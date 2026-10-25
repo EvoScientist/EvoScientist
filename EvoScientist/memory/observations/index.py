@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..types import MemoryScope, MemoryType, ObservationSearchDocument
 from .store import list_observation_documents
 
 DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS = 12_000
+DEFAULT_INLINE_ROWS_PER_SESSION = 3
 
 
 def build_observation_index_context(
@@ -17,11 +19,15 @@ def build_observation_index_context(
     project_id: str,
     max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
     include_search_hints: bool = True,
+    rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
 ) -> str:
     """Build a compact observation-memory index for prompts.
 
     ``include_search_hints=False`` omits the tool-usage footer, for model calls
-    that carry no memory tools (the index is then the whole memory in context).
+    that carry no memory tools. When the index does not fit, every source
+    session's newest ``rows_per_session`` rows claim space first and the rest
+    fill what is left, so one session that wrote many observations cannot push
+    the others out; ``None`` fills by time alone.
     """
     return _format_observation_index_context(
         _observation_documents(memory_dir=memory_dir, project_id=project_id),
@@ -32,6 +38,7 @@ def build_observation_index_context(
         empty_context=True,
         intro="Indexed observations:",
         max_inline_chars=max_inline_chars,
+        rows_per_session=rows_per_session,
     )
 
 
@@ -82,9 +89,55 @@ def _observation_documents(
         key=lambda document: document.observation_id,
     )
     # Newest first, so a truncated index drops the oldest entries; undated ones go last.
-    return sorted(
-        documents, key=lambda document: document.created_at or "", reverse=True
+    return sorted(documents, key=_created_at_key, reverse=True)
+
+
+def _created_at_key(document: ObservationSearchDocument) -> tuple[int, float]:
+    """Order by the instant, not the string: ``+02:00`` and ``Z`` spellings mix."""
+    raw = (document.created_at or "").strip()
+    if not raw:
+        return (0, 0.0)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return (0, 0.0)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (1, parsed.timestamp())
+
+
+def _fill_order(
+    documents: Sequence[ObservationSearchDocument],
+    rows_per_session: int,
+) -> list[int]:
+    """Return the order in which rows claim space.
+
+    ``documents`` is newest first. Each source session's newest
+    ``rows_per_session`` rows come first; documents without a source session are
+    never deferred.
+    """
+    seen: dict[str, int] = {}
+    first: list[int] = []
+    deferred: list[int] = []
+    for index, document in enumerate(documents):
+        session = document.source_session_id
+        if session is not None:
+            seen[session] = seen.get(session, 0) + 1
+            if seen[session] > rows_per_session:
+                deferred.append(index)
+                continue
+        first.append(index)
+    return first + deferred
+
+
+def _session_share_note(rows_per_session: int, *, can_search: bool) -> str:
+    note = (
+        f"Each session's newest {rows_per_session} observations are listed "
+        "before its older ones"
     )
+    if can_search:
+        return f"{note}; search_observations finds the rest."
+    return f"{note}."
 
 
 def _format_observation_index_context(
@@ -97,11 +150,14 @@ def _format_observation_index_context(
     empty_context: bool = True,
     intro: str = "Indexed observations:",
     max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
+    rows_per_session: int | None = None,
 ) -> str:
     """Format parsed observation documents as a prompt index.
 
     ``can_search`` says whether the reader has a search tool; it decides
     whether an index too large to inline tells the reader to search.
+    ``rows_per_session`` shares the space by source session when the index
+    does not fit, as described in ``build_observation_index_context``.
     """
     if not documents and not empty_context:
         return ""
@@ -130,6 +186,7 @@ def _format_observation_index_context(
     if len(full) <= max_inline_chars:
         return full
 
+    shared = rows_per_session is not None
     return _truncated_observation_index_context(
         header=header,
         intro=intro,
@@ -137,6 +194,12 @@ def _format_observation_index_context(
         footer=footer,
         can_search=can_search,
         max_inline_chars=max_inline_chars,
+        order=_fill_order(documents, rows_per_session) if shared else None,
+        note=(
+            _session_share_note(rows_per_session, can_search=can_search)
+            if shared
+            else None
+        ),
     )
 
 
@@ -148,20 +211,30 @@ def _truncated_observation_index_context(
     footer: Sequence[str],
     can_search: bool,
     max_inline_chars: int,
+    order: Sequence[int] | None = None,
+    note: str | None = None,
 ) -> str:
-    prefix = [
-        *header,
-        "Observation index truncated to entries that fit.",
-        intro,
-    ]
+    """Fill the budget with ``lines`` taken in ``order``, shown in their own order.
+
+    ``note`` is shown, with its space reserved, only when ``order`` keeps other
+    lines than taking them by time would.
+    """
+    prefix = [*header, "Observation index truncated to entries that fit.", intro]
     suffix = [*footer, "</observation_memory>"]
-    selected: list[str] = []
-    for line in lines:
-        candidate = "\n".join([*prefix, *selected, line, *suffix])
-        if len(candidate) <= max_inline_chars:
-            selected.append(line)
+    selected = _fill(lines, range(len(lines)), [*prefix, *suffix], max_inline_chars)
+    notes: list[str] = []
+    if order is not None:
+        reordered = _fill(lines, order, [*prefix, *suffix], max_inline_chars)
+        if note is not None and set(reordered) != set(selected):
+            with_note = _fill(lines, order, [*prefix, note, *suffix], max_inline_chars)
+            # A note that leaves no room for any row is dropped instead.
+            if with_note:
+                notes = [note]
+                reordered = with_note
+        selected = reordered
     if selected:
-        return "\n".join([*prefix, *selected, *suffix])
+        kept = [lines[index] for index in sorted(selected)]
+        return "\n".join([*prefix, *notes, *kept, *suffix])
 
     # A reader without a search tool (a tool-less model call) is not told to
     # search.
@@ -174,6 +247,23 @@ def _truncated_observation_index_context(
             "</observation_memory>",
         ]
     )
+
+
+def _fill(
+    lines: Sequence[str],
+    order: Iterable[int],
+    frame: Sequence[str],
+    max_inline_chars: int,
+) -> list[int]:
+    """Take lines in ``order`` while they still fit next to ``frame``."""
+    size = len("\n".join(frame))
+    taken: list[int] = []
+    for index in order:
+        # Each added line costs its length plus one newline.
+        if size + 1 + len(lines[index]) <= max_inline_chars:
+            taken.append(index)
+            size += 1 + len(lines[index])
+    return taken
 
 
 def _observation_index_line(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import threading
-from collections.abc import Sequence
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -13,10 +12,7 @@ import pytest
 import yaml
 from blockbuster import BlockBuster
 from langchain.agents.middleware.types import AgentState
-from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
@@ -52,10 +48,12 @@ from EvoScientist.memory.search import _tokens
 from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
 from tests.fakes.memory import (
-    fake_execution_info,
     fake_runtime,
     linker_context,
     memory_source_context,
+    record_observation_payload,
+    tool_by_name,
+    tool_runtime,
 )
 
 
@@ -83,27 +81,6 @@ def _markdown_sections(body: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         sections[match.group("title")] = body[start:end].strip()
     return sections
-
-
-def _tool_runtime(
-    tool: Any,
-    *,
-    config: RunnableConfig | None = None,
-    thread_id: str | None = None,
-    tool_call_id: str | None = None,
-) -> ToolRuntime:
-    runtime_config: RunnableConfig = config if config is not None else {}
-    return ToolRuntime(
-        state={},
-        context=None,
-        config=runtime_config,
-        stream_writer=lambda _chunk: None,
-        tool_call_id=tool_call_id,
-        store=None,
-        tools=[tool],
-        execution_info=fake_execution_info(thread_id),
-        server_info=None,
-    )
 
 
 def _memory_worker_run(
@@ -193,35 +170,6 @@ def _memory_relative_path(record: dict[str, Any]) -> str:
     return record["path"].removeprefix("/memories/")
 
 
-def _record_observation_payload(
-    tool: Any,
-    *,
-    runtime: ToolRuntime,
-    memory_type: MemoryType,
-    summary: str,
-    observation: str,
-    why_it_matters: str,
-    scope: MemoryScope,
-) -> dict[str, Any]:
-    payload = tool.run(
-        {
-            "memory_type": memory_type,
-            "summary": summary,
-            "observation": observation,
-            "why_it_matters": why_it_matters,
-            "scope": scope,
-            "runtime": runtime,
-        }
-    )
-    return json.loads(payload)
-
-
-def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
-    matches = [tool for tool in tools if tool.name == name]
-    assert len(matches) == 1
-    return matches[0]
-
-
 def _fast_watcher_config(
     *, max_poll_failures: int = 3
 ) -> background_runs.BackgroundRunWatcherConfig:
@@ -276,7 +224,8 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     metadata, body = _read_memory_document(path)
 
     assert first["created"] is True
-    assert second == {**first, "created": False}
+    assert second == {**first, "created": False, "note": second["note"]}
+    assert "identical observation already exists" in second["note"]
     assert first["path"] == (
         f"/memories/observations/projects/P-project/{first['observation_id']}.md"
     )
@@ -822,7 +771,7 @@ def test_link_observations_tool_uses_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    runtime = _tool_runtime(
+    runtime = tool_runtime(
         tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -974,7 +923,7 @@ def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    search_runtime = _tool_runtime(
+    search_runtime = tool_runtime(
         search_tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -995,7 +944,7 @@ def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    read_runtime = _tool_runtime(
+    read_runtime = tool_runtime(
         read_tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -1547,10 +1496,10 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_agent="evomemory-subagent-worker",
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
-    payload = _record_observation_payload(
+    tool = tool_by_name(middleware.tools, "record_observation")
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(
+        runtime=tool_runtime(
             tool,
             tool_call_id="tool-1",
             config={
@@ -1597,7 +1546,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
         workspace_dir=workspace,
     )
 
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
     assert "runtime" in tool.get_input_schema().model_fields
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
@@ -1623,10 +1572,10 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
-    payload = _record_observation_payload(
+    tool = tool_by_name(middleware.tools, "record_observation")
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(
+        runtime=tool_runtime(
             tool,
             config={"configurable": {"thread_id": "thread-from-runtime"}},
             tool_call_id="tool-1",
@@ -1666,11 +1615,11 @@ def test_record_observation_tool_skips_without_runtime_thread_id(tmp_path):
         workspace_dir=workspace,
         memory_scheduler=coordinator,
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
 
-    payload = _record_observation_payload(
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(tool),
+        runtime=tool_runtime(tool),
         memory_type=MemoryType.SEMANTIC,
         summary="Unthreaded observations are skipped.",
         observation="Observation recording needs source session provenance.",
@@ -1698,11 +1647,11 @@ def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
         workspace_dir=workspace,
         memory_scheduler=coordinator,
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
 
-    payload = _record_observation_payload(
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(tool, thread_id="source-thread"),
+        runtime=tool_runtime(tool, thread_id="source-thread"),
         memory_type=MemoryType.PROCEDURAL,
         summary="Direct observations link after worker finish.",
         observation=(

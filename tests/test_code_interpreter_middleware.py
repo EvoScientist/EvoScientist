@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from EvoScientist.middleware import code_interpreter
 from EvoScientist.middleware.code_interpreter import (
     _DEFAULT_PTC_ALLOWLIST,
     aclose_code_interpreters,
@@ -27,9 +28,12 @@ def test_task_excluded_from_ptc_allowlist():
     assert "task" not in _DEFAULT_PTC_ALLOWLIST
 
 
-def test_async_dispatch_tools_remain_in_allowlist():
-    # Guard against over-deletion: async fan-out is the killer PTC use case.
-    for name in ("start_async_task", "check_async_task", "list_async_tasks"):
+def test_async_tools_that_track_tasks_stay_out_of_allowlist():
+    # The REPL drops a tool's Command state update (langchain-ai/deepagents#5652),
+    # so a task started there is never tracked; reading tracked tasks still works.
+    for name in ("start_async_task", "update_async_task", "cancel_async_task"):
+        assert name not in _DEFAULT_PTC_ALLOWLIST
+    for name in ("check_async_task", "list_async_tasks"):
         assert name in _DEFAULT_PTC_ALLOWLIST
 
 
@@ -84,6 +88,30 @@ async def test_aclose_code_interpreters_bounds_stalled_cleanup(monkeypatch, capl
 
     assert cancelled.is_set()
     assert "cleanup did not finish within 0.01 seconds" in caplog.text
+
+
+def test_del_skips_slot_close_during_interpreter_shutdown(monkeypatch):
+    middleware = create_code_interpreter_middleware()
+    registry = middleware._registry
+    registry.get("slot")
+    monkeypatch.setattr(code_interpreter.sys, "is_finalizing", lambda: True)
+
+    middleware.__del__()
+
+    remaining = sorted(registry._slots)
+    monkeypatch.undo()
+    registry.close()
+    assert remaining == ["slot"]
+
+
+def test_del_still_closes_slots_before_shutdown():
+    middleware = create_code_interpreter_middleware()
+    registry = middleware._registry
+    registry.get("slot")
+
+    middleware.__del__()
+
+    assert registry._slots == {}
 
 
 def test_middleware_uses_thread_mode():

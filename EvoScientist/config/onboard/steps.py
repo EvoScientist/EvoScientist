@@ -269,7 +269,7 @@ def _step_provider(
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
         Choice(
-            title="MiniMax (M2 — M3 models, up to 1M context, thinking)",
+            title="MiniMax (M3.1 Flash, M3 — 1M context, thinking)",
             value="minimax",
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
@@ -318,7 +318,7 @@ def _step_provider(
         # Third-party / aggregator
         Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
         Choice(
-            title="SiliconFlow (aggregator — GLM, Kimi, MiniMax, etc.)",
+            title="SiliconFlow (aggregator — GLM models)",
             value="siliconflow",
         ),
         Choice(

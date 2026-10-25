@@ -6,6 +6,7 @@ and should not depend on any specific middleware class.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseChatModel
@@ -158,3 +159,20 @@ def replace_block_by_sentinel(
             ]
             return system_message.model_copy(update={"content": new_blocks})
     return None
+
+
+def request_without_tool(request: Any, name: str) -> Any:
+    """*request* without the tool called *name*; *request* itself when absent."""
+    tools = [tool for tool in request.tools if _tool_name(tool) != name]
+    if len(tools) == len(request.tools):
+        return request
+    return request.override(tools=tools)
+
+
+def _tool_name(candidate: Any) -> Any:
+    if isinstance(candidate, Mapping):
+        # A provider schema names its tool at the top or under "function".
+        nested = candidate.get("function")
+        inner = nested.get("name") if isinstance(nested, Mapping) else None
+        return candidate.get("name") or inner
+    return getattr(candidate, "name", None)

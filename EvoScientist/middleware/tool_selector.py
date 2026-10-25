@@ -6,7 +6,7 @@ defaults. The wrapper reports what it did through an injected
 owns any display state (there are no process-global variables here).
 
 The selector only activates when the agent has more than ``threshold`` tools
-(default 26). Below that, the extra LLM call isn't worth the token savings.
+(default 42). Below that, the extra LLM call isn't worth the token savings.
 
 Usage::
 
@@ -45,14 +45,46 @@ logger = logging.getLogger(__name__)
 # Default threshold: only run tool selection when tools exceed this count.
 # Base tools are ~29; selector activates when MCP tools push count above 42.
 DEFAULT_TOOL_THRESHOLD = 42
+# Every built-in tool, so selection only trims MCP tools (and ``tavily_search``).
+# A new built-in tool belongs here too.
 DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
     {
+        # Core
         "think_tool",
         "task",
+        "write_todos",
+        "skill_manager",
+        "ask_user",
+        "update_goal",
+        "code_interpreter",
+        # Files and shell
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        "execute",
+        "delete",
+        # Background processes
+        "run_in_background",
+        "check_process",
+        "list_processes",
+        "stop_process",
+        # Scheduled tasks
+        "schedule_task",
+        "list_scheduled_tasks",
+        "cancel_scheduled_task",
+        # Memory
         "read_memory",
         "record_observation",
         "search_observations",
-        "update_goal",
+        # Async sub-agents
+        "start_async_task",
+        "check_async_task",
+        "update_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
     }
 )
 
@@ -395,16 +427,12 @@ def create_tool_selector_middleware(
         model: Chat model for tool selection.  If *None*, the default
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
-            Default 26.  Set to 0 to always run selection.
+            Default 42.  Set to 0 to always run selection.
         events: Frontend event sink to report selection to.
 
-    ``think_tool``, ``task``, and memory tools are always included because:
-
-    - ``think_tool``: required every step for structured reflection
-    - ``task``: core delegation mechanism; tested and confirmed the selector
-      model never auto-selects it (0/5 complex queries)
-    - memory tools: referenced by memory prompts; filtering them makes the
-      agent unable to use memory even when the prompt tells it to
+    Built-in tools (``DEFAULT_ALWAYS_INCLUDE_TOOLS``) are always included:
+    the prompts and workflows rely on them, and the selector model never
+    picks ``task`` on its own (0/5 complex queries).
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 

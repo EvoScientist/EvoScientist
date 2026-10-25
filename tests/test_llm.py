@@ -676,7 +676,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
-        model = get_chat_model("deepseek-v4-flash", provider="deepseek")
+        model = get_chat_model("deepseek-flash", provider="deepseek")
 
         mock_init.assert_not_called()
         assert isinstance(model, EvoChatDeepSeek)
@@ -883,8 +883,12 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        # The dated canonical_slug is routable too and must be equally covered.
-        for model_name in ("moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"):
+        # The rule covers the K3 family: dated slugs and point releases too.
+        for model_name in (
+            "moonshotai/kimi-k3",
+            "moonshotai/kimi-k3-20260715",
+            "moonshotai/kimi-k3.1-pro",
+        ):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -902,8 +906,8 @@ class TestThirdPartyRouting:
         """Non-Moonshot models keep the function_calling default.
 
         Includes always-thinking models like grok-4.5 — the forced tool_choice
-        restriction is Moonshot-specific, so the json_schema rerouting must
-        stay limited to _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS.
+        restriction is Moonshot-specific — and Moonshot models outside the
+        always-thinking K3 family.
         """
         from pydantic import BaseModel
 
@@ -912,7 +916,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5"):
+        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5", "moonshotai/kimi-k2.6"):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -1193,6 +1197,20 @@ class TestThirdPartyRouting:
 
         mock_init.assert_not_called()
 
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_does_not_borrow_another_providers_id(
+        self, mock_init, monkeypatch, provider
+    ):
+        # A vendor/model id from another provider's entry can be routable too
+        # and would silently run an older snapshot.
+        monkeypatch.setitem(MODELS, "listed-elsewhere", ("vendor/model-0731", "novita"))
+
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model("listed-elsewhere", provider=provider)
+
+        mock_init.assert_not_called()
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_router_accepts_a_full_model_id(self, mock_init, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
@@ -1385,7 +1403,7 @@ class TestThirdPartyRouting:
 
     @pytest.mark.parametrize(
         ("configured_model", "api_model"),
-        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
+        [("glm-5.2", "glm-5-2")],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_volcengine_code_routes_through_openai(
@@ -1526,7 +1544,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "anthropic"
@@ -1637,21 +1655,23 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
         monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
-        """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
+        """MiniMax gets the only thinking shape its API takes and its documented
+        output limit (no langchain profile, so the fallback would be 4096)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert "thinking" in call_kwargs
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["max_tokens"] == 131072
         assert "reasoning" not in call_kwargs
 
     @patch("EvoScientist.llm.models._patch_openai_compat_content")
@@ -1688,6 +1708,7 @@ class TestThirdPartyRouting:
         model._client = anthropic.Anthropic(
             api_key="mm-key",
             base_url="https://api.minimaxi.com/anthropic",
+            timeout=None,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 
@@ -1769,22 +1790,10 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("minimax-m2.5", provider="minimax")
+        get_chat_model("minimax-m3.1-flash", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5"
-        assert call_kwargs["model_provider"] == "anthropic"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_minimax_highspeed_model(self, mock_init, monkeypatch):
-        """MiniMax M2.5-highspeed model should resolve correctly."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
-
-        get_chat_model("minimax-m2.5-highspeed", provider="minimax")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
+        assert call_kwargs["model"] == "MiniMax-M3.1-Flash"
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
 
@@ -1827,28 +1836,20 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
-        minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 5
-        model_names = {name for name, _ in minimax_models}
-        assert "minimax-m3" in model_names
-        assert "minimax-m2.7" in model_names
-        assert "minimax-m2.7-highspeed" in model_names
-        assert "minimax-m2.5" in model_names
-        assert "minimax-m2.5-highspeed" in model_names
+        """MiniMax lists the two models its API serves."""
+        model_names = {name for name, _ in get_models_for_provider("minimax")}
+        assert model_names == {"minimax-m3.1-flash", "minimax-m3"}
 
     def test_minimax_model_ids_correct(self):
         """MiniMax model IDs should match the official API model names."""
-        minimax_models = get_models_for_provider("minimax")
-        model_dict = dict(minimax_models)
-        assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
-        assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
-        assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"
+        model_dict = dict(get_models_for_provider("minimax"))
+        assert model_dict["minimax-m3.1-flash"] == "MiniMax-M3.1-Flash"
+        assert model_dict["minimax-m3"] == "MiniMax-M3"
 
     def test_minimax_short_name_in_models_dict(self):
         """MiniMax short names should be accessible via the MODELS dict."""
         # Note: MODELS dict uses last-entry-wins, so direct minimax entries
-        # may be overridden by nvidia/siliconflow/openrouter entries.
+        # may be overridden by openrouter entries.
         # Use get_models_for_provider() for provider-specific lookups.
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
@@ -2876,7 +2877,7 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider="deepseek",
             http_client=client,
         )
@@ -3044,142 +3045,6 @@ class TestPatchOpenAICaptureReasoningContent:
         assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
 
 
-class TestIsResponsesReasoningItem:
-    """_is_responses_reasoning_item flags encrypted OpenAI-Responses items."""
-
-    def test_rs_id_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"id": "rs_09363d42", "type": "x"})
-
-    def test_encrypted_data_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"data": "gAAAAAB...", "type": "x"})
-
-    def test_plain_text_reasoning_is_not_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert not _is_responses_reasoning_item(
-            {"type": "reasoning.text", "text": "thinking", "index": 0}
-        )
-        assert not _is_responses_reasoning_item("not a dict")
-
-
-class TestPatchOpenrouterStripResponsesReasoning:
-    """OpenAI-Responses encrypted reasoning items (`rs_` id / encrypted data)
-    are stripped from outgoing OpenRouter assistant messages, preventing the
-    multi-turn "Item with id 'rs_...' not found" 400 (store=false; #37777).
-    """
-
-    def _apply(self):
-        import langchain_openrouter.chat_models as mod
-
-        import EvoScientist.llm.patches as patches
-
-        orig = mod._convert_message_to_dict
-        orig_flag = patches._openrouter_reasoning_strip_patched
-        patches._openrouter_reasoning_strip_patched = False
-        patches._patch_openrouter_strip_responses_reasoning()
-        return patches, mod, orig, orig_flag
-
-    @staticmethod
-    def _restore(patches, mod, orig, orig_flag):
-        mod._convert_message_to_dict = orig
-        patches._openrouter_reasoning_strip_patched = orig_flag
-
-    def test_strips_encrypted_item_drops_key_when_empty(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.summary",
-                            "format": "openai-responses-v1",
-                            "id": "rs_09363d42b054",
-                            "data": "gAAAAAB...",
-                            "summary": "real reasoning text",
-                            "index": 0,
-                        }
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            # sole entry was an rs_ item → reasoning_details removed entirely.
-            assert "reasoning_details" not in result
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_keeps_plain_text_reasoning(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {"type": "reasoning.text", "text": "thinking", "index": 0},
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            kept = result["reasoning_details"]
-            assert len(kept) == 1
-            assert kept[0]["type"] == "reasoning.text"
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_does_not_mutate_original_message(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            details = [{"id": "rs_abc", "data": "blob"}]
-            msg = AIMessage(
-                content="x", additional_kwargs={"reasoning_details": details}
-            )
-            mod._convert_message_to_dict(msg)
-            # stored history untouched — we filter a fresh list, not in place.
-            assert details == [{"id": "rs_abc", "data": "blob"}]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_patch_is_idempotent(self):
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            wrapper = mod._convert_message_to_dict
-            # Second call is guarded by the flag → must not re-wrap.
-            patches._patch_openrouter_strip_responses_reasoning()
-            assert mod._convert_message_to_dict is wrapper
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_non_dict_entry_is_kept(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        "opaque",  # non-dict slipped in → kept, not crashed on
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            assert result["reasoning_details"] == ["opaque"]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-
 # =============================================================================
 # Test _patch_anthropic_strip_foreign_reasoning
 # =============================================================================
@@ -3334,6 +3199,153 @@ class TestAnthropicStripForeignReasoning:
         assert thinking_blocks
         assert thinking_blocks[0]["signature"] == ""
         assert result.content == "ok"
+
+
+# =============================================================================
+# Test _patch_deepagents_bound_reasoning_claude_only
+# =============================================================================
+
+
+class TestSummaryKeepsNonClaudeThinking:
+    """Only Claude binds thinking to the history a summary replaces; Kimi backends
+    reject a tool-call turn whose thinking is missing."""
+
+    @pytest.fixture(autouse=True)
+    def _agent_summarization(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.language_models import FakeListChatModel
+
+        from EvoScientist.middleware import create_per_run_summarization_middleware
+
+        # Building the agent's summarization middleware installs the patch.
+        create_per_run_summarization_middleware(
+            FakeListChatModel(responses=["unused"]),
+            FilesystemBackend(root_dir=tmp_path),
+        )
+
+    @staticmethod
+    def _events(model: str) -> list[dict]:
+        return [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "ls",
+                    "input": {},
+                },
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 2},
+            },
+            {"type": "message_stop"},
+        ]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["invoke", "stream"])
+    @pytest.mark.parametrize(
+        ("provider", "model", "key_env", "kept"),
+        [
+            ("anthropic", "claude-sonnet-5-5", "ANTHROPIC_API_KEY", ["tool_use"]),
+            (
+                "kimi-coding",
+                "kimi-for-coding",
+                "KIMI_API_KEY",
+                ["thinking", "tool_use"],
+            ),
+        ],
+    )
+    def test_reply_kept_across_a_summary(
+        self, monkeypatch, provider, model, key_env, kept, stream
+    ):
+        import json
+
+        import anthropic
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import HumanMessage
+
+        httpx = _anthropic_httpx()
+        monkeypatch.setenv(key_env, "test-key")
+        chat_model = get_chat_model(model, provider=provider)
+        events = self._events(model)
+
+        def respond(request):
+            if json.loads(request.content).get("stream"):
+                body = "".join(
+                    f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events
+                )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=body.encode(),
+                )
+            message = {
+                **events[0]["message"],
+                "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": ""},
+                    events[4]["content_block"],
+                ],
+                "stop_reason": "tool_use",
+            }
+            return httpx.Response(200, json=message)
+
+        chat_model._client = anthropic.Anthropic(
+            api_key=chat_model.anthropic_api_key.get_secret_value(),
+            base_url=chat_model.anthropic_api_url,
+            timeout=None,
+            http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        )
+        prompt = [HumanMessage("list files")]
+        if stream:
+            reply = None
+            for chunk in chat_model.stream(prompt):
+                reply = chunk if reply is None else reply + chunk
+        else:
+            reply = chat_model.invoke(prompt)
+
+        assert reply.response_metadata["model_name"] == model
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == kept
+
+    def test_unnamed_reply_keeps_upstreams_drop(self):
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import AIMessage
+
+        reply = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "done"},
+            ],
+            response_metadata={"model_provider": "anthropic"},
+        )
+
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == ["text"]
 
 
 # =============================================================================
@@ -3995,6 +4007,51 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["model"] == "mimo-v2.6-pro"
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
+
+
+def test_minimax_wire_request(monkeypatch):
+    """Wire-level: MiniMax gets adaptive thinking and its documented output limit."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-test")
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+    model = get_chat_model("minimax-m3.1-flash", provider="minimax")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "MiniMax-M3.1-Flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
+    assert captured["body"]["model"] == "MiniMax-M3.1-Flash"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"] == {"type": "adaptive"}
 
 
 # =============================================================================
