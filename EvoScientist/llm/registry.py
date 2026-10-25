@@ -65,18 +65,19 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax", "xiaomi", "xiaomi-token-plan"}
 
-# Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
-# cannot disable thinking — structured output must use json_schema there.
-# Moonshot-specific: do NOT widen to other mandatory-reasoning models.
-_OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS = frozenset(
-    {"moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"}
-)
-
 
 def _is_mandatory_thinking_kimi(model_id: str) -> bool:
     """True for Kimi models whose thinking cannot be disabled (K3 family)."""
     short_id = model_id.split("/")[-1]
     return short_id.startswith("kimi-k3") or short_id == "kimi-for-coding"
+
+
+def _openrouter_needs_json_schema(model_name: str) -> bool:
+    """Moonshot rejects a forced tool choice while thinking is enabled, and the
+    K3 family cannot disable thinking. Moonshot-specific: do NOT widen."""
+    return model_name.startswith("moonshotai/") and _is_mandatory_thinking_kimi(
+        model_name
+    )
 
 
 # Model registry: list of (short_name, model_id, provider)
@@ -147,11 +148,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
     # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
+    ("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax"),
     ("minimax-m3", "MiniMax-M3", "minimax"),
-    ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
-    ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
-    ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
-    ("minimax-m2.5-highspeed", "MiniMax-M2.5-highspeed", "minimax"),
     # NVIDIA
     ("nemotron-super", "nvidia/nemotron-3-super-120b-a12b", "nvidia"),
     ("nemotron-nano", "nvidia/nemotron-3-nano-30b-a3b", "nvidia"),
@@ -159,17 +157,11 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm4.7", "z-ai/glm4.7", "nvidia"),
     ("deepseek-v3.2", "deepseek-ai/deepseek-v3.2", "nvidia"),
     ("deepseek-v3.1", "deepseek-ai/deepseek-v3.1-terminus", "nvidia"),
-    ("kimi-k2.5", "moonshotai/kimi-k2.5", "nvidia"),
-    ("kimi-k2-thinking", "moonshotai/kimi-k2-thinking", "nvidia"),
-    ("minimax-m2.5", "minimaxai/minimax-m2.5", "nvidia"),
-    ("minimax-m2.1", "minimaxai/minimax-m2.1", "nvidia"),
     ("qwen3.5-397b", "qwen/qwen3.5-397b-a17b", "nvidia"),
     ("step-3.5-flash", "stepfun-ai/step-3.5-flash", "nvidia"),
     # SiliconFlow
-    ("minimax-m2.5", "Pro/MiniMaxAI/MiniMax-M2.5", "siliconflow"),
     ("glm-5.2", "Pro/zai-org/GLM-5.2", "siliconflow"),
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
-    ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
@@ -182,13 +174,14 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
+    ("kimi-k3.1-pro", "moonshotai/kimi-k3.1-pro", "openrouter"),
     ("kimi-k3", "moonshotai/kimi-k3", "openrouter"),
-    ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
     ("glm-5.3-flash", "z-ai/glm-5.3-flash", "openrouter"),
     ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
+    ("minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro", "openrouter"),
     ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
@@ -200,13 +193,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.8-flash", "qwen/qwen3.8-flash", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
-    ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "openrouter"),
+    ("deepseek-flash", "~deepseek/deepseek-flash-latest", "openrouter"),
     ("muse-wonder", "meta/muse-wonder", "openrouter"),
     ("muse-spark-open", "meta/muse-spark-open", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
     # Listed before Zhipu so simple GLM lookups keep their existing default.
     ("glm-5.2", "glm-5-2", "volcengine-code"),
-    ("kimi-k2.5", "kimi-k2-5", "volcengine-code"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5.3", "glm-5.3", "zhipu-code"),
     ("glm-5.3-flash", "glm-5.3-flash", "zhipu-code"),
@@ -261,19 +253,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # DeepSeek — ``deepseek-flash`` is the rolling Flash tier (V4.1-Flash today).
     ("deepseek-flash", "deepseek-flash", "deepseek"),
     ("deepseek-v4-pro", "deepseek-v4-pro", "deepseek"),
-    # Legacy alias kept so existing configs resolve here instead of falling
-    # through to the same-named OpenRouter id (server redirects to deepseek-flash).
-    ("deepseek-v4-flash", "deepseek-v4-flash", "deepseek"),
     # Moonshot (OpenAI-compatible)
+    ("kimi-k3.1-pro", "kimi-k3.1-pro", "moonshot"),
     ("kimi-k3", "kimi-k3", "moonshot"),
-    ("kimi-k2.6", "kimi-k2.6", "moonshot"),
-    ("kimi-k2.5", "kimi-k2.5", "moonshot"),
-    ("kimi-k2-thinking", "kimi-k2-thinking", "moonshot"),
-    ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo", "moonshot"),
-    ("moonshot-v1-auto", "moonshot-v1-auto", "moonshot"),
-    ("moonshot-v1-128k", "moonshot-v1-128k", "moonshot"),
-    ("moonshot-v1-32k", "moonshot-v1-32k", "moonshot"),
-    ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
     # Kimi Coding Plan (Anthropic-compatible)
     ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
     # Xiaomi MiMo Token Plan (subscription, Anthropic-compatible)

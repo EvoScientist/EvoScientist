@@ -1590,6 +1590,19 @@ class TestExecuteTruncation:
         before_marker = resp.output.split("\n\n... Output truncated")[0]
         assert len(before_marker) <= 100
 
+    def test_execute_counts_the_limit_in_utf8_bytes(self, tmp_workspace):
+        backend = CustomSandboxBackend(
+            root_dir=tmp_workspace,
+            virtual_mode=True,
+            max_output_bytes=100,
+        )
+        # 200 three-byte characters: 600 bytes, cut on a character boundary.
+        resp = backend.execute('python -c "print(chr(8364) * 200)"')
+        assert resp.truncated is True
+        before_marker = resp.output.split("\n\n... Output truncated")[0]
+        assert len(before_marker.encode("utf-8")) <= 100
+        assert "�" not in before_marker
+
     def test_execute_no_truncation_small_output(self, tmp_workspace):
         backend = CustomSandboxBackend(
             root_dir=tmp_workspace,

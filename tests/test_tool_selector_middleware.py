@@ -127,6 +127,39 @@ def test_create_tool_selector_always_include():
         ]
 
 
+@pytest.mark.usefixtures("no_mcp")
+def test_always_include_covers_every_builtin_tool(tmp_path, monkeypatch):
+    """Selection must never drop a built-in tool of the main agent, so a new
+    built-in has to join ``DEFAULT_ALWAYS_INCLUDE_TOOLS``."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import create_cli_agent
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.middleware.tool_selector import DEFAULT_ALWAYS_INCLUDE_TOOLS
+    from EvoScientist.paths import Workspace
+
+    class _Model(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    # Every optional tool on, the async-task tools included.
+    monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
+    model = _Model(messages=iter([]))
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_cli_agent(
+        workspace=Workspace(tmp_path),
+        config=EvoScientistConfig(),
+        chat_model=model,
+        checkpointer=InMemorySaver(),
+    )
+
+    builtins = set(agent.nodes["tools"].bound.tools_by_name)
+    assert "start_async_task" in builtins
+    assert builtins - DEFAULT_ALWAYS_INCLUDE_TOOLS == set()
+
+
 def test_custom_threshold():
     p1, p2, p3, p4 = _factory_patches()
     with p1, p2, p3, p4:
@@ -834,7 +867,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider=provider,
             http_async_client=client,
         )

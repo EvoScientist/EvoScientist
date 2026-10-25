@@ -9,14 +9,14 @@ Patches:
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
-      encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
-      (store=false → "Item with id rs_... not found")
     - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
       ChatGPT Codex backend sends only in ``function_call_arguments.done``
       (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
+    - _patch_deepagents_bound_reasoning_claude_only: after a summary, drop
+      kept ``anthropic``-tagged thinking for Claude only (installed by
+      ``create_per_run_summarization_middleware``)
 
 Utilities:
     - _flatten_message_content: convert content blocks to plain string
@@ -714,62 +714,8 @@ def _patch_anthropic_strip_foreign_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
-# items from outgoing assistant messages.
-#
-# OpenRouter's `/responses` beta is stateless — it does not propagate
-# `store=true` / `previous_response_id` upstream. So when a prior turn's
-# assistant message carries a reasoning item with an `rs_*` id (the encrypted
-# Responses reasoning block), replaying it on the next turn fails with HTTP 400:
-#   "Item with id 'rs_...' not found. Items are not persisted when `store` is
-#    set to false. ... remove this item from your input."
-# (observed against both Azure and OpenAI upstreams — so deepagents'
-# azure-ignore is not sufficient). The only robust fix is to drop these items
-# on passback, exactly as the upstream error instructs. Reasoning DISPLAY is
-# unaffected: it happens when the item is generated, not on passback.
-# Related: langchain-ai/langchain#37777.
-# ---------------------------------------------------------------------------
-_openrouter_reasoning_strip_patched = False
-
-
-def _is_responses_reasoning_item(entry: Any) -> bool:
-    """True for an OpenAI-Responses encrypted reasoning item (`rs_` id / data)."""
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get("id") or "").startswith("rs_") or bool(entry.get("data"))
-
-
-def _patch_openrouter_strip_responses_reasoning() -> None:
-    global _openrouter_reasoning_strip_patched
-    if _openrouter_reasoning_strip_patched:
-        return
-    try:
-        import langchain_openrouter.chat_models as _mod
-
-        _orig = _mod._convert_message_to_dict
-
-        def _patched(message: Any) -> Any:
-            result = _orig(message)
-            details = (
-                result.get("reasoning_details") if isinstance(result, dict) else None
-            )
-            if isinstance(details, list):
-                kept = [e for e in details if not _is_responses_reasoning_item(e)]
-                if kept:
-                    result["reasoning_details"] = kept
-                else:
-                    result.pop("reasoning_details", None)
-            return result
-
-        _mod._convert_message_to_dict = _patched
-        _openrouter_reasoning_strip_patched = True
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): default structured output to json_schema for
-# Moonshot's always-thinking models (kimi-k3).
+# Moonshot's always-thinking models (the kimi-k3 family).
 #
 # Moonshot rejects a forced tool choice while thinking is enabled with HTTP 400:
 #   "tool_choice 'specified' is incompatible with thinking enabled"
@@ -801,9 +747,9 @@ def _patch_openrouter_structured_output() -> None:
             **kwargs: Any,
         ) -> Any:
             if method == "function_calling":
-                from .models import _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS
+                from .models import _openrouter_needs_json_schema
 
-                if self.model_name in _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS:
+                if _openrouter_needs_json_schema(self.model_name):
                     method = "json_schema"
             return _orig(self, schema, method=method, **kwargs)
 
@@ -1232,6 +1178,43 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: deepagents (0.7.30+) drops the ``thinking`` blocks of messages kept
+# across a summary whenever they are tagged ``model_provider == "anthropic"``.
+# Only Claude binds them to the earlier history; every Anthropic-protocol reply
+# carries that tag, and Kimi backends reject a tool-call turn without thinking.
+# ---------------------------------------------------------------------------
+def _patch_deepagents_bound_reasoning_claude_only() -> None:
+    """Keep thinking of models named other than Claude (upstream's Bedrock rule).
+
+    A reply without a model name keeps upstream's drop.
+    """
+    try:
+        import deepagents.middleware.summarization as _summ_mod
+    except ImportError:
+        return
+
+    _orig = getattr(_summ_mod, "_bound_reasoning_types", None)
+    if _orig is None or hasattr(_orig, "_evosci_claude_only"):
+        return
+
+    @functools.wraps(_orig)
+    def _patched(message: AIMessage) -> frozenset[str]:
+        metadata = message.response_metadata
+        model = str(metadata.get("model_name") or "").lower()
+        if (
+            metadata.get("model_provider") == "anthropic"
+            and model
+            and "claude" not in model
+            and "anthropic" not in model
+        ):
+            return frozenset()
+        return _orig(message)
+
+    _patched._evosci_claude_only = True  # type: ignore[attr-defined]
+    _summ_mod._bound_reasoning_types = _patched
 
 
 # ---------------------------------------------------------------------------
