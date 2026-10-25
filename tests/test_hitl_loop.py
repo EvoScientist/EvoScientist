@@ -1722,6 +1722,50 @@ def test_abandoned_tool_messages_closes_invalid_tool_calls():
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
 
 
+def test_abandoned_tool_messages_closes_invalid_tool_calls_in_dicts():
+    """The server gateway hands back state messages as dicts (#509).
+
+    ``convert_to_messages`` moves a dict's ``invalid_tool_calls`` into
+    ``additional_kwargs``, so they are read from the dict itself.
+    """
+    from EvoScientist.backends import abandoned_tool_messages
+
+    patch = abandoned_tool_messages(
+        [
+            {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "execute",
+                        "args": {},
+                        "id": "ok-1",
+                        "type": "tool_call",
+                    }
+                ],
+                "invalid_tool_calls": [
+                    {
+                        "name": "execute",
+                        "args": "not-json",
+                        "id": "bad-1",
+                        "error": "parse",
+                        "type": "invalid_tool_call",
+                    }
+                ],
+            },
+            {
+                "type": "tool",
+                "content": "done",
+                "name": "execute",
+                "tool_call_id": "ok-1",
+            },
+        ],
+        reason="round_limit",
+    )
+    assert [message.tool_call_id for message in patch] == ["bad-1"]
+    assert "was not executed" in patch[0].content
+
+
 def test_hitl_pause_unresolved_does_not_replay_without_a_resume():
     from EvoScientist.channels.hitl_budget import hitl_pause_unresolved
 
@@ -1842,6 +1886,53 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
     verify = await agent.aget_state({})
     assert verify.next == ()
     assert not verify.interrupts
+
+
+async def test_close_parked_checkpoint_answers_invalid_calls_in_dict_state():
+    """A server-backed close also answers the malformed call (#509)."""
+    from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget
+
+    agent = FakeCheckpointAgent(
+        values={
+            "messages": [
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo hi"},
+                            "id": "exec-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                    "invalid_tool_calls": [
+                        {
+                            "name": "write_file",
+                            "args": "{not json",
+                            "id": "bad-1",
+                            "error": "parse",
+                            "type": "invalid_tool_call",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    await close_parked_checkpoint(
+        FakeGraphGateway(checkpoint=agent),
+        GraphTarget(local_graph=None),
+        "t-dicts",
+        reason="round_limit",
+    )
+
+    patch = next(values for values, node in agent.updates if node == "tools")[
+        "messages"
+    ]
+    assert [message.tool_call_id for message in patch] == ["exec-1", "bad-1"]
+    assert "was not executed" in patch[1].content
 
 
 async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls():

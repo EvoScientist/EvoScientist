@@ -648,20 +648,22 @@ def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
     except Exception:
         return None
 
-    def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
+    def _calls(message: AIMessage, raw: object) -> list[tuple[dict, bool]]:
+        invalid = getattr(message, "invalid_tool_calls", None)
+        if not invalid and isinstance(raw, dict):
+            # Server state messages are dicts, and ``convert_to_messages``
+            # moves their ``invalid_tool_calls`` into ``additional_kwargs``.
+            invalid = raw.get("invalid_tool_calls")
         return [
             *((call, False) for call in message.tool_calls),
-            *(
-                (call, True)
-                for call in (getattr(message, "invalid_tool_calls", None) or ())
-            ),
+            *((call, True) for call in invalid or ()),
         ]
 
     last_calls: list[tuple[dict, bool]] = []
     last_index = -1
-    for index, message in enumerate(converted):
-        if isinstance(message, AIMessage) and _calls(message):
-            last_calls = _calls(message)
+    for index, (raw, message) in enumerate(zip(messages, converted, strict=True)):
+        if isinstance(message, AIMessage) and _calls(message, raw):
+            last_calls = _calls(message, raw)
             last_index = index
     answered = {
         message.tool_call_id
