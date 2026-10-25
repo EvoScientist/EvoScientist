@@ -597,19 +597,34 @@ class ServerSweepJob:
             api = _job_api()
         except (OSError, AttributeError):
             api = None
+        # A real ``Popen`` on Windows always carries ``_handle``; a test
+        # double may not (#684). Without it nothing can be assigned, so only
+        # the resume is honoured — by pid, best effort.
+        handle = getattr(process, "_handle", None)
+        if handle is None:
+            if resume:
+                try:
+                    import psutil
+
+                    psutil.Process(process.pid).resume()
+                except psutil.Error:
+                    logger.debug(
+                        "Server sweep job: could not resume pid %s", process.pid
+                    )
+            return
         if api is None or self._handle is None:
             # No usable job API (or the job was never created): nothing to
             # assign, the caller's suspended start still needs its resume.
             if resume:
                 if api is not None:
-                    api.resume(int(process._handle))
+                    api.resume(int(handle))
                 else:
                     import psutil
 
                     psutil.Process(process.pid).resume()
             return
         try:
-            if not api.assign(self._handle, int(process._handle)):
+            if not api.assign(self._handle, int(handle)):
                 logger.debug(
                     "Server sweep job: could not assign pid %s (error %s)",
                     process.pid,
@@ -617,7 +632,7 @@ class ServerSweepJob:
                 )
         finally:
             if resume:
-                api.resume(int(process._handle))
+                api.resume(int(handle))
 
     def close(self) -> None:
         """Close this process's handle; the job lives on while the server
