@@ -3552,3 +3552,14 @@ def _configure_logging():
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
+    # Channel credentials ride in HTTP URLs — Telegram's Bot API puts the bot
+    # token in the URL path, DingTalk/WeCom send access_token as a query
+    # parameter — and httpx logs every request URL at INFO (python-telegram-bot
+    # logs its API URL at DEBUG). A stricter root level for --debug must not
+    # start printing them; cap these loggers independently, the same way
+    # run_standalone does for the per-channel entry points (#666). max() keeps
+    # a configured level stricter than the cap in charge.
+    logging.getLogger("httpx").setLevel(max(resolved_level, logging.WARNING))
+    logging.getLogger("httpcore").setLevel(max(resolved_level, logging.WARNING))
+    logging.getLogger("telegram").setLevel(max(resolved_level, logging.INFO))
