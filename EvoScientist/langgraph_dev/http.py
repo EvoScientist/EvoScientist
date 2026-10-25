@@ -202,7 +202,13 @@ async def get_bg_process_check(request: Request) -> JSONResponse:
 
     def check():
         text = background.status(process_id, thread_id=thread_id)
-        return {"text": text, "record": background.state_record(process_id)}
+        record = background.state_record(process_id)
+        if record is not None and record["status"] != "running":
+            # The process may exit while status reads its log tail. Before
+            # mirroring a terminal record, report that exit and mark it observed
+            # by this thread. Terminal state cannot revert to running.
+            text = background.status(process_id, thread_id=thread_id)
+        return {"text": text, "record": record}
 
     return JSONResponse(await asyncio.to_thread(check))
 

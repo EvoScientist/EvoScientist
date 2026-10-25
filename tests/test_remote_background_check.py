@@ -1,5 +1,9 @@
 """The local check_process tool can observe processes owned by the dev server."""
 
+import signal
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -140,7 +144,7 @@ def test_check_route_returns_status_tail_and_state_record(monkeypatch):
         )
     assert response.status_code == 200
     assert response.json() == {"text": status.return_value, "record": RECORD}
-    status.assert_called_once_with("server-process", thread_id="thread-1")
+    status.assert_called_with("server-process", thread_id="thread-1")
 
 
 def test_check_route_returns_null_record_for_missing_process():
@@ -153,6 +157,113 @@ def test_check_route_returns_null_record_for_missing_process():
     assert response.status_code == 200
     assert response.json()["record"] is None
     assert "No such background process" in response.json()["text"]
+
+
+@pytest.fixture
+def held_process(tmp_path, monkeypatch):
+    """A real process whose exit is controlled by closing its input, not a sleep."""
+    log_path = tmp_path / "process.log"
+    with (
+        log_path.open("wb") as log,
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "-c",
+                "import sys; code = int(sys.stdin.read() or '0'); "
+                "print('process-finished'); sys.exit(code)",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        ) as popen,
+    ):
+        process = background.BgProcess(
+            process_id="controlled-process",
+            name="controlled",
+            command="controlled process",
+            popen=popen,
+            pid=popen.pid,
+            log_path=log_path,
+            started_at="2026-10-25T00:00:00Z",
+            started_ts=time.time(),
+            origin_thread_id="thread-1",
+        )
+        monkeypatch.setattr(background, "_PROCESSES", {process.process_id: process})
+        try:
+            yield process
+        finally:
+            if popen.poll() is None:
+                popen.kill()
+            popen.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_status"),
+    [
+        (0, "success"),
+        (7, "error"),
+        pytest.param(
+            -signal.SIGTERM,
+            "interrupted",
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals"),
+        ),
+    ],
+)
+def test_check_route_reports_exit_during_log_read(
+    held_process, monkeypatch, returncode, expected_status
+):
+    """A terminal mirror must report the exit and mark it observed by this thread."""
+    process = held_process
+    read_tail = background._read_tail
+
+    def exit_during_read(log_path, tail_bytes):
+        if process.popen.poll() is None:
+            if returncode < 0:
+                process.popen.terminate()
+            else:
+                process.popen.stdin.write(str(returncode).encode())
+                process.popen.stdin.close()
+            assert process.popen.wait(timeout=5) == returncode
+        return read_tail(log_path, tail_bytes)
+
+    monkeypatch.setattr(background, "_read_tail", exit_during_read)
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get(
+            "/api/bg_process_check",
+            params={"process_id": process.process_id, "thread_id": "thread-1"},
+            headers={local_secret.HEADER: local_secret.ensure_local_secret()},
+        )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["record"]["status"] == expected_status
+    assert result["record"]["returncode"] == returncode
+    assert f"EXITED code {returncode}" in result["text"]
+    assert "RUNNING" not in result["text"]
+    if returncode >= 0:
+        assert "process-finished" in result["text"]
+    assert background.was_observed_done(process.process_id, "thread-1")
+    assert not background.was_observed_done(process.process_id, "another-thread")
+
+
+def test_check_route_keeps_a_later_exit_notifiable(held_process):
+    """Returning a running snapshot must not acknowledge an exit that happens later."""
+    process = held_process
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get(
+            "/api/bg_process_check",
+            params={"process_id": process.process_id, "thread_id": "thread-1"},
+            headers={local_secret.HEADER: local_secret.ensure_local_secret()},
+        )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["record"]["status"] == "running"
+    assert result["record"]["returncode"] is None
+    assert "RUNNING" in result["text"]
+    process.popen.stdin.close()
+    assert process.popen.wait(timeout=5) == 0
+    assert background.poll_status(process.process_id) == "success"
+    assert not background.was_observed_done(process.process_id, "thread-1")
 
 
 @pytest.mark.parametrize(
