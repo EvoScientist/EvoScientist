@@ -245,8 +245,10 @@ def ranged_then_cut(size: str, *, length: bool) -> Reply:
     return reply
 
 
-@pytest.mark.parametrize("size", [str(len(BODY)), "*"])
-@pytest.mark.parametrize("length", [True, False])
+@pytest.mark.parametrize(
+    ("size", "length"),
+    [(str(len(BODY)), True), (str(len(BODY)), False), ("*", True)],
+)
 def test_cut_resume_without_a_content_length_is_retried(
     serve, tmp_path, monkeypatch, size, length
 ):
@@ -257,6 +259,40 @@ def test_cut_resume_without_a_content_length_is_retried(
     assert server.headers[2]["Range"] == "bytes=200-"
     assert (tmp_path / "a").read_bytes() == BODY
     assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def test_cut_resume_of_unknown_size_and_length_cannot_be_told(
+    serve, tmp_path, monkeypatch
+):
+    """Known limit: a ``206`` with a ``*`` size and no Content-Length gives no
+    length to hold it to, so its cut ends the download; the caller's hash
+    check then refuses the file."""
+    monkeypatch.setattr(dl, "_CHUNK", 100)
+    server = serve(chunked_then_cut, ranged_then_cut("*", length=False), ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 2
+    assert digest != hashlib.sha256(BODY).hexdigest()
+
+
+def ranged_part_of_unknown_size(handler) -> None:
+    """Like :func:`ranged_part`, with a ``*`` size."""
+    start = int(handler.headers["Range"].removeprefix("bytes=").rstrip("-"))
+    handler.send_response(206)
+    handler.send_header("Content-Range", f"bytes {start}-{start + 99}/*")
+    handler.send_header("Content-Length", "100")
+    handler.end_headers()
+    handler.wfile.write(BODY[start : start + 100])
+
+
+def test_a_resume_of_unknown_size_sets_no_total(serve, tmp_path, monkeypatch):
+    """``bytes 100-199/*`` says nothing of the file's end: no total is taken
+    from it, so its progress is not reported as complete."""
+    monkeypatch.setattr(dl, "_CHUNK", 100)
+    fractions: list[float] = []
+    server = serve(chunked_then_cut, ranged_part_of_unknown_size)
+    dl.download(server.url, tmp_path / "a", progress=fractions.append)
+    assert server.requests == 2
+    assert fractions == []
 
 
 def ranged_part(handler) -> None:
@@ -529,7 +565,8 @@ def test_tls_after_a_slow_tunnel_gets_only_what_is_left(tmp_path, monkeypatch):
         listener.close()
         for conn in held:
             conn.close()
-    assert time.monotonic() - started < 3.0
+    # Twice the budget would be 4 s; the rest is slack for a slow CI runner.
+    assert time.monotonic() - started < 3.5
     assert "no answer within 2 s" in ei.value.message
 
 

@@ -314,13 +314,13 @@ class _Partial:
 def _resume_offset(resp, partial: _Partial) -> int:
     """Where ``resp``'s body starts: ``partial.done`` for a matching ``206``,
     else 0 (the server sent the whole file). When the first reply had no
-    ``Content-Length``, a ``206`` sets ``partial.total`` (its size, or the end
-    of its range when the size is ``*``), so a cut resume is caught."""
+    ``Content-Length``, a ``206`` with a numeric size sets ``partial.total``,
+    so a cut resume is caught."""
     if not partial.done or resp.status != 206:
         return 0
     unit, _, spec = resp.headers.get("Content-Range", "").partition(" ")
     span, _, size = spec.partition("/")
-    start, _, end = span.partition("-")
+    start, _, _end = span.partition("-")
     if (
         unit != "bytes"
         or start != str(partial.done)
@@ -328,11 +328,9 @@ def _resume_offset(resp, partial: _Partial) -> int:
         or (partial.total and size not in (str(partial.total), "*"))
     ):
         raise _Truncated(f"the server resumed with Content-Range {spec!r}")
-    if not partial.total:
-        if size.isdecimal():
-            partial.total = int(size)
-        elif end.isdecimal():
-            partial.total = int(end) + 1
+    # A "*" size gives no total: the range may end before the file does.
+    if not partial.total and size.isdecimal():
+        partial.total = int(size)
     return partial.done
 
 
@@ -364,6 +362,8 @@ def _download_once(
             # Drop whatever an earlier attempt wrote past what was hashed.
             fh.seek(offset)
             fh.truncate()
+        length = resp.headers.get("Content-Length") or ""
+        start = partial.done
         try:
             while chunk := resp.read(_CHUNK):
                 with _local_io(dest):
@@ -380,7 +380,12 @@ def _download_once(
         with _local_io(dest):
             fh.close()
         # http.client's read(amt) returns b"" at an early end of stream
-        # instead of raising IncompleteRead.
+        # instead of raising IncompleteRead. Each reply is held to its own
+        # length too: a 206 of unknown size ("*") sets no total.
+        if length.isdecimal() and partial.done - start != int(length):
+            raise _Truncated(
+                f"the reply ended after {partial.done - start} of {length} bytes"
+            )
         if partial.total and partial.done != partial.total:
             raise _Truncated(
                 f"the body ended after {partial.done} of {partial.total} bytes"
