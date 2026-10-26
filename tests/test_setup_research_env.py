@@ -1240,7 +1240,7 @@ def test_python_used_is_logged_once(env, caplog):
 
 
 # --------------------------------------------------------------------------- #
-# Watched steps (real subprocesses)
+# Watched steps
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def fast_beats(monkeypatch):
@@ -1254,84 +1254,151 @@ def _python(code: str) -> list[str]:
 # A silence limit longer than starting Python takes on a slow Windows CI
 # runner (the start itself is silent); the steps below stay active for longer.
 LIMIT = 2.0
+# For in-process steps (:class:`FakeStep`), which start at once.
+FAST_LIMIT = 0.3
 
 
-def test_watched_step_returns_its_output_and_exit_code(fast_beats):
-    result = re_env._run(
-        _python("print('hi'); raise SystemExit(3)"), 5, beat=lambda: None
-    )
+class FakeStep:
+    """Stands in for ``subprocess.Popen`` in the tests of ``_run``'s activity
+    and decoding: ``script(out)`` runs on a thread, writes the step's output
+    to ``out`` (a real pipe, read as ``_run`` reads pip's) and returns the
+    exit code. The tests of stopping a process tree use real processes."""
+
+    def __init__(self, script) -> None:
+        self.script = script
+
+    def __call__(self, cmd, **_kw):
+        return _FakeProcess(self.script, cmd)
+
+
+class _FakeProcess:
+    def __init__(self, script, cmd) -> None:
+        import threading
+
+        read_end, write_end = os.pipe()
+        self.args = cmd
+        self.stdout = os.fdopen(read_end, "rb", buffering=0)
+        self.returncode: int | None = None
+
+        def run() -> None:
+            with os.fdopen(write_end, "wb", buffering=0) as out:
+                self.returncode = script(out)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def wait(self, timeout=None) -> int | None:
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return self.returncode
+
+
+def _run_fake(monkeypatch, script, **kw) -> subprocess.CompletedProcess[str]:
+    monkeypatch.setattr(re_env.subprocess, "Popen", FakeStep(script))
+    return re_env._run(["pip"], FAST_LIMIT, **kw)
+
+
+# Steps that stay active for 0.6 s, twice the silence limit.
+_STEPS = 20
+_GAP = 0.03
+
+
+def test_watched_step_returns_its_output_and_exit_code(fast_beats, monkeypatch):
+    def script(out):
+        out.write(b"hi\n")
+        return 3
+
+    result = _run_fake(monkeypatch, script, beat=lambda: None)
     assert (result.returncode, result.stdout.strip()) == (3, "hi")
 
 
-def test_watched_step_that_only_writes_files_is_not_stopped(fast_beats, tmp_path):
+def test_watched_step_that_only_writes_files_is_not_stopped(
+    fast_beats, monkeypatch, tmp_path
+):
     """pip prints nothing while it downloads a wheel; the growing folder keeps
     it alive past the silence limit."""
+    import time
+
+    def script(_out):
+        for _ in range(_STEPS):
+            with (tmp_path / "wheel.part").open("ab") as f:
+                f.write(b"x" * 100)
+            time.sleep(_GAP)
+        return 0
+
     beats: list[int] = []
-    code = (
-        "import pathlib, sys, time\n"
-        "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
-        "for _ in range(30):\n"
-        "    with p.open('ab') as f: f.write(b'x' * 100)\n"
-        "    time.sleep(0.1)\n"
-    )
-    result = re_env._run(
-        [*_python(code), str(tmp_path)],
-        LIMIT,
-        beat=lambda: beats.append(1),
-        watched=(tmp_path,),
+    result = _run_fake(
+        monkeypatch, script, beat=lambda: beats.append(1), watched=(tmp_path,)
     )
     assert result.returncode == 0
     assert beats
 
 
 def test_watched_step_that_grows_an_open_file_is_not_stopped(
-    fast_beats, tmp_path, monkeypatch
+    fast_beats, monkeypatch, tmp_path
 ):
     """Like pip's download: one file held open while it grows, which a Windows
     listing shows at its size when opened."""
+    import time
+
     listed = re_env.tree_signature
     monkeypatch.setattr(
         re_env,
         "tree_signature",
         lambda p, exact=False: listed(p, exact=True) if exact else (listed(p)[0], 0),
     )
+
+    def script(_out):
+        with (tmp_path / "wheel.part").open("ab") as f:
+            for _ in range(_STEPS):
+                f.write(b"x" * 100)
+                f.flush()
+                time.sleep(_GAP)
+        return 0
+
     beats: list[int] = []
-    code = (
-        "import pathlib, sys, time\n"
-        "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
-        "with p.open('ab') as f:\n"
-        "    for _ in range(30):\n"
-        "        f.write(b'x' * 100); f.flush(); time.sleep(0.1)\n"
-    )
-    result = re_env._run(
-        [*_python(code), str(tmp_path)],
-        LIMIT,
-        beat=lambda: beats.append(1),
-        held_open=(tmp_path,),
+    result = _run_fake(
+        monkeypatch, script, beat=lambda: beats.append(1), held_open=(tmp_path,)
     )
     assert result.returncode == 0
     assert beats
 
 
-def test_watched_step_that_prints_is_not_stopped(fast_beats):
-    code = "import time\nfor _ in range(30):\n    print('.', flush=True); time.sleep(0.1)\n"
-    assert re_env._run(_python(code), LIMIT, beat=lambda: None).returncode == 0
+def test_watched_step_that_prints_is_not_stopped(fast_beats, monkeypatch):
+    import time
+
+    def script(out):
+        for _ in range(_STEPS):
+            out.write(b".\n")
+            time.sleep(_GAP)
+        return 0
+
+    assert _run_fake(monkeypatch, script, beat=lambda: None).returncode == 0
 
 
-def test_watched_step_that_prints_without_newlines_is_not_stopped(fast_beats):
+def test_watched_step_that_prints_without_newlines_is_not_stopped(
+    fast_beats, monkeypatch
+):
     """A progress dot with no line end is activity too."""
-    code = (
-        "import sys, time\n"
-        "for _ in range(30):\n"
-        "    sys.stdout.write('.'); sys.stdout.flush(); time.sleep(0.1)\n"
-    )
-    result = re_env._run(_python(code), LIMIT, beat=lambda: None)
-    assert (result.returncode, result.stdout) == (0, "." * 30)
+    import time
+
+    def script(out):
+        for _ in range(_STEPS):
+            out.write(b".")
+            time.sleep(_GAP)
+        return 0
+
+    result = _run_fake(monkeypatch, script, beat=lambda: None)
+    assert (result.returncode, result.stdout) == (0, "." * _STEPS)
 
 
-def test_watched_step_output_has_plain_line_ends(fast_beats):
-    code = "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\rc\\n')"
-    assert re_env._run(_python(code), LIMIT, beat=lambda: None).stdout == "a\nb\nc\n"
+def test_watched_step_output_has_plain_line_ends(fast_beats, monkeypatch):
+    def script(out):
+        out.write(b"a\r\nb\rc\n")
+        return 0
+
+    assert _run_fake(monkeypatch, script, beat=lambda: None).stdout == "a\nb\nc\n"
 
 
 def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
