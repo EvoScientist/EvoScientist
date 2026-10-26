@@ -1054,9 +1054,7 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         transport = server.get("transport", "")
 
         if transport == "stdio":
-            command = _resolve_command(
-                server.get("command", ""), _server_path(server)
-            )
+            command = _resolve_command(server.get("command", ""), _server_path(server))
             conn: dict[str, Any] = {
                 "transport": "stdio",
                 "command": command,
