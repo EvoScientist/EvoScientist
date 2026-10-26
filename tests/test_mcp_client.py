@@ -228,6 +228,12 @@ class TestBuildConnections:
             "NODE_USE_ENV_PROXY",
         ):
             monkeypatch.delenv(var, raising=False)
+        # An npx server also gets the host's npm network settings.
+        from EvoScientist.setup.node import NPM_NETWORK_VARS
+
+        for var in NPM_NETWORK_VARS:
+            monkeypatch.delenv(var, raising=False)
+            monkeypatch.delenv(var.upper(), raising=False)
         config = {
             "fs": {
                 "transport": "stdio",
