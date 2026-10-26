@@ -230,6 +230,21 @@ def test_which_on_path_skips_entries_under_outside(tmp_path, monkeypatch):
     assert _install.which_on_path("node", outside=tools) == str(system)
 
 
+def test_which_on_path_reads_a_given_path(tmp_path, monkeypatch):
+    """``path`` replaces ``PATH``, with the same rules: no empty or relative
+    entry, so never the current directory."""
+    name = "npx.cmd" if os.name == "nt" else "npx"
+    cwd = tmp_path / "cwd"
+    _exe(cwd, name)
+    own = _exe(tmp_path / "opt" / "node22" / "bin", name)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert _install.which_on_path("npx") is None
+    given = os.pathsep.join(["", ".", str(own.parent)])
+    assert _install.which_on_path("npx", path=given) == str(own)
+    assert _install.which_on_path("npx", path=".") is None
+
+
 def test_which_on_path_reads_quoted_entries(tmp_path, monkeypatch, windows_lookup):
     real = _exe(tmp_path / "Program Files" / "Git" / "cmd", "git.exe")
     monkeypatch.setenv("PATH", f'"{real.parent}"')

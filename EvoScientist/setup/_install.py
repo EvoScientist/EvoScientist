@@ -106,15 +106,19 @@ def which_in(name: str, directory: str | Path) -> str | None:
     return None
 
 
-def which_on_path(name: str, *, outside: Path | None = None) -> str | None:
-    """The first program ``name`` on ``PATH``, or None.
+def which_on_path(
+    name: str, *, outside: Path | None = None, path: str | None = None
+) -> str | None:
+    """The first program ``name`` on ``PATH`` (or on ``path``), or None.
 
     Never the current directory (see :func:`which_in`): empty and relative
     ``PATH`` entries are skipped, since both resolve against it. With
     ``outside``, entries under that folder are skipped too, e.g. our tools
     dir when looking for a system tool.
     """
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
+    if path is None:
+        path = os.environ.get("PATH", "")
+    for entry in path.split(os.pathsep):
         directory = _clean_entry(entry)
         if not directory or not os.path.isabs(directory):
             continue

@@ -891,21 +891,41 @@ def load_mcp_config() -> dict[str, Any]:
     return _interpolate_value(data)
 
 
-def _resolve_command(command: str) -> str:
+def _server_path(server: dict[str, Any]) -> str | None:
+    """The ``PATH`` a stdio server sets in its ``mcp.yaml`` env, or None. On
+    POSIX the server's bare command is searched there when it starts."""
+    env = server.get("env")
+    if not isinstance(env, dict):
+        return None
+    for key, value in env.items():
+        if isinstance(key, str) and key.upper() == "PATH" and isinstance(value, str):
+            return value
+    return None
+
+
+def _node_command_on_path(command: str, server_path: str | None) -> str | None:
+    """A bare ``node`` / ``npx`` / ``npm`` on the server's own ``PATH`` (from
+    ``mcp.yaml``), else on ours, or None. Never the current directory: on
+    Windows shutil.which() would return an npx.cmd found there."""
+    from ..setup._install import which_on_path
+
+    found = which_on_path(command, path=server_path) if server_path else None
+    return found or which_on_path(command)
+
+
+def _resolve_command(command: str, server_path: str | None = None) -> str:
     """Resolve a stdio command to its full path.
 
     Checks PATH first, then the current Python environment's bin directory
     (handles conda/venv envs where newly installed binaries may not be on PATH).
     Returns the original command string if not found (let the OS report the error).
+    A ``node`` / ``npx`` / ``npm`` is looked up on ``server_path`` (the server's
+    own ``PATH``) first, see :func:`_node_command_on_path`.
     """
     if os.path.isabs(command):
         return command
     if not os.path.dirname(command) and Path(command).stem.lower() in _NODE_COMMANDS:
-        # Never the current directory, as in _ensure_node_for_stdio(): on
-        # Windows shutil.which() would return an npx.cmd found there.
-        from ..setup._install import which_on_path
-
-        found = which_on_path(command)
+        found = _node_command_on_path(command, server_path)
     else:
         found = shutil.which(command)
     if found:
@@ -931,8 +951,6 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     """
     if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
-    from ..setup._install import which_on_path
-
     missing = [
         name
         for name, server in config.items()
@@ -943,7 +961,7 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
         # on PATH.
         and not os.path.dirname(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
-        and which_on_path(command) is None
+        and _node_command_on_path(command, _server_path(server)) is None
     ]
     if not missing:
         return
@@ -974,7 +992,7 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
 def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
     """Stdio servers whose bare ``node`` / ``npx`` / ``npm`` command is not on
-    ``PATH``. Started anyway, the OS would take that command from the current
+    ``PATH``, theirs (from ``mcp.yaml``) or ours. Started anyway, the OS would take that command from the current
     directory (Windows, or a ``.`` entry on POSIX), which the lookup never
     searches, so they are reported as failed instead."""
     return [
@@ -985,7 +1003,7 @@ def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
         # A path with a folder part (node_modules/.bin/npx) is started as written.
         and not os.path.dirname(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
-        and _resolve_command(command) == command
+        and _resolve_command(command, _server_path(server)) == command
     ]
 
 
@@ -1002,7 +1020,9 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if transport == "stdio":
             conn: dict[str, Any] = {
                 "transport": "stdio",
-                "command": _resolve_command(server.get("command", "")),
+                "command": _resolve_command(
+                    server.get("command", ""), _server_path(server)
+                ),
                 "args": server.get("args", []),
             }
             forwarded = {

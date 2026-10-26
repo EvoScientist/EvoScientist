@@ -179,7 +179,8 @@ class TestResolveCommand:
     def test_build_connections_resolves_command(self, monkeypatch):
         """_build_connections uses _resolve_command so the full path appears in output."""
         monkeypatch.setattr(
-            "EvoScientist.mcp.client._resolve_command", lambda cmd: f"/resolved/{cmd}"
+            "EvoScientist.mcp.client._resolve_command",
+            lambda cmd, _path=None: f"/resolved/{cmd}",
         )
         config = {"srv": {"transport": "stdio", "command": "mytool", "args": []}}
         conns = _build_connections(config)
@@ -2365,6 +2366,32 @@ class TestLoadToolsProgressCallback:
         config = {"fs": {"transport": "stdio", "command": "npx"}}
         assert await mcp_client._load_tools(config) == {"fs": []}
 
+    def test_node_server_with_its_own_path_is_resolved_there(
+        self, monkeypatch, tmp_path
+    ):
+        """On POSIX the server's command is searched on the PATH its mcp.yaml
+        env sets; it starts from there, never from the current directory."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        own = _fake_npx(tmp_path / "opt" / "node22" / "bin")
+        monkeypatch.chdir(_fake_npx(tmp_path / "project"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        server_path = os.pathsep.join([".", str(own)])
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "env": {"PATH": server_path},
+            },
+            "cwd": {"transport": "stdio", "command": "npx", "env": {"PATH": "."}},
+        }
+        assert mcp_client._unresolved_node_servers(config) == ["cwd"]
+        command = mcp_client._build_connections(config)["fs"]["command"]
+        assert Path(command).parent == own
+
     async def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
@@ -2794,6 +2821,18 @@ class TestEnsureNodeForStdio:
             {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         )
         assert calls == {"ensure": 1, "activate": 1}
+
+    def test_npx_on_the_servers_own_path_needs_no_install(
+        self, monkeypatch, calls, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        own = _fake_npx(tmp_path / "opt" / "node22" / "bin")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx", "env": {"PATH": str(own)}}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
 
     def test_npx_in_the_current_directory_does_not_count(
         self, monkeypatch, calls, tmp_path
