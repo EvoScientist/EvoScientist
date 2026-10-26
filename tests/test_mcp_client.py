@@ -270,7 +270,7 @@ class TestBuildConnections:
 
         monkeypatch.setattr(
             "EvoScientist.mcp.client._resolve_command",
-            lambda command: str(tmp_path / "bin" / command),
+            lambda command, _path=None: str(tmp_path / "bin" / command),
         )
 
         state = {"mirror": "default", "registry": None, "private": False}
@@ -340,7 +340,8 @@ class TestBuildConnections:
             setup_node, "configured_npm_registry", lambda e, x: asked.append(x)
         )
         monkeypatch.setattr(
-            "EvoScientist.mcp.client._resolve_command", lambda command: command
+            "EvoScientist.mcp.client._resolve_command",
+            lambda command, _path=None: command,
         )
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         # No env at all when nothing is forwarded (as on a bare Windows host).
