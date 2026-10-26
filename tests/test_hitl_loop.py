@@ -1726,7 +1726,7 @@ def test_abandoned_tool_messages_closes_invalid_tool_calls_in_dicts():
     """The server gateway hands back state messages as dicts (#509).
 
     ``convert_to_messages`` moves a dict's ``invalid_tool_calls`` into
-    ``additional_kwargs``, so they are read from the dict itself.
+    ``additional_kwargs``, so they are read from there.
     """
     from EvoScientist.backends import abandoned_tool_messages
 
