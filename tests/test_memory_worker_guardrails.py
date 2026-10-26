@@ -306,7 +306,6 @@ async def test_hard_stop_ends_a_run_that_never_wraps_up(
         f"evomemory-subagent-worker stopped at the budget of its {BUDGET} model "
         f"calls with 0 observations written (source general-purpose, session "
         f"{SESSION})",
-        "Subagent memory worker ended without an execution summary",
     ]
 
 
@@ -367,23 +366,12 @@ def test_wrap_up_reaches_a_model_with_native_structured_output(tmp_path, monkeyp
 
 
 @SYNC_AND_ASYNC
-async def test_closing_reply_becomes_the_summary_when_the_tool_is_never_called(
+async def test_run_without_a_summary_call_writes_nothing_and_warns_once(
     tmp_path, monkeypatch, caplog, use_async
 ):
-    graph, _ = _build(
-        tmp_path, monkeypatch, [_ai(text="Listed 12 scripts; two failed.")]
-    )
+    graph, _ = _build(tmp_path, monkeypatch, [_ai(text="Done.")])
     with caplog.at_level(logging.WARNING):
         await _run(graph, use_async=use_async)
-
-    [path] = _execution_files(tmp_path)
-    assert path.read_text(encoding="utf-8").endswith("Listed 12 scripts; two failed.\n")
-    assert _warnings(caplog) == []
-
-
-def test_empty_closing_reply_writes_no_summary(tmp_path, monkeypatch, caplog):
-    with caplog.at_level(logging.WARNING):
-        _run_worker(tmp_path, monkeypatch, [_ai(text="  ")])
 
     assert _execution_files(tmp_path) == []
     assert _warnings(caplog) == [
@@ -391,15 +379,108 @@ def test_empty_closing_reply_writes_no_summary(tmp_path, monkeypatch, caplog):
     ]
 
 
-def test_handed_in_summary_wins_over_the_closing_reply(tmp_path, monkeypatch):
-    _run_worker(
-        tmp_path, monkeypatch, [_finish("the real summary"), _ai(text="Closing words.")]
+@SYNC_AND_ASYNC
+async def test_saved_summary_logs_no_warning(tmp_path, monkeypatch, caplog, use_async):
+    graph, _ = _build(tmp_path, monkeypatch, [_finish(), _end()])
+    with caplog.at_level(logging.WARNING):
+        await _run(graph, use_async=use_async)
+
+    assert _execution_files(tmp_path)
+    assert _warnings(caplog) == []
+
+
+@SYNC_AND_ASYNC
+async def test_wrap_up_answered_with_text_warns_that_no_summary_came(
+    tmp_path, monkeypatch, caplog, use_async
+):
+    scripts = [_search()] * (BUDGET - 1) + [_ai(text="All done.")]
+    graph, _ = _build(tmp_path, monkeypatch, scripts)
+    with caplog.at_level(logging.WARNING):
+        await _run(graph, use_async=use_async)
+
+    assert _execution_files(tmp_path) == []
+    assert _warnings(caplog) == [
+        f"evomemory-subagent-worker is making the last of its {BUDGET} model calls "
+        f"with 0 observations written (source general-purpose, session {SESSION})",
+        "Subagent memory worker ended without an execution summary",
+    ]
+
+
+def test_rejected_summary_is_named_on_one_warning_line(tmp_path, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _run_worker(tmp_path, monkeypatch, [_finish("  "), _end()])
+
+    [warning] = _warnings(caplog)
+    assert warning.startswith(
+        "Subagent memory worker ended without an execution summary (last attempt: "
+        "Error invoking tool 'record_execution_summary'"
+    )
+    assert "\n" not in warning
+    assert _execution_files(tmp_path) == []
+
+
+def test_budget_stop_is_told_apart_by_the_last_reply_not_the_last_message(caplog):
+    guardrail = memory_worker._MemoryWorkerGuardrailMiddleware(
+        agent_name="evomemory-subagent-worker",
+        summary_tool="record_execution_summary",
+    )
+    # A tool may append a message after its result (deepagents' read_file
+    # adds video frames), so a cut-off run need not end on a ToolMessage.
+    cut_off = [
+        _ai({"name": "read_file", "id": "r", "args": {"file_path": "/clip.mp4"}}),
+        ToolMessage(content="frames follow", tool_call_id="r", name="read_file"),
+        HumanMessage("frame 1"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        guardrail.after_agent({"messages": cut_off}, None)
+
+    assert _warnings(caplog) == []
+
+
+def test_saved_summary_is_read_off_the_tool_status():
+    def reply(content: str, status: str) -> ToolMessage:
+        return ToolMessage(
+            content=content,
+            tool_call_id="c",
+            name="record_execution_summary",
+            status=status,
+        )
+
+    assert memory_worker._summary_saved([reply("[offloaded to a file]", "success")])
+    assert not memory_worker._summary_saved(
+        [reply(memory_worker._SUMMARY_SAVED, "error")]
     )
 
-    [path] = _execution_files(tmp_path)
-    text = path.read_text(encoding="utf-8")
-    assert text.endswith("the real summary\n")
-    assert "Closing words." not in text
+
+def test_run_without_source_saves_no_summary(tmp_path, monkeypatch, caplog):
+    graph, _ = _build(tmp_path, monkeypatch, [_finish(), _end()])
+    with caplog.at_level(logging.WARNING):
+        result = graph.invoke({"messages": [HumanMessage("Review the run.")]})
+
+    [reply] = [
+        m
+        for m in result["messages"]
+        if isinstance(m, ToolMessage) and m.name == "record_execution_summary"
+    ]
+    assert reply.status == "error"
+    assert (
+        reply.content == "The execution summary was not saved: the run has no source."
+    )
+    assert _execution_files(tmp_path) == []
+    assert _warnings(caplog) == [
+        "Subagent memory worker ended without an execution summary (last attempt: "
+        "The execution summary was not saved: the run has no source.)"
+    ]
+
+
+def test_summary_write_leaves_the_observation_parse_cache_alone(tmp_path, monkeypatch):
+    from EvoScientist.memory.observations import store
+
+    generation = store._cache_generation
+    _run_worker(tmp_path, monkeypatch, [_finish(), _end()])
+
+    assert _execution_files(tmp_path)
+    assert store._cache_generation == generation
 
 
 def test_subagent_worker_sends_no_forced_tool_choice_to_openrouter(
@@ -476,21 +557,6 @@ def test_subagent_worker_sends_no_forced_tool_choice_to_openrouter(
     assert path.read_text(encoding="utf-8").endswith("listed the scripts\n")
 
 
-def test_closing_reply_with_thinking_keeps_only_the_text(tmp_path, monkeypatch):
-    reply = AIMessage(
-        content=[
-            {"type": "thinking", "thinking": "Two failures.", "signature": "sig"},
-            {"type": "text", "text": "Listed 12 scripts; two failed."},
-        ]
-    )
-    _run_worker(tmp_path, monkeypatch, [reply])
-
-    [path] = _execution_files(tmp_path)
-    text = path.read_text(encoding="utf-8")
-    assert text.endswith("## Summary\n\nListed 12 scripts; two failed.\n")
-    assert "Two failures." not in text
-
-
 def test_parallel_summary_calls_each_land_whole(tmp_path, monkeypatch):
     from EvoScientist.memory.observations import store
 
@@ -520,19 +586,16 @@ async def test_async_worker_writes_summaries_off_the_event_loop(tmp_path, monkey
 
     from EvoScientist.memory.observations import store
 
-    by_tool, _ = _build(tmp_path / "tool", monkeypatch, [_finish("by tool"), _end()])
-    by_reply, _ = _build(tmp_path / "reply", monkeypatch, [_ai(text="by reply")])
+    graph, _ = _build(tmp_path, monkeypatch, [_finish("by tool"), _end()])
     blocker = BlockBuster(scanned_modules=[memory_worker, store])
     blocker.activate()
     try:
-        await _run(by_tool, use_async=True)
-        await _run(by_reply, use_async=True)
+        await _run(graph, use_async=True)
     finally:
         blocker.deactivate()
 
-    for folder, summary in (("tool", "by tool"), ("reply", "by reply")):
-        [path] = _execution_files(tmp_path / folder)
-        assert path.read_text(encoding="utf-8").endswith(f"{summary}\n")
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("by tool\n")
 
 
 @SYNC_AND_ASYNC
