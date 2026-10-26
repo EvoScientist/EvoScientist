@@ -338,6 +338,17 @@ def test_is_policy_block_reads_winerror():
     assert _install.is_policy_block(exc)
 
 
+def test_tree_signature_changes_as_files_are_written(tmp_path):
+    root = tmp_path / "out"
+    assert _install.tree_signature(root) == (0, 0)  # not created yet
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "f").write_bytes(b"123")
+    first = _install.tree_signature(root)
+    (root / "a" / "g").write_bytes(b"45")
+    assert first == (1, 3)
+    assert _install.tree_signature(root) == (2, 5)
+
+
 def test_exact_tree_signature_asks_each_file_for_its_size(tmp_path, monkeypatch):
     """A Windows listing keeps the size a file had when it was opened."""
     (tmp_path / "wheel.part").write_bytes(b"x" * 10)

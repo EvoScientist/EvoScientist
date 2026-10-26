@@ -59,7 +59,7 @@ class FakeRun:
     def __call__(self, argv: list[str]):
         self.calls.append(argv)
         if os.path.normcase(argv[0]) in self.blocked:
-            raise git._PolicyBlocked(argv[0])
+            raise git.PolicyBlocked(argv[0])
         key = (os.path.normcase(argv[0]), argv[1])
         if key in self.results:
             stdout = self.results[key]
@@ -106,7 +106,7 @@ class FakeSfx:
         self.closed = 0
         self.launched_sha: str | None = None
         self.part_left: bool | None = None
-        self.killed = False  # set by the fake _kill_tree
+        self.killed = False  # set by the fake kill_tree
         self.survives_kill = False  # the tree does not exit when killed
         self.wait_error: BaseException | None = None  # raised by the first wait
 
@@ -176,7 +176,7 @@ def env(tmp_path, monkeypatch):
         killed.append(pid)
         sfx.killed = True
 
-    monkeypatch.setattr(git, "_kill_tree", kill_tree)
+    monkeypatch.setattr(git, "kill_tree", kill_tree)
     # The real check would read the test host's free space.
     plenty = type("Usage", (), {"free": git.MIN_FREE_BYTES * 10})
     monkeypatch.setattr(git.shutil, "disk_usage", lambda _p: plenty)
@@ -410,7 +410,7 @@ def test_hidden_desktop_process_wait_times_out_and_can_be_killed():
     proc = git._HiddenDesktopProcess(["ping.exe", "-n", "30", "127.0.0.1"])
     try:
         assert proc.wait(0.5) is None
-        git._kill_tree(proc.pid)
+        git.kill_tree(proc.pid)
         assert proc.wait(10) is not None
     finally:
         proc.close()
@@ -527,17 +527,6 @@ def test_silent_sfx_emits_heartbeats_until_it_ends(env):
     assert set(env["sfx"].wait_timeouts[:3]) == {HEARTBEAT_INTERVAL}
 
 
-def test_tree_signature_changes_as_files_are_written(tmp_path):
-    root = tmp_path / "out"
-    assert git._tree_signature(root) == (0, 0)  # not created yet
-    (root / "a").mkdir(parents=True)
-    (root / "a" / "f").write_bytes(b"123")
-    first = git._tree_signature(root)
-    (root / "a" / "g").write_bytes(b"45")
-    assert first == (1, 3)
-    assert git._tree_signature(root) == (2, 5)
-
-
 def test_too_little_disk_space_is_install_failed_before_download(env, monkeypatch):
     usage = type("Usage", (), {"free": git.MIN_FREE_BYTES - 1})
     monkeypatch.setattr(git.shutil, "disk_usage", lambda _p: usage)
@@ -613,7 +602,7 @@ def test_run_reports_a_policy_block(monkeypatch, winerror):
         raise _policy_oserror(winerror)
 
     monkeypatch.setattr(git.subprocess, "run", fake)
-    with pytest.raises(git._PolicyBlocked) as ei:
+    with pytest.raises(git.PolicyBlocked) as ei:
         git._run(["C:/pg/bin/bash.exe", "--version"])
     assert ei.value.path == "C:/pg/bin/bash.exe"
 

@@ -37,21 +37,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._install import PolicyBlocked as _PolicyBlocked
 from ._install import (
+    PolicyBlocked,
     atomic_write_text,
+    is_policy_block,
     is_under,
+    kill_tree,
     move_into_place,
     policy_error,
     prepend_to_path,
     remove_stale_temp_dirs,
     stage_lock,
     tools_dir,
+    tree_signature,
     which_on_path,
 )
-from ._install import is_policy_block as _is_policy_block
-from ._install import kill_tree as _kill_tree
-from ._install import tree_signature as _tree_signature
 from .download import download
 from .protocol import (
     Emitter,
@@ -66,6 +66,8 @@ logger = logging.getLogger(__name__)
 
 GIT_TAG = "v2.56.0.windows.1"
 GIT_VERSION = "2.56.0.windows.1"
+# Completes policy_error()'s "or ... and run `EvoSci setup` again".
+_POLICY_ALTERNATIVE = "install Git for Windows"
 
 # Asset names are pinned in full: first builds drop the ".1" from them.
 # Values: (asset, SHA-256).
@@ -118,17 +120,13 @@ def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def _policy_error(path: str | Path) -> StageError:
-    return policy_error(path, "install Git for Windows")
-
-
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     """Run a probe without a console window; None if it could not run or failed.
 
     ``GIT_EXEC_PATH`` is dropped so ``git --exec-path`` reports the binary's own
     install, not an inherited override. A failure is logged at INFO with its
     reason, so "why was my Git for Windows not used?" has an answer. A program
-    blocked by a Windows policy raises :class:`_PolicyBlocked` instead, so the
+    blocked by a Windows policy raises :class:`PolicyBlocked` instead, so the
     caller can fall back (a system Git) or report it (our PortableGit).
     """
     env = {k: v for k, v in os.environ.items() if k.upper() != "GIT_EXEC_PATH"}
@@ -150,8 +148,8 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         return None
     except OSError as exc:
         logger.info(f"{command} could not run: {exc}")
-        if _is_policy_block(exc):
-            raise _PolicyBlocked(argv[0]) from exc
+        if is_policy_block(exc):
+            raise PolicyBlocked(argv[0]) from exc
         return None
     except subprocess.SubprocessError as exc:
         logger.info(f"{command} could not run: {exc}")
@@ -231,7 +229,7 @@ def _system_git() -> GitInfo | None:
             logger.info(f"Not using {found}: no Git for Windows install found from it")
             return None
         info = _probe_root(install, "system", version)
-    except _PolicyBlocked as exc:
+    except PolicyBlocked as exc:
         logger.info(f"Not using {found}: a Windows policy blocked {exc.path}")
         return None
     if info is None:
@@ -447,7 +445,7 @@ def _launch(argv: list[str]) -> _HiddenDesktopProcess:
 
 def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
     """Kill the extractor's process tree; True once it has exited."""
-    _kill_tree(proc.pid)
+    kill_tree(proc.pid)
     try:
         stopped = proc.wait(30) is not None
     except OSError:
@@ -478,15 +476,15 @@ def _run_sfx(
     try:
         proc = _launch(argv)
     except OSError as exc:
-        if _is_policy_block(exc):
-            raise _policy_error(exe) from exc
+        if is_policy_block(exc):
+            raise policy_error(exe, _POLICY_ALTERNATIVE) from exc
         raise StageError("install_failed", f"Could not run {exe.name}: {exc}") from exc
     try:
         try:
             code = wait_with_heartbeat(
                 proc.wait,
                 beat,
-                lambda: _tree_signature(out),
+                lambda: tree_signature(out),
                 silence_limit=SFX_SILENCE_LIMIT,
             )
         except StepStalled as exc:
@@ -653,10 +651,10 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
                 return recorded
             remove_stale_temp_dirs(root, ".git-")
             return _install(mirror, report)
-    except _PolicyBlocked as exc:
+    except PolicyBlocked as exc:
         # Our recorded, left-over or fresh PortableGit is blocked: report it
         # instead of downloading the same blocked program again.
-        raise _policy_error(exc.path) from exc
+        raise policy_error(exc.path, _POLICY_ALTERNATIVE) from exc
     except OSError as exc:
         raise StageError(
             "install_failed", f"Could not set up Git in {root}: {exc}"
