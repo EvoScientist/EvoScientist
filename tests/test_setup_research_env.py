@@ -1022,6 +1022,20 @@ def test_repair_reinstalls_the_broken_files_then_what_is_missing(env):
     assert flags == [["--force-reinstall", "--no-deps"], []]
 
 
+def test_repair_without_a_wheel_at_the_pin_asks_pip_for_it_once(env):
+    """The forced call falls back to the newest wheel; the plain call after it
+    starts there instead of failing on the pin again."""
+    re_env.ensure_research_env("default")
+    env["run"].calls.clear()
+    env["run"].imports_script = [False]
+    env["run"].failed_packages = ["scipy"]
+    env["run"].no_wheel = {"scipy"}
+    result = re_env.ensure_research_env("default")
+    pin = f"scipy=={re_env.PINS['scipy']}"
+    assert env["run"].pip_requirements() == [[pin], ["scipy"], ["scipy"]]
+    assert result.unpinned == ["scipy"]
+
+
 def test_repair_after_a_crashed_check_does_not_force_a_reinstall(env):
     """With no package named, a forced reinstall would download all four
     again for nothing."""

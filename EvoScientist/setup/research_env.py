@@ -596,9 +596,11 @@ def _pip_install(
     beat: Callable[[], None],
     *,
     force: bool = False,
+    unpinned: Sequence[str] = (),
 ) -> list[str]:
     """Install ``packages`` at their :data:`PINS`; returns the ones installed
-    without the pin.
+    without the pin. Those in ``unpinned`` (an earlier call's answer) start
+    without it, so pip does not fail on their pin again.
 
     Without ``--upgrade``, so packages already there stay as they are unless a
     missing one requires a change. ``force`` reinstalls the packages
@@ -614,8 +616,10 @@ def _pip_install(
     downloads: its growth, and the environment's, show that pip still works
     while it prints nothing.
     """
-    requirements = {name: f"{name}=={PINS[name]}" for name in packages}
-    unpinned: list[str] = []
+    requirements = {
+        name: name if name in unpinned else f"{name}=={PINS[name]}" for name in packages
+    }
+    unpinned = [name for name in unpinned if name in requirements]
     tmp = Path(tempfile.mkdtemp(prefix=_PIP_TEMP_PREFIX, dir=env.parent))
     child_env = {**os.environ, "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp)}
     try:
@@ -746,7 +750,7 @@ def _repair(
     failed: Sequence[str],
     report: Heartbeat,
     *,
-    force: bool = True,
+    force: bool,
 ) -> EnvResult | None:
     """Try to fix a ready environment in place; None to rebuild it.
 
@@ -773,11 +777,8 @@ def _repair(
     unpinned = (
         _pip_install(env, mirror, failed, report.beat, force=True) if force else []
     )
-    unpinned += [
-        name
-        for name in _pip_install(env, mirror, failed, report.beat)
-        if name not in unpinned
-    ]
+    # Packages whose pin has no wheel here start unpinned in the second call.
+    unpinned = _pip_install(env, mirror, failed, report.beat, unpinned=unpinned)
     report(0.06, "Checking the packages")
     check = _import_check(env, report.beat)
     if not check.ok:
