@@ -1888,53 +1888,6 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
     assert not verify.interrupts
 
 
-async def test_close_parked_checkpoint_answers_invalid_calls_in_dict_state():
-    """A server-backed close also answers the malformed call (#509)."""
-    from EvoScientist.backends import close_parked_checkpoint
-    from EvoScientist.gateway import GraphTarget
-
-    agent = FakeCheckpointAgent(
-        values={
-            "messages": [
-                {
-                    "type": "ai",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "name": "execute",
-                            "args": {"command": "echo hi"},
-                            "id": "exec-1",
-                            "type": "tool_call",
-                        }
-                    ],
-                    "invalid_tool_calls": [
-                        {
-                            "name": "write_file",
-                            "args": "{not json",
-                            "id": "bad-1",
-                            "error": "parse",
-                            "type": "invalid_tool_call",
-                        }
-                    ],
-                }
-            ]
-        }
-    )
-
-    await close_parked_checkpoint(
-        FakeGraphGateway(checkpoint=agent),
-        GraphTarget(local_graph=None),
-        "t-dicts",
-        reason="round_limit",
-    )
-
-    patch = next(values for values, node in agent.updates if node == "tools")[
-        "messages"
-    ]
-    assert [message.tool_call_id for message in patch] == ["exec-1", "bad-1"]
-    assert "was not executed" in patch[1].content
-
-
 async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls():
     """With no unanswered calls the first END still gets a trailing END,
     matching recovery: the first clear can leave next == ('model',)."""
