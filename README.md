@@ -361,7 +361,18 @@ What the mounts are for:
 The image does not include the agent's research Python; run `EvoSci setup` once in a container with the same `evosci-data` mount (`docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup`, since the image's entrypoint is `evosci`; with compose, `docker compose run --rm evoscientist setup`), and it builds the environment in that volume, where it survives image upgrades.
 
 > [!IMPORTANT]
-> The image runs as a non-root user (`evosci`, UID `1000`). On Linux hosts, the directory behind the `./workspace` bind mount must be writable by that UID, so if your host user ID differs, run `sudo chown -R 1000:1000 ./workspace` once (changing ownership to another UID needs root). Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so this step is not needed there. Don't pass `--user` to `docker run`: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to UID `1000`, so any other UID fails with `Permission denied`.
+> The image runs as a non-root user (`evosci`, UID `1000`). On Linux hosts:
+>
+> - Create the workspace before the first run with `mkdir -p workspace`. Otherwise Docker creates it as `root` and the container can't write to it, even with UID `1000`.
+> - If your host user ID isn't `1000`, build the image as yourself, so the host and the container can both write to `./workspace`, then use `evoscientist:local` in place of the published image:
+>
+>   ```bash
+>   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t evoscientist:local .
+>   ```
+>
+>   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
+>
+> Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.
 
 Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included):
 
