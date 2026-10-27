@@ -223,8 +223,9 @@ async def _async_main(
         nonlocal channel_exited
         # Worker completion is not a second signal, and outer cancellation
         # must not start another shutdown task while the runner is exiting.
-        if shutdown_task is None and not (owner is not None and owner.cancelling()):
+        if shutdown_task is None and not owner.cancelling():
             channel_exited = True
+            logger.error("Channel %s stopped; shutting down", channel.name)
             _request_shutdown()
 
     workers[0].add_done_callback(_channel_finished)

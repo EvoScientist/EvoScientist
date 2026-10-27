@@ -904,6 +904,11 @@ def test_channel_worker_exit_shuts_down_standalone(
     with caplog.at_level(logging.ERROR):
         assert asyncio.run(_run()) is True
 
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == standalone.__name__
+    ] == ["Channel fake stopped; shutting down"]
     assert channel._stopped
     stop_health.assert_awaited_once()
     if use_agent:
@@ -967,6 +972,7 @@ def test_channel_exit_during_shutdown_does_not_force_exit(
     assert asyncio.run(_run()) is False
     assert channel._stopped
     assert "forcing" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
 
 
 def test_outer_cancellation_does_not_start_shutdown(monkeypatch, tmp_path, caplog):
@@ -990,6 +996,7 @@ def test_outer_cancellation_does_not_start_shutdown(monkeypatch, tmp_path, caplo
 
     assert not channel._stopped
     assert "Graceful shutdown initiated" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
 
 
 @pytest.mark.skipif(
