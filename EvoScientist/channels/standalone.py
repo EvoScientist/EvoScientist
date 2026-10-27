@@ -349,6 +349,12 @@ def run_standalone(
     send_thinking:
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
+
+    Raises
+    ------
+    SystemExit
+        Exit status 1 if the channel stops on its own (for example, a fatal
+        start error). A signal-initiated shutdown returns normally.
     """
     from ..paths import process_workspace
 
