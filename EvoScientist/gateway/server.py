@@ -1381,6 +1381,14 @@ class LangGraphServerGateway:
                     run_id = await self._find_run_for_resume(
                         request.thread_id, *resume_identity
                     )
+                if run_id is None:
+                    # ``stream.events`` stays open for the live run; without a
+                    # run id none of the stop conditions fire and the turn
+                    # hangs. Fail before consuming so the except path can
+                    # still cancel an incomplete run.
+                    raise RuntimeError(
+                        f"Could not identify the run for thread {request.thread_id}"
+                    )
                 # Prefer ``stream.events`` over ``subscribe``: a fresh SSE
                 # replays the thread's history and the SDK ends each
                 # subscribe at the first root ``completed`` (#558), which is
@@ -1392,12 +1400,11 @@ class LangGraphServerGateway:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
                         continue
-                    if run_id is not None:
-                        event_run_id = _synth_event_run_id(raw_event)
-                        if event_run_id is not None:
-                            accepting_run = event_run_id == run_id
-                        if not accepting_run:
-                            continue
+                    event_run_id = _synth_event_run_id(raw_event)
+                    if event_run_id is not None:
+                        accepting_run = event_run_id == run_id
+                    if not accepting_run:
+                        continue
                     for selection_event in self._deliver_custom_middleware_events(
                         raw_event
                     ):
@@ -1413,17 +1420,16 @@ class LangGraphServerGateway:
                     # Stop where the SDK ends subscribe via _signal_paused: a
                     # root interrupt, or this run's root completed/failed/
                     # interrupted.
-                    if run_id is not None and (
+                    if (
                         emitted_interrupt
                         or _is_root_input_requested(event_map)
                         or _is_root_lifecycle_stop(event_map)
                     ):
                         break
                 else:
-                    if run_id is not None:
-                        raise RuntimeError(
-                            "Thread event stream ended before the run finished"
-                        )
+                    raise RuntimeError(
+                        "Thread event stream ended before the run finished"
+                    )
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(

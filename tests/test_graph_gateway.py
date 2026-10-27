@@ -3320,20 +3320,31 @@ async def test_server_gateway_successful_resume_lists_runs_for_boundary(
     interrupts = [{"interrupt_id": "interrupt-1"}]
     if multiple_interrupts:
         interrupts.append({"interrupt_id": "interrupt-2"})
+    resume_payload = {"decisions": [{"type": "approve"}]}
     stream = FakeLangGraphThreadStream("thread", interrupts=interrupts)
     threads = FakeLangGraphThreadsClient(
         states={"thread": {"values": {}}}, streams={"thread": stream}
     )
     client = FakeLangGraphClient(threads)
-    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
+    # Matching run id must equal the fake stream's default run_id so the
+    # auto-appended root completed is accepted after fail-fast identification.
+    client.runs = SimpleNamespace(
+        list=AsyncMock(
+            return_value=[
+                {
+                    "run_id": "run-1",
+                    "status": "success",
+                    "kwargs": {"command": {"resume": {"interrupt-1": resume_payload}}},
+                }
+            ]
+        )
+    )
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
 
     with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
         async for _ in gateway.stream_events(
             RunRequest(
-                message=Command(
-                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
-                ),
+                message=Command(resume={"interrupt-1": resume_payload}),
                 thread_id="thread",
             )
         ):
@@ -3342,11 +3353,48 @@ async def test_server_gateway_successful_resume_lists_runs_for_boundary(
     assert stream.run.responses == [
         {
             "interrupt_id": "interrupt-1",
-            "response": {"decisions": [{"type": "approve"}]},
+            "response": resume_payload,
         }
     ]
     client.runs.list.assert_awaited()
     assert not any("resumed run" in record.message for record in caplog.records)
+
+
+async def test_server_gateway_fails_fast_when_resume_run_unidentified():
+    """Unidentified resume run_id must raise before an open events stream hangs."""
+    from langgraph.types import Command
+
+    class _OpenEnded(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            yield _protocol_root_lifecycle("running", run_id="run-live")
+            # Live SSE stays open; without a run id the old loop never stopped.
+            await asyncio.Event().wait()
+
+    stream = _OpenEnded(
+        "thread-hang",
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        states={"thread-hang": {"values": {}}},
+        streams={"thread-hang": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    async def _drain() -> None:
+        async for _ in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
+                ),
+                thread_id="thread-hang",
+            )
+        ):
+            pass
+
+    with pytest.raises(RuntimeError, match="Could not identify the run"):
+        await asyncio.wait_for(_drain(), timeout=1.0)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "cancel"])

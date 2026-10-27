@@ -844,11 +844,57 @@ class FakeLangGraphThreadsClient:
         return self.streams[thread_id]
 
 
+class FakeLangGraphRunsClient:
+    """Default ``client.runs`` for gateway tests.
+
+    After ``run.respond``, ``_find_run_for_resume`` lists runs with no status
+    filter. Synthesize a matching record from ``stream.run.responses`` so
+    resume turns that omit an explicit runs stub still identify a run id.
+    Status-filtered lists (cleanup) stay empty unless a test overrides.
+    """
+
+    def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
+        self._threads = threads
+
+    async def list(
+        self,
+        thread_id: str,
+        *,
+        limit: int,
+        offset: int,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if offset or status is not None:
+            return []
+        stream = self._threads.streams.get(thread_id)
+        if stream is None:
+            return []
+        runs: list[dict[str, Any]] = []
+        for entry in stream.run.responses:
+            interrupt_id = entry.get("interrupt_id")
+            if not interrupt_id:
+                continue
+            runs.append(
+                {
+                    "run_id": stream.run.run_id,
+                    "status": "success",
+                    "kwargs": {
+                        "command": {"resume": {str(interrupt_id): entry["response"]}}
+                    },
+                }
+            )
+        return runs[:limit]
+
+    async def cancel_many(self, *, thread_id: str, run_ids: list[str]) -> None:
+        return None
+
+
 class FakeLangGraphClient(LangGraphClient):
     """Fake LangGraph SDK async client."""
 
     def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
         self.threads = threads
+        self.runs = FakeLangGraphRunsClient(threads)
 
 
 def _not_found_response() -> httpx.Response:
