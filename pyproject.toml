@@ -1,6 +1,6 @@
 [project]
 name = "EvoScientist"
-version = "0.3.7"
+version = "0.3.8"
 description = "EvoScientist: Towards Self-Evolving AI Scientists for End-to-End Scientific Discovery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "deepagents[quickjs]~=0.7.28",
+    "deepagents[quickjs]~=0.7.32",
     "langchain-quickjs>=0.3.9",
     "langchain>=1.4.6",
     "langchain-anthropic>=1.7.6",

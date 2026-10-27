@@ -1722,6 +1722,50 @@ def test_abandoned_tool_messages_closes_invalid_tool_calls():
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
 
 
+def test_abandoned_tool_messages_closes_invalid_tool_calls_in_dicts():
+    """The server gateway hands back state messages as dicts (#509).
+
+    ``convert_to_messages`` moves a dict's ``invalid_tool_calls`` into
+    ``additional_kwargs``, so they are read from there.
+    """
+    from EvoScientist.backends import abandoned_tool_messages
+
+    patch = abandoned_tool_messages(
+        [
+            {
+                "type": "ai",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "execute",
+                        "args": {},
+                        "id": "ok-1",
+                        "type": "tool_call",
+                    }
+                ],
+                "invalid_tool_calls": [
+                    {
+                        "name": "execute",
+                        "args": "not-json",
+                        "id": "bad-1",
+                        "error": "parse",
+                        "type": "invalid_tool_call",
+                    }
+                ],
+            },
+            {
+                "type": "tool",
+                "content": "done",
+                "name": "execute",
+                "tool_call_id": "ok-1",
+            },
+        ],
+        reason="round_limit",
+    )
+    assert [message.tool_call_id for message in patch] == ["bad-1"]
+    assert "was not executed" in patch[0].content
+
+
 def test_hitl_pause_unresolved_does_not_replay_without_a_resume():
     from EvoScientist.channels.hitl_budget import hitl_pause_unresolved
 

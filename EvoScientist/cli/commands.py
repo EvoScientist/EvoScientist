@@ -1371,6 +1371,8 @@ async def compact_conversation(
         "cutoff_index": state_cutoff,
         "summary_message": summary_msg,
         "file_path": file_path,
+        # Kept messages before this index lose reasoning bound to the old history.
+        "created_at_index": len(messages),
     }
 
     await graph_gateway.update_state_values(
