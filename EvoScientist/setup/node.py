@@ -25,21 +25,29 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ._install import (
+    PolicyBlocked,
+    atomic_write_text,
+    is_policy_block,
     is_under,
     move_into_place,
+    policy_error,
     prepend_to_path,
     remove_stale_temp_dirs,
+    stage_lock,
     tools_dir,
+    which_in,
+    which_on_path,
 )
-from .download import download, fetch_text, verify_sha256_from_sums
+from .download import download
 from .protocol import (
     Emitter,
+    Heartbeat,
     ProgressThrottle,
     StageError,
     StageResult,
@@ -47,6 +55,8 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 NODE_VERSION = "24.21.0"
 # (major, minor): the WebUI's Next.js declares ``engines.node >=20.9.0``.
@@ -56,24 +66,27 @@ SOURCES = {
     "default": "https://nodejs.org/dist",
     "cn": "https://cdn.npmmirror.com/binaries/node",
 }
-# npm registry for packages fetched with our `npx` under a mirror; the default
-# mirror leaves npm's own setting alone.
+# npm registry for `npx` / `npm` children under a mirror, unless the user set
+# one; the default mirror leaves npm's own setting alone.
 NPM_REGISTRIES = {"cn": "https://registry.npmmirror.com"}
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
 _ARCH = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
-# Node publishes .tar.xz for macOS / Linux and .zip for Windows. The glibc
-# Linux builds do not run on musl (Alpine); nodejs.org publishes a musl build
-# for x64 only (from 24.20.0).
-_SUPPORTED = {
-    "darwin-arm64",
-    "darwin-x64",
-    "linux-x64",
-    "linux-arm64",
-    "linux-x64-musl",
-    "win-x64",
-    "win-arm64",
+# SHA-256 of each supported platform's archive (.tar.xz for macOS / Linux,
+# .zip for Windows), from the release's SHASUMS256.txt; npmmirror serves the
+# same files. Update together with NODE_VERSION.
+NODE_SHA256 = {
+    "darwin-arm64": "6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe",
+    "darwin-x64": "0ae5a24c24bb7d015cd816c5036b3f90f2945aa872fcf54e58da054753b3a299",
+    "linux-x64": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6",
+    "linux-arm64": "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2",
+    "win-x64": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
 }
+# The official Linux builds need glibc 2.28 or newer (Node's BUILDING.md).
+MIN_GLIBC = (2, 28)
+_TRY_YOUR_OWN = "Install Node.js 20.9 or newer yourself and run `EvoSci setup` again."
+# Completes policy_error()'s "or ... and run `EvoSci setup` again".
+_POLICY_ALTERNATIVE = "install Node.js 20.9 or newer yourself"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
@@ -125,31 +138,55 @@ def _node_exe(install_dir: Path) -> Path:
     return _bin_dir(install_dir) / ("node.exe" if os.name == "nt" else "node")
 
 
-def _is_musl() -> bool:
-    """True on a musl-based Linux (e.g. Alpine).
-
-    Decided by the running interpreter's libc first: Debian and Ubuntu install
-    the musl loader with their ``musl`` package on a glibc system, where the
-    glibc build is the one that runs. The loader check covers the musl side,
-    where ``libc_ver()`` reports nothing.
-    """
-    if sys.platform != "linux" or platform.libc_ver()[0] == "glibc":
-        return False
-    return any(Path("/lib").glob("ld-musl-*.so.1"))
+def _glibc_version() -> tuple[int, int] | None:
+    """The C library's glibc version, or None when there is none (e.g. musl)."""
+    try:
+        text = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, OSError, ValueError):
+        return None
+    match = re.match(r"glibc (\d+)\.(\d+)", text or "")
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def platform_id() -> str:
-    """The Node archive platform for this machine, e.g. ``linux-x64``."""
+    """The Node archive platform for this machine, e.g. ``linux-x64``.
+
+    Raises ``unsupported_platform`` before any download where the official
+    builds do not run or are not offered: Windows on arm64, a Linux without
+    glibc (musl, e.g. Alpine) and glibc older than :data:`MIN_GLIBC`. A system
+    Node is looked for first, so it is still used there.
+    """
+    machine = platform.machine()
     os_id = _OS.get(sys.platform)
-    arch = _ARCH.get(platform.machine().lower())
-    plat = f"{os_id}-{arch}"
-    if os_id == "linux" and _is_musl():
-        plat += "-musl"
-    if os_id is None or arch is None or plat not in _SUPPORTED:
-        libc = " (musl)" if plat.endswith("-musl") else ""
+    arch = _ARCH.get(machine.lower())
+    if os_id == "win" and arch == "arm64":
         raise StageError(
             "unsupported_platform",
-            f"No Node.js build for {sys.platform} / {platform.machine()}{libc}.",
+            "Windows on arm64 is not supported: no Node.js 20.9 or newer with npx "
+            f"was found on PATH, and the private Node is x64 only. {_TRY_YOUR_OWN}",
+        )
+    if os_id == "linux":
+        glibc = _glibc_version()
+        if glibc is None:
+            raise StageError(
+                "unsupported_platform",
+                "This Linux has no glibc (musl-based systems such as Alpine are "
+                "not supported), so the official Node.js builds do not run. "
+                "Install Node.js 20.9 or newer yourself, e.g. `apk add nodejs "
+                "npm` on Alpine, and run `EvoSci setup` again.",
+            )
+        if glibc < MIN_GLIBC:
+            found, need = (".".join(map(str, v)) for v in (glibc, MIN_GLIBC))
+            raise StageError(
+                "unsupported_platform",
+                f"This Linux has glibc {found}; the official Node.js builds need "
+                f"glibc {need} or newer. {_TRY_YOUR_OWN}",
+            )
+    plat = f"{os_id}-{arch}"
+    if os_id is None or arch is None or plat not in NODE_SHA256:
+        raise StageError(
+            "unsupported_platform",
+            f"No Node.js build for {sys.platform} / {machine}. {_TRY_YOUR_OWN}",
         )
     return plat
 
@@ -170,7 +207,12 @@ def _parse_version(text: str) -> tuple[int, int, int] | None:
 
 
 def _probe(exe: Path) -> tuple[int, int, int] | None:
-    """Run ``<exe> --version``; return the parsed version, or None on any failure."""
+    """Run ``<exe> --version``; return the parsed version, or None on any failure.
+
+    A program blocked by a Windows policy raises :class:`PolicyBlocked`
+    instead, so a blocked system Node is skipped while a blocked private one
+    is reported, not downloaded again.
+    """
     env = node_child_env(os.environ, private=True)
     try:
         result = subprocess.run(
@@ -180,7 +222,11 @@ def _probe(exe: Path) -> tuple[int, int, int] | None:
             timeout=30,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError as exc:
+        if is_policy_block(exc):
+            raise PolicyBlocked(exe) from exc
+        return None
+    except subprocess.SubprocessError:
         return None
     if result.returncode != 0:
         return None
@@ -194,16 +240,14 @@ def _system_node() -> NodeInfo | None:
     Every consumer runs ``npx``, and some distros package ``npm`` (which
     provides it) separately from ``node``; a Node without it does not count.
     """
-    root = tools_dir()
-    search = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not is_under(Path(p), root)
-    )
-    found = shutil.which("node", path=search)
-    if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
+    found = which_on_path("node", outside=tools_dir())
+    if found is None or which_in("npx", Path(found).parent) is None:
         return None
-    version = _probe(Path(found))
+    try:
+        version = _probe(Path(found))
+    except PolicyBlocked as exc:
+        logger.info(f"Not using {found}: a Windows policy blocked {exc.path}")
+        return None
     if version is None or version[:2] < MIN_SYSTEM_NODE:
         return None
     return NodeInfo("system", ".".join(map(str, version)), Path(found))
@@ -223,12 +267,9 @@ def _read_record() -> dict[str, str] | None:
 
 
 def _write_record(version: str, install_dir: Path) -> None:
-    record = _record_path()
-    tmp = record.with_name(record.name + ".tmp")
-    tmp.write_text(
-        json.dumps({"version": version, "path": str(install_dir)}), encoding="utf-8"
+    atomic_write_text(
+        _record_path(), json.dumps({"version": version, "path": str(install_dir)})
     )
-    os.replace(tmp, record)
 
 
 def _recorded_node() -> NodeInfo | None:
@@ -246,21 +287,31 @@ def _recorded_node() -> NodeInfo | None:
 # --------------------------------------------------------------------------- #
 # Install
 # --------------------------------------------------------------------------- #
-def _extract(archive: Path, dest: Path) -> None:
-    """Unpack ``archive`` into ``dest``.
+def _ticking(members: Iterable[T], tick: Callable[[], None]) -> Iterator[T]:
+    """``members``, calling ``tick`` before each one is unpacked."""
+    for member in members:
+        tick()
+        yield member
+
+
+def _extract(
+    archive: Path, dest: Path, tick: Callable[[], None] = lambda: None
+) -> None:
+    """Unpack ``archive`` into ``dest``, calling ``tick`` between members.
 
     ``.zip`` (Windows) goes through ``zipfile``, which strips absolute and
     ``..`` member paths and creates no symlinks. ``.tar.xz`` uses the ``data``
     filter, which keeps Node's relative ``bin/npm`` / ``bin/npx`` links and
-    rejects members or links that escape ``dest``.
+    rejects members or links that escape ``dest``. Both unpack the members as
+    the iterator yields them, so ``tick`` runs while the work goes on.
     """
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(dest)
+            zf.extractall(dest, members=_ticking(zf.namelist(), tick))
         return
     with tarfile.open(archive, "r:xz") as tf:
         if hasattr(tarfile, "data_filter"):
-            tf.extractall(dest, filter="data")
+            tf.extractall(dest, members=_ticking(tf, tick), filter="data")
             return
         # Python < 3.11.4 has no extraction filters: check each member by hand.
         root = dest.resolve()
@@ -274,34 +325,39 @@ def _extract(archive: Path, dest: Path) -> None:
                     (link_base / member.linkname).resolve(), root
                 ):
                     raise tarfile.TarError(f"link {member.name!r} escapes {dest}")
-        tf.extractall(dest)
+        tf.extractall(dest, members=_ticking(tf.getmembers(), tick))
 
 
-def _install(mirror: str, report: ProgressFn) -> NodeInfo:
+def _install(mirror: str, report: Heartbeat) -> NodeInfo:
     plat = platform_id()
     source = SOURCES.get(mirror, SOURCES["default"])
     filename = archive_name(plat)
     base_url = f"{source}/v{NODE_VERSION}"
+    expected = NODE_SHA256[plat]
     root = tools_dir()
     final = root / f"node-v{NODE_VERSION}"
 
     tmp = Path(tempfile.mkdtemp(prefix=".node-", dir=root))
     try:
         report(0.05, f"Downloading Node {NODE_VERSION}")
-        sums = fetch_text(f"{base_url}/SHASUMS256.txt")
         archive = tmp / filename
         actual = download(
             f"{base_url}/{filename}",
             archive,
             lambda f: report(0.05 + 0.8 * f, f"Downloading Node {NODE_VERSION}"),
+            cn_hint=mirror != "cn",
         )
         report(0.86, "Verifying checksum")
-        verify_sha256_from_sums(actual, sums, filename)
+        if actual.lower() != expected:
+            raise StageError(
+                "checksum_mismatch",
+                f"{filename} sha256 {actual} does not match the pinned {expected}.",
+            )
 
         report(0.9, "Unpacking")
         unpack = tmp / "unpack"
         try:
-            _extract(archive, unpack)
+            _extract(archive, unpack, report.tick)
         except (tarfile.TarError, zipfile.BadZipFile) as exc:
             raise StageError(
                 "download_failed", f"Could not unpack {filename}: {exc}"
@@ -327,6 +383,9 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
 
         report(0.96, "Checking the installed Node")
         exe = _node_exe(final)
+        # A policy block propagates (see ensure_node) and leaves the install on
+        # disk unrecorded: the next run adopts it, is blocked again and reports
+        # it without a new download.
         version = _probe(exe)
         if version is None:
             shutil.rmtree(final, ignore_errors=True)
@@ -381,7 +440,7 @@ def ensure_node(
 
     ``mirror`` defaults to the configured ``mirror``.
     """
-    report = progress or (lambda _f, _m: None)
+    report = Heartbeat(progress or (lambda _f, _m: None))
 
     system = _system_node()
     if system is not None:
@@ -391,28 +450,30 @@ def ensure_node(
             _record_path().unlink(missing_ok=True)
         return system
 
-    recorded = _recorded_node()
-    if recorded is not None:
-        return recorded
-
     global _failed_install
-    if _failed_install is not None:
-        # One process can ask several times (server spawn, MCP load, WebUI);
-        # on a blocked network each attempt would wait out the timeouts again.
-        raise _failed_install
-
-    from filelock import FileLock
-
     root = tools_dir()
     try:
+        recorded = _recorded_node()
+        if recorded is not None:
+            return recorded
+        if _failed_install is not None:
+            # One process can ask several times (server spawn, MCP load,
+            # WebUI); on a blocked network each attempt would wait out the
+            # timeouts again.
+            raise _failed_install
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(root / "node.lock")):
+        with stage_lock(root / "node.lock", "Node.js", progress):
             # Another process may have finished the install while we waited.
             recorded = _recorded_node() or _adopt_installed(root)
             if recorded is not None:
                 return recorded
             remove_stale_temp_dirs(root, ".node-")
             return _install(mirror or configured_mirror(), report)
+    except PolicyBlocked as exc:
+        # Our recorded, left-over or fresh Node is blocked: report it instead
+        # of downloading the same blocked program again.
+        _failed_install = policy_error(exc.path, _POLICY_ALTERNATIVE)
+        raise _failed_install from exc
     except StageError as exc:
         _failed_install = exc
         raise
@@ -431,7 +492,8 @@ def activate_runtime() -> Path | None:
 
     Reads ``tools/node.json`` only (no subprocess), so it is cheap enough for
     CLI start-up. Child processes - the WebUI launcher, ``npx`` MCP servers,
-    ``langgraph dev`` and the agent's shell - inherit the change. Returns the
+    ``langgraph dev`` - inherit the change; the agent's shell moves it last
+    when a usable Node of the user's is on PATH (``agent_env``). Returns the
     directory put on PATH, or None when no private Node is recorded.
     """
     record = _read_record()
@@ -450,27 +512,168 @@ def is_private(exe: str | Path | None) -> bool:
     return exe is not None and is_under(Path(exe), tools_dir())
 
 
+# The user's npm network settings: a company or campus network may need its
+# own registry, proxy or CA certificate, so these reach our Node's npm too.
+NPM_NETWORK_VARS = frozenset(
+    {
+        "npm_config_registry",
+        "npm_config_proxy",
+        "npm_config_https_proxy",
+        "npm_config_noproxy",
+        "npm_config_cafile",
+        "npm_config_ca",
+        "npm_config_strict_ssl",
+    }
+)
+
+
 def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
     """Copy ``env`` for a child that runs the private ``node`` / ``npm`` / ``npx``.
 
-    With ``private`` set, drops ``npm_config_*`` and ``NODE_OPTIONS`` so a
-    user's global npm settings cannot break our Node. A system Node keeps the
-    user's environment as it is.
+    With ``private`` set, drops ``NODE_OPTIONS`` and the ``npm_config_*``
+    variables other than :data:`NPM_NETWORK_VARS` (names compared without
+    case, as npm does), so a user's global npm settings cannot break our
+    Node. A system Node keeps the user's environment as it is.
     """
     if not private:
         return dict(env)
     return {
         k: v
         for k, v in env.items()
-        if not k.lower().startswith("npm_config_") and k.upper() != "NODE_OPTIONS"
+        if k.upper() != "NODE_OPTIONS"
+        and (not k.lower().startswith("npm_config_") or k.lower() in NPM_NETWORK_VARS)
     }
+
+
+def npm_network_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The :data:`NPM_NETWORK_VARS` set in ``env``, as written there."""
+    return {k: v for k, v in env.items() if k.lower() in NPM_NETWORK_VARS}
+
+
+_PROXY_VARS = ("http_proxy", "https_proxy")
+# Node 24's fetch matches an IPv6 host only in brackets, ``http`` without.
+_LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")
+_URL_TRIM = "".join(map(chr, range(0x21)))
+_FORBIDDEN_HOST = re.compile(r"[\x00-\x20#%/:<>?@\[\\\]^|\x7f]")
+
+
+def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
+    """Variables to add for a private Node child so its own requests get
+    through a company network. Empty for a system Node, which keeps the
+    user's setup as it is (and may be too old to know these variables).
+
+    ``NODE_USE_SYSTEM_CA=1`` (unless the user set it either way) makes Node
+    trust the operating system's certificates on top of its bundled ones, as
+    EvoScientist's Python downloads do: a proxy or firewall that inspects TLS
+    re-signs every site with a company certificate that only the system store
+    holds. :func:`node_child_env` removes ``NODE_OPTIONS``, so a
+    ``--use-system-ca`` set there would not reach the child.
+
+    Node's built-in ``fetch`` (and ``http``) ignore ``HTTPS_PROXY`` unless
+    ``NODE_USE_ENV_PROXY=1`` is set (Node 24). It is set only when every
+    proxy variable that is set (an empty one is not, a blank one is) is a URL
+    Node takes (:func:`_is_http_url`): Node exits at start for a value it
+    refuses (``socks4://``, a malformed URL), and ``http`` ignores
+    ``socks5://`` silently. Loopback then goes into each
+    ``NO_PROXY`` / ``no_proxy`` already set, or ``NO_PROXY`` alone when none
+    is (two names differing only in case would both land in one Windows
+    environment block), so requests to this machine (Next.js calls its own
+    ``localhost`` port) never go to the proxy. A ``NODE_USE_ENV_PROXY`` the
+    user set, in any case, is kept, and loopback is added only while it is
+    ``1``.
+    """
+    if not private:
+        return {}
+    extra: dict[str, str] = {}
+    if not any(k.upper() == "NODE_USE_SYSTEM_CA" for k in env):
+        extra["NODE_USE_SYSTEM_CA"] = "1"
+    proxies = [v for k, v in env.items() if k.lower() in _PROXY_VARS and v]
+    if not proxies or not all(_is_http_url(v) for v in proxies):
+        return extra
+    switch = [v for k, v in env.items() if k.upper() == "NODE_USE_ENV_PROXY"]
+    if not switch:
+        extra["NODE_USE_ENV_PROXY"] = "1"
+    elif "1" not in switch:
+        return extra
+    no_proxy_keys = [k for k in env if k.lower() == "no_proxy"] or ["NO_PROXY"]
+    for key in no_proxy_keys:
+        entries = [e.strip() for e in env.get(key, "").split(",") if e.strip()]
+        extra[key] = ",".join(entries + [h for h in _LOOPBACK if h not in entries])
+    return extra
+
+
+def _is_http_url(value: str) -> bool:
+    """Whether ``value`` is an ``http`` or ``https`` URL that Node 24 takes as
+    its proxy. Read as Node reads it (C0 controls and spaces trimmed at both
+    ends; its ``http`` module refuses a CR or LF anywhere), it needs a host
+    Node accepts (an IPv6 address in brackets, with no zone; else an ASCII
+    name, an IPv4 address when the last label is a number) and a port from 1
+    to 65535 if any; no ``\\`` (Node reads it as ``/``), path, query or
+    fragment (undici refuses them; a ``#``, ``?`` or ``/`` in the user name or
+    password makes one); and ``%`` escapes that decode as UTF-8 (undici
+    decodes the user name and password)."""
+    import ipaddress
+    import urllib.parse
+
+    if "\r" in value or "\n" in value:
+        return False
+    value = value.strip(_URL_TRIM)
+    if "\\" in value or re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    try:
+        urllib.parse.unquote(value, errors="strict")
+        parts = urllib.parse.urlsplit(value)
+        host = urllib.parse.unquote(parts.hostname or "")
+        if parts.netloc.rpartition("@")[2].startswith("["):
+            ipaddress.IPv6Address(host)
+            bad_host = "%" in host
+        else:
+            last = host.rstrip(".").rpartition(".")[2]
+            if last.isdigit() or last[:2].lower() == "0x":
+                ipaddress.IPv4Address(host.rstrip("."))
+            bad_host = (
+                not host or not host.isascii() or bool(_FORBIDDEN_HOST.search(host))
+            )
+        return (
+            parts.scheme.lower() in ("http", "https")
+            and not bad_host
+            and parts.port != 0
+            and parts.path in ("", "/")
+            and not parts.query
+            and not parts.fragment
+        )
+    except ValueError:
+        return False
+
+
+def npm_registry_override(env: Mapping[str, str], node_exe: Path) -> str | None:
+    """npmmirror for ``npx`` children under ``mirror: cn``, unless the user
+    configured a registry (environment or ``npm config get registry``)."""
+    if configured_mirror() != "cn":
+        return None
+    if configured_npm_registry(env, node_exe) is not None:
+        return None
+    return NPM_REGISTRIES["cn"] + "/"
 
 
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
 _NPM_CONFIG_TIMEOUT = 10
-# `npm config get registry` per npm executable; it starts a Node process, so
-# ask once per process.
-_npm_config_registry: dict[str, str | None] = {}
+# `npm config get registry` per npm executable and npm config context (see
+# _npm_config_context); it starts a Node process, so ask once per process.
+_npm_config_registry: dict[tuple[str, tuple[tuple[str, str], ...]], str | None] = {}
+
+
+def _npm_config_context(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """What in ``env`` changes npm's answer besides its own files: the
+    ``npm_config_*`` variables and the home folder that holds ``~/.npmrc``."""
+    return tuple(
+        sorted(
+            (k.lower(), v)
+            for k, v in env.items()
+            if k.lower().startswith("npm_config_")
+            or k.lower() in ("home", "userprofile")
+        )
+    )
 
 
 def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | None:
@@ -488,12 +691,13 @@ def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | Non
         if key.lower() == "npm_config_registry" and value.strip():
             return value.strip()
 
-    npm = shutil.which("npm", path=str(Path(node_exe).parent))
+    npm = which_in("npm", Path(node_exe).parent)
     if npm is None:
         return None
-    if npm not in _npm_config_registry:
-        _npm_config_registry[npm] = _ask_npm_registry(npm, env)
-    return _npm_config_registry[npm]
+    key = (npm, _npm_config_context(env))
+    if key not in _npm_config_registry:
+        _npm_config_registry[key] = _ask_npm_registry(npm, env)
+    return _npm_config_registry[key]
 
 
 def _ask_npm_registry(npm: str, env: Mapping[str, str]) -> str | None:

@@ -242,10 +242,9 @@ def write_observation_document(
     _write_file_atomically(Path(path), f"---\n{frontmatter}---\n{body}")
 
 
-def _write_file_atomically(path: Path, content: str) -> None:
+def write_text_atomically(path: Path, content: str) -> None:
     """Write next to ``path`` and move into place in one step, so a reader
-    (the summary scan, the index, a search) never sees a partial document."""
-    global _cache_generation
+    never sees a partial document."""
     staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         # A rewrite keeps the file's own permissions; until it takes them
@@ -265,6 +264,13 @@ def _write_file_atomically(path: Path, content: str) -> None:
                 os.chmod(staging, stat.S_IREAD | stat.S_IWRITE)
         with contextlib.suppress(OSError):
             staging.unlink(missing_ok=True)
+
+
+def _write_file_atomically(path: Path, content: str) -> None:
+    """Write an observation file whole (the summary scan, the index and a
+    search never read a partial one) and drop its cached parse."""
+    global _cache_generation
+    write_text_atomically(path, content)
     # The writer's own process must not serve the old parse even where the
     # stat signature cannot tell the files apart, and a parse that began
     # before this write must not be cached afterwards.

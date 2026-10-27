@@ -908,12 +908,60 @@ def test_bundled_runner_cleans_env_only_for_private_node(
 
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
     monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
-    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
+    env = {"PATH": "p", "npm_config_prefix": "x", "NODE_OPTIONS": "--x"}
     lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
     if private:
-        assert captured["env"] == {"PATH": "p", "NODE_ENV": "production"}
+        assert captured["env"] == {
+            "PATH": "p",
+            "NODE_ENV": "production",
+            "NODE_USE_SYSTEM_CA": "1",
+        }
     else:
         assert captured["env"] == {**env, "NODE_ENV": "production"}
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_bundled_runner_gives_the_private_node_the_proxy_switch(
+    monkeypatch, tmp_path, private
+):
+    from EvoScientist.setup import node as setup_node
+
+    node = _bundled_runner_files(tmp_path)
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return _DoneProc()
+
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {"PATH": "p", "HTTPS_PROXY": "http://proxy.example:3128"}
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
+    assert ("NODE_USE_ENV_PROXY" in captured["env"]) is private
+    assert ("NODE_USE_SYSTEM_CA" in captured["env"]) is private
+    if private:
+        assert captured["env"]["NO_PROXY"] == "localhost,127.0.0.1,::1,[::1]"
+
+
+def test_bundled_runner_keeps_the_users_proxy_switch(monkeypatch, tmp_path):
+    from EvoScientist.setup import node as setup_node
+
+    node = _bundled_runner_files(tmp_path)
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return _DoneProc()
+
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: True)
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {
+        "PATH": "p",
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "NODE_USE_ENV_PROXY": "0",
+    }
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
+    assert captured["env"]["NODE_USE_ENV_PROXY"] == "0"
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):

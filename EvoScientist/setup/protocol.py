@@ -197,6 +197,40 @@ def wait_with_heartbeat(
             raise StepStalled(f"no progress for {silence_limit:g} s")
 
 
+class Heartbeat:
+    """A ``(fraction, message)`` progress callback that remembers its last
+    line, so a step that reports nothing for a while can repeat it.
+
+    :meth:`beat` repeats the line now (between the polls of
+    :func:`wait_with_heartbeat`); :meth:`tick` repeats it only when
+    :data:`HEARTBEAT_INTERVAL` has passed since the last line, for a loop in
+    this process (between archive members). Both run on the caller's thread.
+    """
+
+    def __init__(
+        self,
+        report: Callable[[float, str], None],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._report = report
+        self._clock = clock
+        self._last: tuple[float, str] | None = None
+        self._at = clock()
+
+    def __call__(self, fraction: float, message: str) -> None:
+        self._last = (fraction, message)
+        self._at = self._clock()
+        self._report(fraction, message)
+
+    def beat(self) -> None:
+        if self._last is not None:
+            self(*self._last)
+
+    def tick(self) -> None:
+        if self._clock() - self._at >= HEARTBEAT_INTERVAL:
+            self.beat()
+
+
 class ProgressThrottle:
     """Pick the progress updates a human should see.
 
