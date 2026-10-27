@@ -370,6 +370,8 @@ The image does not include the agent's research Python; run `EvoSci setup` once 
 >   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t evoscientist:local .
 >   ```
 >
+>   With compose, change `image:` in `docker-compose.yml` to `evoscientist:local`. If you already ran the published image, the `evosci-data` volume still belongs to UID `1000`: remove it with `docker volume rm evosci-data`, or `docker compose down -v` with compose (this deletes its sessions and config), and run `setup` again with `evoscientist:local`.
+>
 >   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
 >
 > Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.

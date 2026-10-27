@@ -389,6 +389,8 @@ docker run -it --rm \
 >   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t evoscientist:local .
 >   ```
 >
+>   使用 compose 时，把 `docker-compose.yml` 中的 `image:` 改为 `evoscientist:local`。如果你之前运行过官方镜像，`evosci-data` 卷仍属于 UID `1000`：请用 `docker volume rm evosci-data` 删除它，使用 compose 时用 `docker compose down -v`（这会删除其中的会话和配置），再用 `evoscientist:local` 重新运行 `setup`。
+>
 >   也可以一次性执行 `sudo chown -R 1000:1000 ./workspace`，但之后在宿主机上修改这些文件需要 `sudo`。
 >
 > Docker Desktop（macOS、Windows）通常会自行处理 bind 挂载权限，无需这些步骤。不要给 `docker run` 传 `--user`，也不要在 compose 中设置 `user:`：镜像的数据和配置保存在 `/home/evosci/.evoscientist`，该目录属于构建时的 UID，其他 UID 运行会因 `Permission denied` 而失败。
