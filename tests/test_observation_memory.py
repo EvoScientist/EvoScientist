@@ -609,40 +609,6 @@ def test_observation_with_an_empty_relation_list_still_reads(tmp_path):
     assert [hit["observation_id"] for hit in hits] == ["O-empty-relations"]
 
 
-def test_unreadable_observation_is_reported_once_per_version(tmp_path, caplog):
-    memories = tmp_path / "memories"
-    global_dir = memories / "observations" / "global"
-    global_dir.mkdir(parents=True)
-    broken = global_dir / "O-broken.md"
-    broken.write_text(
-        "---\nid: O-broken\nsummary: s\nmemory_type: nonsense\nscope: global\n---\n",
-        encoding="utf-8",
-    )
-
-    def reported() -> list[str]:
-        return [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelname == "WARNING" and "unreadable observation" in r.getMessage()
-        ]
-
-    with caplog.at_level("WARNING"):
-        list_observation_documents(memory_dir=memories, project_id="P-project")
-        list_observation_documents(memory_dir=memories, project_id="P-project")
-        assert len(reported()) == 1
-        assert str(broken) in reported()[0]
-        assert "memory_type" in reported()[0]
-
-        broken.write_text(
-            "---\nid: O-broken\nsummary: s\nmemory_type: semantic\nscope: nowhere\n---\n",
-            encoding="utf-8",
-        )
-        list_observation_documents(memory_dir=memories, project_id="P-project")
-
-    assert len(reported()) == 2
-    assert "scope" in reported()[1]
-
-
 @pytest.mark.parametrize(
     ("first", "second", "reason"),
     [
@@ -656,7 +622,17 @@ def test_unreadable_observation_is_reported_once_per_version(tmp_path, caplog):
         (
             b"---\nid: [SECRET-SENTINEL\n---\n",
             b"---\nid: [SECRET-SENTINEL, 2\n---\n",
-            "Error",
+            "invalid YAML at line 2",
+        ),
+        (
+            b"---\nid: O-x\nsummary: SECRET-SENTINEL\ncreated_at: 2024-13-45\n---\n",
+            b"---\nid: O-x\nsummary: SECRET-SENTINEL\ncreated_at: 2024-14-45\n---\n",
+            "invalid YAML (ValueError)",
+        ),
+        (
+            b"---\n\n---\nSECRET-SENTINEL\n",
+            b"---\n- SECRET-SENTINEL\n---\n",
+            "frontmatter: Input should be a valid dictionary",
         ),
         (
             b"---\nid: O-x\nsummary: s\nmemory_type: SECRET-SENTINEL\nscope: global\n---\n",
@@ -664,7 +640,15 @@ def test_unreadable_observation_is_reported_once_per_version(tmp_path, caplog):
             "memory_type",
         ),
     ],
-    ids=["not-utf8", "no-frontmatter", "unclosed", "yaml-error", "validation-error"],
+    ids=[
+        "not-utf8",
+        "no-frontmatter",
+        "unclosed",
+        "yaml-error",
+        "bad-timestamp",
+        "no-mapping",
+        "validation-error",
+    ],
 )
 def test_each_kind_of_unreadable_observation_is_reported_per_version(
     tmp_path, caplog, first, second, reason

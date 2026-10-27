@@ -117,7 +117,8 @@ class ObservationFrontmatter(BaseModel):
     @field_validator("related_observations", mode="before")
     @classmethod
     def _empty_relations(cls, value: object) -> object:
-        # A key written with no value reads as None; older files carry one.
+        # A key with no value reads as None; an edit that removes the last
+        # relation leaves one.
         return [] if value is None else value
 
     @field_validator("id", "summary", "created_at", "project_id")
@@ -232,13 +233,22 @@ def _read_observation_document_with_text(
         metadata = ObservationFrontmatter.model_validate(yaml.safe_load(frontmatter))
     except ValidationError as exc:
         reason = "; ".join(
-            f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+            f"{'.'.join(map(str, error['loc'])) or 'frontmatter'}: {error['msg']}"
             for error in exc.errors()
         )
         _report_unreadable(document_path, text.encode("utf-8"), reason)
         return None
+    except yaml.MarkedYAMLError as exc:
+        # +1 for 0-based, +1 for the opening ---
+        line = exc.problem_mark.line + 2 if exc.problem_mark else "?"
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML at line {line}"
+        )
+        return None
     except (ValueError, yaml.YAMLError) as exc:
-        _report_unreadable(document_path, text.encode("utf-8"), type(exc).__name__)
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML ({type(exc).__name__})"
+        )
         return None
     return metadata, body, text
 
