@@ -416,7 +416,16 @@ _LOG_OFFSET_AT_START: int = 0
 
 # Cloudflare quick-tunnel public URL, as printed by cloudflared into the
 # langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
-_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
+#
+# ``api.trycloudflare.com`` is excluded: it is the API endpoint cloudflared
+# posts to, not a tunnel hostname, and it appears in the error it logs when
+# the quick tunnel cannot be created ("failed to request quick Tunnel: Post
+# \"https://api.trycloudflare.com/tunnel\": ..."). Matching it there made a
+# failed tunnel look established. A real quick tunnel is a generated name
+# such as ``https://<words>.trycloudflare.com``.
+_TUNNEL_URL_RE = re.compile(
+    r"https://(?!api\.trycloudflare\.com)[A-Za-z0-9.-]+\.trycloudflare\.com"
+)
 
 # Whether async sub-agents are usable in this process.
 #
