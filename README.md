@@ -364,13 +364,17 @@ The image does not include the agent's research Python; run `EvoSci setup` once 
 > The image runs as a non-root user (`evosci`, UID `1000`). On Linux hosts:
 >
 > - Create the workspace before the first run with `mkdir -p workspace`. Otherwise Docker creates it as `root` and the container can't write to it, even with UID `1000`.
-> - If your host user ID isn't `1000`, build the image as yourself, so the host and the container can both write to `./workspace`, then use `evoscientist:local` in place of the published image:
+> - If your host user ID isn't `1000`, build the image as yourself from a clone of this repository, so the host and the container can both write to `./workspace`:
 >
 >   ```bash
->   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t evoscientist:local .
+>   docker build --build-arg UID="$(id -u)" -t evoscientist:local .
 >   ```
 >
->   With compose, change `image:` in `docker-compose.yml` to `evoscientist:local`. If you already ran the published image, the `evosci-data` volume still belongs to UID `1000`: remove it with `docker volume rm evosci-data`, or `docker compose down -v` with compose (this deletes its sessions and config), and run `setup` again with `evoscientist:local`.
+>   Then use `evoscientist:local` in place of the published image, including for `setup`; with compose, set `image: evoscientist:local` in `docker-compose.yml`. If you already used the published image, hand the data volume to your UID once:
+>
+>   ```bash
+>   docker run --rm --user 0 --entrypoint chown -v evosci-data:/home/evosci/.evoscientist evoscientist:local -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
 >
 >   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
 >

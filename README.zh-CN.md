@@ -383,13 +383,17 @@ docker run -it --rm \
 > 镜像以非 root 用户运行（`evosci`，UID `1000`）。在 Linux 宿主机上：
 >
 > - 首次运行前先执行 `mkdir -p workspace` 创建工作目录。否则 Docker 会以 `root` 身份创建它，即使 UID 是 `1000`，容器也无法写入。
-> - 如果你的宿主用户 ID 不是 `1000`，请以你自己的 UID 构建镜像，这样宿主机和容器都能写入 `./workspace`，之后用 `evoscientist:local` 代替官方镜像：
+> - 如果你的宿主用户 ID 不是 `1000`，请在本仓库的克隆目录中以你自己的 UID 构建镜像，这样宿主机和容器都能写入 `./workspace`：
 >
 >   ```bash
->   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t evoscientist:local .
+>   docker build --build-arg UID="$(id -u)" -t evoscientist:local .
 >   ```
 >
->   使用 compose 时，把 `docker-compose.yml` 中的 `image:` 改为 `evoscientist:local`。如果你之前运行过官方镜像，`evosci-data` 卷仍属于 UID `1000`：请用 `docker volume rm evosci-data` 删除它，使用 compose 时用 `docker compose down -v`（这会删除其中的会话和配置），再用 `evoscientist:local` 重新运行 `setup`。
+>   之后用 `evoscientist:local` 代替官方镜像（包括运行 `setup` 时）；使用 compose 时，在 `docker-compose.yml` 中设置 `image: evoscientist:local`。如果你之前用过官方镜像，请一次性把数据卷交给你的 UID：
+>
+>   ```bash
+>   docker run --rm --user 0 --entrypoint chown -v evosci-data:/home/evosci/.evoscientist evoscientist:local -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
 >
 >   也可以一次性执行 `sudo chown -R 1000:1000 ./workspace`，但之后在宿主机上修改这些文件需要 `sudo`。
 >
