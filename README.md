@@ -376,6 +376,12 @@ The image does not include the agent's research Python; run `EvoSci setup` once 
 >   docker run --rm --user 0 --entrypoint chown -v evosci-data:/home/evosci/.evoscientist evoscientist:local -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
 >   ```
 >
+>   With compose, run it through compose instead (after setting `image: evoscientist:local`), since compose names the volume `<project>_evosci-data`:
+>
+>   ```bash
+>   docker compose run --rm --user 0 --entrypoint chown evoscientist -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
+>
 >   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
 >
 > Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.

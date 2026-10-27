@@ -395,6 +395,12 @@ docker run -it --rm \
 >   docker run --rm --user 0 --entrypoint chown -v evosci-data:/home/evosci/.evoscientist evoscientist:local -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
 >   ```
 >
+>   使用 compose 时，请改为通过 compose 运行（先设置 `image: evoscientist:local`），因为 compose 会把卷命名为 `<project>_evosci-data`：
+>
+>   ```bash
+>   docker compose run --rm --user 0 --entrypoint chown evoscientist -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
+>
 >   也可以一次性执行 `sudo chown -R 1000:1000 ./workspace`，但之后在宿主机上修改这些文件需要 `sudo`。
 >
 > Docker Desktop（macOS、Windows）通常会自行处理 bind 挂载权限，无需这些步骤。不要给 `docker run` 传 `--user`，也不要在 compose 中设置 `user:`：镜像的数据和配置保存在 `/home/evosci/.evoscientist`，该目录属于构建时的 UID，其他 UID 运行会因 `Permission denied` 而失败。
