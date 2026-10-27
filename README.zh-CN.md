@@ -380,7 +380,7 @@ docker run -it --rm \
 镜像不包含 agent 使用的研究用 Python；请在挂载同一个 `evosci-data` 卷的容器里运行一次 `EvoSci setup`（镜像的入口是 `evosci`，所以用 `docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup`；使用 compose 时为 `docker compose run --rm evoscientist setup`），它会把环境建在这个卷里，镜像升级后依然保留。
 
 > [!IMPORTANT]
-> 镜像以非 root 用户运行（`evosci`，UID `1000`）。`./workspace` bind 挂载的宿主目录必须可被该 UID 写入。如果你的宿主用户 ID 不同，可以一次性 `chown -R 1000:1000 ./workspace`，或在每次 `docker run` 时加上 `--user "$(id -u):$(id -g)"`，让容器使用你的 UID。
+> 镜像以非 root 用户运行（`evosci`，UID `1000`）。在 Linux 宿主机上，`./workspace` bind 挂载的宿主目录必须可被该 UID 写入；如果你的宿主用户 ID 不同，请一次性执行 `chown -R 1000:1000 ./workspace`。Docker Desktop（macOS、Windows）通常会自行处理 bind 挂载权限，无需此步骤。不要给 `docker run` 传 `--user`：镜像的数据和配置保存在 `/home/evosci/.evoscientist`，该目录属于 UID `1000`，其他 UID 运行会因 `Permission denied` 而失败。
 
 也可使用 `docker compose`（仓库自带一个起步用的 [`docker-compose.yml`](./docker-compose.yml)）：
 
