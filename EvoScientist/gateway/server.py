@@ -47,16 +47,6 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 _THREAD_SEARCH_LIMIT = 1000
-_RUN_SUBSCRIBE_CHANNELS = [
-    "messages",
-    "tools",
-    "updates",
-    "values",
-    "tasks",
-    "lifecycle",
-    "input",
-    "custom",
-]
 _RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
 _RUN_LOOKUP_PAGE_SIZE = 100
 _ACTIVE_RUN_STATUSES = ("pending", "running")
@@ -212,6 +202,40 @@ def _is_id_keyed_hitl_resume(response: object) -> bool:
 
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
+
+
+def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
+    """Return the run id embedded in a synthetic protocol ``event_id``, if any.
+
+    The server mints lifecycle (and other synthetic) ids as
+    ``synth:{run_id}:...``. Plain stream-entry ids carry no run id; callers
+    that need per-run filtering treat those as belonging to the run whose
+    synthetic lifecycle is currently open.
+    """
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id.startswith("synth:"):
+        return None
+    _, _, rest = event_id.partition(":")
+    run_id, sep, _ = rest.partition(":")
+    if not sep or not run_id:
+        return None
+    return run_id
+
+
+def _is_root_terminal_lifecycle(event: Mapping[str, Any]) -> bool:
+    """True for a root-namespace lifecycle ``completed`` or ``failed`` event."""
+    if event.get("method") != "lifecycle" or _event_namespace(event):
+        return False
+    params = _as_raw_map(event.get("params"))
+    data = _as_raw_map(params.get("data")) if params is not None else None
+    if data is None:
+        return False
+    return data.get("event") in {"completed", "failed"}
+
+
+def _is_root_input_requested(event: Mapping[str, Any]) -> bool:
+    """True for a root-namespace ``input.requested`` (HITL / ask_user pause)."""
+    return event.get("method") == "input.requested" and not _event_namespace(event)
 
 
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
@@ -1314,10 +1338,23 @@ class LangGraphServerGateway:
                     on_resume_attempt=mark_resume_attempted,
                     run_metadata=run_metadata,
                 )
-                async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
+                # Prefer ``stream.events`` over ``subscribe``: a fresh SSE
+                # replays the thread's history and the SDK ends each
+                # subscribe at the first root ``completed`` (#558), which is
+                # an earlier run's. ``events`` stays open for the live run;
+                # we drop foreign-run envelopes and stop on this run's
+                # terminal lifecycle.
+                accepting_run = True
+                async for event in stream.events:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
                         continue
+                    if run_id is not None:
+                        event_run_id = _synth_event_run_id(raw_event)
+                        if event_run_id is not None:
+                            accepting_run = event_run_id == run_id
+                        if not accepting_run:
+                            continue
                     for selection_event in self._deliver_custom_middleware_events(
                         raw_event
                     ):
@@ -1330,6 +1367,17 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
+                    # Stop where the SDK ends subscribe via _signal_paused: a
+                    # root interrupt, or this run's root completed/failed.
+                    # A root ``failed`` only breaks here (done path). Open #673
+                    # conflicts in this loop; keep its raise directly above
+                    # the break when resolving.
+                    if (
+                        emitted_interrupt
+                        or _is_root_input_requested(event_map)
+                        or _is_root_terminal_lifecycle(event_map)
+                    ):
+                        break
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(

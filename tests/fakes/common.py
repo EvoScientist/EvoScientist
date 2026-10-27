@@ -564,9 +564,15 @@ class FakeCheckpointAgent:
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, run_id: str = "run-1") -> None:
         self.starts: list[dict[str, Any]] = []
         self.responses: list[dict[str, Any]] = []
+        self.run_id = run_id
+        self._run_ids: list[str] = []
+
+    def queue_run_ids(self, *run_ids: str) -> None:
+        """Preset run ids returned by successive ``start`` calls."""
+        self._run_ids.extend(run_ids)
 
     async def start(
         self,
@@ -582,7 +588,11 @@ class FakeLangGraphRunModule:
                 "metadata": metadata,
             }
         )
-        return {"run_id": "run-1"}
+        if self._run_ids:
+            run_id = self._run_ids.pop(0)
+        else:
+            run_id = self.run_id
+        return {"run_id": run_id}
 
     async def respond(
         self,
@@ -611,13 +621,33 @@ class FakeLangGraphThreadStream:
         interrupted: bool = False,
     ) -> None:
         self.thread_id = thread_id
-        self.events = list(events or [])
+        # Queued envelopes; exposed to subclasses as ``_queued_events``. The
+        # public ``events`` property mirrors the SDK (async iterator).
+        self._queued_events = list(events or [])
         self.interrupts = interrupts or []
         self.interrupted = interrupted
         self.run = FakeLangGraphRunModule()
         self.subscribed_channels: list[list[str]] = []
         self.entered = False
         self.exited = False
+
+    @property
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        """Fresh all-channel subscription; does not stop at root ``completed``."""
+        self.subscribed_channels.append(
+            [
+                "values",
+                "updates",
+                "messages",
+                "tools",
+                "lifecycle",
+                "input",
+                "checkpoints",
+                "tasks",
+                "custom",
+            ]
+        )
+        return self._iter_events()
 
     async def __aenter__(self) -> FakeLangGraphThreadStream:
         self.entered = True
@@ -627,12 +657,30 @@ class FakeLangGraphThreadStream:
         self.exited = True
 
     async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
-        for event in self.events:
+        for event in self._queued_events:
             yield event
 
     def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
         self.subscribed_channels.append(channels)
-        return self._iter_events()
+
+        async def _until_root_terminal() -> AsyncIterator[dict[str, Any]]:
+            for event in self._queued_events:
+                yield event
+                method = event.get("method")
+                params = event.get("params") or {}
+                namespace = (
+                    params.get("namespace") if isinstance(params, dict) else None
+                )
+                data = params.get("data") if isinstance(params, dict) else None
+                if (
+                    method == "lifecycle"
+                    and not namespace
+                    and isinstance(data, dict)
+                    and data.get("event") in {"completed", "failed"}
+                ):
+                    return
+
+        return _until_root_terminal()
 
 
 class FakeLangGraphThreadsClient:
