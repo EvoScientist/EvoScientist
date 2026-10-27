@@ -323,6 +323,7 @@ def test_memory_agents_mount_retry_then_normalization(tmp_path, monkeypatch, aut
     for key, middleware in stacks.items():
         assert isinstance(middleware[0], ModelRetryMiddleware), key
         assert type(middleware[1]).__name__ == "ErrorNormalizationMiddleware", key
+        assert middleware[0]._honor_run_key is False, key
         tier = middleware[0]._tier
         tiers[key] = (tier.wait_budget_seconds, tier.unattended)
     assert tiers == {

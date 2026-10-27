@@ -63,7 +63,9 @@ def memory_agent_middleware(
     middleware: list[AgentMiddleware] = [
         # Workers and the linker share the server's run slots between turns, so
         # they keep the short budget; AutoSkills runs alone on a schedule.
-        _model_retry_middleware(unattended=unattended_retry, follow_auto_mode=False),
+        _model_retry_middleware(
+            unattended=unattended_retry, follow_auto_mode=False, honor_run_key=False
+        ),
         # Inside the retry: provider-SDK exceptions reach it normalized.
         ErrorNormalizationMiddleware(),
         ToolErrorHandlerMiddleware(),
