@@ -2650,11 +2650,12 @@ def test_memory_worker_observation_writer_modes(
         observation_writer=observation_writer,
     )
 
-    # ErrorNormalizationMiddleware wraps outermost so provider-SDK
-    # exceptions from the auxiliary model call get normalized before
-    # the tool-error handler sees them.
-    assert type(middleware[0]).__name__ == "ErrorNormalizationMiddleware"
-    assert type(middleware[1]).__name__ == "ToolErrorHandlerMiddleware"
+    # The retry layer wraps outermost; inside it, provider-SDK exceptions
+    # from the auxiliary model call are normalized before the tool-error
+    # handler sees them.
+    assert type(middleware[0]).__name__ == "ModelRetryMiddleware"
+    assert type(middleware[1]).__name__ == "ErrorNormalizationMiddleware"
+    assert type(middleware[2]).__name__ == "ToolErrorHandlerMiddleware"
     assert _memory_tool_names(middleware) == expected_tools
 
 

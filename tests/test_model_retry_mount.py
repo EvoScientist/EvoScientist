@@ -276,3 +276,58 @@ def test_subagent_lists_get_the_boundary_inside_the_normalization_layer(workspac
         mw, "context_overflow_mapper"
     )
     assert _retry_of(mw)._honor_run_key is False
+
+
+@pytest.mark.parametrize("auto_mode", [False, True])
+def test_memory_agents_mount_retry_then_normalization(tmp_path, monkeypatch, auto_mode):
+    """Workers and the linker keep the short budget even under auto_mode, so a
+    provider outage cannot park them on the server's run slots; AutoSkills
+    runs alone on a schedule and waits as long as the scheduler."""
+    from EvoScientist.config import MemoryObservationWriter
+    from EvoScientist.memory.agents import autoskills, memory_worker, observation_linker
+    from EvoScientist.memory.types import MemorySourceType
+    from EvoScientist.paths import Workspace
+
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._config",
+        EvoScientistConfig(
+            auto_mode=auto_mode,
+            model_retry_wait_seconds=60,
+            auto_mode_retry_wait_seconds=1800,
+        ),
+    )
+    stacks = {
+        source.value: memory_worker._memory_worker_middleware(
+            memory_dir=tmp_path / "memories",
+            workspace_dir=tmp_path / "workspace",
+            source_type=source,
+            observation_writer=MemoryObservationWriter.ALL,
+        )
+        for source in MemorySourceType
+    }
+    for module, build, key in (
+        (observation_linker, "build_observation_linker_graph", "linker"),
+        (autoskills, "build_autoskills_graph", "autoskills"),
+    ):
+
+        def capture(*, key=key, **kwargs):
+            stacks[key] = kwargs["middleware"]
+
+        monkeypatch.setattr(module, "build_memory_agent_graph", capture)
+        getattr(module, build)(
+            workspace=Workspace(tmp_path / "workspace"),
+            memory_dir=tmp_path / "memories",
+        )
+
+    tiers = {}
+    for key, middleware in stacks.items():
+        assert isinstance(middleware[0], ModelRetryMiddleware), key
+        assert type(middleware[1]).__name__ == "ErrorNormalizationMiddleware", key
+        tier = middleware[0]._tier
+        tiers[key] = (tier.wait_budget_seconds, tier.unattended)
+    assert tiers == {
+        "turn": (60.0, False),
+        "subagent": (60.0, False),
+        "linker": (60.0, False),
+        "autoskills": (1800.0, True),
+    }

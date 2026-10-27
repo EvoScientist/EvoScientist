@@ -901,13 +901,19 @@ def _get_default_backend(
 
 
 def _model_retry_middleware(
-    cfg=None, *, unattended: bool = False, honor_run_key: bool = True
+    cfg=None,
+    *,
+    unattended: bool = False,
+    honor_run_key: bool = True,
+    follow_auto_mode: bool = True,
 ):
     """The retry layer for one middleware list; always mounted, the budget may be 0."""
     from .middleware.model_retry import ModelRetryMiddleware
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tier_unattended = unattended or bool(getattr(cfg, "auto_mode", False))
+    tier_unattended = unattended or (
+        follow_auto_mode and bool(getattr(cfg, "auto_mode", False))
+    )
     budget = (
         cfg.auto_mode_retry_wait_seconds
         if tier_unattended
