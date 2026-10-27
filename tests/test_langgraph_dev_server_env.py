@@ -325,9 +325,10 @@ def test_start_without_a_job_keeps_the_spawn_flags(
     with pytest.raises(PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
     if manager.os.name == "nt":
-        assert (
-            captured["kwargs"]["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
-        )
+        # The process-group flag plus the suspended start the server sweep
+        # job resumes (#604): the server joins the job before its first
+        # worker can escape it.
+        assert captured["kwargs"]["creationflags"] == 0x00000200 | 0x00000004
     else:
         assert captured["kwargs"]["start_new_session"] is True
         assert "creationflags" not in captured["kwargs"]
