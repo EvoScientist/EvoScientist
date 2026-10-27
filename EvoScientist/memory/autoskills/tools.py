@@ -54,6 +54,15 @@ class SubmitAutoskillProposalArgs(BaseModel):
             "match skill_name."
         ),
     )
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "Where the skill is installed: 'workspace' (this workspace only) "
+            "or 'global' (every workspace). Leave unset to use the default: "
+            "a new skill installs into the workspace, and an update writes "
+            "back to the tier that already holds the target skill."
+        ),
+    )
 
 
 def _installed_skills_for_autoskill_context(
@@ -120,6 +129,7 @@ def create_submit_autoskill_proposal_tool(
         rationale: str,
         operation: str = "create",
         target_skill_name: str | None = None,
+        scope: str | None = None,
     ) -> str:
         proposal = submit_autoskill_proposal(
             memory_dir=memory_dir,
@@ -132,6 +142,7 @@ def create_submit_autoskill_proposal_tool(
             skills_dir=workspace.skills_dir,
             workspace_dir=workspace.root,
             project_id=project_id,
+            scope=scope,
         )
         if (
             proposal.get("status") == "pending"
