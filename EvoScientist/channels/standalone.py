@@ -99,8 +99,11 @@ async def _async_main(
     backend: str | None = None,
     *,
     workspace: Workspace,
-) -> None:
-    """Async entry point — gather channel, dispatcher and optional consumer."""
+) -> bool:
+    """Async entry point — gather channel, dispatcher and optional consumer.
+
+    Returns ``True`` when the channel worker stopped on its own.
+    """
     from .channel_manager import ChannelManager
 
     channel.set_bus(bus)
@@ -201,17 +204,31 @@ async def _async_main(
 
     loop = asyncio.get_running_loop()
     shutdown_task: asyncio.Task[None] | None = None
+    channel_exited = False
 
     def _request_shutdown() -> None:
         nonlocal shutdown_task
         if shutdown_task is None:
             shutdown_task = asyncio.create_task(_graceful_shutdown())
             return
-        # Second signal forces the exit: cancel the graceful path, whose
+        # A signal during shutdown forces the exit: cancel the graceful path, whose
         # `finally` then cancels the workers. Deferred one step so a task
         # created by a signal handled in the same loop pass enters its `try`.
-        logger.warning("Second signal received, forcing shutdown")
+        logger.warning("Signal received during shutdown, forcing exit")
         loop.call_soon(shutdown_task.cancel)
+
+    owner = asyncio.current_task()
+
+    def _channel_finished(_worker: asyncio.Task[None]) -> None:
+        nonlocal channel_exited
+        # Worker completion is not a second signal, and outer cancellation
+        # must not start another shutdown task while the runner is exiting.
+        if shutdown_task is None and not owner.cancelling():
+            channel_exited = True
+            logger.error("Channel %s stopped; shutting down", channel.name)
+            _request_shutdown()
+
+    workers[0].add_done_callback(_channel_finished)
 
     # Windows event loops have no add_signal_handler. A plain handler runs on
     # the main thread between bytecodes and hands the request to the loop; it
@@ -246,6 +263,7 @@ async def _async_main(
                 await asyncio.gather(*leftover, return_exceptions=True)
             finally:
                 await aclose_code_interpreters()
+    return channel_exited
 
 
 def _ensure_standalone_dev_server(
@@ -331,6 +349,12 @@ def run_standalone(
     send_thinking:
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
+
+    Raises
+    ------
+    SystemExit
+        Exit status 1 if the channel stops on its own (for example, a fatal
+        start error). A signal-initiated shutdown returns normally.
     """
     from ..paths import process_workspace
 
@@ -380,7 +404,7 @@ def run_standalone(
         # Without an agent there is no config to read; attachments go to the
         # process workspace's ``media`` folder.
         workspace = process_workspace()
-    asyncio.run(
+    if asyncio.run(
         _async_main(
             channel,
             bus,
@@ -390,4 +414,5 @@ def run_standalone(
             backend,
             workspace=workspace,
         )
-    )
+    ):
+        raise SystemExit(1)
