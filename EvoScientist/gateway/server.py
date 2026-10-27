@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +61,16 @@ _RUN_SUBSCRIBE_CHANNELS = [
 _RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
 _RUN_LOOKUP_PAGE_SIZE = 100
 _ACTIVE_RUN_STATUSES = ("pending", "running")
+# Prefix the server puts on the event ids of the events it synthesizes.
+_SYNTHETIC_EVENT_ID_PREFIX = "synth:"
+# Root lifecycle statuses that end a run. This is the SDK's own root-terminal
+# rule: the server reports a run that was interrupted as "interrupted", and
+# the SDK does not treat that as the end of the run.
+_ROOT_STOP_LIFECYCLE_EVENTS = frozenset({"completed", "failed"})
+# How long a turn waits for the thread state to record the run's complete set
+# of prompts before it gives up and reports the failure.
+_PAUSE_SYNC_ATTEMPTS = 20
+_PAUSE_SYNC_DELAY = 0.25
 
 
 def _run_matches_resume(
@@ -157,6 +168,54 @@ def _state_interrupts(state: ThreadState) -> list[Mapping[str, object]]:
     return [interrupt for interrupt in interrupts if isinstance(interrupt, Mapping)]
 
 
+def _state_is_paused(state: ThreadState) -> bool:
+    """Whether the run has no outstanding work left.
+
+    ``next`` is the scheduler's unfinished-work queue. Task records also keep
+    completed siblings, whose result can legitimately be None. Repeated
+    names represent distinct invocations, so compare counts rather than sets.
+    """
+    tasks = state.get("tasks") or ()
+    pending = state.get("next")
+    if isinstance(pending, (list, tuple)) and all(
+        isinstance(name, str) for name in pending
+    ):
+        stopped = Counter(
+            task["name"]
+            for task in tasks
+            if isinstance(task, Mapping)
+            and isinstance(task.get("name"), str)
+            and (task.get("interrupts") or task.get("error"))
+        )
+        return not (Counter(pending) - stopped)
+
+    # Older stream adapters may not report the scheduler queue.
+    if not tasks:
+        return True
+    for task in tasks:
+        if not isinstance(task, Mapping):
+            continue
+        if task.get("error"):
+            # A task that failed is not outstanding work.
+            continue
+        if task.get("result") is not None:
+            # A task that finished normally is not outstanding work.
+            continue
+        if not task.get("interrupts"):
+            # Still running: it can interrupt later.
+            return False
+    return True
+
+
+def _interrupt_request_id(event: Mapping[str, object]) -> str:
+    """The id of the interrupt a request event asks for."""
+    params = event.get("params")
+    data = params.get("data") if isinstance(params, Mapping) else None
+    if isinstance(data, Mapping):
+        return str(data.get("interrupt_id") or "default")
+    return "default"
+
+
 def _as_tuple(value: object) -> tuple[Any, ...]:
     if value is None:
         return ()
@@ -212,6 +271,187 @@ def _is_id_keyed_hitl_resume(response: object) -> bool:
 
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
+
+
+def _synthetic_run_id(event: Mapping[str, object]) -> str | None:
+    """Return the run id encoded in a synthetic event id, if any.
+
+    The server mints the events it synthesizes - a run's ``running``
+    marker, its terminal marker, an interrupt request - with
+    ``synth:<run_id>:...`` event ids. Events forwarded from the graph keep
+    the upstream stream id and carry no run id.
+    """
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str):
+        return None
+    if not event_id.startswith(_SYNTHETIC_EVENT_ID_PREFIX):
+        return None
+    _, _, remainder = event_id.partition(":")
+    run_id, _, _ = remainder.partition(":")
+    return run_id or None
+
+
+def _is_run_stop_lifecycle_event(event: Mapping[str, object]) -> bool:
+    """Return whether *event* is the root marker that ends a run.
+
+    A root-namespace lifecycle event whose status is ``completed``,
+    ``failed`` or ``interrupted``.
+    """
+    if event.get("method") != "lifecycle":
+        return False
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return False
+    if params.get("namespace") or []:
+        return False
+    data = params.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    return data.get("event") in _ROOT_STOP_LIFECYCLE_EVENTS
+
+
+def _is_run_interrupt_event(event: Mapping[str, object]) -> bool:
+    """Return whether *event* asks the run to pause for an interrupt."""
+    return event.get("method") == "input.requested"
+
+
+def _is_run_stop_event(event: Mapping[str, object]) -> bool:
+    """Return whether *event* ends the run that produced it.
+
+    A root-namespace lifecycle event whose status is ``completed``,
+    ``failed`` or ``interrupted``, or a request for an interrupt.
+    """
+    return _is_run_stop_lifecycle_event(event) or _is_run_interrupt_event(event)
+
+
+def _event_stream_handle(stream: Any) -> Any | None:
+    """The transport handle of the raw stream this turn opened, if reachable.
+
+    The SDK keeps the handles it opened on the thread stream. If a future
+    version moves them, the adapter degrades to watching the iteration alone,
+    the way the turn behaved before.
+    """
+    handles = getattr(stream, "_open_handles", None)
+    if not handles:
+        return None
+    return handles[-1]
+
+
+async def _raw_stream_events(stream: Any) -> AsyncIterator[Mapping[str, object]]:
+    """Yield the transport-level events of *stream*, with its transport health.
+
+    ``AsyncThreadStream.events`` returns the raw SSE iterator, but not the
+    handle that carries the stream's health: the SDK's HTTP pump records an
+    HTTP or read failure in the handle's ``done`` future and ends the iteration
+    normally. A turn that only watched the iteration would treat a failed
+    stream as a clean end and answer with a partial or empty result. This
+    adapter raises the transport failure instead, so the gateway's existing
+    error handling reports it and cancels the run.
+    """
+    iterator = stream.events
+    handle = _event_stream_handle(stream)
+    async for event in iterator:
+        yield event
+    if handle is not None:
+        error = await handle.done
+        if handle.ready.done() and not handle.ready.cancelled():
+            # The SDK records an HTTP failure in both futures. Retrieving the
+            # readiness one keeps it from surfacing later as an unretrieved
+            # future exception; the completion future carries the same
+            # failure.
+            ready_error = handle.ready.exception()
+            if error is None:
+                error = ready_error
+        if error is not None and not isinstance(error, asyncio.CancelledError):
+            raise error
+
+
+class _InterruptSyncIncomplete(RuntimeError):
+    """The run's pending prompts could not be confirmed from the state.
+
+    The run is still waiting for the user. Cancelling it would destroy the
+    resume protocol state, so the turn reports the failure and leaves the run
+    alone instead of tearing it down.
+    """
+
+
+class _RunScopedEvents:
+    """Keep one run's events out of a replayed thread stream.
+
+    The LangGraph server replays a thread's whole history onto every new
+    thread-stream connection, so a turn that opens a fresh stream on a
+    thread that already ran sees the earlier runs' events again. The
+    replayed text would be answered to the user as if it were this run's
+    answer.
+
+    Only the server's synthetic events carry a run id on the wire, and
+    they bracket every run the server replays: a run opens with a
+    ``running`` marker and closes with a terminal marker. The run that
+    owns an event is therefore the run of the last synthetic event seen,
+    and an event belongs to this turn only while that run is the one this
+    turn started.
+    """
+
+    def __init__(self, run_id: str | None) -> None:
+        self.run_id = run_id
+        self._owner: str | None = None
+        self._held: list[Mapping[str, object]] = []
+        self._marker_seen = False
+        self._unscoped = False
+
+    def dispatch(self, event: Mapping[str, object]) -> list[Mapping[str, object]]:
+        """Return the events to process for *event*.
+
+        Events of another run are dropped. An event that arrives before the
+        first run marker is held back: the marker that follows says which
+        run the prefix belongs to, and until then the owner is unknown. An
+        unknown owner must not be answered with - that is how a replayed
+        prefix leaks into the answer.
+
+        A resumed run has no run id to scope by, so every event of it is
+        kept, synthetic ones included.
+        """
+        if self.run_id is None or self._unscoped:
+            # Nothing to scope by (a resumed run has no run id, and a stream
+            # without run markers cannot be scoped at all): keep every event.
+            return [event]
+        owner = _synthetic_run_id(event)
+        if owner is not None:
+            self._marker_seen = True
+            self._owner = owner
+            held, self._held = self._held, []
+            if owner != self.run_id:
+                # The held prefix belongs to the run this marker opens.
+                return []
+            return [*held, event]
+        # A forwarded event carries no run id.
+        if not self._marker_seen:
+            if _is_run_stop_event(event):
+                # The stream carries no run markers, so it cannot be scoped:
+                # deliver what was held and treat the rest as unscoped.
+                # The run reached its end, so this is also where the turn
+                # ends - a stream that never ends would otherwise hold the
+                # events forever.
+                self._unscoped = True
+                held, self._held = self._held, []
+                return [*held, event]
+            self._held.append(event)
+            return []
+        # The event belongs to the run whose marker was seen last.
+        return [event] if self._owner == self.run_id else []
+
+    def flush(self) -> list[Mapping[str, object]]:
+        """Return the held prefix of a stream that carries no run marker.
+
+        A stream without any run marker cannot be scoped at all. Its events
+        are kept as they are, the way they were before scopes existed. The
+        server always brackets a run with markers, so this is the
+        compatibility path for streams that carry no run ids.
+        """
+        held, self._held = self._held, []
+        if self._marker_seen:
+            return []
+        return held
 
 
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
@@ -1140,12 +1380,57 @@ class LangGraphServerGateway:
         )
         return data["status"]
 
+    async def _await_paused_interrupts(
+        self,
+        thread_id: str,
+        seen: set[str],
+        *,
+        attempts: int = _PAUSE_SYNC_ATTEMPTS,
+        delay: float = _PAUSE_SYNC_DELAY,
+    ) -> tuple[list[Mapping[str, object]], bool]:
+        """Wait for the thread state to hold the run's complete set of prompts.
+
+        A run's interrupt requests reach the event stream before the
+        checkpoint that records them is written, and a sibling task may still
+        be running when the first one interrupts. The state is the
+        authoritative record, but it only becomes final once the run has no
+        outstanding work left - then no further prompt can arrive.
+
+        Returns the state's prompts and whether they were confirmed.
+        """
+        latest: list[Mapping[str, object]] = []
+        for attempt in range(attempts):
+            try:
+                state = await self.thread_store.client.threads.get_state(thread_id)
+            except NotFoundError:
+                state = None
+            if state is not None:
+                interrupts = _state_interrupts(state)
+                if interrupts:
+                    latest = interrupts
+                ids = {
+                    str(interrupt.get("interrupt_id") or interrupt.get("id") or "")
+                    for interrupt in interrupts
+                }
+                if interrupts and seen.issubset(ids) and _state_is_paused(state):
+                    return interrupts, True
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+        return latest, False
+
     async def _pending_interrupt_events(
         self,
         stream: AsyncThreadStream,
         thread_id: str,
         processor: _V3EventProcessor,
     ) -> list[GraphEvent]:
+        """The interrupt prompts this turn still owes the user.
+
+        The SDK's lifecycle watcher is a second SSE connection, so its view of
+        the run's interrupts can lag behind the event stream that reported
+        them. The thread state is the authoritative record of what the run is
+        waiting for, so it is read when the watcher has nothing yet.
+        """
         events: list[GraphEvent] = []
         for interrupt in stream.interrupts:
             events.extend(
@@ -1289,6 +1574,8 @@ class LangGraphServerGateway:
             run_metadata = dict(request.metadata or {})
             run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
         run_attempted = False
+        keep_run_alive = False
+        seen_interrupt_ids: set[str] = set()
         run_id: str | None = None
         resume_identity: tuple[str, object] | None = None
         run_completed = False
@@ -1304,6 +1591,20 @@ class LangGraphServerGateway:
             resume_identity = interrupt_id, response
             mark_run_attempted()
 
+        async def _process_owned(
+            owned: Mapping[str, object],
+        ) -> AsyncIterator[GraphEvent]:
+            """Turn one owned stream event into gateway events."""
+            for selection_event in self._deliver_custom_middleware_events(owned):
+                yield selection_event
+            event_map: dict[str, Any] = dict(owned)
+            for subagent_event in tracker.process(event_map):
+                yield subagent_event
+            for normalized in await processor.process(event_map):
+                nonlocal emitted_interrupt
+                emitted_interrupt = emitted_interrupt or _is_interrupt_event(normalized)
+                yield normalized
+
         try:
             async with stream:
                 run_id = await self._start_or_resume(
@@ -1314,22 +1615,80 @@ class LangGraphServerGateway:
                     on_resume_attempt=mark_resume_attempted,
                     run_metadata=run_metadata,
                 )
-                async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
-                    raw_event = _as_raw_map(event)
-                    if raw_event is None:
-                        continue
-                    for selection_event in self._deliver_custom_middleware_events(
-                        raw_event
-                    ):
-                        yield selection_event
-                    event_map: dict[str, Any] = dict(raw_event)
-                    for subagent_event in tracker.process(event_map):
-                        yield subagent_event
-                    for normalized in await processor.process(event_map):
-                        emitted_interrupt = emitted_interrupt or _is_interrupt_event(
-                            normalized
-                        )
-                        yield normalized
+                scope = _RunScopedEvents(run_id)
+                # The transport-level iterator, not a channel subscription.
+                # A subscription ends at the first root terminal lifecycle
+                # event it sees, and the server replays a thread's earlier
+                # runs onto every new stream, so a subscription stops at an
+                # earlier run's replayed terminal and never reaches this
+                # run's own events.
+                if scope.run_id is None:
+                    # A resumed run has no run id to scope by, and the
+                    # replayed history carries the terminal markers of the
+                    # runs that came before it. The raw reader would have to
+                    # guess which run a marker belongs to, and an earlier
+                    # run's marker would end the turn before the resumed
+                    # answer arrives. Keep the subscription path here: the
+                    # SDK owns its termination, the way it did before.
+                    async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
+                        raw_event = _as_raw_map(event)
+                        if raw_event is None:
+                            continue
+                        for owned in scope.dispatch(raw_event):
+                            async for processed in _process_owned(owned):
+                                yield processed
+                else:
+                    stop = False
+                    async for event in _raw_stream_events(stream):
+                        raw_event = _as_raw_map(event)
+                        if raw_event is None:
+                            continue
+                        for owned in scope.dispatch(raw_event):
+                            async for processed in _process_owned(owned):
+                                yield processed
+                            if _is_run_interrupt_event(owned):
+                                seen_interrupt_ids.add(_interrupt_request_id(owned))
+                                # The run is pausing. The prompts it waits
+                                # for are only final once the thread state
+                                # records them all, so wait for that
+                                # instead of reporting the one that
+                                # happened to arrive first.
+                                (
+                                    persisted,
+                                    confirmed,
+                                ) = await self._await_paused_interrupts(
+                                    request.thread_id, seen_interrupt_ids
+                                )
+                                for interrupt in persisted:
+                                    for prompt in await processor.process(
+                                        _input_requested_event_from_interrupt(interrupt)
+                                    ):
+                                        emitted_interrupt = True
+                                        yield prompt
+                                if not confirmed:
+                                    # The run is still waiting: report what
+                                    # is known, say the set is incomplete,
+                                    # and leave the run alone.
+                                    raise _InterruptSyncIncomplete(
+                                        "the run's pending prompts could not be "
+                                        "confirmed from the thread state; the "
+                                        "run is still waiting"
+                                    )
+                                stop = True
+                                break
+                            if _is_run_stop_event(owned):
+                                # The transport-level iterator has no
+                                # terminal sentinel, so the turn ends here.
+                                # An event of another run never reaches
+                                # this point: the scope drops it.
+                                stop = True
+                                break
+                        if stop:
+                            break
+                    if not stop:
+                        for owned in scope.flush():
+                            async for processed in _process_owned(owned):
+                                yield processed
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(
@@ -1340,6 +1699,15 @@ class LangGraphServerGateway:
                         yield event
             for event in tracker.finish():
                 yield event
+        except _InterruptSyncIncomplete as exc:
+            # The run is waiting for the user, so it is not torn down:
+            # cancelling it would destroy the resume protocol state and the
+            # checkpoint would no longer be answerable.
+            keep_run_alive = True
+            yield emitter.error(str(exc)).data
+            for event in tracker.finish():
+                yield event
+            raise
         except Exception as exc:
             # Cancel this request's run, then repair, both before the first yield:
             # a consumer that stops iterating after the error event (aclose /
@@ -1376,6 +1744,7 @@ class LangGraphServerGateway:
                 and not run_completed
                 and not emitted_interrupt
                 and not run_cleaned_up
+                and not keep_run_alive
             ):
                 await self._cancel_incomplete_run(
                     request.thread_id,

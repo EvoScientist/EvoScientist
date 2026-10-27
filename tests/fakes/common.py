@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -564,7 +564,8 @@ class FakeCheckpointAgent:
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, run_id: str = "run-1") -> None:
+        self.run_id = run_id
         self.starts: list[dict[str, Any]] = []
         self.responses: list[dict[str, Any]] = []
 
@@ -582,7 +583,7 @@ class FakeLangGraphRunModule:
                 "metadata": metadata,
             }
         )
-        return {"run_id": "run-1"}
+        return {"run_id": self.run_id}
 
     async def respond(
         self,
@@ -599,6 +600,84 @@ class FakeLangGraphRunModule:
         return {}
 
 
+class _FakeEventStreamHandle:
+    """The handle the SDK keeps for an opened event stream.
+
+    It carries the stream's health: the SDK's HTTP pump records a failure in
+    ``done`` and ends the iteration normally, so a consumer that only watches
+    the iteration cannot tell a failed stream from a clean end.
+    """
+
+    def __init__(self, events: list[Any], error: BaseException | None) -> None:
+        self.events = events
+        self.error = error
+        self._ready: asyncio.Future[None] | None = None
+        self._done: asyncio.Future[BaseException | None] | None = None
+
+    def _ensure(self) -> None:
+        if self._ready is not None:
+            return
+        loop = asyncio.get_running_loop()
+        self._ready = loop.create_future()
+        self._done = loop.create_future()
+        if self.error is None:
+            self._ready.set_result(None)
+            self._done.set_result(None)
+        else:
+            # The SDK records a transport failure in both futures: readiness
+            # rejects, completion carries the error.
+            self._ready.set_exception(self.error)
+            self._done.set_result(self.error)
+
+    @property
+    def ready(self) -> asyncio.Future[None]:
+        self._ensure()
+        assert self._ready is not None
+        return self._ready
+
+    @property
+    def done(self) -> asyncio.Future[BaseException | None]:
+        self._ensure()
+        assert self._done is not None
+        return self._done
+
+
+class _EventList(list):
+    """A list of stream events that can also be iterated asynchronously.
+
+    The SDK's transport-level ``events`` property is an async iterator; the
+    fake keeps the plain list so tests can inspect it. The async iteration
+    goes through the stream, so a test can inject a failure there.
+    """
+
+    def __init__(self, events: Iterable[dict[str, Any]], owner: Any) -> None:
+        super().__init__(events)
+        self._owner = owner
+
+    async def __aiter__(self) -> AsyncIterator[Any]:
+        async for event in self._owner._iter_raw_events():
+            yield event
+
+
+def _is_root_terminal_event(event: Mapping[str, Any]) -> bool:
+    """Mirror the SDK's root-terminal rule for a lifecycle event.
+
+    The SDK treats a root-namespace ``lifecycle`` event whose status is
+    ``completed`` or ``failed`` as the end of a run.
+    """
+    if event.get("method") != "lifecycle":
+        return False
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return False
+    if params.get("namespace") or []:
+        return False
+    data = params.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    return data.get("event") in {"completed", "failed"}
+
+
 class FakeLangGraphThreadStream:
     """Finite fake of the LangGraph SDK thread stream."""
 
@@ -609,13 +688,25 @@ class FakeLangGraphThreadStream:
         *,
         interrupts: list[dict[str, Any]] | None = None,
         interrupted: bool = False,
+        run_id: str = "run-1",
+        transport_error: BaseException | None = None,
+        persistent: bool = False,
     ) -> None:
         self.thread_id = thread_id
-        self.events = list(events or [])
+        self.events = _EventList(events or [], self)
         self.interrupts = interrupts or []
         self.interrupted = interrupted
-        self.run = FakeLangGraphRunModule()
+        self.run = FakeLangGraphRunModule(run_id=run_id)
         self.subscribed_channels: list[list[str]] = []
+        self.raw_events_used = False
+        # A transport failure the SDK records in the stream handle instead of
+        # raising it out of the iteration.
+        self.transport_error = transport_error
+        # The server keeps a thread stream open after the run ends.
+        self.persistent = persistent
+        self._open_handles: list[_FakeEventStreamHandle] = [
+            _FakeEventStreamHandle(self.events, transport_error)
+        ]
         self.entered = False
         self.exited = False
 
@@ -626,9 +717,33 @@ class FakeLangGraphThreadStream:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.exited = True
 
-    async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
-        for event in self.events:
+    async def _iter_raw_events(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield every event, the way the transport-level iterator does.
+
+        ``AsyncThreadStream.events`` reads the SSE response directly and has
+        no terminal sentinel, so it delivers the whole replay.
+        """
+        self.raw_events_used = True
+        for event in list(self.events):
             yield event
+        if self.persistent:
+            # The thread stream stays open after the run ends; only the
+            # consumer stopping ends it.
+            await asyncio.Event().wait()
+
+    async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield events the way a channel subscription does.
+
+        The SDK's fanout enqueues ``None`` right after the first root
+        terminal lifecycle event, so a subscription never sees the events
+        that follow it. Mirror that here: a test that relies on a
+        subscription crossing a terminal would pass here and fail against
+        the real SDK.
+        """
+        async for event in self._iter_raw_events():
+            yield event
+            if _is_root_terminal_event(event):
+                return
 
     def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
         self.subscribed_channels.append(channels)
@@ -643,12 +758,17 @@ class FakeLangGraphThreadsClient:
         *,
         threads: list[dict[str, Any]] | None = None,
         states: dict[str, dict[str, Any]] | None = None,
-        streams: dict[str, FakeLangGraphThreadStream] | None = None,
+        streams: (
+            dict[str, FakeLangGraphThreadStream | list[FakeLangGraphThreadStream]]
+            | None
+        ) = None,
         copy_response: object = _DEFAULT_COPY_RESPONSE,
     ) -> None:
         self.threads = threads or []
         self.states = states or {}
         self.streams = streams or {}
+        self.stream_call_counts: dict[str, int] = {}
+        self.state_get_counts: dict[str, int] = {}
         self.copy_response = copy_response
         self.created: list[dict[str, Any]] = []
         self.copied: list[str] = []
@@ -754,8 +874,16 @@ class FakeLangGraphThreadsClient:
         from langgraph_sdk.errors import NotFoundError
 
         self.state_gets.append(thread_id)
-        if thread_id in self.states:
-            return self.states[thread_id]
+        state = self.states.get(thread_id)
+        if isinstance(state, list):
+            # A per-thread sequence of states: each call takes the next one
+            # and the last repeats, so a test can model a run whose
+            # interrupts are persisted over time.
+            index = min(self.state_get_counts.get(thread_id, 0), len(state) - 1)
+            self.state_get_counts[thread_id] = index + 1
+            return state[index]
+        if state is not None:
+            return state
         raise NotFoundError("not found", response=_not_found_response(), body=None)
 
     async def update_state(
@@ -783,7 +911,15 @@ class FakeLangGraphThreadsClient:
     ) -> FakeLangGraphThreadStream:
         assert thread_id is not None
         self.stream_calls.append((thread_id, assistant_id))
-        return self.streams[thread_id]
+        source = self.streams[thread_id]
+        if isinstance(source, list):
+            # A per-thread queue of streams: each call takes the next entry
+            # and the last one repeats, so a test can model a server that
+            # answers a second connection with a different event sequence.
+            index = min(self.stream_call_counts.get(thread_id, 0), len(source) - 1)
+            self.stream_call_counts[thread_id] = index + 1
+            return source[index]
+        return source
 
 
 class FakeLangGraphClient(LangGraphClient):

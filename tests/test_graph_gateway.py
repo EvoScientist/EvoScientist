@@ -1070,6 +1070,883 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     ]
 
 
+def _server_lifecycle_event(run_id: str, status: str) -> dict[str, Any]:
+    """Build a root lifecycle event the way the LangGraph server mints it."""
+    return {
+        "method": "lifecycle",
+        "event_id": f"synth:{run_id}:lc||{status}",
+        "params": {
+            "namespace": [],
+            "data": {"event": status, "graph_name": "EvoScientist"},
+        },
+    }
+
+
+async def _collect(gateway, request) -> list[dict[str, Any]]:
+    """Collect the events of one turn."""
+    return [event async for event in gateway.stream_events(request)]
+
+
+def _server_message_events(text: str, *, index: int) -> list[dict[str, Any]]:
+    """Build the message events the server forwards for one answer."""
+    return [
+        {
+            "method": "messages",
+            "event_id": f"stream-entry:{index}",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "event": "content-block-delta",
+                    "delta": {"type": "text-delta", "text": text},
+                },
+            },
+        },
+        {
+            "method": "messages",
+            "event_id": f"stream-entry:{index + 1}",
+            "params": {
+                "namespace": [],
+                "data": {"event": "message-finish"},
+            },
+        },
+    ]
+
+
+async def test_langgraph_server_gateway_second_turn_does_not_replay_first_turn():
+    """A second turn answers with its own run, not the replayed first one.
+
+    The LangGraph server replays a thread's whole history onto every new
+    thread-stream connection, so the second turn's stream carries the first
+    run's events - including its terminal lifecycle marker - before the
+    second run's own events. A channel subscription would stop at that
+    replayed terminal, so the turn has to read the stream as a whole and
+    keep only the events of the run it started.
+    """
+    first_run_events = [
+        _server_lifecycle_event("run-1", "running"),
+        *_server_message_events("first answer", index=0),
+        _server_lifecycle_event("run-1", "completed"),
+    ]
+    # The second turn's connection replays the history and then the events of
+    # the run the turn started.
+    replayed_with_second_run = [
+        *first_run_events,
+        _server_lifecycle_event("run-2", "running"),
+        *_server_message_events("second answer", index=2),
+        _server_lifecycle_event("run-2", "completed"),
+    ]
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={
+            "abc12345": [
+                FakeLangGraphThreadStream(
+                    "abc12345", events=first_run_events, run_id="run-1"
+                ),
+                FakeLangGraphThreadStream(
+                    "abc12345", events=replayed_with_second_run, run_id="run-2"
+                ),
+            ]
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _turn(message: str) -> list[dict[str, Any]]:
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message=message,
+                    thread_id="abc12345",
+                    metadata={"workspace_dir": "/tmp/ws"},
+                    target=GraphTarget(graph_id="writing-agent"),
+                )
+            )
+        ]
+
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        first_turn = await _turn("hey")
+        second_turn = await _turn("list the files in your workspace")
+
+    assert first_turn == [
+        {"type": "text", "content": "first answer"},
+        {"type": "done", "content": "first answer", "response": "first answer"},
+    ]
+    assert second_turn == [
+        {"type": "text", "content": "second answer"},
+        {"type": "done", "content": "second answer", "response": "second answer"},
+    ]
+    # One stream per turn: the second turn reads the whole replay, so it
+    # never has to open a second connection to get past the first run's
+    # replayed terminal marker.
+    assert len(threads.stream_calls) == 2
+
+
+async def test_langgraph_server_gateway_turn_scopes_events_across_several_runs():
+    """A turn only answers with its own run, whatever the history holds.
+
+    The replayed history of a thread that already ran several times ends on
+    the last of those runs' terminal markers. The turn has to read past
+    every one of them to reach the run it started.
+    """
+    history = [
+        _server_lifecycle_event("run-1", "running"),
+        *_server_message_events("first answer", index=0),
+        _server_lifecycle_event("run-1", "completed"),
+        _server_lifecycle_event("run-2", "running"),
+        *_server_message_events("second answer", index=2),
+        _server_lifecycle_event("run-2", "completed"),
+    ]
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={
+            "abc12345": [
+                FakeLangGraphThreadStream(
+                    "abc12345",
+                    events=[
+                        *history,
+                        _server_lifecycle_event("run-3", "running"),
+                        *_server_message_events("third answer", index=4),
+                        _server_lifecycle_event("run-3", "completed"),
+                    ],
+                    run_id="run-3",
+                ),
+            ]
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        events = [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message="hey",
+                    thread_id="abc12345",
+                    metadata={"workspace_dir": "/tmp/ws"},
+                    target=GraphTarget(graph_id="writing-agent"),
+                )
+            )
+        ]
+
+    assert events == [
+        {"type": "text", "content": "third answer"},
+        {"type": "done", "content": "third answer", "response": "third answer"},
+    ]
+    assert len(threads.stream_calls) == 1
+
+
+async def test_langgraph_server_gateway_resumed_run_completes():
+    """A resumed run still ends the turn.
+
+    A resumed run has no run id to scope by, so every event of it is kept -
+    the synthetic terminal and pause markers included. Without them the turn
+    would wait for a terminal that was filtered out.
+    """
+    import asyncio
+
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+        events=[
+            _server_lifecycle_event("run-9", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-9:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "value": {"question": "continue?"},
+                    },
+                },
+            },
+            _server_lifecycle_event("run-9", "interrupted"),
+            _server_lifecycle_event("run-10", "running"),
+            *_server_message_events("resumed answer", index=0),
+            _server_lifecycle_event("run-10", "completed"),
+        ],
+        # The thread stream stays open after the run ends.
+        persistent=True,
+    )
+    threads = FakeLangGraphThreadsClient(
+        states={"thread": {"values": {}}}, streams={"thread": stream}
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await asyncio.wait_for(
+        _collect(
+            gateway,
+            RunRequest(
+                message=Command(
+                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
+                ),
+                thread_id="thread",
+            ),
+        ),
+        timeout=5.0,
+    )
+
+    assert events[-1] == {
+        "type": "done",
+        "content": "resumed answer",
+        "response": "resumed answer",
+    }
+
+
+async def test_langgraph_server_gateway_reports_a_failed_transport():
+    """A failed stream is an error, not a clean end.
+
+    The SDK's transport records an HTTP or read failure in the stream
+    handle and ends the iteration normally. A turn that only watched the
+    iteration would answer with a partial result.
+    """
+    import asyncio
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            *_server_message_events("half an answer", index=0),
+        ],
+        transport_error=RuntimeError("connection lost"),
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        await asyncio.wait_for(
+            _collect(
+                gateway,
+                RunRequest(message="hi", thread_id="abc12345"),
+            ),
+            timeout=5.0,
+        )
+
+
+async def test_langgraph_server_gateway_finishes_a_stream_without_run_markers():
+    """A stream with no run markers still ends the turn.
+
+    The server marks every run, but a stream that carries no marker at all
+    cannot be scoped. Its events are then kept unscoped, and the run's own
+    terminal marker ends the turn instead of the stream ending.
+    """
+    import asyncio
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "markerless answer"},
+                    },
+                },
+            },
+            {
+                "method": "lifecycle",
+                "params": {"namespace": [], "data": {"event": "completed"}},
+            },
+        ],
+        # The thread stream stays open after the run ends.
+        persistent=True,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await asyncio.wait_for(
+        _collect(gateway, RunRequest(message="hi", thread_id="abc12345")),
+        timeout=5.0,
+    )
+
+    assert events[-1] == {
+        "type": "done",
+        "content": "markerless answer",
+        "response": "markerless answer",
+    }
+
+
+def _ask_user_interrupt(interrupt_id: str, question: str) -> dict[str, Any]:
+    """A pending ask_user interrupt, as the thread state records it."""
+    return {
+        "interrupt_id": interrupt_id,
+        "value": {
+            "type": "ask_user",
+            "questions": [{"question": question}],
+            "tool_call_id": f"tc-{interrupt_id}",
+        },
+    }
+
+
+async def test_langgraph_server_gateway_delivers_a_prompt_the_watcher_has_not_seen():
+    """A prompt is delivered even when the lifecycle watcher lags behind.
+
+    The raw event stream and the SDK's lifecycle watcher are separate
+    connections. The watcher's view of the run's interrupts can arrive after
+    the event that reported them, so the prompt has to come from the thread
+    state - the authoritative record of what the run waits for.
+    """
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        # The server sends the payload under this key.
+                        "payload": {
+                            "type": "ask_user",
+                            "questions": [{"question": "continue?"}],
+                            "tool_call_id": "tc-1",
+                        },
+                    },
+                },
+            },
+        ],
+        # The watcher has not caught up: it knows of no interrupt.
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "thread": {
+                "values": {},
+                "interrupts": [_ask_user_interrupt("interrupt-1", "continue?")],
+            }
+        },
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await _collect(gateway, RunRequest(message="hi", thread_id="thread"))
+
+    prompts = [event for event in events if event["type"] in {"interrupt", "ask_user"}]
+    assert len(prompts) == 1, events
+    assert events[-1]["type"] == "done", events
+
+
+async def test_langgraph_server_gateway_delivers_every_pending_prompt():
+    """A run that waits on several prompts delivers all of them.
+
+    The raw stream reports the first prompt and the turn stops there; the
+    thread state holds every prompt the run is waiting for.
+    """
+    first = _ask_user_interrupt("interrupt-1", "first question")
+    second = _ask_user_interrupt("interrupt-2", "second question")
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "value": first["value"],
+                    },
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"thread": {"values": {}, "interrupts": [first, second]}},
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await _collect(gateway, RunRequest(message="hi", thread_id="thread"))
+
+    prompts = [event for event in events if event["type"] in {"interrupt", "ask_user"}]
+    assert len(prompts) == 2, events
+    assert events[-1]["type"] == "done", events
+
+
+async def test_langgraph_server_gateway_waits_for_a_sibling_to_interrupt():
+    """A prompt is not reported until the run is fully paused.
+
+    When the first node interrupts, a sibling task may still be running
+    and can interrupt later. The thread state is only final once every task
+    carries its interrupt, so the turn waits for that instead of reporting
+    the one prompt that happened to arrive first.
+    """
+    import asyncio
+
+    first = _ask_user_interrupt("interrupt-1", "first question")
+    second = _ask_user_interrupt("interrupt-2", "second question")
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "value": first["value"],
+                    },
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "thread": [
+                {
+                    # The first node interrupted; the sibling still runs.
+                    # (The turn's pre-run state read sees this one too.)
+                    "values": {},
+                    "interrupts": [first],
+                    "tasks": [
+                        {"id": "t1", "name": "a", "interrupts": [first]},
+                        {"id": "t2", "name": "b", "interrupts": []},
+                    ],
+                },
+                {
+                    # Still incomplete: the sibling has not interrupted yet.
+                    "values": {},
+                    "interrupts": [first],
+                    "tasks": [
+                        {"id": "t1", "name": "a", "interrupts": [first]},
+                        {"id": "t2", "name": "b", "interrupts": []},
+                    ],
+                },
+                {
+                    # The sibling interrupted too: the run is fully paused.
+                    "values": {},
+                    "interrupts": [first, second],
+                    "tasks": [
+                        {"id": "t1", "name": "a", "interrupts": [first]},
+                        {"id": "t2", "name": "b", "interrupts": [second]},
+                    ],
+                },
+            ]
+        },
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await asyncio.wait_for(
+        _collect(gateway, RunRequest(message="hi", thread_id="thread")),
+        timeout=10.0,
+    )
+
+    prompts = [event for event in events if event["type"] in {"interrupt", "ask_user"}]
+    assert len(prompts) == 2, events
+    assert events[-1]["type"] == "done", events
+
+
+async def test_langgraph_server_gateway_pauses_despite_a_finished_sibling():
+    """A sibling that finished normally does not keep the run running.
+
+    The state's task records keep the siblings that completed in the same
+    superstep, so a run can be paused while a task without an interrupt is
+    still listed.
+    """
+    import asyncio
+
+    first = _ask_user_interrupt("interrupt-1", "first question")
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "value": first["value"],
+                    },
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "thread": {
+                "values": {},
+                "interrupts": [first],
+                "tasks": [
+                    {"id": "t1", "name": "a", "interrupts": [first]},
+                    {
+                        # The sibling finished normally in the same step.
+                        "id": "t2",
+                        "name": "b",
+                        "interrupts": [],
+                        "result": {"ok": True},
+                    },
+                ],
+            }
+        },
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events = await asyncio.wait_for(
+        _collect(gateway, RunRequest(message="hi", thread_id="thread")),
+        timeout=10.0,
+    )
+
+    prompts = [event for event in events if event["type"] in {"interrupt", "ask_user"}]
+    assert len(prompts) == 1, events
+    assert events[-1]["type"] == "done", events
+
+
+def _server_state_from_graph_snapshot(snapshot) -> dict[str, Any]:
+    """Keep the real task results and scheduler queue in the server wire shape."""
+    return {
+        "values": snapshot.values,
+        "next": list(snapshot.next),
+        "interrupts": [
+            {"id": item.id, "value": item.value} for item in snapshot.interrupts
+        ],
+        "tasks": [
+            {
+                "id": task.id,
+                "name": task.name,
+                "error": task.error,
+                "result": task.result,
+                "interrupts": [
+                    {"id": item.id, "value": item.value} for item in task.interrupts
+                ],
+            }
+            for task in snapshot.tasks
+        ],
+    }
+
+
+@pytest.mark.parametrize("finished_result", [None, {}], ids=["none", "empty-dict"])
+async def test_langgraph_server_gateway_pauses_after_a_single_channel_sibling(
+    finished_result,
+):
+    import asyncio
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import interrupt
+
+    prompt = _ask_user_interrupt("unused", "continue?")["value"]
+
+    def paused(state):
+        interrupt(prompt)
+
+    def finished(state):
+        return finished_result
+
+    builder = StateGraph(dict)
+    builder.add_node("paused", paused)
+    builder.add_node("finished", finished)
+    for name in ("paused", "finished"):
+        builder.add_edge(START, name)
+        builder.add_edge(name, END)
+    graph = builder.compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "thread"}}
+    await graph.ainvoke({"messages": []}, config)
+    snapshot = await graph.aget_state(config)
+    assert snapshot.next == ("paused",)
+    state = _server_state_from_graph_snapshot(snapshot)
+    completed = next(task for task in state["tasks"] if task["name"] == "finished")
+    assert completed["result"] == finished_result
+    (pending,) = state["interrupts"]
+
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": f"synth:run-1:input::{pending['id']}",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": pending["id"],
+                        "payload": pending["value"],
+                    },
+                },
+            },
+        ],
+        persistent=True,
+    )
+    threads = FakeLangGraphThreadsClient(
+        states={"thread": state}, streams={"thread": stream}
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    recovered, confirmed = await gateway._await_paused_interrupts(
+        "thread", {pending["id"]}, attempts=1, delay=0
+    )
+    assert confirmed
+    assert recovered == state["interrupts"]
+    events = await asyncio.wait_for(
+        _collect(gateway, RunRequest(message="hi", thread_id="thread")), timeout=2
+    )
+    assert [event["type"] for event in events] == ["ask_user", "done"]
+    client.runs.cancel_many.assert_not_awaited()
+
+
+async def test_langgraph_server_gateway_pause_counts_same_name_fanout_tasks():
+    import asyncio
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Send, interrupt
+
+    from EvoScientist.gateway.server import _state_is_paused
+
+    pausing = asyncio.Event()
+    finish_sibling = asyncio.Event()
+
+    async def worker(state):
+        if state["pause"]:
+            pausing.set()
+            interrupt(_ask_user_interrupt("unused", "continue?")["value"])
+        else:
+            await finish_sibling.wait()
+        return None
+
+    builder = StateGraph(dict)
+    builder.add_node("worker", worker)
+    builder.add_conditional_edges(
+        START,
+        lambda state: [
+            Send("worker", {"pause": True}),
+            Send("worker", {"pause": False}),
+        ],
+    )
+    builder.add_edge("worker", END)
+    graph = builder.compile(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "same-name-fanout"}}
+    run = asyncio.create_task(graph.ainvoke({}, config))
+    try:
+        await asyncio.wait_for(pausing.wait(), timeout=2)
+        for _ in range(100):
+            snapshot = await graph.aget_state(config)
+            if snapshot.interrupts:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the fanout task never persisted its interrupt")
+        assert snapshot.next == ("worker", "worker")
+        assert not _state_is_paused(_server_state_from_graph_snapshot(snapshot))
+    finally:
+        finish_sibling.set()
+        await asyncio.wait_for(run, timeout=2)
+
+    snapshot = await graph.aget_state(config)
+    assert snapshot.next == ("worker",)
+    assert _state_is_paused(_server_state_from_graph_snapshot(snapshot))
+
+
+async def test_langgraph_server_gateway_keeps_a_run_it_cannot_confirm(monkeypatch):
+    """A run whose prompts cannot be confirmed is left alone.
+
+    The run is waiting for the user. Cancelling it would destroy the resume
+    protocol state, so the turn reports that the set is incomplete and leaves
+    the run running.
+    """
+    from EvoScientist.gateway import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_ATTEMPTS", 2)
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_DELAY", 0.01)
+    first = _ask_user_interrupt("interrupt-1", "first question")
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "value": first["value"],
+                    },
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "thread": {
+                "values": {},
+                "interrupts": [first],
+                "tasks": [
+                    {"id": "t1", "name": "a", "interrupts": [first]},
+                    {
+                        # A sibling is still running: the run is not paused.
+                        "id": "t2",
+                        "name": "b",
+                        "interrupts": [],
+                    },
+                ],
+            }
+        },
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events: list[dict[str, Any]] = []
+
+    async def _run() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError):
+        await _run()
+
+    # What is known is still delivered, and the gap is reported.
+    prompts = [event for event in events if event["type"] in {"interrupt", "ask_user"}]
+    assert len(prompts) == 1, events
+    assert any(event["type"] == "error" for event in events), events
+    assert not any(event["type"] == "done" for event in events), events
+    # The run is left alone: cancelling it would destroy the resume state.
+    assert client.runs.cancel_many.await_count == 0
+
+
+async def test_langgraph_server_gateway_does_not_cancel_a_run_with_nothing_persisted(
+    monkeypatch,
+):
+    """A run the turn could not read at all is still left alone.
+
+    Cancelling it would destroy the resume protocol state, and the checkpoint
+    would no longer be answerable. The turn reports the gap instead.
+    """
+    from EvoScientist.gateway import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_ATTEMPTS", 2)
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_DELAY", 0.01)
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {"interrupt_id": "interrupt-1", "value": {"q": 1}},
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        # Nothing is persisted yet, so no prompt can be confirmed.
+        states={"thread": {"values": {}, "interrupts": []}},
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events: list[dict[str, Any]] = []
+
+    async def _run() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError):
+        await _run()
+
+    assert any(event["type"] == "error" for event in events), events
+    assert not any(event["type"] == "done" for event in events), events
+    # The run is left alone: cancelling it would destroy the resume state.
+    assert client.runs.cancel_many.await_count == 0
+
+
 async def test_langgraph_server_gateway_forwards_configurable_extra():
     stream = FakeLangGraphThreadStream(
         "abc12345",
@@ -1280,8 +2157,9 @@ async def test_langgraph_server_gateway_delivers_custom_middleware_events():
         "text",
         "done",
     ]
-    # The subscription must include the custom channel or nothing arrives.
-    assert "custom" in stream.subscribed_channels[0]
+    # The transport-level iterator reads every channel, so the custom channel
+    # is covered without naming it.
+    assert stream.raw_events_used
 
 
 async def test_langgraph_server_gateway_ignores_untagged_custom_events():
@@ -2413,7 +3291,7 @@ async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
 
 async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
+        async def _iter_raw_events(self):
             for event in self.events:
                 yield event
             raise RuntimeError("provider connection lost")
@@ -2554,7 +3432,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
     GeneratorExit at the yield - the repair must already have run."""
 
     class _FailingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
+        async def _iter_raw_events(self):
             for event in self.events:
                 yield event
             raise RuntimeError("provider connection lost")
@@ -2600,7 +3478,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 
 async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
+        async def _iter_raw_events(self):
             for event in self.events:
                 yield event
             raise RuntimeError("provider connection lost")
@@ -2661,7 +3539,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
     caplog: pytest.LogCaptureFixture,
 ):
     class _FailingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
+        async def _iter_raw_events(self):
             for event in self.events:
                 yield event
             raise RuntimeError("provider connection lost")
@@ -3156,7 +4034,7 @@ async def test_server_gateway_resume_cleanup_skips_incomplete_run_listing(
 
 async def test_server_gateway_failure_does_not_cancel_or_repair_another_run():
     class _FailingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
+        async def _iter_raw_events(self):
             raise RuntimeError("subscription failed")
             yield  # pragma: no cover
 
