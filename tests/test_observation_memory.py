@@ -582,6 +582,125 @@ def test_malformed_observation_frontmatter_is_skipped(tmp_path):
     assert worker_activity.snapshot_observation_relations(memories) == frozenset()
 
 
+def test_observation_with_an_empty_relation_list_still_reads(tmp_path):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    observation = global_dir / "O-empty-relations.md"
+    observation.write_text(
+        "---\n"
+        "id: O-empty-relations\n"
+        "summary: Redirect stray output to /dev/null instead of a workspace file.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "related_observations:\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+    assert document is not None
+    metadata, _body = document
+    assert metadata.related_observations == []
+    hits = search_observation_files(
+        memory_dir=memories, project_id="P-project", query="stray output dev null"
+    )
+    assert [hit["observation_id"] for hit in hits] == ["O-empty-relations"]
+
+
+def test_unreadable_observation_is_reported_once_per_version(tmp_path, caplog):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    broken = global_dir / "O-broken.md"
+    broken.write_text(
+        "---\nid: O-broken\nsummary: s\nmemory_type: nonsense\nscope: global\n---\n",
+        encoding="utf-8",
+    )
+
+    def reported() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "unreadable observation" in r.getMessage()
+        ]
+
+    with caplog.at_level("WARNING"):
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        assert len(reported()) == 1
+        assert str(broken) in reported()[0]
+        assert "memory_type" in reported()[0]
+
+        broken.write_text(
+            "---\nid: O-broken\nsummary: s\nmemory_type: semantic\nscope: nowhere\n---\n",
+            encoding="utf-8",
+        )
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+
+    assert len(reported()) == 2
+    assert "scope" in reported()[1]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "reason"),
+    [
+        (b"\xff\xfeSECRET-SENTINEL", b"\xff\xfdSECRET-SENTINEL", "not UTF-8"),
+        (b"SECRET-SENTINEL one", b"SECRET-SENTINEL two", "no frontmatter"),
+        (
+            b"---\nid: SECRET-SENTINEL\n",
+            b"---\nid: SECRET-SENTINEL2\n",
+            "frontmatter is not closed",
+        ),
+        (
+            b"---\nid: [SECRET-SENTINEL\n---\n",
+            b"---\nid: [SECRET-SENTINEL, 2\n---\n",
+            "Error",
+        ),
+        (
+            b"---\nid: O-x\nsummary: s\nmemory_type: SECRET-SENTINEL\nscope: global\n---\n",
+            b"---\nid: O-x\nsummary: s\nmemory_type: SECRET-SENTINEL2\nscope: global\n---\n",
+            "memory_type",
+        ),
+    ],
+    ids=["not-utf8", "no-frontmatter", "unclosed", "yaml-error", "validation-error"],
+)
+def test_each_kind_of_unreadable_observation_is_reported_per_version(
+    tmp_path, caplog, first, second, reason
+):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    broken = global_dir / "O-x.md"
+
+    def reported() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if "unreadable observation" in r.getMessage()
+        ]
+
+    with caplog.at_level("WARNING"):
+        broken.write_bytes(first)
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        assert len(reported()) == 1
+        broken.write_bytes(second)
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+
+    assert len(reported()) == 2
+    assert all(str(broken) in w and reason in w for w in reported())
+    assert not any("SECRET-SENTINEL" in w for w in reported())
+
+
+def test_missing_observation_file_is_not_reported(tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        assert read_observation_document(tmp_path / "O-gone.md") is None
+
+    assert not [r for r in caplog.records if "unreadable" in r.getMessage()]
+
+
 def test_legacy_observation_source_without_session_id_still_reads(tmp_path):
     memories = tmp_path / "memories"
     global_dir = memories / "observations" / "global"
