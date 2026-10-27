@@ -11,6 +11,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -45,6 +46,8 @@ from ..types import (
 )
 
 OBSERVATION_DIR = "/observations"
+
+logger = logging.getLogger(__name__)
 
 
 ObservationFrontmatterValue = str | dict[str, str] | list[dict[str, str]]
@@ -110,6 +113,13 @@ class ObservationFrontmatter(BaseModel):
     project_id: str | None = Field(default=None, min_length=1, strict=True)
     source: ObservationSourceFrontmatter | None = None
     related_observations: list[RelatedObservationEntry] = Field(default_factory=list)
+
+    @field_validator("related_observations", mode="before")
+    @classmethod
+    def _empty_relations(cls, value: object) -> object:
+        # A key with no value reads as None; an edit that removes the last
+        # relation leaves one.
+        return [] if value is None else value
 
     @field_validator("id", "summary", "created_at", "project_id")
     @classmethod
@@ -204,16 +214,58 @@ def _read_observation_document_with_text(
     document_path = Path(path).expanduser()
     try:
         text = document_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        with contextlib.suppress(OSError):
+            _report_unreadable(document_path, document_path.read_bytes(), "not UTF-8")
+        return None
+    except OSError:
         return None
     if not text.startswith("---\n"):
+        _report_unreadable(document_path, text.encode("utf-8"), "no frontmatter")
+        return None
+    frontmatter, closed, body = text.removeprefix("---\n").partition("\n---\n")
+    if not closed:
+        _report_unreadable(
+            document_path, text.encode("utf-8"), "frontmatter is not closed"
+        )
         return None
     try:
-        frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
         metadata = ObservationFrontmatter.model_validate(yaml.safe_load(frontmatter))
-    except (ValueError, ValidationError, yaml.YAMLError):
+    except ValidationError as exc:
+        reason = "; ".join(
+            f"{'.'.join(map(str, error['loc'])) or 'frontmatter'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        _report_unreadable(document_path, text.encode("utf-8"), reason)
+        return None
+    except yaml.MarkedYAMLError as exc:
+        # +1 for 0-based, +1 for the opening ---
+        line = exc.problem_mark.line + 2 if exc.problem_mark else "?"
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML at line {line}"
+        )
+        return None
+    except (ValueError, yaml.YAMLError) as exc:
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML ({type(exc).__name__})"
+        )
         return None
     return metadata, body, text
+
+
+# Index builds reread the whole store on every model call and parse failures
+# are not cached, so a broken file is reported again only once it changes.
+_reported_unreadable: dict[str, str] = {}
+_reported_lock = threading.Lock()
+
+
+def _report_unreadable(path: Path, content: bytes, reason: str) -> None:
+    digest = hashlib.sha256(content).hexdigest()
+    with _reported_lock:
+        if _reported_unreadable.get(str(path)) == digest:
+            return
+        _reported_unreadable[str(path)] = digest
+    logger.warning("Skipped unreadable observation %s: %s", path, reason[:300])
 
 
 def read_observation_document(
