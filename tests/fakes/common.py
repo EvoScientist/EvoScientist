@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -656,31 +656,41 @@ class FakeLangGraphThreadStream:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.exited = True
 
+    @staticmethod
+    def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
+        if event.get("method") != "lifecycle":
+            return False
+        params = event.get("params") or {}
+        if not isinstance(params, Mapping):
+            return False
+        namespace = params.get("namespace") or []
+        if namespace:
+            return False
+        data = params.get("data")
+        return isinstance(data, Mapping) and data.get("event") in {
+            "completed",
+            "failed",
+            "interrupted",
+        }
+
+    def _events_with_terminal(self) -> list[dict[str, Any]]:
+        """Queue plus a root completed when the caller omitted one."""
+        events = list(self._queued_events)
+        if events and self._is_root_lifecycle_stop(events[-1]):
+            return events
+        run_id = self.run.run_id
+        events.append(
+            {
+                "method": "lifecycle",
+                "params": {"namespace": [], "data": {"event": "completed"}},
+                "event_id": f"synth:{run_id}:lc::completed",
+            }
+        )
+        return events
+
     async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
-        for event in self._queued_events:
+        for event in self._events_with_terminal():
             yield event
-
-    def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
-        self.subscribed_channels.append(channels)
-
-        async def _until_root_terminal() -> AsyncIterator[dict[str, Any]]:
-            for event in self._queued_events:
-                yield event
-                method = event.get("method")
-                params = event.get("params") or {}
-                namespace = (
-                    params.get("namespace") if isinstance(params, dict) else None
-                )
-                data = params.get("data") if isinstance(params, dict) else None
-                if (
-                    method == "lifecycle"
-                    and not namespace
-                    and isinstance(data, dict)
-                    and data.get("event") in {"completed", "failed"}
-                ):
-                    return
-
-        return _until_root_terminal()
 
 
 class FakeLangGraphThreadsClient:

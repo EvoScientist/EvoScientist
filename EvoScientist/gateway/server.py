@@ -222,15 +222,15 @@ def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
     return run_id
 
 
-def _is_root_terminal_lifecycle(event: Mapping[str, Any]) -> bool:
-    """True for a root-namespace lifecycle ``completed`` or ``failed`` event."""
+def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
+    """True for a root-namespace lifecycle stop: completed, failed, or interrupted."""
     if event.get("method") != "lifecycle" or _event_namespace(event):
         return False
     params = _as_raw_map(event.get("params"))
     data = _as_raw_map(params.get("data")) if params is not None else None
     if data is None:
         return False
-    return data.get("event") in {"completed", "failed"}
+    return data.get("event") in {"completed", "failed", "interrupted"}
 
 
 def _is_root_input_requested(event: Mapping[str, Any]) -> bool:
@@ -1033,6 +1033,45 @@ class LangGraphServerGateway:
             return None
         return matching_ids.pop()
 
+    async def _find_run_for_resume(
+        self, thread_id: str, interrupt_id: str, response: object
+    ) -> str | None:
+        """Return the run id created for this resume, including finished runs.
+
+        ``run.respond`` returns ``{}``, so the stream loop has no run id unless
+        we look one up. Prefer ``runs.list`` without a status filter: a fast
+        resume can leave ``pending``/``running`` before the lookup runs.
+        """
+        runs: list[Mapping[str, Any]] = []
+        try:
+            offset = 0
+            while True:
+                page = await self.thread_store.client.runs.list(
+                    thread_id,
+                    limit=_RUN_LOOKUP_PAGE_SIZE,
+                    offset=offset,
+                )
+                runs.extend(page)
+                if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                    break
+                offset += _RUN_LOOKUP_PAGE_SIZE
+        except Exception:
+            logger.warning(
+                "Could not list runs on thread %s while resolving a resume",
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        matching_ids = {
+            str(run_id)
+            for run in runs
+            if (run_id := run.get("run_id"))
+            and _run_matches_resume(run, interrupt_id, response)
+        }
+        if len(matching_ids) != 1:
+            return None
+        return matching_ids.pop()
+
     async def _has_other_active_runs(self, thread_id: str, run_id: str) -> bool:
         """Conservatively protect another request before repairing thread state."""
         runs = await self._list_active_runs(thread_id)
@@ -1338,6 +1377,10 @@ class LangGraphServerGateway:
                     on_resume_attempt=mark_resume_attempted,
                     run_metadata=run_metadata,
                 )
+                if run_id is None and resume_identity is not None:
+                    run_id = await self._find_run_for_resume(
+                        request.thread_id, *resume_identity
+                    )
                 # Prefer ``stream.events`` over ``subscribe``: a fresh SSE
                 # replays the thread's history and the SDK ends each
                 # subscribe at the first root ``completed`` (#558), which is
@@ -1368,16 +1411,19 @@ class LangGraphServerGateway:
                         )
                         yield normalized
                     # Stop where the SDK ends subscribe via _signal_paused: a
-                    # root interrupt, or this run's root completed/failed.
-                    # A root ``failed`` only breaks here (done path). Open #673
-                    # conflicts in this loop; keep its raise directly above
-                    # the break when resolving.
-                    if (
+                    # root interrupt, or this run's root completed/failed/
+                    # interrupted.
+                    if run_id is not None and (
                         emitted_interrupt
                         or _is_root_input_requested(event_map)
-                        or _is_root_terminal_lifecycle(event_map)
+                        or _is_root_lifecycle_stop(event_map)
                     ):
                         break
+                else:
+                    if run_id is not None:
+                        raise RuntimeError(
+                            "Thread event stream ended before the run finished"
+                        )
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(
