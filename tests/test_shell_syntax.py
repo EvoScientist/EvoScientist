@@ -1,5 +1,7 @@
 """The shell syntax behind the sandbox's command checks and path rewriting."""
 
+import time
+
 from EvoScientist import shell_syntax
 
 
@@ -99,6 +101,59 @@ class TestWordsAndScripts:
     def test_the_closing_paren_skips_quotes_and_comments(self):
         text = 'a (b) "c)" # x)\n) tail'
         assert shell_syntax.matching_paren(text, 0) == text.index("\n") + 1
+
+
+class TestSimpleCommands:
+    @staticmethod
+    def _found(command):
+        return [(c.name, c.via) for c in shell_syntax.simple_commands(command)]
+
+    def test_wrapped_commands_and_their_wrappers(self):
+        assert self._found("env 'RUN=a b' timeout -s KILL 5 pkill -f x") == [
+            ("env", ()),
+            ("timeout", ("env",)),
+            ("pkill", ("env", "timeout")),
+        ]
+
+    def test_command_v_only_looks_the_name_up(self):
+        assert self._found("command -v sudo >/dev/null") == [("command", ())]
+
+    def test_scripts_of_shells_in_command_position_keep_their_wrappers(self):
+        command = "pgrep -f t | xargs sh -c 'kill -9 \"$@\"' _"
+        assert ("kill", ("xargs",)) in self._found(command)
+        assert self._found('docker exec c bash -c "chmod +x a"') == [("docker", ())]
+
+    def test_here_documents_a_shell_reads_as_code(self):
+        assert ("pkill", ("timeout",)) in self._found(
+            "timeout 30 sh <<'EOF'\npkill -f t\nEOF"
+        )
+        for data in (
+            "bash -c 'cat' <<'EOF'\npkill\nEOF",
+            "bash run.sh <<EOF\npkill\nEOF",
+            "timeout 5 bash -n <<'EOF'\npkill\nEOF",
+        ):
+            assert "pkill" not in [name for name, _ in self._found(data)]
+
+    def test_nested_scripts_are_read_once(self):
+        command = "echo hi"
+        for _ in range(40):
+            command = 'bash -c "$(' + command.replace('"', '\\"') + ')"'
+        started = time.monotonic()
+        assert len(shell_syntax.simple_commands(command)) < 400
+        assert time.monotonic() - started < 2
+        found = self._found("cat ids | xargs sh -c 'kill $0'; sh -c 'kill $0'")
+        assert ("kill", ("xargs",)) in found
+        assert ("kill", ()) in found
+
+    def test_arguments_leave_out_redirection_targets(self):
+        [rm, echo] = shell_syntax.simple_commands("rm -rf /a /b > /dev/null 2>&1; echo")
+        assert rm.args == ("-rf", "/a", "/b")
+        assert echo.args == ()
+
+    def test_a_substitution_is_one_argument(self):
+        [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")
+        assert kill.args == ("`pgrep -f python`",)
+        assert pgrep.args == ("-f", "python")
 
 
 def test_parse_is_shared_between_checks():

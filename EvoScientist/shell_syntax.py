@@ -34,6 +34,10 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
     "nice": frozenset({"-n", "--adjustment"}),
     "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
 }
+# Shell options whose value is the next word.
+_SHELL_OPTIONS_WITH_VALUE = frozenset(
+    {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+)
 
 
 def tokenize(command: str) -> list[dict[str, object]]:
@@ -219,7 +223,7 @@ class ShellWords(NamedTuple):
     body_delimiters: tuple[int, ...]  # per body: the start of its delimiter word
 
 
-@functools.lru_cache(maxsize=128)
+@functools.lru_cache(maxsize=16)
 def parse(command: str) -> ShellWords:
     """Tokens of *command* outside here-document bodies; a body is data and is
     never tokenized, so quotes in it cannot swallow the commands after it.
@@ -532,6 +536,11 @@ def _command_arguments(
     return args, heredocs
 
 
+def _word_value(arg: str, token: dict[str, object] | None) -> str:
+    """A word as the shell reads it: its decoded token, else as written."""
+    return str(token["value"]) if token is not None else arg
+
+
 def _unwrap(
     name: str, args: list[tuple[str, dict[str, object] | None]], via: tuple[str, ...]
 ) -> list[SimpleCommand]:
@@ -544,33 +553,74 @@ def _unwrap(
         return found
     takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
     skip = False
-    for position, (arg, _token) in enumerate(args):
+    for position, (arg, token) in enumerate(args):
+        value = _word_value(arg, token)
         if skip:
             skip = False
             continue
-        if arg in takes_value:
+        if value in takes_value:
             skip = True
             continue
+        if name == "command" and value in ("-v", "-V"):
+            return found  # only looks the name up
         if (
-            arg.startswith("-")
-            or ASSIGNMENT_RE.match(arg)
-            or _WRAPPER_VALUE_RE.fullmatch(arg)
+            value.startswith("-")
+            or ASSIGNMENT_RE.match(value)
+            or _WRAPPER_VALUE_RE.fullmatch(value)
         ):
             continue
-        inner = re.split(r"[\\/]", arg)[-1]
+        inner = re.split(r"[\\/]", value)[-1]
         return found + _unwrap(inner, args[position + 1 :], (*via, name))
     return found
 
 
+def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
+    """The argument index of the script a shell runs from ``-c``, and whether
+    it runs code from stdin (no ``-c`` and no script file, or ``-s``); a
+    shell with ``-n`` only checks the syntax and runs neither."""
+    reads_stdin = skip = False
+    if any(
+        value.startswith("-") and not value.startswith("--") and "n" in value[1:]
+        for value in (
+            _word_value(a, t) for a, t in zip(shell.args, shell.tokens, strict=True)
+        )
+    ):
+        return None, False
+    for position, (arg, token) in enumerate(zip(shell.args, shell.tokens, strict=True)):
+        value = _word_value(arg, token)
+        if skip:
+            skip = False
+        elif value in _SHELL_OPTIONS_WITH_VALUE:
+            skip = True
+        elif SHELL_C_OPTION_RE.fullmatch(value):
+            return (position + 1 if position + 1 < len(shell.args) else None), False
+        elif value.startswith(("-", "+")) and value not in ("-", "--"):
+            reads_stdin = reads_stdin or (
+                not value.startswith("--") and "s" in value[1:]
+            )
+        else:
+            return None, reads_stdin  # a script file; stdin is its data
+    return None, True
+
+
 def simple_commands(command: str) -> list[SimpleCommand]:
     """Every command *command* runs, with its arguments: at each command-name
-    position, through wrappers, and inside substitutions, ``sh -c`` scripts and
-    here-documents fed to a shell."""
+    position, through wrappers, and inside substitutions, the ``-c`` scripts of
+    shells it runs and the here-documents those shells read as code."""
+    return _simple_commands(command, set(), ())
+
+
+def _simple_commands(
+    command: str, seen: set[tuple[str, tuple[str, ...]]], outer: tuple[str, ...]
+) -> list[SimpleCommand]:
+    """:func:`simple_commands`; *seen* holds the nested texts already read, by
+    the wrappers they run under (*outer* for this one)."""
     words = parse(command)
     tokens = words.tokens
-    scripts = shell_script_words(tokens)
     found: list[SimpleCommand] = []
-    nested: list[str] = []
+    nested: list[tuple[str, tuple[str, ...]]] = []  # text, wrappers it runs under
+    script_tokens: set[int] = set()  # read as scripts, not again as quoted words
+    code_bodies: set[int] = set()  # read as code, not again for substitutions
     in_backtick = False
     for index, (token, is_name) in enumerate(
         zip(tokens, words.name_flags, strict=True)
@@ -585,30 +635,48 @@ def simple_commands(command: str) -> list[SimpleCommand]:
         ):
             continue
         args, heredocs = _command_arguments(command, words, index, in_backtick)
-        name = re.split(r"[\\/]", value)[-1]
-        found.extend(_unwrap(name, args, ()))
-        if name in SHELL_NAMES:
-            for body in heredocs:
-                start, end, _expands = words.bodies[body]
-                text = command[start:end].rstrip("\n")
-                nested.append(text[: text.rfind("\n") + 1])  # without the end line
+        for each in _unwrap(re.split(r"[\\/]", value)[-1], args, ()):
+            found.append(each)
+            if each.name not in SHELL_NAMES:
+                continue
+            script, reads_stdin = _shell_code(each)
+            if script is not None:
+                nested.append(
+                    (_word_value(each.args[script], each.tokens[script]), each.via)
+                )
+                if each.tokens[script] is not None:
+                    script_tokens.add(int(each.tokens[script]["start"]))
+            if reads_stdin:
+                code_bodies.update(heredocs)
+                for body in heredocs:
+                    start, end, _expands = words.bodies[body]
+                    text = command[start:end].rstrip("\n")
+                    # Without the end line.
+                    nested.append((text[: text.rfind("\n") + 1], each.via))
 
     def collect(body: str) -> tuple[str, bool]:
-        nested.append(body)
+        nested.append((body, ()))
         return body, False
 
     for token in tokens:
-        if token["type"] != "word":
-            continue
-        if int(token["start"]) in scripts:
-            nested.append(str(token["value"]))
-        elif token["quoted"]:
+        if (
+            token["type"] == "word"
+            and token["quoted"]
+            and int(token["start"]) not in script_tokens
+        ):
             rewrite_substitutions(str(token["raw"]), collect)
-    for start, end, expands in words.bodies:
-        if expands:
+    for body, (start, end, expands) in enumerate(words.bodies):
+        if expands and body not in code_bodies:
             rewrite_substitutions(command[start:end], collect, heredoc=True)
-    for body in nested:
-        found.extend(simple_commands(body))
+    for text, via in nested:
+        chain = (*outer, *via)
+        if (text, chain) in seen:
+            continue  # the same code reached through another nesting
+        seen.add((text, chain))
+        found.extend(
+            inner._replace(via=(*via, *inner.via))
+            for inner in _simple_commands(text, seen, chain)
+        )
     return found
 
 

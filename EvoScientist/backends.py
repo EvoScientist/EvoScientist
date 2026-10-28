@@ -106,6 +106,10 @@ _KILL_BY_LOOKUP_ERROR = (
 _HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
 # Commands that find processes by name, pattern or resource.
 _PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
+# Of those, the ones whose only job is matching names.
+_NAME_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof"})
+# Commands that stop processes, checked by _kill_by_lookup.
+_KILL_COMMANDS = frozenset({"kill", "fuser", "taskkill", "taskkill.exe"})
 _BLOCKED_COMMAND_HINTS["chmod"] = (
     "To run a script, call it through its interpreter (bash run.sh, "
     "python run.py) instead of making it executable."
@@ -1069,23 +1073,53 @@ def _under_any(path: str, folders: tuple[str, ...]) -> bool:
     return _is_under_allowed_prefix(path, folders)
 
 
-def _removable_inside(
+def _removal_problem(
     path: str, workspace_root: str, protected: tuple[str, ...]
-) -> bool:
-    """Whether *path* lies strictly inside the workspace and outside the
-    *protected* folders: not the root and no ``..``."""
+) -> str | None:
+    """Why *path* may not be removed: ``"outside"`` (not strictly inside the
+    workspace, ``..``, or an expansion that could leave it) or ``"protected"``
+    (a protected folder, inside one or holding one); ``None`` when it may."""
+    path = path.replace("\\", "/")
     root = workspace_root.replace("\\", "/").rstrip("/")
     if _is_windows():  # case-insensitive file systems
-        path, root = path.replace("\\", "/").lower(), root.lower()
-    if not path.startswith(root + "/") or _under_any(path, protected):
-        return False
-    rest = path[len(root) + 1 :]
-    segments = [part for part in rest.split("/") if part not in ("", ".")]
+        path, root = path.lower(), root.lower()
+    if not path.startswith(root + "/"):
+        return "outside"
+    segments = [
+        part for part in path[len(root) + 1 :].split("/") if part not in ("", ".")
+    ]
     # A literal first segment keeps the target below the root whatever the
     # rest expands to (`%` expands under cmd.exe).
+    if not segments or ".." in segments or re.search(r"[$`%]", segments[0]):
+        return "outside"
+    normalized = root + "/" + "/".join(segments)
+    if _under_any(normalized, protected) or any(
+        _under_any(folder, (normalized,)) for folder in protected
+    ):
+        return "protected"
+    return None
+
+
+def _protected_removal_error(target: str) -> str:
     return (
-        bool(segments) and ".." not in segments and not re.search(r"[$`%]", segments[0])
+        f"Command blocked: '{target}' is or holds a protected folder (skills, "
+        f"memories or media), which shell commands may not remove."
     )
+
+
+def _is_home_word(raw: str) -> bool:
+    """Whether a word as written starts in the home folder: ``~`` or
+    ``$HOME`` that the shell expands (not inside single quotes)."""
+    return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
+
+
+def _bare_cd_goes_home() -> bool:
+    """A bare ``cd`` goes home, except in cmd.exe, where it prints the folder."""
+    if not _is_windows():
+        return True
+    from . import agent_shell
+
+    return agent_shell.uses_bash()
 
 
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
@@ -1101,18 +1135,13 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
             if not (arg.startswith("-") and arg != "-")
         ]
         if not targets:
-            if found.name == "cd":
+            if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
             continue
         arg, token = targets[0]
         path = str(token["value"]) if token is not None else arg
-        if (
-            path.startswith("~")
-            or _HOME_VARIABLE_RE.match(path)
-            or (
-                path.startswith("/")
-                and not _is_under_allowed_prefix(path, allow_prefixes)
-            )
+        if _is_home_word(arg) or (
+            path.startswith("/") and not _is_under_allowed_prefix(path, allow_prefixes)
         ):
             return f"{found.name} {arg}"
     return None
@@ -1140,12 +1169,26 @@ def _recursive_rm_operands(
     return operands if recursive else []
 
 
-def _kill_by_lookup(found: shell_syntax.SimpleCommand, looks_up: bool) -> bool:
-    """Whether a kill reaches processes found by name or pattern (through
-    xargs or a substitution; *looks_up*: the command runs such a lookup), or
-    -1, 0 or a process group."""
-    if "xargs" in found.via:
-        return looks_up
+def _kill_by_lookup(
+    found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
+) -> bool:
+    """Whether a kill reaches processes found by name or pattern, or -1, 0 or
+    a process group. *looks_up*: the command runs a process lookup; *by_name*:
+    one that matches names (pgrep, pidof), so a variable holds its ids."""
+    if found.name == "fuser":
+        return any(
+            arg in ("-k", "--kill")
+            or (arg[:2] != "--" and arg[:1] == "-" and "k" in arg)
+            for arg in found.args
+        )
+    if found.name in ("taskkill", "taskkill.exe"):
+        options = {arg.upper() for arg in found.args}
+        by_pid = bool(options & {"/PID", "-PID"})
+        return bool(options & {"/IM", "-IM"}) or (
+            not by_pid and bool(options & {"/FI", "-FI"})
+        )
+    if "xargs" in found.via and looks_up:
+        return True
     args = list(found.args)
     if args and args[0] in ("-l", "-L"):
         return False
@@ -1156,10 +1199,18 @@ def _kill_by_lookup(found: shell_syntax.SimpleCommand, looks_up: bool) -> bool:
     if args and args[0] == "--":
         args = args[1:]
     return any(
-        (re.fullmatch(r"-?\d+", arg) and int(arg) <= 0)
-        or _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
+        re.fullmatch(r"-\d+|0+", arg)  # -1, a process group, or 0
+        or (
+            by_name
+            and "$" in arg
+            and "$(" not in arg
+            and arg.strip('"') not in ("$!", "${!}")
+        )
+        or (
+            ("$(" in arg or "`" in arg)
+            and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
+        )
         for arg in args
-        if "$(" in arg or "`" in arg or arg[:1] in "-0"
     )
 
 
@@ -1234,15 +1285,15 @@ def validate_command(
     for pattern in _DESTRUCTIVE_PATTERNS:
         for match in pattern.finditer(command):
             target = targets.get(match.start("target"))
-            if (
-                not dangerous
-                and workspace_root
-                and target is not None
-                and _removable_inside(
-                    _removal_target(target), workspace_root, protected
-                )
-            ):
+            problem = (
+                _removal_problem(_removal_target(target), workspace_root, protected)
+                if not dangerous and workspace_root and target is not None
+                else "outside"
+            )
+            if problem is None:
                 continue
+            if problem == "protected":
+                return _protected_removal_error(str(target["raw"]))
             return (
                 f"Command blocked: contains forbidden pattern '{match.group(0)}'. "
                 f"All commands must operate within the workspace directory. "
@@ -1253,22 +1304,27 @@ def validate_command(
         for found in commands:
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
-                if not path.lstrip("'\"").startswith("/") and not _DRIVE_PATH_RE.match(
-                    path.lstrip("'\"")
-                ):
+                bare = path.lstrip("'\"")
+                if _is_home_word(operand):
+                    problem = "outside"
+                elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
                     continue
-                if token is not None and _removable_inside(
-                    path, workspace_root, protected
-                ):
-                    continue
-                return (
-                    f"Command blocked: rm would remove '{operand}', outside the "
-                    f"workspace or in a protected folder (skills, memories, "
-                    f"media). Remove paths inside the workspace (e.g., './build')."
-                )
+                elif token is None:
+                    problem = "outside"  # glued to a substitution
+                else:
+                    problem = _removal_problem(path, workspace_root, protected)
+                if problem == "protected":
+                    return _protected_removal_error(operand)
+                if problem is not None:
+                    return (
+                        f"Command blocked: rm would remove '{operand}', which is "
+                        f"outside the workspace or may expand there. Remove a "
+                        f"path inside the workspace (e.g., './build')."
+                    )
 
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
+    by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
     for found in commands:
         if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
@@ -1278,7 +1334,7 @@ def validate_command(
                 f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
                 f"{hint}"
             )
-        if found.name == "kill" and _kill_by_lookup(found, looks_up):
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(found, looks_up, by_name):
             return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.
@@ -1548,7 +1604,14 @@ def _rewrite_path_word(
     )
     rest = _windows_workspace_rest(path, workspace_root)
     if rest is not None:
-        return (None if _under_any(path, protected) else in_workspace(rest)), False
+        if not _under_any(path, protected):
+            return in_workspace(rest), False
+        from . import agent_shell
+
+        # Git Bash would read the separators as escapes; real escapes stay.
+        return (
+            re.sub(r"\\(?=[\w.-])", "/", path) if agent_shell.uses_bash() else None
+        ), False
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:

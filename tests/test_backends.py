@@ -807,6 +807,44 @@ class TestWorkspaceRemovalAndComments:
     def test_recursive_removals_inside_the_workspace_pass(self, command, tmp_workspace):
         assert prepare_sandbox_command(command, tmp_workspace)[1] is None
 
+    @pytest.mark.parametrize(
+        "command",
+        ["rm -rf ~", "rm -rf $HOME/.cache/huggingface", 'rm -rf "${HOME}/.cache/pip"'],
+    )
+    def test_removing_from_the_home_folder_is_refused(self, command, tmp_workspace):
+        assert (
+            "outside the workspace"
+            in prepare_sandbox_command(command, tmp_workspace)[1]
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd . && rm -r /.evoscientist",
+            "cd . && rm -r /./.evoscientist/memories",
+            "cd . && rm -r //.evoscientist//memories",
+            "cd . && rm -rf /.evoscientist/./memories",
+        ],
+    )
+    def test_protected_folders_and_their_parents_stay_protected(
+        self, command, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(tmp_workspace) / ".evoscientist" / "memories"
+        )
+        error = prepare_sandbox_command(command, tmp_workspace)[1]
+        assert "protected folder" in error
+        assert "relative paths" not in error
+        assert "(e.g., './" not in error
+
+    def test_an_operand_glued_to_a_substitution_may_expand_anywhere(
+        self, tmp_workspace
+    ):
+        error = prepare_sandbox_command(
+            "cd src && rm -r /results/$(date +%F)", tmp_workspace
+        )[1]
+        assert "may expand" in error
+
     def test_destructive_patterns_name_their_target(self):
         assert all("target" in p.groupindex for p in backends._DESTRUCTIVE_PATTERNS)
         assert "'rm -rf /'" in validate_command("rm -rf /")
@@ -822,7 +860,7 @@ class TestWorkspaceRemovalAndComments:
             "mkdir -p sub && cd sub && rm -rf /memories",
         ):
             _prepared, error = prepare_sandbox_command(command, tmp_workspace)
-            assert "forbidden pattern" in error, command
+            assert "protected folder" in error, command
 
     def test_a_target_glued_to_a_substitution_is_not_exempt(self, tmp_workspace):
         _command, error = prepare_sandbox_command(
@@ -974,10 +1012,27 @@ class TestSandboxCommandChecks:
 
     @pytest.mark.parametrize(
         "command",
-        ["cd src", "cd ./src && cd -", "cd -P src", "cd $HOMEDIR", "pushd src"],
+        [
+            "cd src",
+            "cd ./src && cd -",
+            "cd -P src",
+            "cd $HOMEDIR",
+            "pushd src",
+            "mkdir -p '$HOME' && cd '$HOME'",
+            "cd '~'",
+        ],
     )
     def test_cd_inside_the_workspace_passes(self, command):
         assert validate_command(command, workspace_root="/W") is None
+
+    def test_a_bare_cd_only_prints_the_folder_in_cmd(self, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+        assert validate_command("cd && dir", workspace_root=r"C:\W") is None
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+        assert validate_command("cd && ls", workspace_root=r"C:\W") is not None
 
     @pytest.mark.parametrize("bash", [False, True])
     def test_windows_workspace_paths_map_into_the_workspace(self, monkeypatch, bash):
@@ -1006,6 +1061,11 @@ class TestSandboxCommandChecks:
         assert prepare_sandbox_command(
             f"rm -rf {ws.replace(chr(92), '/')}/build", ws, skills_dir=skills
         ) == ("rm -rf ./build", None)
+        # Kept as written, with the separators the shell reads.
+        expected = ws.replace(chr(92), "/") if bash else ws
+        assert prepare_sandbox_command(
+            f"cat {ws}/skills/my\\ x.md", ws, skills_dir=skills
+        ) == (f"cat {expected}/skills/my\\ x.md", None)
 
     def test_protected_folders_inside_the_workspace_keep_their_host_path(
         self, tmp_workspace
@@ -2519,6 +2579,9 @@ class TestProcessKillByName:
             "xargs pkill < pids",
             "exec pkill x",
             "command pkill x",
+            "timeout 30 sh <<'EOF'\npkill -f train\nEOF",
+            "nohup bash <<EOF\npkill -f x\nEOF",
+            "env 'RUN_NAME=test train' pkill -f train",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -2540,6 +2603,13 @@ class TestProcessKillByName:
             "x=$(echo) kill $(pgrep x)",
             "kill $(ps aux | grep train | awk '{print $2}')",
             "kill $(lsof -t -i :6174)",
+            "PID=$(pgrep -f train.py); kill $PID",
+            "for pid in $(pgrep -f train.py); do kill $pid; done",
+            "pgrep -f train.py | while read p; do kill $p; done",
+            "pgrep -f train | xargs sh -c 'kill -9 \"$@\"' _",
+            "cat logs/pids | xargs kill -9 0",
+            "fuser -k 8000/tcp",
+            "taskkill -F -IM python.exe",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -2575,6 +2645,15 @@ class TestProcessKillByName:
             "kill -l",
             "kill $(cat logs/train.pid)",
             "cat logs/pids | xargs kill",
+            "ps -p $PID && kill $PID",
+            "python train.py & kill -9 $!",
+            "command -v sudo >/dev/null && echo yes",
+            "bash -c 'cat' <<'EOF'\npkill is prohibited\nEOF",
+            'docker exec ctr bash -c "chmod +x run.sh && ./run.sh"',
+            'python worker.py & pgrep -f worker.py; kill "${!}"',
+            "pgrep -f train.py && kill $(cat train.pid)",
+            'taskkill /F /PID 12345 /FI "STATUS eq RUNNING"',
+            "kill " + "1" * 5000,
             "ps aux | grep pkill",
             "cat > n.md <<'EOF'\npkill is blocked\nEOF",
             "cat > n.md <<'EOF'\n$(pkill -f x)\nEOF",
