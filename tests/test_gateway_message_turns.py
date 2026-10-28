@@ -631,7 +631,11 @@ async def test_thread_events_closes_its_reader():
 
 
 async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
-    """A transient get_state error must not cancel an already paused run."""
+    """A transient get_state error must not cancel an already paused run.
+
+    The turn emits the gateway ``error`` shape (and raises) so callers do not
+    treat an empty ``done`` as a normal finish / "No response".
+    """
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[_lifecycle("run-1", "running"), _input_requested([])],
@@ -665,11 +669,27 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     stream.interrupts = []
     threads.get_state = boom  # type: ignore[method-assign]
 
-    events = await _turn(gateway, "hi")
+    events: list[dict] = []
+
+    async def collect() -> None:
+        async with asyncio.timeout(GUARD_SECONDS):
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id=THREAD_ID)
+            ):
+                events.append(event)
+
+    with pytest.raises(
+        server_mod._PauseStateReadError,
+        match="Could not read the pause state",
+    ):
+        await collect()
 
     assert cancelled == []
-    assert [event["type"] for event in events] == ["done"]
-    assert events[-1] == {"type": "done", "content": "", "response": ""}
+    assert [event["type"] for event in events] == ["error"]
+    assert events[-1] == {
+        "type": "error",
+        "message": f"Could not read the pause state for thread {THREAD_ID}",
+    }
 
 
 async def test_root_failed_lifecycle_emits_done_like_main():

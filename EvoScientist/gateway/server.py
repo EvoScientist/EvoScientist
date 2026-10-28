@@ -199,6 +199,10 @@ def _thread_state_as_snapshot(state: Mapping[str, Any]) -> SimpleNamespace:
     )
 
 
+class _PauseStateReadError(RuntimeError):
+    """``threads.get_state`` failed after a pause; leave the run paused."""
+
+
 def _is_id_keyed_hitl_resume(response: object) -> bool:
     """True for a HITL resume payload keyed by interrupt id.
 
@@ -1322,15 +1326,17 @@ class LangGraphServerGateway:
             state = await self.thread_store.client.threads.get_state(thread_id)
         except NotFoundError:
             return events
-        except Exception:
-            # The run already paused. Cancelling it from the outer handler
-            # would drop a prompt the user can still answer after a retry.
+        except Exception as exc:
+            # The run already paused. Propagate as _PauseStateReadError so the
+            # outer handler can emit error without cancelling the pause.
             logger.warning(
                 "Pause state read failed for thread %s; leaving the pause",
                 thread_id,
                 exc_info=True,
             )
-            return events
+            raise _PauseStateReadError(
+                f"Could not read the pause state for thread {thread_id}"
+            ) from exc
         for interrupt in _state_interrupts(state):
             events.extend(
                 await processor.process(
@@ -1585,6 +1591,13 @@ class LangGraphServerGateway:
                         yield event
             for event in tracker.finish():
                 yield event
+        except _PauseStateReadError as exc:
+            # Pause already accepted; emit the gateway error shape and leave
+            # the run so a later turn can still show the prompt.
+            yield emitter.error(str(exc)).data
+            for event in tracker.finish():
+                yield event
+            raise
         except Exception as exc:
             # Cancel this request's run, then repair, both before the first yield:
             # a consumer that stops iterating after the error event (aclose /
