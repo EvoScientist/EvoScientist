@@ -47,6 +47,9 @@ class SkillProposal:
     project_id: str | None = None
     approved_skill_path: str | None = None
     scope: str | None = None
+    submitted_scope: str | None = None
+    upstream_source: str | None = None
+    upstream_commit: str | None = None
 
     @property
     def effective_scope(self) -> str:
@@ -214,6 +217,21 @@ def _proposal_from_manifest(
                 else None
             ),
             scope=(str(manifest["scope"]) if manifest.get("scope") else None),
+            submitted_scope=(
+                str(manifest["submitted_scope"])
+                if manifest.get("submitted_scope")
+                else None
+            ),
+            upstream_source=(
+                str(manifest["upstream_source"])
+                if manifest.get("upstream_source")
+                else None
+            ),
+            upstream_commit=(
+                str(manifest["upstream_commit"])
+                if manifest.get("upstream_commit")
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -394,17 +412,17 @@ def _installed_skill_name(skill_dir: Path) -> str | None:
     interchangeable. Reusing the runtime's own metadata contract keeps this
     lookup on exactly the skills the runtime can load.
     """
-    from ...tools.skills_manager import _skill_name_and_description
+    from ...tools.skills_manager import skill_name_and_description
 
     try:
         raw = (skill_dir / "SKILL.md").read_bytes()
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return None
-    resolved = _skill_name_and_description(raw)
+    resolved = skill_name_and_description(raw)
     if resolved is None:
         return None
     name, _description = resolved
-    return name or None
+    return name
 
 
 def _find_installed_user_skill(
@@ -413,19 +431,31 @@ def _find_installed_user_skill(
     roots: list[Path],
 ) -> Path | None:
     """Find an installed skill by name across the given roots."""
-    for root in roots:
+    candidates: dict[str, list[tuple[int, Path]]] = defaultdict(list)
+    for root_index, root in enumerate(roots):
         if not root.exists():
             continue
-        direct = root / skill_name
-        if direct.is_dir() and (direct / "SKILL.md").is_file():
-            if _installed_skill_name(direct) == skill_name:
-                return direct
         for entry in root.iterdir():
             if not entry.is_dir() or not (entry / "SKILL.md").is_file():
                 continue
+            candidates[entry.name].append((root_index, entry))
+    match: Path | None = None
+    resolved_candidates: list[tuple[str, Path]] = []
+    for entry_name, entries in candidates.items():
+        # If tiers expose the same virtual directory, the earlier root wins
+        # when it contains the requested skill. If it does not, a matching
+        # lower-tier alias remains discoverable (legacy autoskill behaviour).
+        for _root_index, entry in sorted(entries, key=lambda item: item[0]):
             if _installed_skill_name(entry) == skill_name:
-                return entry
-    return None
+                resolved_candidates.append((entry_name, entry))
+                break
+    for _entry_name, entry in sorted(resolved_candidates, key=lambda item: item[0]):
+        # The merged runtime backend resolves duplicate frontmatter names in
+        # virtual path order, with the later valid entry winning. Keep
+        # approval and agent loading pointed at the same physical directory.
+        if _installed_skill_name(entry) == skill_name:
+            match = entry
+    return match
 
 
 def _requested_scope(value: object) -> tuple[str | None, bool]:
@@ -445,12 +475,6 @@ def _requested_scope(value: object) -> tuple[str | None, bool]:
     return text, True
 
 
-def _normalize_scope(value: object) -> str | None:
-    """The scope recorded in a manifest, or None when it is absent or unknown."""
-    scope, valid = _requested_scope(value)
-    return scope if valid else None
-
-
 def _scope_root(scope: str, *, skills_dir: str | Path) -> Path:
     """The install root a scope writes to."""
     if scope == _SCOPE_GLOBAL:
@@ -458,16 +482,35 @@ def _scope_root(scope: str, *, skills_dir: str | Path) -> Path:
     return Path(skills_dir).expanduser()
 
 
+def _installed_provenance(skill_dir: Path | None) -> dict[str, str] | None:
+    """Read source metadata for a resolved installed skill, if available."""
+    if skill_dir is None:
+        return None
+    from ...tools.skills_manager import installed_skill_provenance
+
+    return installed_skill_provenance(skill_dir)
+
+
 def _installed_scope(skill_name: str, *, skills_dir: str | Path) -> str | None:
     """The scope that holds ``skill_name``.
 
-    The workspace tier shadows the global one, so a workspace copy wins
-    when both tiers hold a skill with that name.
+    Resolution follows the same merged virtual-path order as the runtime;
+    when both tiers expose the same directory, the workspace copy wins.
     """
-    for scope in (_SCOPE_WORKSPACE, _SCOPE_GLOBAL):
-        root = _scope_root(scope, skills_dir=skills_dir)
-        if _find_installed_user_skill(skill_name, roots=[root]) is not None:
-            return scope
+    workspace_root = _scope_root(_SCOPE_WORKSPACE, skills_dir=skills_dir)
+    global_root = _scope_root(_SCOPE_GLOBAL, skills_dir=skills_dir)
+    resolved = _find_installed_user_skill(
+        skill_name,
+        roots=[workspace_root, global_root],
+    )
+    if resolved is not None:
+        try:
+            if resolved.is_relative_to(workspace_root):
+                return _SCOPE_WORKSPACE
+            if resolved.is_relative_to(global_root):
+                return _SCOPE_GLOBAL
+        except ValueError:
+            pass
     return None
 
 
@@ -516,7 +559,8 @@ def submit_autoskill_proposal(
     defaults to the workspace tier; an update without an explicit scope
     writes back to the tier that already holds the target skill, so
     updating a global skill updates the global skill instead of leaving a
-    workspace copy that shadows it.
+    workspace copy that shadows it. An explicit workspace update may instead
+    fork a global-only target into a workspace shadow.
     """
     normalized_name = sanitize_skill_name(skill_name)
     if normalized_name != skill_name:
@@ -548,6 +592,9 @@ def submit_autoskill_proposal(
     # The tier this proposal installs into. An update resolves it once,
     # here, so the approval never re-guesses which copy to touch.
     target_scope = requested_scope
+    target_path: Path | None = None
+    shadow_source_scope: str | None = None
+    upstream_provenance: dict[str, str] | None = None
     if normalized_operation == "update":
         target_name = sanitize_skill_name(target_skill_name or skill_name)
         if target_name != (target_skill_name or skill_name):
@@ -575,13 +622,21 @@ def submit_autoskill_proposal(
                     "skill_name": skill_name,
                     "operation": normalized_operation,
                 }
-        elif (
-            _find_installed_user_skill(
+        target_path = _find_installed_user_skill(
+            skill_name,
+            roots=[_scope_root(target_scope, skills_dir=skills_dir)],
+        )
+        if target_path is None and target_scope == _SCOPE_WORKSPACE:
+            # An explicit workspace update can intentionally fork a global
+            # skill into this workspace. Approval overlays the proposal on a
+            # copy of the current global directory.
+            target_path = _find_installed_user_skill(
                 skill_name,
-                roots=[_scope_root(target_scope, skills_dir=skills_dir)],
+                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
             )
-            is None
-        ):
+            if target_path is not None:
+                shadow_source_scope = _SCOPE_GLOBAL
+        if target_path is None:
             return {
                 "submitted": False,
                 "error": (
@@ -591,6 +646,7 @@ def submit_autoskill_proposal(
                 "operation": normalized_operation,
                 "scope": target_scope,
             }
+        upstream_provenance = _installed_provenance(target_path)
     else:
         # A new skill defaults to the workspace tier; the global tier is
         # only used when it is asked for explicitly.
@@ -679,6 +735,12 @@ def submit_autoskill_proposal(
     # re-deciding where the skill lives.
     manifest["scope"] = target_scope
     manifest["submitted_scope"] = target_scope
+    if shadow_source_scope is not None:
+        manifest["shadow_source_scope"] = shadow_source_scope
+    if upstream_provenance:
+        manifest["upstream_source"] = upstream_provenance["source"]
+        if upstream_provenance.get("commit"):
+            manifest["upstream_commit"] = upstream_provenance["commit"]
     if normalized_workspace is not None:
         manifest["workspace_dir"] = normalized_workspace
     if project_id:
@@ -693,6 +755,13 @@ def submit_autoskill_proposal(
         "operation": normalized_operation,
         "target_skill_name": skill_name if normalized_operation == "update" else None,
         "scope": target_scope,
+        "submitted_scope": target_scope,
+        "upstream_source": (
+            upstream_provenance.get("source") if upstream_provenance else None
+        ),
+        "upstream_commit": (
+            upstream_provenance.get("commit") if upstream_provenance else None
+        ),
         "path": proposal_virtual_path(skill_name),
     }
 
@@ -803,12 +872,25 @@ def approve_skill_proposal(
     destination_root = _scope_root(target_scope, skills_dir=skills_dir)
     destination = destination_root / skill_name
     base_skill_dir: Path | None = None
-    if operation == "create" and destination.exists():
+    shadow_source_scope = manifest.get("shadow_source_scope")
+    if shadow_source_scope not in {None, _SCOPE_GLOBAL}:
         return {
             "approved": False,
-            "proposal_id": manifest["proposal_id"],
-            "error": f"Skill already exists: {destination}",
+            "proposal_id": manifest.get("proposal_id"),
+            "error": f"Proposal records an unknown shadow source {shadow_source_scope!r}",
         }
+    if operation == "create":
+        existing_skill = _find_installed_user_skill(
+            skill_name,
+            roots=[destination_root],
+        )
+        if destination.exists() or existing_skill is not None:
+            collision = existing_skill or destination
+            return {
+                "approved": False,
+                "proposal_id": manifest["proposal_id"],
+                "error": f"Skill already exists: {collision}",
+            }
     if operation == "update":
         if target_skill_name != skill_name:
             return {
@@ -816,11 +898,42 @@ def approve_skill_proposal(
                 "proposal_id": manifest["proposal_id"],
                 "error": "Update proposal target must match the proposed skill name",
             }
-        if legacy and requested_scope != _SCOPE_GLOBAL:
-            # A proposal written before scopes existed keeps the old
-            # behaviour: it updates the workspace tier and never touches the
-            # global tier. Naming the global tier explicitly is the
-            # confirmation that lets it write back there.
+        if (
+            target_scope == _SCOPE_WORKSPACE
+            and shadow_source_scope == _SCOPE_GLOBAL
+            and requested_scope != _SCOPE_GLOBAL
+        ):
+            # An explicit workspace fork records the global source at submit
+            # time. Do not silently retarget it if a workspace copy appears
+            # before approval, or if the source moved away.
+            if destination.exists():
+                return {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": (
+                        f"Workspace skill path already exists; refusing to "
+                        f"retarget global skill {skill_name!r}"
+                    ),
+                    "scope": target_scope,
+                }
+            existing_global = _find_installed_user_skill(
+                skill_name,
+                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
+            )
+            if existing_global is None:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": (
+                        f"No installed global skill named {skill_name!r} "
+                        "to use as the workspace fork source"
+                    ),
+                    "scope": target_scope,
+                }
+            base_skill_dir = existing_global
+        elif legacy and target_scope == _SCOPE_WORKSPACE:
+            # Legacy proposals retain their historical workspace shadow
+            # behaviour; only an explicit global approval writes globally.
             local_match = _find_installed_user_skill(
                 skill_name,
                 roots=[destination_root],
@@ -874,6 +987,18 @@ def approve_skill_proposal(
 
     _copy_proposed_skill(proposal_dir, destination, base_dir=base_skill_dir)
 
+    provenance_path = base_skill_dir or (destination if operation == "update" else None)
+    upstream_provenance = _installed_provenance(provenance_path)
+    if upstream_provenance:
+        manifest["upstream_source"] = upstream_provenance["source"]
+        if upstream_provenance.get("commit"):
+            manifest["upstream_commit"] = upstream_provenance["commit"]
+        else:
+            manifest.pop("upstream_commit", None)
+    else:
+        manifest.pop("upstream_source", None)
+        manifest.pop("upstream_commit", None)
+
     manifest["status"] = "approved"
     manifest["updated_at"] = _now()
     manifest["approved_skill_path"] = str(destination)
@@ -891,6 +1016,12 @@ def approve_skill_proposal(
         "operation": operation,
         "path": str(destination),
         "scope": target_scope,
+        "upstream_source": (
+            upstream_provenance.get("source") if upstream_provenance else None
+        ),
+        "upstream_commit": (
+            upstream_provenance.get("commit") if upstream_provenance else None
+        ),
     }
 
 

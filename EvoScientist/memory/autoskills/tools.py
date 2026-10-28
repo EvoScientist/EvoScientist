@@ -60,7 +60,10 @@ class SubmitAutoskillProposalArgs(BaseModel):
             "Where the skill is installed: 'workspace' (this workspace only) "
             "or 'global' (every workspace). Leave unset to use the default: "
             "a new skill installs into the workspace, and an update writes "
-            "back to the tier that already holds the target skill."
+            "back to the tier that already holds the target skill. For an "
+            "update, explicitly choose workspace to fork a global-only skill "
+            "into this workspace, or global only when the change should be "
+            "shared everywhere."
         ),
     )
 
@@ -167,7 +170,9 @@ def create_submit_autoskill_proposal_tool(
             "folder under /autoskill-proposals/<skill-name>. Set operation to "
             "'update' when changing an existing workspace/global skill. In "
             "auto mode, the tool promotes the proposal only if validation and "
-            "collision checks pass."
+            "collision checks pass. Leave scope unset for normal updates; use "
+            "workspace to intentionally create a local shadow of a global "
+            "skill, and global only for changes meant for every workspace."
         ),
         args_schema=SubmitAutoskillProposalArgs,
         infer_schema=False,

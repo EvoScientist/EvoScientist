@@ -294,6 +294,19 @@ def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
     return out
 
 
+def installed_skill_provenance(skill_dir: str | Path) -> dict[str, str] | None:
+    """Return install provenance recorded for an installed skill directory.
+
+    The sidecar manifest is keyed by the physical directory name, so this
+    helper is useful to callers that already resolved the skill path. A
+    missing entry means the skill was created locally or predates provenance
+    tracking.
+    """
+    path = Path(skill_dir)
+    entry = _load_manifest(path.parent).get(path.name)
+    return dict(entry) if entry is not None else None
+
+
 def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
     path = _manifest_path(dest_dir)
     try:
@@ -1153,7 +1166,7 @@ _MAX_SKILL_MD_BYTES = 10 * 1024 * 1024
 _INDEX_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def _skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
+def skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
     """Return the frontmatter name and description, or None when the agent skips the file."""
     if len(raw) > _MAX_SKILL_MD_BYTES:
         return None
@@ -1176,6 +1189,11 @@ def _skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
     if not name or not description:
         return None
     return name, description
+
+
+# Keep the old private name for integrations that imported it before the
+# metadata contract became public.
+_skill_name_and_description = skill_name_and_description
 
 
 def _build_skill_index(workspace: Workspace) -> dict[str, str]:
@@ -1201,7 +1219,7 @@ def _build_skill_index(workspace: Workspace) -> dict[str, str]:
     # In path order, so the later folder wins a repeated name, as in the middleware.
     for response in backend.download_files(skill_md_paths):
         if response.error is None and response.content is not None:
-            parsed = _skill_name_and_description(response.content)
+            parsed = skill_name_and_description(response.content)
             if parsed is not None:
                 index[parsed[0]] = parsed[1]
     return index

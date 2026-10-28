@@ -198,6 +198,7 @@ class AutoSkillsCommand(Command):
         table.add_column("Action", style="magenta")
         table.add_column("AutoSkill", style="green")
         table.add_column("Scope", style="cyan")
+        table.add_column("Provenance", style="blue")
         table.add_column("Status", style="yellow")
         table.add_column("Observations", justify="right")
         table.add_column("Description", style="dim")
@@ -207,6 +208,11 @@ class AutoSkillsCommand(Command):
                 proposal.operation,
                 proposal.skill_name,
                 proposal.effective_scope,
+                (
+                    f"upstream: {proposal.upstream_source}"
+                    if proposal.upstream_source
+                    else "local"
+                ),
                 proposal.status,
                 str(len(proposal.source_observation_ids)),
                 proposal.description,
@@ -250,8 +256,15 @@ class AutoSkillsCommand(Command):
         )
         if result.get("approved"):
             verb = "Updated" if result.get("operation") == "update" else "Approved"
+            upstream = result.get("upstream_source")
+            provenance_note = (
+                f"; upstream provenance: {upstream} (a future reinstall may overwrite this change)"
+                if upstream
+                else ""
+            )
             ctx.ui.append_system(
-                f"{verb} autoskill: {result['skill_name']} ({result['path']})",
+                f"{verb} autoskill: {result['skill_name']} ({result['path']})"
+                f"{provenance_note}",
                 style="green",
             )
         else:
