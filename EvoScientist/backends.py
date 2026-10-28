@@ -85,7 +85,19 @@ BLOCKED_COMMANDS = [
     "dd",
     "shutdown",
     "reboot",
+    # Kill by name or pattern, which reaches EvoScientist's own processes.
+    "pkill",
+    "killall",
 ]
+_BLOCKED_COMMAND_HINTS = dict.fromkeys(
+    ("pkill", "killall"),
+    "Stop a process by its id instead: stop_process with the id "
+    "run_in_background returned, or kill <PID> with the PID from ps.",
+)
+_BLOCKED_COMMAND_HINTS["chmod"] = (
+    "To run a script, call it through its interpreter (bash run.sh, "
+    "python run.py) instead of making it executable."
+)
 
 
 _active_shell_processes_lock = threading.RLock()
@@ -1020,29 +1032,29 @@ def _validate_ssh_remote_command_format(command: str) -> str | None:
 
 
 def _split_shell_commands(command: str) -> list[str]:
-    """Split a compound shell command into individual base commands.
-
-    Handles command-boundary shell operators tracked by ``_shell_token_spans``.
-    Redirection operators are not boundaries; their operands are filenames, not
-    commands.
+    """The command names of a compound shell command: the first word of each
+    command, on every line; here-document bodies are skipped. Redirection
+    operands are filenames, not commands.
     """
-    command_boundaries = {"&&", "||", ";", "|", "&", "(", ")", "`"}
-    base_commands: list[str] = []
-    segment: list[str] = []
+    tokens = _shell_words(command).tokens
+    flags = _command_name_flags(command, tokens)
+    names = [
+        str(token["value"])
+        for token, is_command_name in zip(tokens, flags, strict=True)
+        if is_command_name
+    ]
+    bodies: list[str] = []
 
-    def flush_segment() -> None:
-        words = [token for token in segment if token]
-        if words:
-            base_commands.append(words[0])
+    def collect(body: str) -> tuple[str, bool]:
+        bodies.append(body)
+        return body, False
 
-    for token in _shell_token_spans(command):
-        if token.get("type") == "op" and token.get("value") in command_boundaries:
-            flush_segment()
-            segment = []
-        else:
-            segment.append(str(token.get("value", "")))
-    flush_segment()
-    return base_commands
+    for token in tokens:
+        if token["type"] == "word" and token["quoted"]:
+            _rewrite_quoted_substitutions(str(token["raw"]), collect)
+    for body in bodies:
+        names.extend(_split_shell_commands(body))
+    return names
 
 
 def _split_command_segments(command: str) -> list[str] | None:
@@ -1287,11 +1299,12 @@ def validate_command(
 
     # Check for dangerous commands (pipeline-aware) — always enforced.
     for base_cmd in _split_shell_commands(command):
-        if base_cmd in BLOCKED_COMMANDS:
-            return (
-                f"Command blocked: '{base_cmd}' is not allowed in sandbox mode. "
-                f"Only standard development commands are permitted."
+        name = re.split(r"[\\/]", base_cmd)[-1]
+        if name in BLOCKED_COMMANDS:
+            hint = _BLOCKED_COMMAND_HINTS.get(
+                name, "Only standard development commands are permitted."
             )
+            return f"Command blocked: '{name}' is not allowed in sandbox mode. {hint}"
 
     # Absolute-system-path check — skipped in dangerous mode.
     # Catches attacks like: python -c "os.remove('/Users/foo/file')"

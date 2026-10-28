@@ -699,6 +699,24 @@ class TestWorkspaceRemovalAndComments:
         assert convert_virtual_paths_in_command(command) == expected
 
     @pytest.mark.parametrize(
+        "command",
+        [
+            "# Let's stop the old server\npkill -f server.py",
+            "# usage: cat <<EOF\npkill x\nEOF",
+            "x=$(echo) pkill y",
+            "$(true)pkill y",
+            "f() { pkill y; }",
+            "case $x in a) pkill y;; esac",
+            'x="$(pkill y)"',
+            'echo "`pkill y`"',
+            "a[0]=x pkill y",
+            "time -p pkill y",
+        ],
+    )
+    def test_more_places_a_command_starts(self, command):
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
         ("command", "expected"),
         [
             (
@@ -841,6 +859,10 @@ class TestWorkspaceRemovalAndComments:
         self, command, tmp_workspace
     ):
         assert prepare_sandbox_command(command, tmp_workspace)[1] is None
+
+    def test_chmod_on_a_later_line_is_blocked_with_a_way_out(self):
+        error = validate_command("mkdir -p scripts\nchmod +x scripts/run.sh")
+        assert "bash run.sh" in error
 
     def test_quoted_skill_paths_after_cd_are_absolute(self):
         assert (
@@ -2348,6 +2370,53 @@ class TestPipelineCommandValidation:
 
 
 # === Absolute system path detection ===
+
+
+class TestProcessKillByName:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pkill -f train.py",
+            "pkill python",
+            "killall python",
+            "ls && pkill x",
+            "ps aux | grep x; pkill x",
+            "ls\npkill -f x",
+            "/usr/bin/pkill x",
+        ],
+    )
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_name_based_kills_are_blocked_with_a_way_out(self, command, dangerous):
+        error = validate_command(command, dangerous=dangerous)
+        assert "stop_process" in error
+        assert "kill <PID>" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo hi\nsudo ls",
+            "/usr/bin/sudo ls",
+            "FLAG=1 sudo ls",
+            "for p in a b; do sudo ls $p; done",
+            "if true; then sudo ls; fi",
+            "! sudo ls",
+            "time sudo ls",
+            "{ sudo ls; }",
+        ],
+    )
+    def test_blocked_commands_wherever_a_command_starts(self, command):
+        assert "'sudo' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "kill 1234",
+            "ps aux | grep pkill",
+            "cat > n.md <<'EOF'\npkill is blocked\nEOF",
+        ],
+    )
+    def test_kill_by_pid_and_mentions_stay_allowed(self, command):
+        assert validate_command(command) is None
 
 
 class TestAbsolutePathDetection:
