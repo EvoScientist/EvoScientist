@@ -1005,7 +1005,9 @@ class TestSandboxCommandChecks:
             ("bash -c 'cd ~ && ls'", "'cd ~'"),
         ],
     )
-    def test_cd_home_leaves_the_workspace(self, command, shown):
+    def test_cd_home_leaves_the_workspace(self, command, shown, monkeypatch):
+        # A POSIX shell; cmd.exe's bare cd only prints the folder (below).
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
         assert f"{shown} leaves the workspace" in validate_command(
             command, workspace_root="/W"
         )
@@ -2581,6 +2583,7 @@ class TestProcessKillByName:
             "command pkill x",
             "timeout 30 sh <<'EOF'\npkill -f train\nEOF",
             "nohup bash <<EOF\npkill -f x\nEOF",
+            "bash -c 'pkill -f x' -n",
             "env 'RUN_NAME=test train' pkill -f train",
         ],
     )

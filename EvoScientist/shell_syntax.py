@@ -576,31 +576,33 @@ def _unwrap(
 
 def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
     """The argument index of the script a shell runs from ``-c``, and whether
-    it runs code from stdin (no ``-c`` and no script file, or ``-s``); a
-    shell with ``-n`` only checks the syntax and runs neither."""
-    reads_stdin = skip = False
-    if any(
-        value.startswith("-") and not value.startswith("--") and "n" in value[1:]
-        for value in (
-            _word_value(a, t) for a, t in zip(shell.args, shell.tokens, strict=True)
-        )
-    ):
-        return None, False
+    it runs code from stdin (no ``-c`` and no script file, or ``-s``). Only
+    the options before the first operand count; with ``-n`` the shell checks
+    the syntax and runs neither."""
+    letters = ""
+    skip = False
+    first: int | None = None
     for position, (arg, token) in enumerate(zip(shell.args, shell.tokens, strict=True)):
         value = _word_value(arg, token)
         if skip:
             skip = False
         elif value in _SHELL_OPTIONS_WITH_VALUE:
             skip = True
-        elif SHELL_C_OPTION_RE.fullmatch(value):
-            return (position + 1 if position + 1 < len(shell.args) else None), False
-        elif value.startswith(("-", "+")) and value not in ("-", "--"):
-            reads_stdin = reads_stdin or (
-                not value.startswith("--") and "s" in value[1:]
-            )
+        elif value in ("-", "--"):
+            first = position + 1 if position + 1 < len(shell.args) else None
+            break
+        elif value.startswith("--") or value.startswith("+"):
+            continue
+        elif value.startswith("-") and len(value) > 1:
+            letters += value[1:]
         else:
-            return None, reads_stdin  # a script file; stdin is its data
-    return None, True
+            first = position
+            break
+    if "n" in letters:
+        return None, False
+    if "c" in letters:
+        return first, False
+    return None, first is None or "s" in letters
 
 
 def simple_commands(command: str) -> list[SimpleCommand]:

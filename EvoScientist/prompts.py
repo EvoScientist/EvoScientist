@@ -290,7 +290,7 @@ When using the `execute` tool for shell commands:
 
 _SHELL_GUIDELINES_DANGEROUS_FOOTER = """
 
-**Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`), killing by name (`pkill`, `killall`, `kill $(pgrep ...)`, `kill -1`) and `rm -rf /` are rejected regardless of mode."""
+**Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`), killing by name or all at once (`pkill`, `killall`, `kill $(pgrep ...)`, `kill -9 -1`) and `rm -rf /` are rejected regardless of mode."""
 
 
 # Windows with the recorded Git Bash (EvoScientist.agent_shell). The sandbox

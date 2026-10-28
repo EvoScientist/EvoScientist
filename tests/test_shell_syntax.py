@@ -131,8 +131,11 @@ class TestSimpleCommands:
             "bash -c 'cat' <<'EOF'\npkill\nEOF",
             "bash run.sh <<EOF\npkill\nEOF",
             "timeout 5 bash -n <<'EOF'\npkill\nEOF",
+            "bash -n -c 'pkill x'",
         ):
             assert "pkill" not in [name for name, _ in self._found(data)]
+        # After the script, -n is only $0.
+        assert ("pkill", ()) in self._found("bash -c 'pkill x' -n")
 
     def test_nested_scripts_are_read_once(self):
         command = "echo hi"
