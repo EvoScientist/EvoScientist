@@ -69,7 +69,10 @@ _SYNTHETIC_EVENT_ID_PREFIX = "synth:"
 # marker with the run's interrupt request, which is what ends the turn here.
 _ROOT_STOP_LIFECYCLE_EVENTS = frozenset({"completed", "failed"})
 # How long a turn waits for the thread state to record the run's complete set
-# of prompts before it gives up and reports the failure.
+# of prompts before it gives up and reports the failure. The wait is bounded
+# on purpose: a turn that waited for a slow sibling task forever would block
+# the user, while a turn that gives up keeps the run alive and reports that
+# the set is incomplete. 20 attempts of 0.25s give the state 5s to settle.
 _PAUSE_SYNC_ATTEMPTS = 20
 _PAUSE_SYNC_DELAY = 0.25
 
@@ -1667,11 +1670,16 @@ class LangGraphServerGateway:
                                 yield processed
                             if _is_run_interrupt_event(owned):
                                 seen_interrupt_ids.add(_interrupt_request_id(owned))
-                                # The run is pausing. The prompts it waits
-                                # for are only final once the thread state
-                                # records them all, so wait for that
-                                # instead of reporting the one that
-                                # happened to arrive first.
+                                # The run is pausing. This event already
+                                # carried its own prompt, and a sibling
+                                # task may still be running: the thread
+                                # state is the authority on the run's
+                                # complete set of prompts, so wait for it
+                                # and deliver the sibling's prompt in the
+                                # same turn. This event's own prompt is
+                                # delivered before the wait on purpose, so
+                                # the user still gets the question when the
+                                # state has not recorded it yet.
                                 (
                                     persisted,
                                     confirmed,

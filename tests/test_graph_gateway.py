@@ -1251,6 +1251,80 @@ async def test_langgraph_server_gateway_turn_scopes_events_across_several_runs()
     assert len(threads.stream_calls) == 1
 
 
+async def test_langgraph_server_gateway_stops_at_a_markerless_terminal():
+    """A stream without run markers ends the turn at its first terminal.
+
+    The server brackets every run with synthetic markers, so a stream that
+    carries none cannot be scoped: the turn keeps the pre-scope behavior
+    and ends at the terminal event instead of waiting for a marker that
+    never comes. A markerless run in front of this run's marker therefore
+    ends the turn early and hands over the earlier run's text. The server
+    does not produce that mix - every lifecycle event it mints carries the
+    run id it belongs to.
+    """
+    markerless_terminal = {
+        "method": "lifecycle",
+        # No synthetic prefix, so the event carries no run id.
+        "event_id": "stream-entry:1712",
+        "params": {
+            "namespace": [],
+            "data": {"event": "completed", "graph_name": "EvoScientist"},
+        },
+    }
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={
+            "abc12345": [
+                FakeLangGraphThreadStream(
+                    "abc12345",
+                    events=[
+                        *_server_message_events("earlier answer", index=0),
+                        markerless_terminal,
+                        _server_lifecycle_event("run-2", "running"),
+                        *_server_message_events("second answer", index=2),
+                        _server_lifecycle_event("run-2", "completed"),
+                    ],
+                    run_id="run-2",
+                ),
+            ]
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        events = [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message="hey",
+                    thread_id="abc12345",
+                    metadata={"workspace_dir": "/tmp/ws"},
+                    target=GraphTarget(graph_id="writing-agent"),
+                )
+            )
+        ]
+
+    # The turn ends at the markerless terminal, with the text that was held
+    # back until then: the stream cannot be scoped, so it behaves the way
+    # it did before the scopes existed.
+    assert events == [
+        {"type": "text", "content": "earlier answer"},
+        {
+            "type": "done",
+            "content": "earlier answer",
+            "response": "earlier answer",
+        },
+    ]
+
+
 async def test_langgraph_server_gateway_resumed_run_completes():
     """A resumed run still ends the turn.
 
