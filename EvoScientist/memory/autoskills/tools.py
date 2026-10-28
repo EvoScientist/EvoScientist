@@ -169,8 +169,7 @@ def create_submit_autoskill_proposal_tool(
             "folder under /autoskill-proposals/<skill-name>. Set operation to "
             "'update' when changing an existing workspace/global skill. In "
             "auto mode, the tool promotes the proposal only if validation and "
-            "collision checks pass. Installation into another tier requires "
-            "explicit human approval via /autoskills approve."
+            "collision checks pass."
         ),
         args_schema=SubmitAutoskillProposalArgs,
         infer_schema=False,

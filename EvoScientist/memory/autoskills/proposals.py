@@ -841,13 +841,6 @@ def approve_skill_proposal(
     destination = destination_root / skill_name
     base_skill_dir: Path | None = None
     workspace_shadow: Path | None = None
-    shadow_source_scope = manifest.get("shadow_source_scope")
-    if shadow_source_scope not in {None, _SCOPE_GLOBAL}:
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Proposal records an unknown shadow source {shadow_source_scope!r}",
-        }
     if operation == "create":
         existing_skill = _find_installed_user_skill(
             skill_name,
@@ -875,9 +868,10 @@ def approve_skill_proposal(
                 "proposal_id": manifest["proposal_id"],
                 "error": "Update proposal target must match the proposed skill name",
             }
-        if target_scope == _SCOPE_WORKSPACE and (
-            (recorded_scope == _SCOPE_GLOBAL and requested_scope == _SCOPE_WORKSPACE)
-            or shadow_source_scope == _SCOPE_GLOBAL
+        if (
+            target_scope == _SCOPE_WORKSPACE
+            and recorded_scope == _SCOPE_GLOBAL
+            and requested_scope == _SCOPE_WORKSPACE
         ):
             # A workspace approval may fork the global target. Refuse a
             # destination or matching workspace alias that would remain the
@@ -911,7 +905,7 @@ def approve_skill_proposal(
                     "scope": target_scope,
                 }
             base_skill_dir = existing_global
-        elif legacy and target_scope == _SCOPE_WORKSPACE and requested_scope is None:
+        elif legacy and target_scope == _SCOPE_WORKSPACE:
             # Legacy proposals retain their historical workspace shadow
             # behaviour; only an explicit global approval writes globally.
             local_match = _find_installed_user_skill(

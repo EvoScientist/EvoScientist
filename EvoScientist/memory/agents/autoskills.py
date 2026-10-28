@@ -71,10 +71,8 @@ def _autoskills_system_prompt() -> str:
         "exact skill_name, cluster_hash, source observation IDs, rationale, "
         'and `operation`. Use `operation="create"` for a new skill and '
         '`operation="update"` plus `target_skill_name=<skill-name>` for an '
-        "existing skill update. Installation into another tier is a human "
-        "approval decision; do not try to choose an install scope in the "
-        "proposal tool. If it reports validation errors, edit the proposal "
-        "folder and submit again."
+        "existing skill update. If it reports validation errors, edit the "
+        "proposal folder and submit again."
     )
 
 

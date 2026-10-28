@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from EvoScientist import paths
 from EvoScientist.config import (
     EvoScientistConfig,
@@ -1028,9 +1030,11 @@ def test_update_shadowed_by_local_skill_leaves_global_untouched(tmp_path, monkey
     assert (global_skill / "SKILL.md").read_bytes() == original_global
 
 
+@pytest.mark.parametrize("scope", [None, "workspace"])
 def test_legacy_proposal_without_scope_keeps_workspace_behaviour(
     tmp_path,
     monkeypatch,
+    scope,
 ):
     """A proposal recorded before scopes existed must not write to global.
 
@@ -1074,7 +1078,10 @@ def test_legacy_proposal_without_scope_keeps_workspace_behaviour(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     approved = approve_skill_proposal(
-        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+        scope=scope,
     )
 
     assert approved["approved"] is True

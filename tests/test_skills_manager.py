@@ -23,7 +23,6 @@ from EvoScientist.tools.skills_manager import (
     list_skills,
     register_skills_changed_callback,
     resolve_remote_head,
-    skill_name_and_description,
     uninstall_skill,
 )
 
@@ -90,13 +89,6 @@ This skill has no YAML frontmatter.
 
 
 class TestParseSkillMd:
-    def test_public_skill_metadata_parser_remains_available(self):
-        raw = b"---\nname: public-name\ndescription: Public description\n---\n"
-        assert skill_name_and_description(raw) == (
-            "public-name",
-            "Public description",
-        )
-
     """Tests for _parse_skill_md function."""
 
     def test_parse_with_frontmatter(self, sample_skill_dir):

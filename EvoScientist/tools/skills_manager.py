@@ -1191,11 +1191,6 @@ def _skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
     return name, description
 
 
-def skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
-    """Compatibility wrapper for callers using the metadata parser."""
-    return _skill_name_and_description(raw)
-
-
 def _build_skill_index(workspace: Workspace) -> dict[str, str]:
     """Return ``{name: description}`` for the skills the agent can pin.
 
