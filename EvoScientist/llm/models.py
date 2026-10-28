@@ -320,6 +320,8 @@ def _apply_auto_config(
             # Flash always thinks; M3 needs adaptive to enable thinking. Unlike
             # Claude, neither requires a token budget or a display setting.
             kwargs["thinking"] = {"type": "adaptive"}
+            # Avoid the SDK's 4096 fallback without forcing streaming-only calls.
+            kwargs.setdefault("max_tokens", 16000)
         elif _is_proxy or (is_third_party and not _supports_thinking):
             # Mandatory-thinking Kimi models (K3 / Kimi For Coding) must declare
             # thinking so with_structured_output avoids forced tool_choice (400).

@@ -33,6 +33,18 @@ TEST_WORKSPACE = Workspace("/nonexistent/evosci-test-workspace")
 _DEFAULT_COPY_RESPONSE = object()
 
 
+def anthropic_httpx():
+    """Return the httpx flavor accepted by the installed Anthropic SDK."""
+    import anthropic
+    from packaging.version import Version
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as sdk_httpx
+    else:
+        import httpx as sdk_httpx
+    return sdk_httpx
+
+
 class FakeCommandUI(CommandUI):
     """Command UI test double with recorded calls and inert pickers."""
 

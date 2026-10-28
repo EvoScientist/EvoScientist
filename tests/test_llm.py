@@ -18,6 +18,7 @@ from EvoScientist.llm import (
     list_models,
 )
 from EvoScientist.llm.models import _MODEL_ENTRIES
+from tests.fakes import anthropic_httpx
 
 # =============================================================================
 # Test MODELS registry
@@ -174,8 +175,6 @@ class TestListModels:
         result = set(list_models())
         assert result <= MODELS.keys()
         assert MODELS.keys() - result == {
-            "minimax-m2.1",
-            "minimax-m2.5",
             "minimax-m2.5-highspeed",
             "minimax-m2.7",
             "minimax-m2.7-highspeed",
@@ -1663,7 +1662,7 @@ class TestThirdPartyRouting:
         import anthropic
         from langchain_core.messages import AIMessage, HumanMessage
 
-        httpx = _anthropic_httpx()
+        httpx = anthropic_httpx()
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
         model = get_chat_model("MiniMax-M3", provider="minimax", output_version="v1")
@@ -3185,21 +3184,6 @@ class TestPatchOpenrouterStripResponsesReasoning:
 # =============================================================================
 
 
-def _anthropic_httpx():
-    """Return the httpx flavour the installed anthropic SDK accepts as ``http_client``.
-
-    anthropic >= 1.0 is built on ``httpx2`` and rejects an ``httpx.Client``.
-    """
-    import anthropic
-    from packaging.version import Version
-
-    if Version(anthropic.__version__) >= Version("1"):
-        import httpx2 as httpx
-    else:
-        import httpx
-    return httpx
-
-
 class TestAnthropicStripForeignReasoning:
     def test_strip_removes_reasoning_content_blocks(self):
         """reasoning_content blocks are dropped; text and thinking survive."""
@@ -3277,7 +3261,7 @@ class TestAnthropicStripForeignReasoning:
         import anthropic
         from langchain_core.messages import AIMessage, HumanMessage
 
-        httpx = _anthropic_httpx()
+        httpx = anthropic_httpx()
 
         monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
         monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
@@ -3350,7 +3334,7 @@ class TestAnthropicStructuredOutput:
         import anthropic
         from pydantic import BaseModel
 
-        httpx = _anthropic_httpx()
+        httpx = anthropic_httpx()
 
         class Pick(BaseModel):
             answer: str
@@ -3951,7 +3935,7 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     import anthropic
     from langchain_core.messages import HumanMessage
 
-    httpx = _anthropic_httpx()
+    httpx = anthropic_httpx()
     monkeypatch.setenv("MIMO_TOKEN_PLAN_API_KEY", "tp-test")
     if region_url:
         monkeypatch.setenv("MIMO_TOKEN_PLAN_BASE_URL", region_url)

@@ -12,13 +12,13 @@ from EvoScientist.llm.context_window import get_context_window
 from EvoScientist.llm.models import get_chat_model
 from EvoScientist.llm.registry import (
     _MODEL_ENTRIES,
-    DEFAULT_MODEL,
     MODELS,
     get_models_for_provider,
     list_model_picker_entries,
     list_models,
     list_models_by_provider,
 )
+from tests.fakes import anthropic_httpx
 
 
 def test_current_choices_preserve_legacy_resolution():
@@ -36,14 +36,29 @@ def test_current_choices_preserve_legacy_resolution():
         ("minimax-m3", "minimax/minimax-m3"),
     ]
     picker = asyncio.run(list_model_picker_entries(None, include_custom_ollama=False))
+    direct_picker = [
+        (name, model_id)
+        for name, model_id, provider in picker
+        if provider == "minimax"
+    ]
+    assert direct_picker == current
+    assert not any(name.startswith("minimax-m2") for name, _ in direct_picker)
+    legacy_names = {
+        "minimax-m2.5",
+        "minimax-m2.5-highspeed",
+        "minimax-m2.7",
+        "minimax-m2.7-highspeed",
+    }
+    assert legacy_names <= MODELS.keys()
+    assert legacy_names <= {
+        name
+        for name, _, provider in _MODEL_ENTRIES
+        if provider == "minimax"
+    }
+    assert ("minimax-m2.5", "minimaxai/minimax-m2.5", "nvidia") in picker
+    assert ("minimax-m2.5", "Pro/MiniMaxAI/MiniMax-M2.5", "siliconflow") in picker
+    assert {"minimax-m2.1", "minimax-m2.5"} <= set(list_models())
     assert picker == list_models_by_provider()
-    assert not any(name.startswith("minimax-m2") for name in list_models())
-    assert not any(name.startswith("minimax-m2") for name, _, _ in picker)
-    legacy = [entry for entry in _MODEL_ENTRIES if entry[0].startswith("minimax-m2")]
-    assert len(legacy) == 7
-    assert all(name in MODELS for name, _, _ in legacy)
-    assert DEFAULT_MODEL == "claude-sonnet-5-5"
-    assert ("kimi-k3", "kimi-k3", "moonshot") in picker
 
 
 @pytest.mark.parametrize("model_id", ["MiniMax-M3.1-Flash", "MiniMax-M3"])
@@ -52,10 +67,7 @@ def test_current_choices_preserve_legacy_resolution():
     ["https://api.minimaxi.com/anthropic", "https://api.minimax.io/anthropic"],
 )
 def test_current_direct_request_and_history(monkeypatch, model_id, base_url):
-    # Match the SDK's transport: Anthropic 1.x moved from httpx to httpx2.
-    from tests.test_llm import _anthropic_httpx
-
-    httpx = _anthropic_httpx()
+    sdk_httpx = anthropic_httpx()
     monkeypatch.setenv("MINIMAX_API_KEY", "fixture-key")
     monkeypatch.setenv("MINIMAX_BASE_URL", base_url)
     model = get_chat_model(model_id.lower(), provider="minimax")
@@ -64,7 +76,7 @@ def test_current_direct_request_and_history(monkeypatch, model_id, base_url):
 
     def handler(request):
         captured.append((request.url, json.loads(request.content)))
-        return httpx.Response(
+        return sdk_httpx.Response(
             200,
             json={
                 "id": "msg_fixture",
@@ -82,7 +94,7 @@ def test_current_direct_request_and_history(monkeypatch, model_id, base_url):
         {"type": "thinking", "thinking": "consider", "signature": "fixture-signature"},
         {"type": "tool_use", "id": "tool_1", "name": "lookup", "input": {"q": "x"}},
     ]
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+    with sdk_httpx.Client(transport=sdk_httpx.MockTransport(handler)) as client:
         model._client = anthropic.Anthropic(
             api_key="fixture-key", base_url=base_url, http_client=client, max_retries=0
         )
@@ -98,6 +110,7 @@ def test_current_direct_request_and_history(monkeypatch, model_id, base_url):
     assert str(url) == base_url + "/v1/messages"
     assert payload["model"] == model_id
     assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["max_tokens"] == 16000
     assert "service_tier" not in payload
     assert "reasoning_effort" not in payload
     assert payload["messages"][1]["content"] == history

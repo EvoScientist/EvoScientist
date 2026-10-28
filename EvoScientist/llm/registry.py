@@ -294,15 +294,14 @@ MODELS: dict[str, tuple[str, str]] = {
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
-# Keep legacy entries in _MODEL_ENTRIES and MODELS for saved configurations and
-# explicit lookups; only omit them from current model selection surfaces.
-_DEPRECATED_MODEL_NAMES = frozenset(
+# Keep legacy direct MiniMax entries in _MODEL_ENTRIES and MODELS for saved
+# configurations and explicit lookups; only omit them from direct selection.
+_DEPRECATED_MODEL_ENTRIES = frozenset(
     {
-        "minimax-m2.7",
-        "minimax-m2.7-highspeed",
-        "minimax-m2.5",
-        "minimax-m2.5-highspeed",
-        "minimax-m2.1",
+        ("minimax-m2.7", "minimax"),
+        ("minimax-m2.7-highspeed", "minimax"),
+        ("minimax-m2.5", "minimax"),
+        ("minimax-m2.5-highspeed", "minimax"),
     }
 )
 
@@ -322,7 +321,8 @@ def get_models_for_provider(
     return [
         (name, model_id)
         for name, model_id, p in _MODEL_ENTRIES
-        if p == provider and (include_deprecated or name not in _DEPRECATED_MODEL_NAMES)
+        if p == provider
+        and (include_deprecated or (name, p) not in _DEPRECATED_MODEL_ENTRIES)
     ]
 
 
@@ -334,8 +334,8 @@ def list_models() -> list[str]:
     """
     seen = set()
     result = []
-    for name, _, _ in _MODEL_ENTRIES:
-        if name not in seen and name not in _DEPRECATED_MODEL_NAMES:
+    for name, _, provider in _MODEL_ENTRIES:
+        if name not in seen and (name, provider) not in _DEPRECATED_MODEL_ENTRIES:
             seen.add(name)
             result.append(name)
     return result
@@ -351,7 +351,7 @@ def list_models_by_provider() -> list[tuple[str, str, str]]:
     result: list[tuple[str, str, str]] = []
     for name, model_id, provider in _MODEL_ENTRIES:
         key = (name, provider)
-        if key not in seen and name not in _DEPRECATED_MODEL_NAMES:
+        if key not in seen and key not in _DEPRECATED_MODEL_ENTRIES:
             seen.add(key)
             result.append((name, model_id, provider))
     return result
