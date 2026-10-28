@@ -12,11 +12,11 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -32,7 +32,7 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 
-from . import paths
+from . import paths, shell_syntax
 from .cancellation import current_cancel_event
 
 if TYPE_CHECKING:
@@ -190,126 +190,6 @@ def _unregister_shell_process(
             _active_shell_processes.pop(event, None)
 
 
-def _shell_token_spans(command: str) -> list[dict[str, object]]:
-    """Tokenize enough shell syntax for the command checks and path rewriting.
-
-    This is intentionally small: it tracks words, quotes, comments and command
-    separators, but does not try to be a full POSIX shell parser.
-    """
-    return list(_iter_shell_tokens(command))
-
-
-def _iter_shell_tokens(command: str, start: int = 0) -> Iterator[dict[str, object]]:
-    """The tokens of :func:`_shell_token_spans`, lazily and from *start*."""
-    i = start
-    n = len(command)
-
-    def read_operator(index: int) -> str | None:
-        if command.startswith(("&&", "||"), index):
-            return command[index : index + 2]
-        if command.startswith("&>", index):
-            return "&>"
-        ch = command[index]
-        if ch in "`();|&":
-            return ch
-        if ch in "<>":
-            # `>>`/`<<` and `>|` (force-clobber redirect) are single redirection
-            # operators, NOT a pipe — the trailing `|` must not read as a boundary.
-            if index + 1 < n and (
-                command[index + 1] == ch or (ch == ">" and command[index + 1] == "|")
-            ):
-                return command[index : index + 2]
-            return ch
-        if ch.isdigit():
-            j = index
-            while j < n and command[j].isdigit():
-                j += 1
-            if j < n and command[j] in "<>":
-                end = j + 1
-                # `2>&1`, `2>>`, and `2>|` (fd force-clobber) are single
-                # redirection operators — the trailing `|` is not a pipe.
-                if end < n and command[end] in ("&", "|", command[j]):
-                    end += 1
-                return command[index:end]
-        return None
-
-    while i < n:
-        if command[i].isspace():
-            i += 1
-            continue
-        if command.startswith("\\\n", i):
-            i += 2  # line continuation
-            continue
-        if command[i] == "#" and (i == 0 or command[i - 1] not in ")`"):
-            # A comment: its quotes are text, so they open nothing. After a
-            # ")" or backtick the "#" still belongs to the word.
-            newline = command.find("\n", i)
-            i = n if newline == -1 else newline
-            continue
-        operator = read_operator(i)
-        if operator is not None:
-            yield {
-                "type": "op",
-                "value": operator,
-                "start": i,
-                "end": i + len(operator),
-            }
-            i += len(operator)
-            continue
-
-        word_start = i
-        value: list[str] = []
-        quoted = False
-        while i < n:
-            ch = command[i]
-            if ch.isspace():
-                break
-            if read_operator(i) is not None:
-                break
-            if ch in ("'", '"'):
-                quoted = True
-                quote = ch
-                i += 1
-                while i < n:
-                    inner = command[i]
-                    if inner == quote:
-                        i += 1
-                        break
-                    if (
-                        quote == '"'
-                        and command.startswith("$(", i)
-                        and not command.startswith("$((", i)
-                    ):
-                        # Quotes inside the substitution do not end the string.
-                        close = _matching_paren(command, i + 2)
-                        if close is not None:
-                            value.append(command[i : close + 1])
-                            i = close + 1
-                            continue
-                    if inner == "\\" and quote == '"' and i + 1 < n:
-                        value.append(command[i + 1])
-                        i += 2
-                    else:
-                        value.append(inner)
-                        i += 1
-                continue
-            if ch == "\\" and i + 1 < n:
-                value.append(command[i + 1])
-                i += 2
-                continue
-            value.append(ch)
-            i += 1
-
-        yield {
-            "type": "word",
-            "value": "".join(value),
-            "raw": command[word_start:i],
-            "start": word_start,
-            "end": i,
-            "quoted": quoted,
-        }
-
-
 # Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
 # piped data as code or ship it off-box). Everything else piping is normal.
 _PIPE_NETWORKING_RHS = frozenset(
@@ -369,7 +249,7 @@ def check_dangerous_command(command: str) -> str | None:
     not detected — this is a known limitation, not a bug to fix here.
     """
     after_pipe = False
-    for token in _shell_words(command).tokens:
+    for token in shell_syntax.parse(command).tokens:
         if token.get("type") == "op":
             value = token.get("value")
             if value == "|":
@@ -899,7 +779,7 @@ def _ssh_invocations(
         >>> _ssh_invocations("/tmp/ssh host 'pwd'")
         []
     """
-    tokens = _shell_words(command).tokens
+    tokens = shell_syntax.parse(command).tokens
     invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
     segment: list[dict[str, object]] = []
 
@@ -922,7 +802,7 @@ def _ssh_invocations(
 
     prev_end = 0
     for token in tokens:
-        ends_command = _COMMAND_NEWLINE_RE.search(
+        ends_command = shell_syntax.COMMAND_NEWLINE_RE.search(
             command, prev_end, int(token["start"])
         )
         if token.get("type") == "op" or ends_command is not None:
@@ -1031,40 +911,10 @@ def _validate_ssh_remote_command_format(command: str) -> str | None:
     return None
 
 
-def _split_shell_commands(command: str) -> list[str]:
-    """The command names of a compound shell command: the first word of each
-    command, on every line; here-document bodies are skipped. Redirection
-    operands are filenames, not commands.
-    """
-    words = _shell_words(command)
-    tokens = words.tokens
-    flags = _command_name_flags(command, tokens)
-    names = [
-        str(token["value"])
-        for token, is_command_name in zip(tokens, flags, strict=True)
-        if is_command_name
-    ]
-    bodies: list[str] = []
-
-    def collect(body: str) -> tuple[str, bool]:
-        bodies.append(body)
-        return body, False
-
-    for token in tokens:
-        if token["type"] == "word" and token["quoted"]:
-            _rewrite_quoted_substitutions(str(token["raw"]), collect)
-    for start, end, expands in words.bodies:
-        if expands:
-            _rewrite_quoted_substitutions(command[start:end], collect, heredoc=True)
-    for body in bodies:
-        names.extend(_split_shell_commands(body))
-    return names
-
-
 def _split_command_segments(command: str) -> list[str] | None:
     """Split a compound command into raw segment strings on command boundaries.
 
-    Quote-aware (via ``_shell_token_spans``). Boundaries are ``;`` ``&&`` ``||``
+    Quote-aware (via ``shell_syntax.tokenize``). Boundaries are ``;`` ``&&`` ``||``
     ``|`` ``&`` and grouping; redirections are not boundaries. Lets the allow-list
     clear a chain only when *every* segment is allow-listed, not just the leading
     one (``ls; rm -rf x`` must not ride in on an allow-listed ``ls``).
@@ -1083,7 +933,7 @@ def _split_command_segments(command: str) -> list[str] | None:
     boundaries = {"&&", "||", ";", "|", "&", "(", ")"}
     segments: list[str] = []
     seg_start = 0
-    for token in _shell_token_spans(command):
+    for token in shell_syntax.tokenize(command):
         if token.get("type") == "op" and token.get("value") in boundaries:
             seg = command[seg_start : int(token["start"])].strip()
             if seg:
@@ -1220,9 +1070,11 @@ def _removable_inside(
 
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The absolute ``cd`` / ``pushd`` target outside *allow_prefixes*, if any."""
-    tokens = _shell_words(command).tokens
-    flags = _command_name_flags(command, tokens)
-    for index, (token, is_command_name) in enumerate(zip(tokens, flags, strict=True)):
+    words = shell_syntax.parse(command)
+    tokens = words.tokens
+    for index, (token, is_command_name) in enumerate(
+        zip(tokens, words.name_flags, strict=True)
+    ):
         if not (is_command_name and token["value"] in ("cd", "pushd")):
             continue
         target = tokens[index + 1] if index + 1 < len(tokens) else None
@@ -1288,8 +1140,10 @@ def validate_command(
             )
 
     # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
-    tokens = _shell_words(command).tokens
-    whole_words = {(start, end) for start, end, _quoted in _glued_words(tokens)}
+    tokens = shell_syntax.parse(command).tokens
+    whole_words = {
+        (start, end) for start, end, _quoted in shell_syntax.glued_words(tokens)
+    }
     # A target glued to a substitution can expand to more paths than it shows.
     targets = {
         int(token["start"]): token
@@ -1320,7 +1174,7 @@ def validate_command(
             )
 
     # Check for dangerous commands (pipeline-aware) — always enforced.
-    for base_cmd in _split_shell_commands(command):
+    for base_cmd in shell_syntax.command_names(command):
         name = re.split(r"[\\/]", base_cmd)[-1]
         if name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
@@ -1533,229 +1387,6 @@ def _rewrite_quoted_path(
 
 
 _QUOTED_SPAN_RE = re.compile(r'(["\'])((?:\\.|(?!\1).)*?)\1')
-# Operators after which the next word is a command name.
-_COMMAND_START_OPS = frozenset({";", "&&", "||", "|", "&", "(", ")", "`"})
-
-
-def _heredoc_spans(
-    command: str, start: int, delimiters: list[tuple[str, bool, bool]]
-) -> list[tuple[int, int, bool]] | None:
-    """``(start, end, expands)`` of the here-document bodies that begin at
-    *start*, one per ``(delimiter, strip_tabs, expands)``; ``None`` when one
-    is unterminated."""
-    spans: list[tuple[int, int, bool]] = []
-    pos = start
-    for delimiter, strip_tabs, expands in delimiters:
-        body_start = pos
-        while True:
-            if pos >= len(command):
-                return None
-            newline = command.find("\n", pos)
-            line_end = len(command) if newline == -1 else newline
-            line = command[pos:line_end]
-            pos = line_end + 1
-            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
-                break
-        spans.append((body_start, min(pos, len(command)), expands))
-    return spans
-
-
-class _ShellWords(NamedTuple):
-    tokens: list[dict[str, object]]
-    bodies: list[
-        tuple[int, int, bool]
-    ]  # start, end, expands $(...) (unquoted delimiter)
-    delimiters: frozenset[int]  # starts of here-document delimiter words
-    arithmetic: frozenset[int]  # starts of tokens inside $(( )) / (( ))
-
-
-_HEREDOC_OP_RE = re.compile(r"\d*<<")
-
-
-def _shell_words(command: str) -> _ShellWords:
-    """Tokens of *command* outside here-document bodies; a body is data and is
-    never tokenized, so quotes in it cannot swallow the commands after it."""
-    tokens: list[dict[str, object]] = []
-    bodies: list[tuple[int, int, bool]] = []
-    delimiters: set[int] = set()
-    in_arithmetic: set[int] = set()
-    pending: list[tuple[str, bool, bool]] = []
-    # One flag per open "(", True inside arithmetic, where "<<" is a shift.
-    parens: list[bool] = []
-    awaiting: tuple[int, bool] | None = None  # heredoc operator end, strip tabs
-    stream = _iter_shell_tokens(command)
-    prev_end = 0
-    previous: dict[str, object] | None = None
-    while True:
-        token = next(stream, None)
-        token_start = len(command) if token is None else int(token["start"])
-        newline = _COMMAND_NEWLINE_RE.search(command, prev_end, token_start)
-        if pending and newline is not None:
-            spans = _heredoc_spans(command, newline.end(), pending)
-            pending = []
-            if spans is not None:
-                bodies.extend(spans)
-                stream = _iter_shell_tokens(command, spans[-1][1])
-                continue
-        if token is None:
-            break
-        tokens.append(token)
-        if any(parens):
-            in_arithmetic.add(token_start)
-        value = str(token["value"])
-        if token["type"] == "op":
-            awaiting = None
-            if value == "(":
-                arithmetic = (
-                    previous is not None
-                    and previous["value"] == "("
-                    and int(previous["end"]) == token_start
-                )
-                if arithmetic and parens:
-                    parens[-1] = True
-                parens.append(arithmetic)
-            elif value == ")" and parens:
-                parens.pop()
-            elif _HEREDOC_OP_RE.fullmatch(value) and not any(parens):
-                awaiting = (int(token["end"]), False)
-        elif awaiting is not None:
-            op_end, strip_tabs = awaiting
-            raw = str(token["raw"])
-            if raw == "-" and token_start == op_end:
-                awaiting = (int(token["end"]), True)
-            else:
-                if token_start == op_end and raw.startswith("-"):
-                    strip_tabs, value = True, value[1:]
-                if value:
-                    # A quoted or escaped delimiter makes the body literal.
-                    expands = not token["quoted"] and "\\" not in raw
-                    pending.append((value, strip_tabs, expands))
-                    delimiters.add(token_start)
-                awaiting = None
-        prev_end = int(token["end"])
-        previous = token
-    return _ShellWords(tokens, bodies, frozenset(delimiters), frozenset(in_arithmetic))
-
-
-_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
-_SHELL_C_OPTION_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
-
-
-def _shell_script_words(tokens: list[dict[str, object]]) -> set[int]:
-    """Starts of the script arguments of ``sh -c '...'`` / ``bash -lc "..."``."""
-    starts: set[int] = set()
-    for index, token in enumerate(tokens):
-        name = re.split(r"[\\/]", str(token["value"]))[-1]
-        if token["type"] != "word" or name not in _SHELL_NAMES:
-            continue
-        for option, script in zip(
-            tokens[index + 1 :], tokens[index + 2 :], strict=False
-        ):
-            if option["type"] != "word" or not str(option["raw"]).startswith("-"):
-                break
-            if _SHELL_C_OPTION_RE.fullmatch(str(option["raw"])):
-                if script["type"] == "word":
-                    starts.add(int(script["start"]))
-                break
-    return starts
-
-
-# Words after which the next word is still a command name.
-_COMMAND_PREFIX_WORDS = frozenset(
-    {"do", "then", "else", "elif", "if", "while", "until", "!", "time", "{"}
-)
-# A newline that ends a command, not a backslash line continuation.
-_COMMAND_NEWLINE_RE = re.compile(r"(?<!\\)\n")
-_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
-
-
-def _command_name_flags(command: str, tokens: list[dict[str, object]]) -> list[bool]:
-    """For each token, whether it is a word in command-name position."""
-    flags: list[bool] = []
-    previous: dict[str, object] | None = None
-    carried = timing = False
-    for token in tokens:
-        starts_command = (
-            carried
-            or previous is None
-            or (previous["type"] == "op" and previous["value"] in _COMMAND_START_OPS)
-            or _COMMAND_NEWLINE_RE.search(
-                command, int(previous["end"]), int(token["start"])
-            )
-            is not None
-        )
-        value = str(token["value"])
-        is_name = token["type"] == "word" and starts_command
-        time_option = is_name and timing and value.startswith("-")
-        flags.append(is_name and not time_option)
-        timing = time_option or (is_name and value == "time")
-        carried = timing or (
-            is_name
-            and (
-                value in _COMMAND_PREFIX_WORDS
-                or bool(_ASSIGNMENT_RE.match(str(token["raw"])))
-            )
-        )
-        previous = token
-    return flags
-
-
-def _glued_words(tokens: list[dict[str, object]]) -> list[tuple[int, int, bool]]:
-    """``(start, end, quoted)`` of each shell word: tokens with nothing between
-    them, so ``/Users/$(whoami)/x`` is one word; an enclosing closer ends it."""
-    words: list[tuple[int, int, bool]] = []
-    in_backtick = False
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        previous = tokens[index - 1] if index else None
-        if token["type"] == "op":
-            if token["value"] == "`":
-                in_backtick = not in_backtick
-            index += 1
-            continue
-        continues_previous = (
-            previous is not None
-            and int(previous["end"]) == int(token["start"])
-            and previous["type"] == "op"
-            and (
-                previous["value"] == ")"
-                or (previous["value"] == "`" and not in_backtick)
-            )
-        )
-        if continues_previous:
-            index += 1
-            continue
-        start, end = int(token["start"]), int(token["end"])
-        quoted = bool(token["quoted"])
-        depth = 0
-        own_backtick = False
-        index += 1
-        while index < len(tokens):
-            following = tokens[index]
-            if int(following["start"]) != end:
-                break
-            value = following["value"]
-            if following["type"] == "word":
-                quoted = quoted or bool(following["quoted"])
-            elif value == "(":
-                depth += 1
-            elif value == ")":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif value == "`":
-                if not own_backtick and in_backtick:
-                    break
-                own_backtick = not own_backtick
-            else:
-                break
-            end = int(following["end"])
-            index += 1
-        if own_backtick:
-            in_backtick = not in_backtick
-        words.append((start, end, quoted))
-    return words
 
 
 def _is_system_path(path: str) -> bool:
@@ -1842,81 +1473,6 @@ def _rewrite_path_word(
     return in_workspace("" if path == "/" else path), False
 
 
-def _matching_paren(text: str, start: int) -> int | None:
-    """Index of the ``)`` closing a ``$(`` whose body begins at *start*."""
-    depth = 0
-    quote: str | None = None
-    i = start
-    while i < len(text):
-        ch = text[i]
-        if ch == "\\" and quote != "'":
-            i += 2
-            continue
-        if quote is not None:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-        elif ch == "#" and (i == start or text[i - 1] in " \t\n;|&("):
-            newline = text.find("\n", i)
-            if newline == -1:
-                return None
-            i = newline
-            continue
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth == 0:
-                return i
-            depth -= 1
-        i += 1
-    return None
-
-
-def _rewrite_quoted_substitutions(
-    raw: str, convert: Callable[[str], tuple[str, bool]], *, heredoc: bool = False
-) -> tuple[str, bool]:
-    """Convert the commands inside ``$(...)`` and backticks within double
-    quotes (or anywhere in an expanding *heredoc* body); they run, while the
-    text around them is data."""
-    out: list[str] = []
-    uses_tmp = False
-    quote: str | None = '"' if heredoc else None
-    i = 0
-    while i < len(raw):
-        ch = raw[i]
-        body: tuple[int, int, str, str] | None = None
-        if quote == "'":
-            if ch == "'":
-                quote = None
-        elif ch == "\\":
-            out.append(raw[i : i + 2])
-            i += 2
-            continue
-        elif ch in "'\"" and not heredoc and (quote is None or quote == ch):
-            quote = None if quote == ch else ch
-        elif quote == '"' and raw.startswith("$(", i) and not raw.startswith("$((", i):
-            close = _matching_paren(raw, i + 2)
-            if close is not None:
-                body = (i + 2, close, "$(", ")")
-        elif quote == '"' and ch == "`":
-            close = i + 1
-            while close < len(raw) and raw[close] != "`":
-                close += 2 if raw[close] == "\\" else 1
-            if close < len(raw):
-                body = (i + 1, close, "`", "`")
-        if body is None:
-            out.append(ch)
-            i += 1
-            continue
-        inner_start, close, opener, closer = body
-        inner, tmp = convert(raw[inner_start:close])
-        uses_tmp = uses_tmp or tmp
-        out.append(opener + inner + closer)
-        i = close + 1
-    return "".join(out), uses_tmp
-
-
 def _convert_command_paths(
     command: str,
     workspace_name: str | None = None,
@@ -1927,11 +1483,10 @@ def _convert_command_paths(
 ) -> tuple[str, bool]:
     """:func:`convert_virtual_paths_in_command`, plus whether the result uses
     the workspace's ``tmp/``; *after_cd* marks a substitution that runs after one."""
-    words = _shell_words(command)
-    flags = _command_name_flags(command, words.tokens)
+    words = shell_syntax.parse(command)
     cd_starts = [
         int(token["start"])
-        for token, is_command_name in zip(words.tokens, flags, strict=True)
+        for token, is_command_name in zip(words.tokens, words.name_flags, strict=True)
         if is_command_name and token["value"] in ("cd", "pushd")
     ]
     rules = {
@@ -1940,10 +1495,10 @@ def _convert_command_paths(
         "skills_dir": skills_dir,
         "media_dirs": media_dirs,
     }
-    scripts = _shell_script_words(words.tokens)
+    scripts = shell_syntax.shell_script_words(words.tokens)
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
-    for start, end, quoted in _glued_words(words.tokens):
+    for start, end, quoted in shell_syntax.glued_words(words.tokens):
         if start in words.delimiters or start in words.arithmetic:
             continue
         raw = command[start:end]
@@ -1984,7 +1539,7 @@ def _convert_command_paths(
                 ),
                 raw,
             )
-            replacement, tmp = _rewrite_quoted_substitutions(
+            replacement, tmp = shell_syntax.rewrite_substitutions(
                 replacement,
                 lambda inner, absolute=absolute: _convert_command_paths(
                     inner, **rules, after_cd=absolute
@@ -2016,7 +1571,7 @@ def _convert_command_paths(
         if not expands:
             continue
         body = command[body_start:body_end]
-        converted, tmp = _rewrite_quoted_substitutions(
+        converted, tmp = shell_syntax.rewrite_substitutions(
             body,
             lambda inner: _convert_command_paths(inner, **rules, after_cd=after_cd),
             heredoc=True,
