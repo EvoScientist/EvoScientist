@@ -326,7 +326,8 @@ def _offer_server_start() -> None:
         sidecar = manager._read_workspace_sidecar()
         if manager.is_lasting(sidecar):
             # From the project it was started from, which the WebUI opens.
-            workspace = escape(command_arg(sidecar.get("workspace") or "<project>"))
+            recorded = sidecar.get("workspace")
+            workspace = escape(command_arg(recorded) if recorded else "<project>")
             console.print(
                 "[dim]The background agent service runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "

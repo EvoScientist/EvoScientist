@@ -6,6 +6,7 @@ import functools
 import logging
 import os
 import re
+import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -54,11 +55,14 @@ def host_file_tool_path(path: str) -> str:
 
 
 def command_arg(path: str | Path) -> str:
-    """*path* as a command printed for the user to copy takes it: in double
-    quotes when it holds whitespace, which POSIX shells, ``cmd`` and
-    PowerShell all read as one argument."""
+    """*path* as one argument of a command printed for the user to copy:
+    quoted for a POSIX shell (``shlex.quote``), or on Windows in double quotes
+    when it holds whitespace, which ``cmd`` and PowerShell read as one
+    argument (other characters they treat specially are left as they are)."""
     shown = str(path)
-    return f'"{shown}"' if any(ch.isspace() for ch in shown) else shown
+    if os.name == "nt":
+        return f'"{shown}"' if any(ch.isspace() for ch in shown) else shown
+    return shlex.quote(shown)
 
 
 # What reading a stored or forwarded folder value can raise: a wrong type,

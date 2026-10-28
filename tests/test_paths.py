@@ -544,16 +544,32 @@ def test_server_marker_read_once_and_removed(tmp_path):
     assert out.stdout.split() == ["True", "False"], out.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell quoting")
 @pytest.mark.parametrize(
     ("path", "shown"),
     [
         ("/home/me/proj", "/home/me/proj"),
-        ("/home/me/My Projects/app", '"/home/me/My Projects/app"'),
+        ("/home/me/My Projects/app", "'/home/me/My Projects/app'"),
+        ("/home/me/R&D", "'/home/me/R&D'"),
+        ("/home/me/it's", """'/home/me/it'"'"'s'"""),
+    ],
+)
+def test_command_arg_quotes_path_for_posix_shell(path, shown):
+    """A printed command the user copies must keep the path one argument."""
+    from EvoScientist.paths import command_arg
+
+    assert command_arg(path) == shown
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows quoting")
+@pytest.mark.parametrize(
+    ("path", "shown"),
+    [
+        (r"C:\Users\me\proj", r"C:\Users\me\proj"),
         (r"C:\Users\me\My Projects", r'"C:\Users\me\My Projects"'),
     ],
 )
-def test_command_arg_quotes_paths_with_whitespace(path, shown):
-    """A printed command the user copies must keep the path one argument."""
+def test_command_arg_quotes_path_with_whitespace_on_windows(path, shown):
     from EvoScientist.paths import command_arg
 
     assert command_arg(path) == shown
