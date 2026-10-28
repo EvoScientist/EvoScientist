@@ -460,7 +460,7 @@ async def test_skip_replay_stops_at_the_quiet_window():
     assert skipped == 7
 
 
-async def test_skip_replay_stops_at_the_cap_when_never_quiet():
+async def test_skip_replay_raises_when_the_cap_is_hit_while_still_receiving():
     async def endless() -> AsyncIterator[Any]:
         index = 0
         while True:
@@ -476,9 +476,8 @@ async def test_skip_replay_stops_at_the_cap_when_never_quiet():
         clock=clock,
         wait_for=_fake_wait_for(clock, step=0.25),
     ) as events:
-        skipped = await events.skip_replay()
-
-    assert skipped == 4
+        with pytest.raises(RuntimeError, match="replay did not finish within 1s"):
+            await events.skip_replay()
 
 
 async def test_skip_replay_keeps_the_end_of_stream():
@@ -591,6 +590,76 @@ async def test_thread_events_closes_its_reader():
         await asyncio.sleep(0)
 
     assert closed.is_set()
+
+
+async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
+    """A transient get_state error must not cancel an already paused run."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_lifecycle("run-1", "running"), _input_requested([])],
+        interrupted=False,
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    client = gateway.thread_store.client
+    cancelled: list[list[str]] = []
+
+    class _Runs:
+        async def list(self, thread_id: str, **kwargs):
+            return [{"run_id": "run-1", "status": "running", "metadata": {}}]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancelled.append(list(run_ids))
+
+    client.runs = _Runs()
+
+    # Fail only the post-pause read; the pre-run state fetch must still work.
+    real_get_state = threads.get_state
+    calls = {"n": 0}
+
+    async def boom(thread_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real_get_state(thread_id)
+        raise ConnectionError("state store unavailable")
+
+    # Force the paused-state fallback: no stream.interrupts, interrupted False.
+    stream.interrupts = []
+    threads.get_state = boom  # type: ignore[method-assign]
+
+    events = await _turn(gateway, "hi")
+
+    assert cancelled == []
+    assert [event["type"] for event in events] == ["done"]
+    assert events[-1] == {"type": "done", "content": "", "response": ""}
+
+
+async def test_root_failed_lifecycle_emits_done_like_main():
+    """A root ``failed`` ends the turn the same way main's subscribe path does.
+
+    Main ends ``subscribe`` at root failed and then emits ``done`` with whatever
+    text was streamed. The new-message path matches that: it breaks on failed
+    and emits ``done``. An ``error`` event is reserved for raised exceptions.
+    """
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("partial", "1-0"),
+            _lifecycle("run-1", "failed"),
+        ],
+        stay_open=True,
+    )
+    gateway, _ = _gateway(stream)
+
+    events = await _turn(gateway, "hi")
+
+    assert [event["type"] for event in events] == ["text", "done"]
+    assert events[-1] == {
+        "type": "done",
+        "content": "partial",
+        "response": "partial",
+    }
 
 
 def test_quiet_window_defaults():

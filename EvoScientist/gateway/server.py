@@ -320,7 +320,11 @@ class _ThreadEvents:
                 self._queue.put_nowait(event)
                 return skipped
             skipped += 1
-        return skipped
+        # Hitting the cap means replay is still producing envelopes. Starting
+        # the run now would miss its live events on this connection.
+        raise RuntimeError(
+            f"Thread history replay did not finish within {self._max_seconds:g}s"
+        )
 
     def __aiter__(self) -> _ThreadEvents:
         return self
@@ -1310,6 +1314,15 @@ class LangGraphServerGateway:
         try:
             state = await self.thread_store.client.threads.get_state(thread_id)
         except NotFoundError:
+            return events
+        except Exception:
+            # The run already paused. Cancelling it from the outer handler
+            # would drop a prompt the user can still answer after a retry.
+            logger.warning(
+                "Pause state read failed for thread %s; leaving the pause",
+                thread_id,
+                exc_info=True,
+            )
             return events
         for interrupt in _state_interrupts(state):
             events.extend(
