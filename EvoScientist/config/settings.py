@@ -249,8 +249,8 @@ class EvoScientistConfig:
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
     # Transient model-call failures (5xx, 429, connection drops): how long one
     # model call keeps retrying after it first fails, in seconds; 0 = no retry.
-    model_retry_wait_seconds: int = 60
-    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
+    model_retry_wait_seconds: int = 60  # interactive sessions; memory workers, linker
+    auto_mode_retry_wait_seconds: int = 1800  # auto_mode, scheduler, AutoSkills
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider

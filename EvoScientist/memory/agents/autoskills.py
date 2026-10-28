@@ -119,6 +119,7 @@ def build_autoskills_graph(
         workspace_dir=agent_paths.workspace_dir,
         middleware=memory_agent_middleware(
             excluded_tools=_AUTOSKILLS_EXCLUDED_TOOLS,
+            unattended_retry=True,
         ),
         skills=["/skills/"],
         backend=build_autoskill_agent_backend(

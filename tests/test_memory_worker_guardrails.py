@@ -330,6 +330,60 @@ def test_last_budgeted_call_offers_only_the_summary_tool(tmp_path, monkeypatch, 
     )
 
 
+class _RateLimitedOnce(_ScriptedModel):
+    rate_limited: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if not self.rate_limited:
+            self.rate_limited = True
+            import httpx
+            import openai
+
+            request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+            raise openai.RateLimitError(
+                "Error code: 429",
+                response=httpx.Response(429, request=request),
+                body=None,
+            )
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@SYNC_AND_ASYNC
+async def test_rate_limited_worker_call_is_retried(tmp_path, monkeypatch, use_async):
+    from EvoScientist.middleware.model_retry import ModelRetryMiddleware
+
+    waits: list[float] = []
+    build = ModelRetryMiddleware.__init__
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    def fake_clock_and_sleep(self, **kwargs):
+        fakes = {
+            "clock": lambda: sum(waits),
+            "sleep": sleep,
+            "sync_sleep": waits.append,
+        }
+        build(self, **{**kwargs, **fakes, "rng": lambda: 0.5})
+
+    monkeypatch.setattr(ModelRetryMiddleware, "__init__", fake_clock_and_sleep)
+    model = _RateLimitedOnce(scripts=[_finish("after the retry"), _end()], bound=[])
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+    graph = memory_worker.build_memory_worker_graph(
+        MemorySourceType.SUBAGENT,
+        workspace=Workspace(tmp_path / "workspace"),
+        memory_dir=tmp_path / "memories",
+    )
+    await _run(graph, use_async=use_async)
+
+    assert model.rate_limited
+    assert len(waits) == 1
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("after the retry\n")
+
+
 def test_subagent_worker_never_forces_a_tool_choice(tmp_path, monkeypatch):
     """Structured output forced a tool choice on every call, which some models
     reject; the summary tool is an ordinary tool the model chooses to call."""

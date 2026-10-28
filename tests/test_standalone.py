@@ -10,11 +10,12 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import EvoScientist.channels.standalone as standalone
-from EvoScientist.channels.base import Channel
+from EvoScientist.channels.base import Channel, ChannelError
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.paths import Workspace
 from tests.fakes.common import QueueFakeChannel
@@ -891,3 +892,187 @@ def test_run_standalone_quiets_httpx(monkeypatch):
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
 
     assert enabled_at_start == dict.fromkeys(leaking_level, False)
+
+
+@pytest.mark.parametrize("use_agent", [False, True])
+@pytest.mark.parametrize("outcome", ["return", "fatal_start"])
+def test_channel_worker_exit_shuts_down_standalone(
+    monkeypatch, tmp_path, caplog, use_agent, outcome
+):
+    from EvoScientist.channels.bus.events import OutboundMessage
+    from EvoScientist.channels.channel_manager import ChannelManager
+
+    bus = MessageBus()
+    consumer_started = asyncio.Event()
+    consumer_stopped = False
+    consumer_cancelled = False
+
+    class _FailedStartChannel(QueueFakeChannel):
+        async def start(self):
+            raise ChannelError("invalid test credentials")
+
+    class _ExitingChannel(QueueFakeChannel):
+        async def run(self):
+            if use_agent:
+                await consumer_started.wait()
+
+    class _Consumer:
+        def __init__(self, **_kwargs):
+            self.metrics = {}
+
+        async def run(self):
+            nonlocal consumer_cancelled
+            consumer_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                consumer_cancelled = True
+
+        async def stop(self):
+            nonlocal consumer_stopped
+            consumer_stopped = True
+            await bus.publish_outbound(
+                OutboundMessage(channel="fake", chat_id="chat", content="last reply")
+            )
+
+    monkeypatch.setattr(standalone, "InboundConsumer", _Consumer)
+    monkeypatch.setattr(standalone, "_create_standalone_agent", AsyncMock())
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+    stop_health = AsyncMock()
+    monkeypatch.setattr(ChannelManager, "stop_health", stop_health)
+    channel = _FailedStartChannel() if outcome == "fatal_start" else _ExitingChannel()
+
+    async def _run():
+        async with asyncio.timeout(1):
+            return await standalone._async_main(
+                channel, bus, use_agent, False, workspace=Workspace(tmp_path)
+            )
+
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(_run()) is True
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == standalone.__name__
+    ] == ["Channel fake stopped; shutting down"]
+    assert channel._stopped
+    stop_health.assert_awaited_once()
+    if use_agent:
+        assert consumer_stopped
+        assert consumer_cancelled
+        assert [message.content for message in channel._sent] == ["last reply"]
+    if outcome == "fatal_start":
+        assert "invalid test credentials" in caplog.text
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_run_standalone_exits_nonzero_when_the_channel_cannot_start(
+    monkeypatch, tmp_path
+):
+    class _FailedStartChannel(QueueFakeChannel):
+        async def start(self):
+            raise ChannelError("invalid test credentials")
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        standalone.run_standalone(_FailedStartChannel(), MessageBus(), use_agent=False)
+
+    assert exc_info.value.code == 1
+
+
+def test_channel_exit_during_shutdown_does_not_force_exit(
+    monkeypatch, tmp_path, caplog
+):
+    handlers = {}
+    exited = asyncio.Event()
+
+    class _StoppingChannel(QueueFakeChannel):
+        async def run(self):
+            handlers[signal.SIGINT]()
+            await exited.wait()
+
+        async def stop(self):
+            exited.set()
+            # Let the worker finish and its done callbacks run before stop completes.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            await super().stop()
+
+    channel = _StoppingChannel()
+
+    async def _run():
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda sig, callback: handlers.__setitem__(sig, callback),
+        )
+        async with asyncio.timeout(1):
+            return await standalone._async_main(
+                channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+            )
+
+    assert asyncio.run(_run()) is False
+    assert channel._stopped
+    assert "forcing" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
+
+
+def test_outer_cancellation_does_not_start_shutdown(monkeypatch, tmp_path, caplog):
+    class _CancelledChannel(QueueFakeChannel):
+        async def run(self):
+            runner.cancel()
+            await asyncio.Future()
+
+    channel = _CancelledChannel()
+    runner = None
+
+    async def _run():
+        nonlocal runner
+        runner = asyncio.current_task()
+        await standalone._async_main(
+            channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+        )
+
+    with caplog.at_level(logging.INFO), pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+
+    assert not channel._stopped
+    assert "Graceful shutdown initiated" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+def test_sigint_forces_shutdown_after_channel_worker_exits(tmp_path, caplog):
+    class _Channel(QueueFakeChannel):
+        signalled = False
+
+        async def run(self):
+            return
+
+        async def stop(self):
+            if not self.signalled:
+                self.signalled = True
+                asyncio.get_running_loop().call_soon(signal.raise_signal, signal.SIGINT)
+            await asyncio.Future()
+
+    channel = _Channel()
+
+    async def _run():
+        async with asyncio.timeout(1):
+            await standalone._async_main(
+                channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+            )
+
+    asyncio.run(_run())
+    assert "Signal received during shutdown, forcing exit" in caplog.text
