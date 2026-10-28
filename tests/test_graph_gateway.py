@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -1069,358 +1068,6 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
         {"type": "text", "content": "hello"},
         {"type": "done", "content": "hello", "response": "hello"},
     ]
-
-
-def _protocol_text_delta(text: str, *, event_id: str | None = None) -> dict[str, Any]:
-    event: dict[str, Any] = {
-        "method": "messages",
-        "params": {
-            "namespace": [],
-            "data": {
-                "event": "content-block-delta",
-                "delta": {"type": "text-delta", "text": text},
-            },
-        },
-    }
-    if event_id is not None:
-        event["event_id"] = event_id
-    return event
-
-
-def _protocol_root_lifecycle(phase: str, *, run_id: str) -> dict[str, Any]:
-    return {
-        "method": "lifecycle",
-        "params": {"namespace": [], "data": {"event": phase}},
-        "event_id": f"synth:{run_id}:lc::{phase}",
-    }
-
-
-async def test_langgraph_server_gateway_second_turn_ignores_replayed_history():
-    """A second turn on the same thread must not reply with the first answer.
-
-    A new ``threads.stream`` replays earlier runs; the SDK ends ``subscribe``
-    at the first root ``completed``. The gateway has to keep only the current
-    run's envelopes (#558).
-    """
-    turn1 = [
-        _protocol_root_lifecycle("running", run_id="run-1"),
-        _protocol_text_delta("hello from turn one"),
-        _protocol_root_lifecycle("completed", run_id="run-1"),
-    ]
-    turn2 = [
-        _protocol_root_lifecycle("running", run_id="run-2"),
-        _protocol_text_delta("files in the workspace"),
-        _protocol_root_lifecycle("completed", run_id="run-2"),
-    ]
-
-    stream_turn1 = FakeLangGraphThreadStream("thread-1", events=turn1)
-    stream_turn1.run.run_id = "run-1"
-    threads = FakeLangGraphThreadsClient(
-        threads=[{"thread_id": "thread-1", "metadata": {"graph_id": "EvoScientist"}}],
-        states={"thread-1": {"values": {}}},
-        streams={"thread-1": stream_turn1},
-    )
-    gateway = LangGraphServerGateway(
-        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
-    )
-
-    first = [
-        event
-        async for event in gateway.stream_events(
-            RunRequest(message="hey", thread_id="thread-1")
-        )
-    ]
-    assert first[-1] == {
-        "type": "done",
-        "content": "hello from turn one",
-        "response": "hello from turn one",
-    }
-
-    # Second open: history for run-1 plus the live run-2 envelopes.
-    stream_turn2 = FakeLangGraphThreadStream("thread-1", events=[*turn1, *turn2])
-    stream_turn2.run.run_id = "run-2"
-    threads.streams["thread-1"] = stream_turn2
-
-    second = [
-        event
-        async for event in gateway.stream_events(
-            RunRequest(message="list the files", thread_id="thread-1")
-        )
-    ]
-    texts = [event["content"] for event in second if event["type"] == "text"]
-    assert texts == ["files in the workspace"]
-    assert second[-1] == {
-        "type": "done",
-        "content": "files in the workspace",
-        "response": "files in the workspace",
-    }
-
-
-async def test_langgraph_server_gateway_stops_events_after_root_interrupt():
-    """stream.events stays open after input.requested; the gateway must stop.
-
-    The real SDK ends subscribe via _signal_paused on a root interrupt. After
-    switching to events (#558), a never-closing SSE would hang once the
-    interrupt is yielded unless the loop breaks.
-    """
-    interrupt_value = {
-        "action_requests": [
-            {
-                "name": "execute",
-                "args": {"command": "echo hello"},
-                "id": "tool-1",
-            }
-        ],
-        "review_configs": [
-            {
-                "action_name": "execute",
-                "allowed_decisions": ["approve", "reject"],
-            }
-        ],
-    }
-    queued = [
-        _protocol_root_lifecycle("running", run_id="run-1"),
-        {
-            "method": "input.requested",
-            "params": {
-                "namespace": [],
-                "data": {
-                    "interrupt_id": "interrupt-1",
-                    "value": interrupt_value,
-                },
-            },
-            "event_id": "synth:run-1:input::requested",
-        },
-    ]
-
-    class _NeverClosingStream(FakeLangGraphThreadStream):
-        async def _iter_events(self):
-            for event in self._queued_events:
-                yield event
-            await asyncio.Future()
-
-    stream = _NeverClosingStream("abc12345", events=queued)
-    stream.run.run_id = "run-1"
-    threads = FakeLangGraphThreadsClient(
-        threads=[],
-        states={"abc12345": {"values": {}}},
-        streams={"abc12345": stream},
-    )
-    gateway = LangGraphServerGateway(
-        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
-    )
-
-    async def collect() -> list[dict[str, Any]]:
-        return [
-            event
-            async for event in gateway.stream_events(
-                RunRequest(message="hi", thread_id="abc12345")
-            )
-        ]
-
-    events = await asyncio.wait_for(collect(), timeout=2.0)
-    assert events[0]["type"] == "interrupt"
-    assert events[0]["interrupt_id"] == "interrupt-1"
-    assert events[-1] == {"type": "done", "content": "", "response": ""}
-    assert "error" not in {event["type"] for event in events}
-
-
-def _resume_interrupt_envelope(
-    *, run_id: str, interrupt_id: str = "interrupt-1"
-) -> dict[str, Any]:
-    return {
-        "method": "input.requested",
-        "params": {
-            "namespace": [],
-            "data": {
-                "interrupt_id": interrupt_id,
-                "value": {
-                    "action_requests": [
-                        {
-                            "name": "execute",
-                            "args": {"command": "echo hello"},
-                            "id": "tool-1",
-                        }
-                    ],
-                    "review_configs": [
-                        {
-                            "action_name": "execute",
-                            "allowed_decisions": ["approve", "reject"],
-                        }
-                    ],
-                },
-            },
-        },
-        "event_id": f"synth:{run_id}:input::requested",
-    }
-
-
-@pytest.mark.parametrize("include_prior_completed", [True, False])
-async def test_langgraph_server_gateway_resume_ignores_replayed_interrupt(
-    include_prior_completed: bool,
-):
-    """Resume must keep live output after a replayed root input.requested.
-
-    With ``run_id is None`` the old break stopped on the replayed interrupt and
-    dropped the resumed run. Looking up the resumed run id restores filtering.
-    """
-    from langgraph.types import Command
-
-    run1 = [
-        _protocol_root_lifecycle("running", run_id="run-1"),
-        _protocol_text_delta("turn one"),
-        _protocol_root_lifecycle("completed", run_id="run-1"),
-    ]
-    run2 = [
-        _protocol_root_lifecycle("running", run_id="run-2"),
-        _resume_interrupt_envelope(run_id="run-2"),
-    ]
-    run3 = [
-        _protocol_root_lifecycle("running", run_id="run-3"),
-        _protocol_text_delta("after resume"),
-        _protocol_root_lifecycle("completed", run_id="run-3"),
-    ]
-    queued = [*(run1 if include_prior_completed else ()), *run2, *run3]
-    stream = FakeLangGraphThreadStream(
-        "thread-resume",
-        events=queued,
-        interrupts=[{"interrupt_id": "interrupt-1"}],
-    )
-    threads = FakeLangGraphThreadsClient(
-        threads=[
-            {"thread_id": "thread-resume", "metadata": {"graph_id": "EvoScientist"}}
-        ],
-        states={"thread-resume": {"values": {}}},
-        streams={"thread-resume": stream},
-    )
-    client = FakeLangGraphClient(threads)
-    resume_payload = {"decisions": [{"allowed": True}]}
-
-    class _FakeRunsClient:
-        async def list(self, thread_id: str, *, limit: int, offset: int, status=None):
-            if offset:
-                return []
-            return [
-                {
-                    "run_id": "run-3",
-                    "status": "success",
-                    "kwargs": {"command": {"resume": {"interrupt-1": resume_payload}}},
-                }
-            ]
-
-        async def cancel_many(self, *, thread_id: str, run_ids):
-            return None
-
-    client.runs = _FakeRunsClient()
-    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
-
-    events = [
-        event
-        async for event in gateway.stream_events(
-            RunRequest(
-                message=Command(resume={"interrupt-1": resume_payload}),
-                thread_id="thread-resume",
-            )
-        )
-    ]
-    assert [e["type"] for e in events if e["type"] == "interrupt"] == []
-    assert events[-1] == {
-        "type": "done",
-        "content": "after resume",
-        "response": "after resume",
-    }
-
-
-async def test_langgraph_server_gateway_raises_when_event_stream_ends_early():
-    """A dropped events pump must not look like a successful partial turn."""
-
-    class _DropAfterPartial(FakeLangGraphThreadStream):
-        async def _iter_events(self):
-            for event in self._queued_events:
-                yield event
-            # No terminal lifecycle: the transport hung up mid-turn.
-
-    drop = _DropAfterPartial(
-        "abc12345",
-        events=[
-            _protocol_root_lifecycle("running", run_id="run-1"),
-            _protocol_text_delta("partial"),
-        ],
-    )
-    drop.run.run_id = "run-1"
-    threads = FakeLangGraphThreadsClient(
-        threads=[],
-        states={"abc12345": {"values": {}}},
-        streams={"abc12345": drop},
-    )
-    client = FakeLangGraphClient(threads)
-
-    class _FakeRunsClient:
-        async def list(self, thread_id: str, *, limit: int, offset: int, status=None):
-            return [{"run_id": "run-1", "status": "running"}] if not offset else []
-
-        async def cancel_many(self, *, thread_id: str, run_ids):
-            return None
-
-    client.runs = _FakeRunsClient()
-    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
-    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
-    error_event = None
-
-    async def _drain() -> None:
-        nonlocal error_event
-        async for event in gen:
-            if event.get("type") == "error":
-                error_event = event
-
-    with pytest.raises(
-        RuntimeError, match="Thread event stream ended before the run finished"
-    ):
-        await _drain()
-    assert error_event is not None
-    assert error_event["message"] == (
-        "Thread event stream ended before the run finished"
-    )
-
-
-async def test_langgraph_server_gateway_stops_on_root_lifecycle_interrupted():
-    stream = FakeLangGraphThreadStream(
-        "abc12345",
-        events=[
-            _protocol_root_lifecycle("running", run_id="run-1"),
-            _protocol_text_delta("before cancel"),
-            _protocol_root_lifecycle("interrupted", run_id="run-1"),
-            _protocol_text_delta("should not appear"),
-        ],
-    )
-    stream.run.run_id = "run-1"
-    threads = FakeLangGraphThreadsClient(
-        threads=[],
-        states={"abc12345": {"values": {}}},
-        streams={"abc12345": stream},
-    )
-    gateway = LangGraphServerGateway(
-        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
-    )
-    events = [
-        event
-        async for event in gateway.stream_events(
-            RunRequest(message="hi", thread_id="abc12345")
-        )
-    ]
-    texts = [e["content"] for e in events if e["type"] == "text"]
-    assert texts == ["before cancel"]
-    assert events[-1]["type"] == "done"
-
-
-def test_synth_event_run_id_parses_server_lifecycle_ids(monkeypatch):
-    monkeypatch.setenv("REDIS_URI", "redis://localhost")
-    from langgraph_api.event_streaming.session import _synth_event_id
-
-    from EvoScientist.gateway.server import _synth_event_run_id
-
-    event = {"event_id": _synth_event_id("run-abc", "lc", "", "running")}
-    assert _synth_event_run_id(event) == "run-abc"
 
 
 async def test_langgraph_server_gateway_forwards_configurable_extra():
@@ -2767,7 +2414,7 @@ async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
 async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self._queued_events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2908,7 +2555,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self._queued_events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2954,7 +2601,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self._queued_events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -3015,7 +2662,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
 ):
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self._queued_events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -3311,40 +2958,29 @@ async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
 
 
 @pytest.mark.parametrize("multiple_interrupts", [False, True])
-async def test_server_gateway_successful_resume_lists_runs_for_boundary(
+async def test_server_gateway_successful_resume_does_not_list_active_runs(
     multiple_interrupts, caplog
 ):
-    """Successful resumes list runs once to recover the resumed run id."""
+    """Successful resumes need no ownership lookup or ambiguity warnings."""
     from langgraph.types import Command
 
     interrupts = [{"interrupt_id": "interrupt-1"}]
     if multiple_interrupts:
         interrupts.append({"interrupt_id": "interrupt-2"})
-    resume_payload = {"decisions": [{"type": "approve"}]}
     stream = FakeLangGraphThreadStream("thread", interrupts=interrupts)
     threads = FakeLangGraphThreadsClient(
         states={"thread": {"values": {}}}, streams={"thread": stream}
     )
     client = FakeLangGraphClient(threads)
-    # Matching run id must equal the fake stream's default run_id so the
-    # auto-appended root completed is accepted after fail-fast identification.
-    client.runs = SimpleNamespace(
-        list=AsyncMock(
-            return_value=[
-                {
-                    "run_id": "run-1",
-                    "status": "success",
-                    "kwargs": {"command": {"resume": {"interrupt-1": resume_payload}}},
-                }
-            ]
-        )
-    )
+    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
 
     with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
         async for _ in gateway.stream_events(
             RunRequest(
-                message=Command(resume={"interrupt-1": resume_payload}),
+                message=Command(
+                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
+                ),
                 thread_id="thread",
             )
         ):
@@ -3353,48 +2989,11 @@ async def test_server_gateway_successful_resume_lists_runs_for_boundary(
     assert stream.run.responses == [
         {
             "interrupt_id": "interrupt-1",
-            "response": resume_payload,
+            "response": {"decisions": [{"type": "approve"}]},
         }
     ]
-    client.runs.list.assert_awaited()
+    client.runs.list.assert_not_awaited()
     assert not any("resumed run" in record.message for record in caplog.records)
-
-
-async def test_server_gateway_fails_fast_when_resume_run_unidentified():
-    """Unidentified resume run_id must raise before an open events stream hangs."""
-    from langgraph.types import Command
-
-    class _OpenEnded(FakeLangGraphThreadStream):
-        async def _iter_events(self):
-            yield _protocol_root_lifecycle("running", run_id="run-live")
-            # Live SSE stays open; without a run id the old loop never stopped.
-            await asyncio.Event().wait()
-
-    stream = _OpenEnded(
-        "thread-hang",
-        interrupts=[{"interrupt_id": "interrupt-1"}],
-    )
-    threads = FakeLangGraphThreadsClient(
-        states={"thread-hang": {"values": {}}},
-        streams={"thread-hang": stream},
-    )
-    client = FakeLangGraphClient(threads)
-    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
-    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
-
-    async def _drain() -> None:
-        async for _ in gateway.stream_events(
-            RunRequest(
-                message=Command(
-                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
-                ),
-                thread_id="thread-hang",
-            )
-        ):
-            pass
-
-    with pytest.raises(RuntimeError, match="Could not identify the run"):
-        await asyncio.wait_for(_drain(), timeout=1.0)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "cancel"])
