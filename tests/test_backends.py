@@ -2559,31 +2559,19 @@ class TestExecuteTimeoutRecovery:
         assert "Recovery" in resp.output
         assert "background" in resp.output.lower()
 
-    def test_timeout_includes_background_command(self, tmp_workspace):
-        backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        cmd = _sleep_cmd(10)
-        resp = backend.execute(cmd)
-        assert cmd in resp.output
-        assert "> /output.log 2>&1 &" in resp.output
-
-    def test_timeout_recovery_uses_relative_log_in_dangerous(self, tmp_workspace):
-        """Dangerous mode: recovery hint must not point the log at the host root."""
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_long_runs_go_to_run_in_background(self, tmp_workspace, dangerous):
         backend = CustomSandboxBackend(
-            root_dir=tmp_workspace, timeout=1, dangerous=True
+            root_dir=tmp_workspace, timeout=1, dangerous=dangerous
         )
-        resp = backend.execute(_sleep_cmd(10))
+        resp = backend.execute(f"cd . && {_sleep_cmd(10)}")
         assert resp.exit_code == 124
-        assert "> ./output.log 2>&1 &" in resp.output
-        assert "cat ./output.log" in resp.output
-        assert "> /output.log" not in resp.output
-
-    def test_timeout_recovery_captures_pid_and_offers_timeout(self, tmp_workspace):
-        backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)
-        resp = backend.execute(_sleep_cmd(10))
-        # Background recovery captures the PID so the job can be managed later.
-        assert "PID: $!" in resp.output
-        # Recovery also offers re-running with a larger per-command timeout.
         assert "timeout=600" in resp.output
+        assert "run_in_background tool" in resp.output
+        assert "Report the command back" in resp.output
+        # No ready-made `command > log &` line, which hangs on compound commands.
+        assert "output.log" not in resp.output
+        assert "&&" not in resp.output.split("Recovery")[1]
 
     def test_timeout_preserves_original_error(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, timeout=1)

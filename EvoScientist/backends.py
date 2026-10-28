@@ -2920,22 +2920,21 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Enhance timeout errors with actionable recovery guidance
         if response.exit_code == 124:
-            cmd_words = command.split()
-            grep_hint = cmd_words[0] if cmd_words else "process"
-            # In dangerous mode `/` is the host root; use a workspace-relative
-            # log path so the suggested command doesn't fail or write to `/`.
-            output_log = "./output.log" if self._dangerous else "/output.log"
-            bg_cmd = f'{command} > {output_log} 2>&1 & echo "PID: $!"'
+            # No ready-made `command &` line: on a compound command it still
+            # holds the output pipe and hangs the same way.
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
                     f"Recovery — pick one:\n"
                     f"  1. Needs more time? Re-run with a larger timeout (up to 3600s): "
                     f"execute(command=..., timeout=600)\n"
-                    f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
-                    f"       {bg_cmd}\n"
-                    f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
-                    f"Read: cat {output_log}  ·  Stop: kill <PID>"
+                    f"  2. Runs for minutes or longer? Start it with the "
+                    f"run_in_background tool: it returns a process id and writes the "
+                    f"output to a log (read it with check_process, stop it with "
+                    f"stop_process).\n"
+                    f"  3. No run_in_background tool here (a sub-agent)? Report the "
+                    f"command back so the main agent can run it in the background "
+                    f"instead of retrying it."
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,
