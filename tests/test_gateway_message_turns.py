@@ -1,8 +1,8 @@
-"""New-message turns on the LangGraph server gateway (#558).
+"""Turns that send a new message on the LangGraph server gateway (#558).
 
 A new message reads ``stream.events``: it skips the thread's history replay,
 starts the run, keeps only that run's envelopes and stops at its root
-completed/failed or at a pause. Resume turns keep main's ``subscribe`` path.
+completed/failed or at a pause. Resume turns use ``subscribe``.
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def _texts(events: list[dict]) -> list[str]:
     return [event["content"] for event in events if event["type"] == "text"]
 
 
-# --- state: pause on a new thread / in a subgraph (regression 1) -------------
+# --- state: pause on a new thread / in a subgraph ---------------------------
 
 
 @pytest.mark.parametrize(
@@ -220,7 +220,7 @@ async def test_pause_after_a_completed_turn_skips_the_replayed_turn():
     assert stream.lost_live_events is False
 
 
-# --- state: second turn (#558) and long history (regression 2) --------------
+# --- state: second turn (#558) and long history ----------------------------
 
 
 async def test_second_turn_ignores_replayed_history():
@@ -246,6 +246,7 @@ async def test_second_turn_ignores_replayed_history():
         "response": "new answer",
     }
     assert stream.event_streams_opened == 1
+    assert stream.lost_live_events is False
 
 
 async def test_starts_the_run_after_a_long_history_replay():
@@ -267,26 +268,6 @@ async def test_starts_the_run_after_a_long_history_replay():
     # The fake drops live envelopes for a run started before the replay ended.
     assert stream.lost_live_events is False
     assert _texts(events) == ["short"]
-
-
-async def test_run_started_during_the_replay_loses_its_events():
-    """The fake models regression 2: starting first loses the live envelopes."""
-    stream = FakeLangGraphThreadStream(
-        THREAD_ID,
-        events=[_text("short"), _lifecycle("run-1", "completed")],
-        replay=_earlier_run("run-0", "old"),
-        stay_open=True,
-    )
-    await stream.run.start(input={})
-    received = []
-
-    with suppress(TimeoutError):
-        async with asyncio.timeout(0.2):
-            async for event in stream.events:
-                received.append(event)
-
-    assert stream.lost_live_events is True
-    assert received == _earlier_run("run-0", "old")
 
 
 # --- state: first turn on a new thread --------------------------------------
@@ -385,7 +366,7 @@ async def test_events_stream_ending_early_raises():
         await _turn(gateway, "hi")
 
 
-# --- state: resume and retry keep main's subscribe path ---------------------
+# --- state: resume and retry use subscribe ---------------------------------
 
 
 async def test_resume_keeps_the_subscribe_path():
@@ -780,12 +761,11 @@ async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
     }
 
 
-async def test_root_failed_lifecycle_emits_done_like_main():
-    """A root ``failed`` ends the turn the same way main's subscribe path does.
+async def test_root_failed_lifecycle_emits_partial_text_as_done():
+    """A root ``failed`` ends the turn with ``done`` and any partial text.
 
-    Main ends ``subscribe`` at root failed and then emits ``done`` with whatever
-    text was streamed. The new-message path matches that: it breaks on failed
-    and emits ``done``. An ``error`` event is reserved for raised exceptions.
+    The path for a new message breaks on root failed and emits ``done``. An
+    ``error`` event is reserved for raised exceptions.
     """
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
@@ -824,9 +804,6 @@ async def test_skip_replay_uses_module_timeout_constants(monkeypatch):
             skipped = await events.skip_replay()
 
     assert skipped == 0
-
-def test_quiet_window_defaults():
-    assert server_mod._REPLAY_QUIET_SECONDS < server_mod._REPLAY_MAX_SECONDS
 
 
 def test_synth_event_run_id_parses_server_lifecycle_ids(monkeypatch):

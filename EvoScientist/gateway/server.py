@@ -1349,9 +1349,7 @@ class LangGraphServerGateway:
         pause seen here reads thread state without waiting for the flag.
         """
         try:
-            events = await self._pending_interrupt_events(
-                stream, thread_id, processor
-            )
+            events = await self._pending_interrupt_events(stream, thread_id, processor)
         except Exception as exc:
             # ``_pending`` may read state when the interrupted flag is set and
             # ``stream.interrupts`` is empty. Keep that failure on the pause

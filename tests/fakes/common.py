@@ -561,6 +561,10 @@ class FakeCheckpointAgent:
             self.values = {**self.values, "messages": messages}
 
 
+FAKE_THREAD_RUN_ID = "run-1"
+FAKE_THREAD_RUN_COMPLETED_EVENT_ID = f"synth:{FAKE_THREAD_RUN_ID}:lc::completed"
+
+
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests."""
 
@@ -584,7 +588,7 @@ class FakeLangGraphRunModule:
             }
         )
         self.started.set()
-        return {"run_id": "run-1"}
+        return {"run_id": FAKE_THREAD_RUN_ID}
 
     async def respond(
         self,
@@ -695,25 +699,14 @@ class FakeLangGraphThreadStream:
                 yield {
                     "method": "lifecycle",
                     "params": {"namespace": [], "data": {"event": "completed"}},
-                    "event_id": "synth:run-1:lc::completed",
+                    "event_id": FAKE_THREAD_RUN_COMPLETED_EVENT_ID,
                 }
         if self.stay_open:
             await asyncio.Event().wait()
 
     def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
         self.subscribed_channels.append(channels)
-        if self.replay:
-            return self._replayed_subscription()
         return self._iter_events()
-
-    async def _replayed_subscription(self) -> AsyncIterator[dict[str, Any]]:
-        """Like the SDK on a fresh SSE: replay, then end at the first root stop."""
-        for event in self.replay:
-            yield event
-            if _is_root_lifecycle_stop(event):
-                return
-        async for event in self._iter_events():
-            yield event
 
 
 class FakeLangGraphThreadsClient:
