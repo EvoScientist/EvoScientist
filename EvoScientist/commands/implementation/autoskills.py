@@ -262,9 +262,11 @@ class AutoSkillsCommand(Command):
                 if upstream
                 else ""
             )
+            shadow = result.get("workspace_shadow")
+            shadow_note = f"; workspace shadow remains at {shadow}" if shadow else ""
             ctx.ui.append_system(
                 f"{verb} autoskill: {result['skill_name']} ({result['path']})"
-                f"{provenance_note}",
+                f"{provenance_note}{shadow_note}",
                 style="green",
             )
         else:

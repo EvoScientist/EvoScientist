@@ -1166,7 +1166,7 @@ _MAX_SKILL_MD_BYTES = 10 * 1024 * 1024
 _INDEX_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
-def skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
+def _skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
     """Return the frontmatter name and description, or None when the agent skips the file."""
     if len(raw) > _MAX_SKILL_MD_BYTES:
         return None
@@ -1191,9 +1191,9 @@ def skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
     return name, description
 
 
-# Keep the old private name for integrations that imported it before the
-# metadata contract became public.
-_skill_name_and_description = skill_name_and_description
+def skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
+    """Compatibility wrapper for callers using the metadata parser."""
+    return _skill_name_and_description(raw)
 
 
 def _build_skill_index(workspace: Workspace) -> dict[str, str]:
@@ -1219,7 +1219,7 @@ def _build_skill_index(workspace: Workspace) -> dict[str, str]:
     # In path order, so the later folder wins a repeated name, as in the middleware.
     for response in backend.download_files(skill_md_paths):
         if response.error is None and response.content is not None:
-            parsed = skill_name_and_description(response.content)
+            parsed = _skill_name_and_description(response.content)
             if parsed is not None:
                 index[parsed[0]] = parsed[1]
     return index

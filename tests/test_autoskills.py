@@ -652,26 +652,71 @@ def test_update_global_skill_does_not_overwrite_nonmatching_local_dir(
         target_skill_name="global-validation",
         skills_dir=workspace_skills,
     )
-    approved = approve_skill_proposal(
-        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
-    )
-
-    assert proposal["submitted"] is True
-    # The workspace directory holds a different skill, so the target is the
-    # global one and the update lands there.
-    assert proposal["scope"] == "global"
-    assert approved["approved"] is True
-    assert "Workspace shadow update." in (
-        global_skills / "global-validation" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    # The unrelated local directory keeps its content.
+    assert proposal["submitted"] is False
+    assert "No installed workspace/global skill" in proposal["error"]
+    # The workspace directory hides the same virtual path, so the runtime does
+    # not load the global target in this workspace.
     assert "Keep this local content." in (
         workspace_skills / "global-validation" / "SKILL.md"
     ).read_text(encoding="utf-8")
+    assert "Global workflow." in (
+        global_skills / "global-validation" / "SKILL.md"
+    ).read_text(encoding="utf-8")
 
 
-def test_explicit_workspace_update_forks_global_skill(tmp_path, monkeypatch):
-    """An explicit workspace scope creates a local shadow of a global skill."""
+def test_global_approval_reports_workspace_shadow(tmp_path, monkeypatch):
+    """Global approval proceeds but reports a workspace copy still in use."""
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    _write_installed_skill(
+        global_skills,
+        "global-validation",
+        "Use when validating code changes from a global skill.",
+        "# Global validation\n\nGlobal workflow.",
+    )
+    _write_skill_folder(
+        memory_dir,
+        "global-validation",
+        "Use when validating code changes from an updated global skill.",
+        "# Global validation\n\nUpdated global workflow.",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="global-validation",
+        cluster_hash="cluster-shadow-after-submit",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="The global update should be audited when a shadow appears.",
+        operation="update",
+        target_skill_name="global-validation",
+        skills_dir=workspace_skills,
+    )
+    _write_installed_skill_in_dir(
+        workspace_skills,
+        "global-validation",
+        skill_name="workspace-only",
+        description="A workspace shadow with a different knowledge name.",
+        body="# Workspace shadow\n\nStill active here.",
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+        scope="global",
+    )
+
+    assert result["approved"] is True
+    assert result["scope"] == "global"
+    assert result["workspace_shadow"] == str(workspace_skills / "global-validation")
+    assert "Updated global workflow." in (
+        global_skills / "global-validation" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_workspace_approval_forks_global_skill(tmp_path, monkeypatch):
+    """A workspace approval creates a local shadow of a global skill."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -681,6 +726,13 @@ def test_explicit_workspace_update_forks_global_skill(tmp_path, monkeypatch):
         "global-validation",
         "Use when validating code changes from a global skill.",
         "# Global validation\n\nGlobal workflow.",
+    )
+    bundled = global_skill / "scripts" / "check.py"
+    bundled.parent.mkdir()
+    bundled.write_text("print('check')\n", encoding="utf-8")
+    (global_skills / ".installed.yaml").write_text(
+        "global-validation:\n  source: owner/repo@global-validation\n",
+        encoding="utf-8",
     )
     _write_skill_folder(
         memory_dir,
@@ -698,23 +750,28 @@ def test_explicit_workspace_update_forks_global_skill(tmp_path, monkeypatch):
         operation="update",
         target_skill_name="global-validation",
         skills_dir=workspace_skills,
-        scope="workspace",
     )
     approved = approve_skill_proposal(
-        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+        scope="workspace",
     )
 
     assert proposal["submitted"] is True
-    assert proposal["scope"] == "workspace"
+    assert proposal["scope"] == "global"
     assert approved["approved"] is True
+    assert approved["scope"] == "workspace"
+    assert approved["upstream_source"] is None
     assert "Workspace workflow." in (
         workspace_skills / "global-validation" / "SKILL.md"
     ).read_text(encoding="utf-8")
     assert "Global workflow." in (global_skill / "SKILL.md").read_text(encoding="utf-8")
+    assert (workspace_skills / "global-validation" / "scripts" / "check.py").is_file()
 
 
-def test_create_proposal_can_target_global_scope(tmp_path, monkeypatch):
-    """A create proposal may target the global scope and install there."""
+def test_create_approval_can_target_global_scope(tmp_path, monkeypatch):
+    """A global approval may install a new skill into the global tier."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -733,15 +790,18 @@ def test_create_proposal_can_target_global_scope(tmp_path, monkeypatch):
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="This skill belongs in every workspace.",
         skills_dir=workspace_skills,
-        scope="global",
     )
     approved = approve_skill_proposal(
-        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+        scope="global",
     )
 
     assert proposal["submitted"] is True
-    assert proposal["scope"] == "global"
+    assert proposal["scope"] == "workspace"
     assert approved["approved"] is True
+    assert approved["scope"] == "global"
     assert (global_skills / "global-validation" / "SKILL.md").exists()
     assert not (workspace_skills / "global-validation").exists()
 
@@ -785,6 +845,13 @@ def test_create_approval_rejects_frontmatter_name_collision(tmp_path, monkeypatc
         description="Already installed under another directory name.",
         body="# Existing skill\n",
     )
+    _write_installed_skill_in_dir(
+        global_skills,
+        "a-global-existing",
+        skill_name="another-collision",
+        description="A skill in the other tier.",
+        body="# Other tier\n",
+    )
     _write_skill_folder(
         memory_dir,
         "frontmatter-collision",
@@ -811,9 +878,31 @@ def test_create_approval_rejects_frontmatter_name_collision(tmp_path, monkeypatc
     assert "already exists" in result["error"]
     assert not (workspace_skills / "frontmatter-collision").exists()
 
+    _write_skill_folder(
+        memory_dir,
+        "another-collision",
+        "Use when testing cross-tier create collisions.",
+        "# Proposed other-tier skill\n",
+    )
+    second = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="another-collision",
+        cluster_hash="cluster-create-cross-tier-collision",
+        source_observation_ids=["O-4", "O-5", "O-6"],
+        rationale="A create must reject a collision in the other tier.",
+        skills_dir=workspace_skills,
+    )
+    second_result = approve_skill_proposal(
+        memory_dir,
+        second["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+    assert second_result["approved"] is False
+    assert "already exists" in second_result["error"]
 
-def test_submit_proposal_rejects_unknown_scope(tmp_path):
-    """An unknown scope is rejected and leaves no pending proposal."""
+
+def test_approval_rejects_unknown_scope(tmp_path):
+    """An unknown approval scope is rejected and leaves the proposal pending."""
     memory_dir = tmp_path / "memories"
     _write_skill_folder(
         memory_dir,
@@ -827,18 +916,24 @@ def test_submit_proposal_rejects_unknown_scope(tmp_path):
         skill_name="focused-validation",
         cluster_hash="cluster-bad-scope",
         source_observation_ids=["O-1", "O-2", "O-3"],
-        rationale="This proposal names a scope that does not exist.",
+        rationale="This approval names a scope that does not exist.",
+        skills_dir=tmp_path / "skills",
+    )
+    approved = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
         skills_dir=tmp_path / "skills",
         scope="everywhere",
     )
 
-    assert proposal["submitted"] is False
-    assert "scope must be" in proposal["error"]
-    assert pending_skill_proposal_count(memory_dir) == 0
+    assert proposal["submitted"] is True
+    assert approved["approved"] is False
+    assert "scope must be" in approved["error"]
+    assert pending_skill_proposal_count(memory_dir) == 1
 
 
-def test_update_proposal_rejects_scope_without_a_target(tmp_path, monkeypatch):
-    """A scope naming a tier that does not hold the target is an error."""
+def test_update_approval_rejects_scope_without_a_target(tmp_path, monkeypatch):
+    """A global approval of a workspace-only skill is an error."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -865,11 +960,17 @@ def test_update_proposal_rejects_scope_without_a_target(tmp_path, monkeypatch):
         operation="update",
         target_skill_name="focused-validation",
         skills_dir=workspace_skills,
+    )
+    approved = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
         scope="global",
     )
 
-    assert proposal["submitted"] is False
-    assert "No installed global skill" in proposal["error"]
+    assert proposal["submitted"] is True
+    assert approved["approved"] is False
+    assert "No installed global skill" in approved["error"]
 
 
 def test_update_shadowed_by_local_skill_leaves_global_untouched(tmp_path, monkeypatch):
@@ -1063,7 +1164,6 @@ def test_approve_command_rejects_an_unknown_scope(tmp_path, monkeypatch):
         rationale="The scope argument must be checked.",
         skills_dir=skills_dir,
         workspace_dir=tmp_path,
-        scope="global",
     )
     assert proposal["submitted"] is True
 
@@ -1111,7 +1211,6 @@ def test_approval_records_the_scope_it_installed_into(tmp_path, monkeypatch):
         rationale="The scope override must be recorded.",
         skills_dir=skills_dir,
         workspace_dir=tmp_path,
-        scope="workspace",
     )
     assert proposal["submitted"] is True
 
@@ -1155,7 +1254,6 @@ def test_approve_command_accepts_global_scope(tmp_path, monkeypatch):
         rationale="The command should accept a valid scope.",
         skills_dir=skills_dir,
         workspace_dir=tmp_path,
-        scope="workspace",
     )
     messages: list[str] = []
     ctx = SimpleNamespace(
@@ -1367,6 +1465,60 @@ def test_update_uses_the_runtime_winner_for_duplicate_skill_names(
     assert "Keep first." in (first / "SKILL.md").read_text(encoding="utf-8")
 
 
+def test_update_uses_virtual_path_order_for_duplicate_skill_names(
+    tmp_path,
+    monkeypatch,
+):
+    """The resolver follows slash-delimited virtual path ordering."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "skills"
+    folders = {
+        "a": "First.",
+        "a-b": "Middle.",
+        "a.x": "Last by bare-name order.",
+    }
+    created = {
+        name: _write_installed_skill_in_dir(
+            workspace_skills,
+            name,
+            skill_name="virtual-duplicate",
+            description="Use when testing virtual path ordering.",
+            body=f"# {name}\n\n{body}",
+        )
+        for name, body in folders.items()
+    }
+    _write_skill_folder(
+        memory_dir,
+        "virtual-duplicate",
+        "Use when testing virtual path ordering.",
+        "# Revised virtual duplicate\n",
+    )
+
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="virtual-duplicate",
+        cluster_hash="cluster-virtual-order",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="The update must follow the runtime's virtual path winner.",
+        operation="update",
+        target_skill_name="virtual-duplicate",
+        skills_dir=workspace_skills,
+    )
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert result["approved"] is True
+    assert Path(result["path"]) == created["a"]
+    assert "Revised virtual duplicate" in (created["a"] / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_update_uses_runtime_winner_across_workspace_and_global_tiers(
     tmp_path,
     monkeypatch,
@@ -1471,19 +1623,9 @@ def test_update_ignores_a_skill_the_runtime_cannot_load(tmp_path, monkeypatch):
         skills_dir=workspace_skills,
         workspace_dir=tmp_path,
     )
-    assert proposal["submitted"] is True
-    # The workspace copy is never loaded, so the global one is the target.
-    assert proposal["scope"] == "global"
-
-    result = approve_skill_proposal(
-        memory_dir,
-        proposal["proposal_id"],
-        skills_dir=workspace_skills,
-        workspace_dir=tmp_path,
-    )
-    assert result["approved"] is True
-    assert "Revised audit" in global_file.read_text(encoding="utf-8")
-    assert original_global != global_file.read_bytes()
+    assert proposal["submitted"] is False
+    assert "No installed workspace/global skill" in proposal["error"]
+    assert global_file.read_bytes() == original_global
 
 
 def test_update_is_refused_without_any_loadable_skill(tmp_path, monkeypatch):
@@ -1537,7 +1679,6 @@ def test_approval_refuses_an_unknown_recorded_scope(tmp_path, monkeypatch):
         rationale="A broken scope must not be ignored.",
         skills_dir=skills_dir,
         workspace_dir=tmp_path,
-        scope="global",
     )
     assert proposal["submitted"] is True
     manifest_path = (
@@ -1558,24 +1699,18 @@ def test_approval_refuses_an_unknown_recorded_scope(tmp_path, monkeypatch):
     assert not (skills_dir / "unknown-scope").exists()
 
 
-def test_auto_approval_installs_a_global_proposal_without_review(
+def test_auto_approval_keeps_new_skill_in_workspace(
     tmp_path,
     monkeypatch,
 ):
-    """AUTO mode promotes a global proposal on its own.
-
-    There is no human gate on this path: a global install takes effect for
-    every workspace of the user as soon as the proposal is submitted. The
-    mode is an explicit opt-in, so the scope follows the same resolution as
-    the reviewed path - but it is not a reviewed install.
-    """
+    """AUTO mode cannot choose a tier, so new skills stay in workspace."""
     global_skills = tmp_path / "global-skills"
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
     memory_dir = tmp_path / "memories"
     workspace = Workspace(tmp_path)
     _write_skill_folder(
         memory_dir,
-        "auto-global",
+        "auto-new",
         "Use when testing the auto mode.",
         "# Auto skill\n",
     )
@@ -1591,17 +1726,68 @@ def test_auto_approval_installs_a_global_proposal_without_review(
         result = json.loads(
             tool.invoke(
                 {
-                    "skill_name": "auto-global",
-                    "cluster_hash": "cluster-auto-global",
+                    "skill_name": "auto-new",
+                    "cluster_hash": "cluster-auto-new",
                     "source_observation_ids": ["O-1", "O-2", "O-3"],
                     "rationale": "Auto mode installs without review.",
-                    "scope": "global",
                 }
             )
         )
+    assert "scope" not in tool.args
     assert result["auto_approval"]["approved"] is True
-    assert result["auto_approval"]["scope"] == "global"
-    assert (global_skills / "auto-global" / "SKILL.md").is_file()
+    assert result["auto_approval"]["scope"] == "workspace"
+    assert (workspace.skills_dir / "auto-new" / "SKILL.md").is_file()
+    assert not (global_skills / "auto-new").exists()
+
+
+def test_auto_mode_keeps_global_update_pending_for_human_approval(
+    tmp_path,
+    monkeypatch,
+):
+    """AUTO mode never writes an update to the shared global tier."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace = Workspace(tmp_path)
+    installed = _write_installed_skill(
+        global_skills,
+        "auto-global-update",
+        "Use when testing guarded global updates.",
+        "# Global skill\n\nOriginal workflow.\n",
+    )
+    _write_skill_folder(
+        memory_dir,
+        "auto-global-update",
+        "Use when testing guarded global updates.",
+        "# Global skill\n\nUpdated workflow.\n",
+    )
+    tool = create_submit_autoskill_proposal_tool(
+        memory_dir=memory_dir,
+        workspace=workspace,
+        project_id="P-1",
+    )
+    with patch("EvoScientist.memory.autoskills.tools.get_effective_config") as config:
+        config.return_value = SimpleNamespace(
+            memory_skill_synthesis_mode=MemorySkillSynthesisMode.AUTO
+        )
+        result = json.loads(
+            tool.invoke(
+                {
+                    "skill_name": "auto-global-update",
+                    "cluster_hash": "cluster-auto-global-update",
+                    "source_observation_ids": ["O-1", "O-2", "O-3"],
+                    "rationale": "Auto mode must not silently change every workspace.",
+                    "operation": "update",
+                    "target_skill_name": "auto-global-update",
+                }
+            )
+        )
+
+    assert result["scope"] == "global"
+    assert result["auto_approval"]["approved"] is False
+    assert "human approval" in result["auto_approval"]["error"]
+    assert pending_skill_proposal_count(memory_dir) == 1
+    assert "Original workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_create_proposal_rejects_target_skill_name(tmp_path):

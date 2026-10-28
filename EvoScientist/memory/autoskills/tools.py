@@ -54,18 +54,6 @@ class SubmitAutoskillProposalArgs(BaseModel):
             "match skill_name."
         ),
     )
-    scope: str | None = Field(
-        default=None,
-        description=(
-            "Where the skill is installed: 'workspace' (this workspace only) "
-            "or 'global' (every workspace). Leave unset to use the default: "
-            "a new skill installs into the workspace, and an update writes "
-            "back to the tier that already holds the target skill. For an "
-            "update, explicitly choose workspace to fork a global-only skill "
-            "into this workspace, or global only when the change should be "
-            "shared everywhere."
-        ),
-    )
 
 
 def _installed_skills_for_autoskill_context(
@@ -132,7 +120,6 @@ def create_submit_autoskill_proposal_tool(
         rationale: str,
         operation: str = "create",
         target_skill_name: str | None = None,
-        scope: str | None = None,
     ) -> str:
         """Register a proposal and auto-approve it when the mode allows."""
         proposal = submit_autoskill_proposal(
@@ -146,20 +133,32 @@ def create_submit_autoskill_proposal_tool(
             skills_dir=workspace.skills_dir,
             workspace_dir=workspace.root,
             project_id=project_id,
-            scope=scope,
         )
         if (
             proposal.get("status") == "pending"
             and get_effective_config().memory_skill_synthesis_mode
             == MemorySkillSynthesisMode.AUTO
         ):
-            approved = approve_skill_proposal(
-                memory_dir,
-                str(proposal["proposal_id"]),
-                skills_dir=workspace.skills_dir,
-                workspace_dir=workspace.root,
-            )
-            proposal["auto_approval"] = approved
+            if proposal.get("scope") == "global":
+                # AUTO mode must never turn an agent-generated global update
+                # into an unreviewed write shared by every workspace. Keep it
+                # pending until a human runs `/autoskills approve ... global`.
+                proposal["auto_approval"] = {
+                    "approved": False,
+                    "error": (
+                        "Global-scope updates require human approval; "
+                        "the proposal remains pending"
+                    ),
+                    "scope": "global",
+                }
+            else:
+                approved = approve_skill_proposal(
+                    memory_dir,
+                    str(proposal["proposal_id"]),
+                    skills_dir=workspace.skills_dir,
+                    workspace_dir=workspace.root,
+                )
+                proposal["auto_approval"] = approved
         return json.dumps(proposal, ensure_ascii=False, default=str)
 
     return StructuredTool.from_function(
@@ -170,9 +169,8 @@ def create_submit_autoskill_proposal_tool(
             "folder under /autoskill-proposals/<skill-name>. Set operation to "
             "'update' when changing an existing workspace/global skill. In "
             "auto mode, the tool promotes the proposal only if validation and "
-            "collision checks pass. Leave scope unset for normal updates; use "
-            "workspace to intentionally create a local shadow of a global "
-            "skill, and global only for changes meant for every workspace."
+            "collision checks pass. Installation into another tier requires "
+            "explicit human approval via /autoskills approve."
         ),
         args_schema=SubmitAutoskillProposalArgs,
         infer_schema=False,

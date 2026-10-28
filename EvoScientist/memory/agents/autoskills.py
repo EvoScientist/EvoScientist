@@ -71,12 +71,9 @@ def _autoskills_system_prompt() -> str:
         "exact skill_name, cluster_hash, source observation IDs, rationale, "
         'and `operation`. Use `operation="create"` for a new skill and '
         '`operation="update"` plus `target_skill_name=<skill-name>` for an '
-        "existing skill update. Leave `scope` unset for normal updates so the "
-        'installed tier is preserved. Choose `scope="workspace"` only when '
-        "the procedure is workspace-specific or you intentionally want a "
-        'workspace shadow of a global skill; choose `scope="global"` only '
-        "when the change should apply in every workspace. New skills default "
-        "to workspace. If it reports validation errors, edit the proposal "
+        "existing skill update. Installation into another tier is a human "
+        "approval decision; do not try to choose an install scope in the "
+        "proposal tool. If it reports validation errors, edit the proposal "
         "folder and submit again."
     )
 
