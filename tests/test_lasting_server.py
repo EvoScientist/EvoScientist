@@ -776,6 +776,18 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
     assert "left running" in result.output
 
 
+def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):
+    """EvoSci server stop ends a server EvoSci deploy or the desktop app owns
+    too, so its work is asked about; without a terminal it is refused."""
+    monkeypatch.setattr(manager, "owned_by_its_starter", lambda: True)
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 1
+    assert busy_server == []
+    assert "--yes" in " ".join(result.output.split())
+
+
 def test_stop_asks_recorded_server_on_another_port(busy_server, monkeypatch):
     """langgraph_dev_port changed while the server ran: the stop ends the
     recorded server, so that is the one asked whether it is busy."""
