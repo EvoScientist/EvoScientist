@@ -866,6 +866,27 @@ class TestWorkspaceRemovalAndComments:
     ):
         assert prepare_sandbox_command(command, tmp_workspace)[1] is None
 
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("cd . && rm -rf /build /", "cd . && rm -rf /W/build /W/."),
+            ("cd . && rm -rf build //", "cd . && rm -rf build /W/."),
+            ("cd src && rm -rf build /W/", "cd src && rm -rf build /W/."),
+            ('cd src && rm -rf build "/home/u/W"', "cd src && rm -rf build '/W/.'"),
+            ("bash -c 'cd . && rm -rf b /'", "bash -c 'cd . && rm -rf b /W/.'"),
+            ("cd src && ls /", "cd src && ls /W/."),
+        ],
+    )
+    def test_the_root_after_cd_is_a_dot_operand(self, command, expected):
+        """rm refuses a `.` operand, so `rm -rf x /` after a cd cannot remove
+        the workspace, as `rm -rf x .` cannot before one."""
+        assert (
+            convert_virtual_paths_in_command(
+                command, workspace_name="W", workspace_root="/W"
+            )
+            == expected
+        )
+
     def test_chmod_on_a_later_line_is_blocked_with_a_way_out(self):
         error = validate_command("mkdir -p scripts\nchmod +x scripts/run.sh")
         assert "bash run.sh" in error

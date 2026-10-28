@@ -1502,8 +1502,9 @@ def _rewrite_quoted_path(
 
     def in_workspace(relative: str) -> str:
         if anchor:
+            # The root itself as `<root>/.`, which rm refuses to remove.
             return _platform_quote(
-                anchor.rstrip("/") + ("/" + relative if relative else "")
+                anchor.rstrip("/") + ("/" + relative if relative else "/.")
             )
         return shlex.quote("./" + relative if relative else ".")
 
@@ -1792,6 +1793,10 @@ def _rewrite_path_word(
 
     def in_workspace(rest: str) -> str:
         if absolute and workspace_root:
+            if all(part in ("", ".") for part in rest.split("/")):
+                # The root itself as `<root>/.`: rm refuses a `.` operand, as
+                # it does the `.` written before a `cd`.
+                return _platform_quote(workspace_root) + "/."
             return _platform_quote(workspace_root) + rest
         return "." + rest if rest else "."
 
