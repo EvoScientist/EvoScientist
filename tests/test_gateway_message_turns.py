@@ -542,6 +542,9 @@ async def test_skip_replay_keeps_the_end_of_stream():
     clock = _Clock()
     async with _ThreadEvents(
         _source([{"n": 0}, {"n": 1}], then_wait=False),
+        quiet_seconds=0.5,
+        first_event_seconds=2.0,
+        max_seconds=30.0,
         clock=clock,
         wait_for=_fake_wait_for(clock, step=0.25),
     ) as events:
@@ -559,7 +562,12 @@ async def test_skip_replay_keeps_a_stream_error():
 
     clock = _Clock()
     async with _ThreadEvents(
-        failing(), clock=clock, wait_for=_fake_wait_for(clock, step=0.25)
+        failing(),
+        quiet_seconds=0.5,
+        first_event_seconds=2.0,
+        max_seconds=30.0,
+        clock=clock,
+        wait_for=_fake_wait_for(clock, step=0.25),
     ) as events:
         skipped = await events.skip_replay()
         with pytest.raises(ConnectionError, match="provider connection lost"):
@@ -799,6 +807,23 @@ async def test_root_failed_lifecycle_emits_done_like_main():
         "response": "partial",
     }
 
+
+async def test_skip_replay_uses_module_timeout_constants(monkeypatch):
+    """Patched ``_REPLAY_*`` values apply without passing timeouts to the constructor."""
+    monkeypatch.setattr(server_mod, "_REPLAY_FIRST_EVENT_SECONDS", 0.05)
+    monkeypatch.setattr(server_mod, "_REPLAY_QUIET_SECONDS", 0.05)
+    monkeypatch.setattr(server_mod, "_REPLAY_MAX_SECONDS", 1.0)
+
+    async def empty() -> AsyncIterator[Any]:
+        if False:  # pragma: no cover
+            yield None
+        await asyncio.Event().wait()
+
+    async with asyncio.timeout(0.5):
+        async with _ThreadEvents(empty()) as events:
+            skipped = await events.skip_replay()
+
+    assert skipped == 0
 
 def test_quiet_window_defaults():
     assert server_mod._REPLAY_QUIET_SECONDS < server_mod._REPLAY_MAX_SECONDS

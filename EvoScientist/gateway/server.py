@@ -264,13 +264,15 @@ class _ThreadEvents:
         self,
         events: AsyncIterator[Any],
         *,
-        quiet_seconds: float = _REPLAY_QUIET_SECONDS,
-        first_event_seconds: float = _REPLAY_FIRST_EVENT_SECONDS,
-        max_seconds: float = _REPLAY_MAX_SECONDS,
+        quiet_seconds: float | None = None,
+        first_event_seconds: float | None = None,
+        max_seconds: float | None = None,
         clock: Callable[[], float] | None = None,
         wait_for: Callable[..., Any] = asyncio.wait_for,
     ) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
+        # None means "read the module constants when skip_replay runs" so
+        # tests can lower ``_REPLAY_*`` without reconstructing instances.
         self._quiet_seconds = quiet_seconds
         self._first_event_seconds = first_event_seconds
         self._max_seconds = max_seconds
@@ -304,8 +306,24 @@ class _ThreadEvents:
         take longer than the quiet window to deliver the first replayed event,
         and treating that setup delay as the end of the replay would start the
         run too early and lose its live envelopes.
+
+        Timeouts are read from the module ``_REPLAY_*`` constants when the
+        constructor left them unset, so tests can lower them for the suite.
         """
-        deadline = self._clock() + self._max_seconds
+        quiet_seconds = (
+            _REPLAY_QUIET_SECONDS
+            if self._quiet_seconds is None
+            else self._quiet_seconds
+        )
+        first_event_seconds = (
+            _REPLAY_FIRST_EVENT_SECONDS
+            if self._first_event_seconds is None
+            else self._first_event_seconds
+        )
+        max_seconds = (
+            _REPLAY_MAX_SECONDS if self._max_seconds is None else self._max_seconds
+        )
+        deadline = self._clock() + max_seconds
         skipped = 0
         while (left := deadline - self._clock()) > 0:
             # Wait longer for the first event than for later quiet gaps: a
@@ -313,19 +331,18 @@ class _ThreadEvents:
             # envelope. After that, a short quiet stretch means the replay
             # is done.
             timeout = (
-                min(self._first_event_seconds, left)
+                min(first_event_seconds, left)
                 if skipped == 0
-                else min(self._quiet_seconds, left)
+                else min(quiet_seconds, left)
             )
             try:
                 event = await self._wait_for(self._queue.get(), timeout)
             except TimeoutError:
                 # A wait shorter than the quiet window means the overall cap
                 # trimmed the timeout, so replay is still unfinished.
-                if skipped > 0 and timeout < self._quiet_seconds:
+                if skipped > 0 and timeout < quiet_seconds:
                     raise RuntimeError(
-                        "Thread history replay did not finish within "
-                        f"{self._max_seconds:g}s"
+                        f"Thread history replay did not finish within {max_seconds:g}s"
                     ) from None
                 return skipped
             if event is None or isinstance(event, Exception):
@@ -335,7 +352,7 @@ class _ThreadEvents:
         # Hitting the cap means replay is still producing envelopes. Starting
         # the run now would miss its live events on this connection.
         raise RuntimeError(
-            f"Thread history replay did not finish within {self._max_seconds:g}s"
+            f"Thread history replay did not finish within {max_seconds:g}s"
         )
 
     def __aiter__(self) -> _ThreadEvents:
