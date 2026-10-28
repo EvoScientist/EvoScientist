@@ -1124,8 +1124,8 @@ def _bare_cd_goes_home() -> bool:
 
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
-    absolute target outside them, the home folder (``~``, ``$HOME``) or a
-    bare ``cd``."""
+    absolute target outside them (a drive path on Windows too), the home
+    folder (``~``, ``$HOME``) or a bare ``cd``."""
     for found in shell_syntax.simple_commands(command):
         if found.name not in ("cd", "pushd"):
             continue
@@ -1139,9 +1139,11 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
                 return "cd"
             continue
         arg, token = targets[0]
-        path = str(token["value"]) if token is not None else arg
+        # As the agent's shell reads it, so a Windows drive path is absolute too.
+        path = _removal_target(token) if token is not None else arg
         if _is_home_word(arg) or (
-            path.startswith("/") and not _is_under_allowed_prefix(path, allow_prefixes)
+            (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+            and not _under_any(path, allow_prefixes)
         ):
             return f"{found.name} {arg}"
     return None

@@ -672,9 +672,6 @@ class TestWorkspaceRemovalAndComments:
             _prepared, error = prepare_sandbox_command(command, tmp_workspace)
             assert error is not None, command
 
-    @pytest.mark.skipif(
-        sys.platform == "win32", reason="cd into a drive path is not checked"
-    )
     def test_cd_into_memories_stays_blocked(self, tmp_workspace, tmp_path, monkeypatch):
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         assert prepare_sandbox_command("cd /memories && rm -rf *", tmp_workspace)[1]
@@ -1026,6 +1023,31 @@ class TestSandboxCommandChecks:
     )
     def test_cd_inside_the_workspace_passes(self, command):
         assert validate_command(command, workspace_root="/W") is None
+
+    @pytest.mark.parametrize("bash", [False, True])
+    def test_windows_drive_targets_are_checked_like_absolute_paths(
+        self, monkeypatch, bash
+    ):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            agent_shell, "agent_bash", lambda: object() if bash else None
+        )
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(r"C:\Users\me\.evoscientist\memories")
+        )
+        ws = r"C:\Users\me\proj"
+        for command in (
+            "cd /memories && rm -rf *",
+            "cd C:/ && ls",
+            "cd D:/data && ls",
+        ):
+            assert "leaves the workspace" in prepare_sandbox_command(command, ws)[1], (
+                command
+            )
+        for command in ("cd src && cd /results && ls", f"cd {ws}\\src && dir"):
+            assert prepare_sandbox_command(command, ws)[1] is None, command
 
     def test_a_bare_cd_only_prints_the_folder_in_cmd(self, monkeypatch):
         from EvoScientist import agent_shell
