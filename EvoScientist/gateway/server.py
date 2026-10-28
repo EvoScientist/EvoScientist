@@ -65,7 +65,8 @@ _ACTIVE_RUN_STATUSES = ("pending", "running")
 _SYNTHETIC_EVENT_ID_PREFIX = "synth:"
 # Root lifecycle statuses that end a run. This is the SDK's own root-terminal
 # rule: the server reports a run that was interrupted as "interrupted", and
-# the SDK does not treat that as the end of the run.
+# the SDK does not treat that as the end of the run. The server pairs that
+# marker with the run's interrupt request, which is what ends the turn here.
 _ROOT_STOP_LIFECYCLE_EVENTS = frozenset({"completed", "failed"})
 # How long a turn waits for the thread state to record the run's complete set
 # of prompts before it gives up and reports the failure.
@@ -294,8 +295,9 @@ def _synthetic_run_id(event: Mapping[str, object]) -> str | None:
 def _is_run_stop_lifecycle_event(event: Mapping[str, object]) -> bool:
     """Return whether *event* is the root marker that ends a run.
 
-    A root-namespace lifecycle event whose status is ``completed``,
-    ``failed`` or ``interrupted``.
+    A root-namespace lifecycle event whose status is ``completed`` or
+    ``failed``. An interrupted run is paused, not ended: the SDK does
+    not treat ``interrupted`` as a terminal status either.
     """
     if event.get("method") != "lifecycle":
         return False
@@ -318,8 +320,8 @@ def _is_run_interrupt_event(event: Mapping[str, object]) -> bool:
 def _is_run_stop_event(event: Mapping[str, object]) -> bool:
     """Return whether *event* ends the run that produced it.
 
-    A root-namespace lifecycle event whose status is ``completed``,
-    ``failed`` or ``interrupted``, or a request for an interrupt.
+    A root-namespace lifecycle event whose status is ``completed`` or
+    ``failed``, or a request for an interrupt.
     """
     return _is_run_stop_lifecycle_event(event) or _is_run_interrupt_event(event)
 
@@ -1385,8 +1387,8 @@ class LangGraphServerGateway:
         thread_id: str,
         seen: set[str],
         *,
-        attempts: int = _PAUSE_SYNC_ATTEMPTS,
-        delay: float = _PAUSE_SYNC_DELAY,
+        attempts: int | None = None,
+        delay: float | None = None,
     ) -> tuple[list[Mapping[str, object]], bool]:
         """Wait for the thread state to hold the run's complete set of prompts.
 
@@ -1398,11 +1400,28 @@ class LangGraphServerGateway:
 
         Returns the state's prompts and whether they were confirmed.
         """
+        # Read the module constants at call time. A default argument
+        # freezes them at import, so a test could not bound the polling.
+        attempts = _PAUSE_SYNC_ATTEMPTS if attempts is None else attempts
+        delay = _PAUSE_SYNC_DELAY if delay is None else delay
         latest: list[Mapping[str, object]] = []
         for attempt in range(attempts):
             try:
                 state = await self.thread_store.client.threads.get_state(thread_id)
             except NotFoundError:
+                state = None
+            except Exception:
+                # The run is paused; a failed read must not reach the
+                # generic handler, which cancels the run. An unreadable
+                # state means the prompts are not confirmed yet, not that
+                # the run is gone: keep polling.
+                logger.debug(
+                    "Pause-state read failed for thread %s (attempt %d/%d)",
+                    thread_id,
+                    attempt + 1,
+                    attempts,
+                    exc_info=True,
+                )
                 state = None
             if state is not None:
                 interrupts = _state_interrupts(state)

@@ -1947,6 +1947,76 @@ async def test_langgraph_server_gateway_does_not_cancel_a_run_with_nothing_persi
     assert client.runs.cancel_many.await_count == 0
 
 
+async def test_langgraph_server_gateway_keeps_a_run_when_the_state_read_fails(
+    monkeypatch,
+):
+    """A failed state read must not cancel the paused run.
+
+    The run is waiting for the user. A read that fails is not a confirmed
+    state, so the turn keeps polling and finally reports the gap. It must
+    not reach the generic handler, which cancels the run and destroys the
+    resume protocol state.
+    """
+    from EvoScientist.gateway import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_ATTEMPTS", 2)
+    monkeypatch.setattr(server_mod, "_PAUSE_SYNC_DELAY", 0.01)
+
+    class _FailingReads(FakeLangGraphThreadsClient):
+        """A threads client whose state read always fails transiently."""
+
+        async def get_state(self, thread_id: str) -> dict[str, Any]:
+            self.state_gets.append(thread_id)
+            raise httpx.ReadTimeout("state read timed out")
+
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            _server_lifecycle_event("run-1", "running"),
+            {
+                "method": "input.requested",
+                "event_id": "synth:run-1:input::interrupt-1",
+                "params": {
+                    "namespace": [],
+                    "data": {"interrupt_id": "interrupt-1", "value": {"q": 1}},
+                },
+            },
+        ],
+        interrupts=[],
+        interrupted=False,
+    )
+    threads = _FailingReads(
+        threads=[],
+        states={"thread": {"values": {}, "interrupts": []}},
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(
+        cancel_many=AsyncMock(), list=AsyncMock(return_value=[])
+    )
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events: list[dict[str, Any]] = []
+
+    async def _run() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError):
+        await _run()
+
+    # The turn reported the gap instead of ending cleanly.
+    assert any(event["type"] == "error" for event in events), events
+    assert not any(event["type"] == "done" for event in events), events
+    # It kept polling instead of giving up on the first failure: one
+    # pre-run read, then the two bounded pause polls.
+    assert len(threads.state_gets) == 3, threads.state_gets
+    # The run is left alone: cancelling it would destroy the resume state.
+    assert client.runs.cancel_many.await_count == 0
+
+
 async def test_langgraph_server_gateway_forwards_configurable_extra():
     stream = FakeLangGraphThreadStream(
         "abc12345",
