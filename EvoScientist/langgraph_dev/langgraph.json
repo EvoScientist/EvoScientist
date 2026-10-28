@@ -14,13 +14,14 @@
     },
     "checkpointer": {
         "backend": "custom",
-        "path": "EvoScientist.sessions.create_checkpointer_for_langgraph_api"
+        "path": "EvoScientist.langgraph_dev.checkpointer.server_checkpointer"
     },
     "config": {
         "recursion_limit": 1000000
     },
     "http": {
         "app": "EvoScientist.langgraph_dev.http:app",
+        "disable_mcp": true,
         "cors": {
             "allow_origins": [],
             "allow_origin_regex": "https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?",

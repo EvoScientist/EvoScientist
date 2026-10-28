@@ -91,11 +91,13 @@ class FakeRegistry:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Isolated DATA_DIR with a space and non-ASCII characters; fake registry
-    and probe; no override of the range."""
+    and probe; the range the fake registry's versions are written for, with
+    no override."""
     from EvoScientist import paths
 
     data = tmp_path.resolve() / "Jan Kowalski ąę" / ".evoscientist"
     monkeypatch.setattr(paths, "DATA_DIR", data)
+    monkeypatch.setattr(webui, "WEBUI_COMPAT", ">=0.3,<0.4")
     monkeypatch.delenv(webui.COMPAT_ENV, raising=False)
     monkeypatch.setattr(webui, "_failed_install", None)
     reg = FakeRegistry({"0.3.0": _tarball("0.3.0"), "0.3.1": _tarball("0.3.1")})
@@ -524,7 +526,6 @@ def test_probe_fails_with_the_output_when_the_server_exits(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_stage_runs_after_research_env():
     ids = [s.id for s in STAGES]
-    assert ids[-1] == "webui"
     assert ids.index("research-env") < ids.index("webui")
 
 

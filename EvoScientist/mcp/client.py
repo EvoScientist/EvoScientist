@@ -39,13 +39,13 @@ logger = logging.getLogger(__name__)
 # issue #283; the other is the Selector-loop subprocess fallback handled by
 # ``EvoScientist._winloop``).
 #
-# ``_resolve_command()`` (below) already resolves bare command names to their
-# absolute paths at connection-build time — a sync context where blocking is
-# fine. So by the time the stdio transport asks for the executable, the command
-# is already absolute and there is nothing left to look up. We short-circuit the
-# SDK's resolver for absolute paths, avoiding the ``os.access()`` entirely; bare
-# commands (which shouldn't reach here, but might via a transport we don't build)
-# still fall through to the original SDK behaviour.
+# ``_resolve_command()`` (below) resolves commands to absolute paths at
+# connection-build time, which runs off the event loop. So by the time the
+# stdio transport asks for the executable, a command it found is absolute and
+# there is nothing left to look up. We short-circuit the SDK's resolver for
+# absolute paths, avoiding the ``os.access()`` entirely. A command found
+# nowhere still falls through to the original SDK behaviour (its own
+# ``.cmd``/``.bat`` search); it fails to start otherwise.
 
 
 def _patch_mcp_windows_command_resolver() -> None:
@@ -397,16 +397,17 @@ _MAX_CONCURRENT_CONNECTIONS = 8
 # Per-server time limit for ``get_tools`` inside ``langgraph dev`` (see
 # :func:`_get_tools_timeout`).  A server that hasn't answered by then is
 # skipped like one that failed, so a single slow server can't hold up the
-# rest.  The server builds its graphs, and so loads MCP tools, before
-# answering ``/ok``, so this is sized for the 60s health budget in
-# ``start_langgraph_dev`` while still leaving room for a first ``npx -y``
-# launch that downloads its package.  Shutting down a stdio server that timed
-# out adds up to ~4s on top (the MCP SDK's termination waits).
+# rest.  The server loads MCP tools when it first builds a project's graph,
+# after it answers ``/ok``, one build at a time: a slow load holds up the
+# builds waiting behind it, so this is bounded while still leaving room for a
+# first ``npx -y`` launch that downloads its package.  Shutting down a stdio
+# server that timed out adds up to ~4s on top (the MCP SDK's termination
+# waits).
 #
 # It is not a hard bound on the whole load: the limit starts once a server
 # gets a slot under ``_MAX_CONCURRENT_CONNECTIONS``, so with more than that
 # many servers hanging, the ones queued behind them can still push the load
-# past 60s.
+# past it.
 _SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 
 # Healthy remote servers usually list tools within a few seconds; 20s leaves
@@ -921,9 +922,11 @@ def _resolve_command(command: str, server_path: str | None = None) -> str:
 
     Checks PATH first, then the current Python environment's bin directory
     (handles conda/venv envs where newly installed binaries may not be on PATH).
-    Returns the original command string if not found (let the OS report the error).
     A ``node`` / ``npx`` / ``npm`` is looked up on ``server_path`` (the server's
-    own ``PATH``) first, see :func:`_node_command_on_path`.
+    own ``PATH``) first, see :func:`_node_command_on_path`. A command found is
+    made absolute (``./srv.sh`` is read against the current directory), so the
+    stdio transport has nothing left to look up. A command found nowhere is
+    returned as given (let the OS report the error).
     """
     if os.path.isabs(command):
         return command
@@ -932,10 +935,12 @@ def _resolve_command(command: str, server_path: str | None = None) -> str:
     else:
         found = shutil.which(command)
     if found:
-        return found
+        return os.path.abspath(found)
     candidate = os.path.join(os.path.dirname(sys.executable), command)
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
+    if os.name == "nt" and os.path.isfile(candidate + ".exe"):
+        return candidate + ".exe"
     return command
 
 
@@ -947,13 +952,14 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     ``npm`` and that command is not on PATH.
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
-    the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
+    the server then fails to start as it would without Node. Never installs
+    inside ``langgraph dev`` (``paths.SERVER_PROCESS``): a download there would
     race the server's health deadline with its progress hidden in the server
-    log, so ``start_langgraph_dev`` runs this before spawning instead.
+    log, so ``start_langgraph_dev`` runs this before spawning instead. The
+    server, which outlives sessions, only puts on its PATH a private Node that
+    a session or ``EvoSci setup`` installed since it started, at its first MCP
+    load: the tool cache keeps that load while ``mcp.yaml`` is unchanged.
     """
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
-        return
     missing = [
         name
         for name, server in config.items()
@@ -970,6 +976,10 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
         return
     from ..setup.node import activate_runtime, ensure_node, log_progress
     from ..setup.protocol import StageError
+
+    if paths.SERVER_PROCESS:
+        activate_runtime()
+        return
 
     try:
         ensure_node(progress=log_progress(logger))
@@ -1177,13 +1187,13 @@ def _get_tools_timeout(transport: str) -> float | None:
     """The default ``get_tools`` limit for this transport and process.
 
     URL transports always have a discovery deadline. Stdio servers have a
-    deadline only inside ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS=1``),
+    deadline only inside ``langgraph dev`` (``paths.SERVER_PROCESS``),
     whose health check gives up after 60s. CLI/TUI stdio discovery may wait
     as long as needed for first-launch package downloads.
     """
     if transport in _URL_TRANSPORTS:
         return _NETWORK_GET_TOOLS_TIMEOUT_SECONDS
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
+    if paths.SERVER_PROCESS:
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
     return None
 
@@ -1218,7 +1228,9 @@ async def _load_tools(
     # May download Node (in the CLI process only); off the event loop so the
     # running session stays responsive.
     await asyncio.to_thread(_ensure_node_for_stdio, config)
-    unresolved = _unresolved_node_servers(config)
+    # Looking commands up on PATH touches the disk (``os.access``), which
+    # blockbuster refuses on an event loop inside ``langgraph dev``.
+    unresolved = await asyncio.to_thread(_unresolved_node_servers, config)
     # Off the event loop too: under mirror: cn the first Node server runs
     # `npm config get registry`.
     connections = await asyncio.to_thread(
@@ -1247,14 +1259,15 @@ async def _load_tools(
         _report("error", name, detail)
         return name, []
 
+    hint = "Run 'EvoSci setup' to install Node.js"
+    if paths.SERVER_PROCESS:
+        # The server keeps this load until it restarts.
+        hint += ", then 'EvoSci server stop' (the next session starts it again)"
     skipped: dict[str, list] = {}
     for name in unresolved:
         _report("start", name)
         command = config[name]["command"]
-        _fail(
-            name,
-            f"{command} was not found on PATH. Run 'EvoSci setup' to install Node.js",
-        )
+        _fail(name, f"{command} was not found on PATH. {hint}")
         skipped[name] = []
     if not connections:
         return skipped

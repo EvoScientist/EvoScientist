@@ -538,4 +538,7 @@ def test_scheduler_build_is_quiet_for_an_unsupported_grader(tmp_path, caplog):
         _build(
             "scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-fable-5.1")
         )
-    assert caplog.text == ""
+    # Only the rubric's own: a dependency's first probe in this process may
+    # warn too.
+    rubric = "EvoScientist.middleware.rubric"
+    assert [r for r in caplog.records if r.name.startswith(rubric)] == []

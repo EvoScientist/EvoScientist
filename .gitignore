@@ -16,7 +16,6 @@ build/
 # Environment
 .env
 .env.*
-!.env.example
 .venv/
 venv/
 bridge/node_modules/

@@ -72,6 +72,47 @@ def test_ensure_dev_server_spawns_on_server_backend(monkeypatch, tmp_path):
     assert ensure_calls[0]["backend"] == "langgraph_server"
 
 
+def test_ensure_dev_server_logs_server_exposure(monkeypatch, tmp_path, caplog):
+    import EvoScientist.langgraph_dev.manager as manager_mod
+    from EvoScientist.langgraph_dev.registration import (
+        ServerExposure,
+        exposure_messages,
+    )
+
+    config, _calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+    exposure = ServerExposure.of("0.0.0.0", False)
+    monkeypatch.setattr(manager_mod, "SERVER_EXPOSURE", exposure)
+
+    with caplog.at_level("WARNING"):
+        standalone._ensure_standalone_dev_server(
+            config, workspace_dir=str(tmp_path), backend="langgraph_server"
+        )
+
+    assert set(exposure_messages(exposure)) <= set(caplog.messages)
+
+
+def test_ensure_dev_server_unusable_server_exits(monkeypatch, tmp_path):
+    import EvoScientist.langgraph_dev.manager as manager_mod
+    from EvoScientist.langgraph_dev.registration import OlderServerError
+
+    config, _calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+
+    def older(_cfg, *, workspace_dir, backend=None):
+        raise OlderServerError()
+
+    monkeypatch.setattr(manager_mod, "ensure_langgraph_dev", older)
+
+    with pytest.raises(SystemExit) as exited:
+        standalone._ensure_standalone_dev_server(
+            config, workspace_dir=str(tmp_path), backend="langgraph_server"
+        )
+    assert exited.value.code == 1
+
+
 def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
     config, ensure_calls = _patch_manager(
         monkeypatch, gateway_backend="local", default_workdir=str(tmp_path)
@@ -655,7 +696,7 @@ def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
 
     calls: list[object] = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
     )
 
     standalone._ensure_ccproxy(_oauth_config())
@@ -663,15 +704,18 @@ def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
     assert calls == []
 
 
-def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
+def test_ensure_ccproxy_outlives_runner(monkeypatch):
+    """It is shared by every session and the background server; EvoSci
+    ccproxy stop stops it."""
     import atexit as atexit_mod
 
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    proc = object()
-    calls: list[object] = []
+    calls: list = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config) or proc
+        ccproxy_mod,
+        "maybe_start_ccproxy",
+        lambda config, *, lasting: calls.append((config, lasting)),
     )
     registered: list[tuple] = []
     monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
@@ -679,8 +723,8 @@ def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
     cfg = _oauth_config(anthropic_auth_mode="oauth")
     standalone._ensure_ccproxy(cfg)
 
-    assert calls == [cfg]
-    assert registered == [(ccproxy_mod.stop_ccproxy, proc)]
+    assert calls == [(cfg, True)]
+    assert registered == []
 
 
 def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
@@ -689,7 +733,7 @@ def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
 
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config: None)
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: None)
     registered: list[tuple] = []
     monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
 
@@ -704,7 +748,7 @@ def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
 
     calls: list[object] = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
     )
 
     standalone._ensure_ccproxy(_oauth_config(openai_auth_mode="oauth"))
@@ -715,7 +759,7 @@ def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
 def test_ensure_ccproxy_exits_when_the_proxy_cannot_start(monkeypatch, caplog):
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    def _boom(config):
+    def _boom(config, **_k):
         raise RuntimeError("ccproxy is required for OAuth mode but not found")
 
     monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", _boom)
@@ -742,7 +786,9 @@ def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
         ),
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
     monkeypatch.setattr(
         standalone,
         "_ensure_standalone_dev_server",
@@ -767,7 +813,9 @@ def test_run_standalone_skips_ccproxy_when_chatgpt_sign_in_missing(monkeypatch):
         anthropic_auth_mode="oauth",
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
 
     with pytest.raises(SystemExit):
         standalone.run_standalone(channel=None, bus=None, use_agent=True)
@@ -784,7 +832,9 @@ def test_run_standalone_starts_ccproxy_after_chatgpt_sign_in(monkeypatch):
         anthropic_auth_mode="oauth",
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
 
     standalone.run_standalone(channel=None, bus=None, use_agent=True)
 
@@ -804,7 +854,7 @@ def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
     monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda provider: (True, ""))
-    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port: None)
+    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port, **_k: None)
     seen: list[str] = []
     monkeypatch.setattr(
         manager_mod,

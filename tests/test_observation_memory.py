@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
 from EvoScientist.gateway import background_runs
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.memory import (
     launch as memory_launch,
 )
@@ -2072,7 +2073,10 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
         thread_id="worker-thread",
     )
 
-    assert kwargs["assistant_id"] == memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    # The run goes to the worker graph's assistant for the run's workspace.
+    assert kwargs["assistant_id"] == workspace_assistant_id(
+        memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID, "/tmp/ws"
+    )
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",

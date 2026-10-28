@@ -258,22 +258,20 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     from .config import get_effective_config
     from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        _DEFAULT_PORT,
         _base_url,
         _pid_serves_port,
         _read_workspace_sidecar,
+        configured_address,
         is_langgraph_dev_running,
+        is_lasting,
         stop_recorded_server,
     )
 
     config = get_effective_config()
-    port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
-    host = (
-        str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
-    ).strip() or _DEFAULT_HOST
+    port, host = configured_address(config)
     # A stale record whose server does not answer is ignored.
     if not is_langgraph_dev_running(port=port, host=host):
+        _stop_service_ccproxy(emit)
         return
     sidecar = _read_workspace_sidecar()
     if sidecar is not None and _pid_serves_port(sidecar.get("pid"), port):
@@ -300,8 +298,21 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
                 raise UpdateError(
                     "server_running", "Update cancelled; the server keeps running."
                 )
+        # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
+        # is started again by the setup after the update, from the project it
+        # was started from.
+        recorded = sidecar.get("workspace")
+        restart = is_lasting(sidecar) and isinstance(recorded, str)
+        if restart:
+            from .setup.server import remember_for_restart
+
+            remember_for_restart(recorded)
         pid = stop_recorded_server()
         if pid is None:
+            if restart:
+                from .setup.server import forget_restart
+
+                forget_restart()
             raise UpdateError(
                 "server_running",
                 f"Could not stop the EvoScientist server on port {port}; nothing "
@@ -309,6 +320,7 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
                 f"update again.",
             )
         emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
+        _stop_service_ccproxy(emit)
         return
     manual = manual_stop_command(port)
     message = (
@@ -318,9 +330,20 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     )
     if confirm is not None and not opts.yes:
         if confirm(f"{message}\nUpdate anyway?"):
+            _stop_service_ccproxy(emit)
             return
         raise UpdateError("server_running", "Update cancelled.")
     raise UpdateError("server_running", f"{message} Nothing was changed.")
+
+
+def _stop_service_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy EvoSci left running for its sessions: it runs from
+    the install the update replaces. The next session starts it again."""
+    from .ccproxy_manager import stop_recorded_ccproxy
+
+    pid = stop_recorded_ccproxy()
+    if pid is not None:
+        emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
 
 
 # --------------------------------------------------------------------------- #
@@ -738,16 +761,22 @@ def _reader_gone() -> bool:
 
 
 def _server_tree() -> set[int]:
-    """The recorded langgraph server and its children."""
+    """The background agent service the update stops itself: the recorded
+    langgraph server and the recorded ccproxy, with their children."""
     import psutil
 
+    from .ccproxy_manager import recorded_ccproxy_running
     from .langgraph_dev.manager import _read_workspace_sidecar
 
-    try:
-        server = psutil.Process(int((_read_workspace_sidecar() or {})["pid"]))
-        return {server.pid, *(c.pid for c in server.children(recursive=True))}
-    except (KeyError, TypeError, ValueError, OverflowError, psutil.Error):
-        return set()
+    pids = [(_read_workspace_sidecar() or {}).get("pid"), recorded_ccproxy_running()]
+    tree: set[int] = set()
+    for pid in pids:
+        try:
+            root = psutil.Process(int(pid))
+            tree |= {root.pid, *(c.pid for c in root.children(recursive=True))}
+        except (TypeError, ValueError, OverflowError, psutil.Error):
+            continue
+    return tree
 
 
 def _hold_update_lock():

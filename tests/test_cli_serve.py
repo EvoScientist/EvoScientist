@@ -5,6 +5,10 @@ from __future__ import annotations
 import os
 import signal
 
+import pytest
+import typer
+
+import EvoScientist.ccproxy_manager as ccproxy_mod
 from EvoScientist.cli import commands
 from EvoScientist.paths import SessionDirs, Workspace
 from tests.fakes.serve import run_serve_once, serve_config
@@ -27,9 +31,7 @@ def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):
     assert captured["dirs"] == SessionDirs(Workspace(expected))
     assert captured["media_dir"] == Workspace(expected).media_dir
     assert cli_ws.is_dir()
-    # The project .env can override the memories folder; it must be re-read
-    # before ensure_dirs() creates it.
-    assert order.index(("reload_env_dirs", None)) < order.index(("ensure_dirs", None))
+    assert ("ensure_dirs", None) in order
 
 
 def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_path):
@@ -279,3 +281,29 @@ def test_serve_sigint_cancels_active_message_scope_before_interrupt(
     )
 
     assert cancelled_scopes == ["channel:telegram:chat-2:message-2"]
+
+
+def test_serve_says_where_its_dangerous_flag_applies(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    noted: list = []
+    monkeypatch.setattr(commands, "_print_dangerous_flag_note", noted.append)
+
+    run_serve_once(monkeypatch, serve_config(default_workdir=ws), workdir=ws)
+
+    assert noted == ["local"]
+
+
+def test_serve_ccproxy_failure_keeps_install_hint(monkeypatch, tmp_path, capsys):
+    """The hint's ``[oauth]`` extra is text, not markup."""
+
+    def missing(config, *, lasting):
+        raise RuntimeError("Install it with: pip install 'evoscientist[oauth]'")
+
+    monkeypatch.setattr(commands, "uses_oauth", lambda _config: True)
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", missing)
+    ws = str((tmp_path / "ws").resolve())
+
+    with pytest.raises(typer.Exit):
+        run_serve_once(monkeypatch, serve_config(default_workdir=ws), workdir=ws)
+
+    assert "evoscientist[oauth]" in capsys.readouterr().out

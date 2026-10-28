@@ -274,58 +274,28 @@ def test_strip_private_scrubs_task_result_snapshot_blob():
     assert tasks_after[1] is clean_task
 
 
-def test_agent_uses_filtered_graph_class():
-    """The ``__class__`` swap in ``main_graph.py`` is the load-bearing wiring
-    that makes ``_strip_private`` reach the langgraph-api endpoints.
-    ``_strip_private`` and ``_EvoFilteredGraph`` in isolation don't prove the
-    swap ran; every other test in this file passes even if someone drops the
-    swap line. This asserts the compiled agent is actually the filtered
-    subclass at module-load time, and that the subclass survives
-    ``Pregel.copy(update=...)`` — the call langgraph-api makes in
-    ``get_graph`` before yielding the graph to endpoint handlers.
-    """
-    from EvoScientist.langgraph_dev.main_graph import (
-        EvoScientist_agent,
-        _EvoFilteredGraph,
-    )
-
-    # Registered graphs sit behind a folder-checking factory; it serves this graph.
-    graph = EvoScientist_agent.graph
-    assert isinstance(graph, _EvoFilteredGraph)
-    assert isinstance(graph.copy(update={}), _EvoFilteredGraph)
-
-
-def test_all_registered_graphs_use_filtered_graph_class():
-    """Every graph registered in ``langgraph.json`` (main + all subagents)
-    gets the ``__class__`` swap via ``_apply_filter_to_all_registered_graphs``.
-    Iterating the config directly matches the auto-detect refactor: adding
-    a new subagent to ``langgraph.json`` should not require a corresponding
-    test update.
+def test_every_served_graph_uses_filtered_graph_class(
+    monkeypatch, tmp_path, tiny_graph
+):
+    """Every graph the server builds (main + all subagents) gets the
+    ``__class__`` swap. Iterates the registered builders, so a new graph needs
+    no test update.
 
     Subagents get ``create_code_interpreter_middleware`` unconditionally
     (``EvoScientist.py:_build_middleware_stack``), so they can touch the
     QuickJS REPL and write ``_quickjs_snapshot_payload`` on their own
-    checkpoint namespace. Async subagents also get their own ``thread_id``
-    and their ``/threads/{id}/state`` endpoint runs on their own compiled
-    graph — without the swap on those graphs, our filter would miss that
-    endpoint entirely.
+    checkpoint namespace, read through their own ``/threads/{id}/state``.
     """
-    import json
-    from importlib import import_module
-    from pathlib import Path
-
-    # Import triggers ``main_graph``'s swap loop.
-    from EvoScientist.langgraph_dev import main_graph
+    from EvoScientist.langgraph_dev import factories
     from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
+    from EvoScientist.paths import SessionDirs, Workspace
 
-    config_path = Path(main_graph.__file__).parent / "langgraph.json"
-    config = json.loads(config_path.read_text())
-    for name, path in config["graphs"].items():
-        module_path, attr = path.rsplit(":", 1)
-        graph = getattr(import_module(module_path), attr).graph
-        assert isinstance(graph, _EvoFilteredGraph), (
-            f"graph {name!r} ({path}) did not receive the class swap"
-        )
+    for graph_id in list(factories.BUILDERS):
+        monkeypatch.setitem(factories.BUILDERS, graph_id, tiny_graph)
+    graphs = factories.GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    for graph_id in factories.BUILDERS:
+        assert isinstance(graphs.get(graph_id, dirs), _EvoFilteredGraph), graph_id
 
 
 def test_strip_private_recurses_into_nested_subgraph_state():
