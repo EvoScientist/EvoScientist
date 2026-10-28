@@ -80,7 +80,9 @@ Running the command again repairs the install or moves it to the newest release
 tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
 A package that went into the environment another way (on Windows, or with an
 older release, when you added a channel or an MCP server) is not in the
-receipt and is removed; add it again afterwards. Close EvoScientist first; on Windows the script stops and names the EvoScientist
+receipt and is removed; add it again afterwards. Close EvoScientist and stop
+the background agent service (`EvoSci service stop`) first: it keeps running
+after your sessions end. On Windows the script stops and names the EvoScientist
 processes that still run, because a running process keeps the files locked.
 
 A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
@@ -103,13 +105,16 @@ no longer used.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
-same packages, or by running the command again. `EvoSci update` waits until
-other EvoScientist sessions, servers and MCP servers started from the install
-have closed, and names them; Ctrl+C cancels and changes nothing.
+same packages, or by running the command again. `EvoSci update` asks before it
+stops the background agent service, starts it again after the update, and
+waits until other EvoScientist sessions and MCP servers started from the
+install have closed, naming them; Ctrl+C cancels and changes nothing.
 
 ## Uninstalling
 
-There is no `--uninstall` option. On macOS and Linux:
+There is no `--uninstall` option. First stop the background agent service,
+which keeps running after your sessions end: `EvoSci service stop`. Then, on
+macOS and Linux:
 
 1. Remove the package with the uv the script installed, which
    `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or

@@ -21,6 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..langgraph_dev.assistants import launch_assistant_id
 from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
@@ -709,6 +710,15 @@ class LangGraphServerGateway:
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
 
+    def _target_assistant_id(self, target: GraphTarget | None = None) -> str:
+        """The assistant a turn on *target* runs on: its graph's assistant for
+        the target's workspace, which names the project; the graph itself for
+        a target without a workspace."""
+        return launch_assistant_id(
+            self._target_graph_id(target),
+            target.workspace_dir if target is not None else None,
+        )
+
     async def create_thread(
         self,
         target: GraphTarget | None = None,
@@ -799,8 +809,10 @@ class LangGraphServerGateway:
         """Assemble this run's config, reading the live session config here.
 
         The target's folders go in last and replace any a caller put in
-        ``configurable_extra``, so the server checks the run against the
-        folders the session works in and can refuse it when it serves others.
+        ``configurable_extra``. The server reads the run's project from its
+        assistant (or its thread's binding) and the run folder from
+        ``run_dir``, and refuses a run folder that is not one of that
+        project's.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -1453,7 +1465,7 @@ class LangGraphServerGateway:
         tracker = _ServerSubagentTracker(emitter, subagents)
         stream = self.thread_store.client.threads.stream(
             request.thread_id,
-            assistant_id=self._target_graph_id(request.target),
+            assistant_id=self._target_assistant_id(request.target),
         )
 
         request_id = (

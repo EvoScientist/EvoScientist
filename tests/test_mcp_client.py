@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from EvoScientist import paths
 from EvoScientist.mcp.client import (
     _build_connections,
     _filter_tools,
@@ -130,6 +131,28 @@ class TestResolveCommand:
         assert Path(result).stem.lower() in ("python", "python3")
         assert result != "python"  # resolved, not the bare name
 
+    @pytest.mark.skipif(os.name == "nt", reason="finds commands by PATHEXT")
+    def test_relative_command_made_absolute(self, tmp_path, monkeypatch):
+        """The stdio transport looks up a relative command again, on the
+        event loop, where ``langgraph dev`` refuses the disk access."""
+        tool = tmp_path / "srv.sh"
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+
+        assert Path(_resolve_command("./srv.sh")) == tool
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows executable lookup")
+    def test_windows_venv_exe_found_next_to_python(self, tmp_path, monkeypatch):
+        """A venv console script on Windows is ``<name>.exe``."""
+        (tmp_path / "my-mcp-tool.exe").write_text("")
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client.sys.executable", str(tmp_path / "python.exe")
+        )
+
+        assert _resolve_command("my-mcp-tool") == str(tmp_path / "my-mcp-tool.exe")
+
     def test_found_in_python_bin(self, tmp_path, monkeypatch):
         """Falls back to sys.executable's directory when not in PATH."""
 
@@ -169,9 +192,8 @@ class TestResolveCommand:
         monkeypatch.setenv("PATH", str(on_path))
         name = "npx.cmd" if os.name == "nt" else "npx"
         command = f"node_modules/.bin/{name}"
-        # The file mcp.yaml names, relative to the current directory; Windows
-        # spells it with a backslash.
-        assert Path(_resolve_command(command)) == Path(command)
+        # The file mcp.yaml names, read against the current directory.
+        assert Path(_resolve_command(command)) == tmp_path / command
 
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
@@ -2565,6 +2587,29 @@ class TestLoadToolsProgressCallback:
             ),
         ]
 
+    async def test_unresolved_node_server_in_langgraph_dev_names_server_stop(
+        self, monkeypatch, tmp_path
+    ):
+        """The server keeps a failed load until it restarts, so EvoSci setup
+        alone does not bring the server's tools back."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        events: list[tuple[str, str, str]] = []
+
+        await mcp_client._load_tools(
+            {"fs": {"transport": "stdio", "command": "npx", "args": []}},
+            on_progress=lambda *e: events.append(e),
+        )
+
+        (failure,) = [e for e in events if e[0] == "error"]
+        assert "EvoSci server stop" in failure[2]
+
     async def test_unresolved_node_server_alone_returns_its_failure(
         self, monkeypatch, tmp_path
     ):
@@ -2764,9 +2809,9 @@ class TestLoadToolsProgressCallback:
     ):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         if server_process:
-            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+            monkeypatch.setattr(paths, "SERVER_PROCESS", True)
         if transport != "stdio":
             expected = mcp_client._NETWORK_GET_TOOLS_TIMEOUT_SECONDS
         elif server_process:
@@ -2786,7 +2831,7 @@ class TestLoadToolsProgressCallback:
             return {}
 
         monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
 
         config = {"srv": {"transport": "stdio", "command": "demo"}}
         await mcp_client.aload_mcp_tools(config)
@@ -2820,9 +2865,9 @@ class TestLoadToolsProgressCallback:
         monkeypatch.setattr(lc_client, "MultiServerMCPClient", _SlowClient)
         monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
         if server_process is None:
-            monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+            monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         else:
-            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", server_process)
+            monkeypatch.setattr(paths, "SERVER_PROCESS", server_process == "1")
 
         config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
         result = mcp_client.load_mcp_tools(config)
@@ -2852,7 +2897,7 @@ class TestLoadToolsProgressCallback:
 
         monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
         monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
 
         config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
         with caplog.at_level(logging.WARNING, logger=mcp_client.logger.name):
@@ -2891,7 +2936,7 @@ class TestNetworkDiscoveryDeadline:
                         cancelled.set()
                 return [tool]
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
@@ -3013,7 +3058,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -3118,7 +3163,7 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
@@ -3137,7 +3182,7 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
@@ -3146,15 +3191,19 @@ class TestEnsureNodeForStdio:
             )
         assert "compression type 99" in caplog.text
 
-    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls, tmp_path):
+    def test_langgraph_dev_uses_node_installed_since_start_without_installing(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """The server lasts across sessions: a session or EvoSci setup may
+        have installed the private Node after it started."""
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
         monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
         )
-        assert calls == {"ensure": 0, "activate": 0}
+        assert calls == {"ensure": 0, "activate": 1}
 
     async def test_load_tools_checks_node_before_building_connections(
         self, monkeypatch
@@ -3166,10 +3215,15 @@ class TestEnsureNodeForStdio:
             mcp_client, "_ensure_node_for_stdio", lambda _c: order.append("node")
         )
         monkeypatch.setattr(
+            mcp_client,
+            "_unresolved_node_servers",
+            lambda _c: order.append("lookup") or [],
+        )
+        monkeypatch.setattr(
             mcp_client, "_build_connections", lambda _c: order.append("connect") or {}
         )
         await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
-        assert order == ["node", "connect"]
+        assert order == ["node", "lookup", "connect"]
 
     async def test_load_tools_builds_connections_off_the_event_loop(self, monkeypatch):
         """Under mirror: cn building them may run ``npm config get registry``."""
@@ -3184,6 +3238,25 @@ class TestEnsureNodeForStdio:
             "_build_connections",
             lambda _c: threads.append(threading.current_thread()) or {},
         )
+        await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
+        (thread,) = threads
+        assert thread is not threading.current_thread()
+
+    async def test_load_tools_looks_node_up_off_event_loop(self, monkeypatch):
+        """Looking ``npx`` up on PATH calls ``os.access``, which blockbuster
+        refuses on an event loop inside ``langgraph dev``."""
+        import threading
+
+        from EvoScientist.mcp import client as mcp_client
+
+        threads: list[threading.Thread] = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client,
+            "_unresolved_node_servers",
+            lambda _c: threads.append(threading.current_thread()) or [],
+        )
+        monkeypatch.setattr(mcp_client, "_build_connections", lambda _c: {})
         await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
         (thread,) = threads
         assert thread is not threading.current_thread()

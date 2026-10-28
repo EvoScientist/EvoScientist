@@ -14,6 +14,7 @@ import pytest
 
 from EvoScientist.channels import interaction as I
 from EvoScientist.channels.capabilities import ChannelCapabilities
+from EvoScientist.paths import Workspace
 
 # ═══════════════════════════════════════════════════════════════════════
 # Scripted fake IO
@@ -491,6 +492,7 @@ class TestConsumerUnrecognizedRefeed:
             manager=mgr,
             agent=MagicMock(),
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=gateway,
             max_concurrent=2,
             max_pending=10,
@@ -586,6 +588,7 @@ class TestReplyInterceptionSkipsThreadCreation:
             manager=MagicMock(),
             agent=MagicMock(),
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=gateway,
             max_concurrent=1,
             max_pending=5,

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.graph.state import CompiledStateGraph
@@ -32,6 +32,15 @@ from EvoScientist.gateway import RuntimeGateways, ThreadStore
 from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.runtime import AsyncRuntime
 from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+
+
+@pytest.fixture(autouse=True)
+def _folders_are_names(monkeypatch):
+    """The folders here are names, not folders on disk: a session moving
+    to another project would otherwise create it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(registration, "prepare_workdir", lambda path: path)
 
 
 def _agent(name: str = "agent") -> CompiledStateGraph:
@@ -212,7 +221,7 @@ async def test_hook_updates_workspace_dir_on_resume():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch(
@@ -223,9 +232,7 @@ async def test_hook_updates_workspace_dir_on_resume():
         await hook(ctx, old_agent, cmd)
 
     restored = SessionDirs(Workspace("/restored-ws"))
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=restored, backend=None, status_message=ANY
-    )
+    sync_server.assert_awaited_once_with(cfg, dirs=restored, backend=None)
     load_agent.assert_called_once_with(
         work_dir=str(restored.work_dir),
         workspace=restored.workspace,
@@ -379,17 +386,16 @@ async def test_start_new_session_cb_returns_to_root_after_run_folder_resume():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch("EvoScientist.cli.commands._load_agent", return_value=root_agent),
     ):
         await cb()
 
+    # The project stays the same, so the server already serves it.
     root = SessionDirs(workspace)
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=root, backend=None, status_message=ANY
-    )
+    sync_server.assert_not_awaited()
     assert state.dirs == root
     assert state.thread_id == "new-tid"
     assert state.agent is root_agent
@@ -420,7 +426,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(side_effect=_sync_server),
         ) as sync_server,
         patch(
@@ -431,9 +437,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     new_dirs = SessionDirs(Workspace("/new-ws"))
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=new_dirs, backend=None, status_message=ANY
-    )
+    sync_server.assert_awaited_once_with(cfg, dirs=new_dirs, backend=None)
     load_agent.assert_called_once_with(
         work_dir=str(Workspace("/new-ws").root),
         workspace=Workspace("/new-ws"),
@@ -463,7 +467,7 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch(
@@ -474,10 +478,7 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     sync_server.assert_awaited_once_with(
-        cfg,
-        dirs=SessionDirs(Workspace("/new-ws")),
-        backend="langgraph_server",
-        status_message=ANY,
+        cfg, dirs=SessionDirs(Workspace("/new-ws")), backend="langgraph_server"
     )
 
 
@@ -496,7 +497,7 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ),
         patch(
@@ -523,7 +524,7 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
 
 
 async def test_serve_resume_callback_preserves_state_when_server_refused():
-    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+    from EvoScientist.langgraph_dev.registration import OlderServerError
 
     cfg = _config()
     old_agent = _agent("old-agent")
@@ -539,14 +540,14 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
-            new=AsyncMock(side_effect=WorkspaceMismatchError("workspace conflict")),
+            "EvoScientist.cli.commands._register_project",
+            new=AsyncMock(side_effect=OlderServerError()),
         ),
         patch(
             "EvoScientist.cli.commands._load_agent",
             return_value=loaded_but_not_adopted,
         ) as load_agent,
-        pytest.raises(WorkspaceMismatchError, match="workspace conflict"),
+        pytest.raises(OlderServerError),
     ):
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
@@ -563,6 +564,38 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
     assert state.config is cfg
     assert runtime.agent is old_agent
     assert runtime.thread_id == "old-tid"
+
+
+async def test_serve_resume_callback_refuses_missing_project_before_agent_load(
+    tmp_path,
+):
+    """Loading the agent would recreate the folder empty."""
+    from EvoScientist.langgraph_dev.registration import ProjectFolderMissingError
+    from EvoScientist.langgraph_dev.registry import Registry
+
+    gone = Workspace(tmp_path / "gone")
+    Registry().set_registered(gone.key, True)
+    cfg = _config()
+    old_agent = _agent("old-agent")
+    state = _runtime_state(
+        agent=old_agent,
+        thread_id="old-tid",
+        dirs=SessionDirs(Workspace(tmp_path)),
+        config=cfg,
+    )
+    runtime = ChannelRuntime(agent=old_agent, thread_id="old-tid")
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=cfg)
+
+    with (
+        patch("EvoScientist.cli.commands._load_agent") as load_agent,
+        pytest.raises(ProjectFolderMissingError),
+    ):
+        await cb("new-tid", SessionDirs(gone))
+
+    load_agent.assert_not_called()
+    assert not gone.root.exists()
+    assert state.thread_id == "old-tid"
+    assert runtime.agent is old_agent
 
 
 async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
@@ -583,7 +616,7 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
             side_effect=RuntimeError("load failed"),
         ) as load_agent,
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         pytest.raises(RuntimeError, match="load failed"),

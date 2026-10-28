@@ -21,7 +21,7 @@ from ..paths import Workspace
 from .observations import build_observation_linker_index_context
 from .scheduler import ObservationLinkerContext
 from .source_context import MemorySourceContext, _trajectory_for_prompt
-from .types import MemorySourceType
+from .types import MEMORY_AGENT_RECURSION_LIMIT, MemorySourceType
 from .worker_activity import (
     MemoryOutputDelta,
     MemoryOutputSnapshot,
@@ -83,13 +83,11 @@ def _runs_create_kwargs(
 ) -> BackgroundRunPayload:
     """Merge the live model and the run's folders into *payload*.
 
-    Memory belongs to the workspace, so a run forwards its root and the
-    server checks that.
+    Memory belongs to the workspace, so a run goes to the workspace
+    assistant of its root, which the server reads the project from.
     """
-    try:
-        from EvoScientist.llm.patches import _merge_runs_config_kwargs
-    except Exception:
-        return payload
+    from EvoScientist.llm.patches import _merge_runs_config_kwargs
+
     return cast(
         "BackgroundRunPayload",
         _merge_runs_config_kwargs(
@@ -125,13 +123,14 @@ def _memory_worker_run_payload(
         "input": messages_input(_memory_worker_user_prompt(context)),
         "metadata": metadata,
         "config": {
+            "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
             "configurable": {
                 "thread_id": thread_id,
                 "evomemory_source_session_id": context.session_id,
                 "evomemory_source_agent": context.source_agent,
                 "evomemory_project_id": context.project_id,
                 "evomemory_trajectory_digest": context.trajectory_digest,
-            }
+            },
         },
     }
     return _runs_create_kwargs(payload, workspace_dir=metadata["workspace_dir"])
@@ -196,6 +195,7 @@ def _observation_linker_run_payload(
         "input": messages_input(_observation_linker_user_prompt(context)),
         "metadata": metadata,
         "config": {
+            "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
             "configurable": {
                 "thread_id": thread_id,
                 "evomemory_project_id": context.project_id,
@@ -203,7 +203,7 @@ def _observation_linker_run_payload(
                     list(context.observation_ids),
                     ensure_ascii=False,
                 ),
-            }
+            },
         },
     }
     return _runs_create_kwargs(payload, workspace_dir=metadata["workspace_dir"])

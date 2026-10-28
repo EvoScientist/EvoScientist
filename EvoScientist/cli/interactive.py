@@ -340,43 +340,18 @@ async def _resolve_startup_session(
     )
 
 
-async def _new_session_dirs(
-    current: SessionDirs,
-    *,
-    config: Any,
-    backend: str | None,
-    mode: str | None,
-    run_name: str | None,
+def _new_session_dirs(
+    current: SessionDirs, *, mode: str | None, run_name: str | None
 ) -> SessionDirs:
-    """The folders ``/new`` starts in, with the background agent server moved there.
-
-    ``--mode=run`` starts every session in a fresh run folder of the current
-    workspace; daemon mode works in its root. The server moves first, so the
-    new session's background work lands in its folder. Raises
-    ``WorkspaceMismatchError`` when another session holds the server: the
-    session stays as it is and the fresh run folder is removed.
+    """The folders ``/new`` starts in: ``--mode=run`` starts every session in
+    a fresh run folder of the current workspace; daemon mode works in its
+    root. The project stays the same, so the server already serves it.
     """
-    from .commands import _move_server_or_keep_session
-
     workspace = current.workspace
-    new_dirs = SessionDirs(
+    return SessionDirs(
         workspace,
         _create_run_dir(workspace, run_name) if mode == "run" else None,
     )
-    if not await _move_server_or_keep_session(
-        config,
-        target=new_dirs,
-        current=current,
-        backend=backend,
-        new_run_dir=True,
-        status_message="[dim]Moving background agent server to the new session...[/dim]",
-    ):
-        console.print(
-            "[yellow]Background agent server sync failed; started the new "
-            "session, but async subagents and EvoMemory workers may be "
-            "unavailable.[/yellow]"
-        )
-    return new_dirs
 
 
 # =============================================================================
@@ -896,12 +871,8 @@ def cmd_interactive(
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
-                new_dirs = await _new_session_dirs(
-                    state["dirs"],
-                    config=config,
-                    backend=gateway_backend,
-                    mode=mode,
-                    run_name=run_name,
+                new_dirs = _new_session_dirs(
+                    state["dirs"], mode=mode, run_name=run_name
                 )
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["dirs"] = new_dirs
@@ -929,25 +900,25 @@ def cmd_interactive(
                 callback mutates REPL state, reloads the agent, and
                 renders conversation history."""
                 if dirs is not None:
-                    # Move the background agent server to the resumed folders
-                    # so background workers and deployed sub-agents don't work
-                    # in the previous ones. Restart can take 10-15s behind a
-                    # spinner, in a worker thread so the event loop keeps
-                    # serving channel polls / MCP heartbeats. State changes
-                    # only after the move, so a WorkspaceMismatchError leaves
+                    # Register the resumed project with the background agent
+                    # server so background workers and deployed sub-agents
+                    # work there. The registration restores the project's
+                    # threads, behind a spinner, in a worker thread so the
+                    # event loop keeps serving channel polls / MCP heartbeats.
+                    # State changes only after it, so a ServerUnusableError leaves
                     # the session's folders and thread as they are, and command
                     # UIs (including channels) report the failure.
-                    from .commands import _move_server_or_keep_session
+                    from .commands import _register_or_keep_session
 
-                    if not await _move_server_or_keep_session(
+                    if not await _register_or_keep_session(
                         config,
                         target=dirs,
                         current=state["dirs"],
                         backend=gateway_backend,
                     ):
                         console.print(
-                            "[yellow]Background agent server sync failed; "
-                            "resumed the session, but async subagents and "
+                            "[yellow]The background agent server is unavailable "
+                            "for this project; resumed the session, but async subagents and "
                             "EvoMemory workers may be unavailable.[/yellow]"
                         )
                     state["dirs"] = dirs

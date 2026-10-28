@@ -526,8 +526,8 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         # ``configurable.model_provider`` per run. ``_ClientCacheProxy`` exposes
         # the same ``get_sync`` / ``get_async`` surface as ``_ClientCache``, so
         # the upstream tool builders accept it without a type change.
-        # Every launched run also carries this graph's folders, so the server
-        # refuses one meant for another workspace or run folder.
+        # Every launched run also goes to this graph's project, through its
+        # workspace assistant, and carries its run folder.
         clients = _ClientCacheProxy(
             _ClientCache(agent_map),
             folders=SessionDirs(workspace, work_dir).metadata(),

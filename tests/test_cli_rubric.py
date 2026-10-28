@@ -110,7 +110,6 @@ def _invoke(monkeypatch, argv, config=None):
 
     import EvoScientist.config as cfg_mod
     from EvoScientist.cli._app import app
-    from EvoScientist.stream.console import console
 
     captured: dict[str, object] = {}
 
@@ -125,11 +124,7 @@ def _invoke(monkeypatch, argv, config=None):
 
     monkeypatch.setattr(cfg_mod, "get_effective_config", _grab)
     monkeypatch.setattr(cfg_mod, "apply_config_to_env", lambda _config: None)
-    original = console.file
-    try:
-        result = CliRunner().invoke(app, argv, catch_exceptions=True)
-    finally:
-        console.file = original
+    result = CliRunner().invoke(app, argv, catch_exceptions=True)
     return captured.get("overrides"), result
 
 

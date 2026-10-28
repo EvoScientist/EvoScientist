@@ -377,7 +377,7 @@ class ActionVerdict:
 # gate to the backend. Set client-side by ``resolve_per_run_config`` from
 # ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
 # every gateway run; read by the HITL ``when`` predicate and the backend/background
-# guards. A per-run channel (not a construction flag) so a keepalive server can
+# guards. A per-run channel (not a construction flag) so a shared server can
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 

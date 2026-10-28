@@ -38,7 +38,10 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from ..langgraph_dev.registration import ServerExposure
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,6 @@ class LauncherConfig:
     backend_port: int
     webui_host: str
     webui_port: int
-    keepalive: bool = False
     # Honoured by :meth:`WebUILauncher.wait_ready` for front-ends whose
     # ``handles_browser_open`` is False (every runner in this module).
     open_browser: bool = False
@@ -74,7 +76,6 @@ class BackendTarget:
     workspace_dir: str
     backend_host: str
     backend_port: int
-    keepalive: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,9 @@ class LaunchResult:
     warnings: list[str] = field(default_factory=list)
     # True when wait_ready() opened a browser (False on a host without one).
     browser_opened: bool = False
+    # How the backend can be reached from other machines, as it answered the
+    # registration.
+    exposure: ServerExposure | None = None
 
 
 class LauncherError(Exception):
@@ -96,7 +100,7 @@ class LauncherError(Exception):
     panel, other front-ends to their own error display. ``message`` is
     human-readable and actionable; ``detail`` is an optional secondary line.
     ``fields`` carries the same facts for a program, e.g. ``{"workspace": ...}``
-    or ``{"run_dir": ...}`` on ``workspace_mismatch``.
+    on ``folder_missing`` and ``workspace_mismatch``.
     """
 
     def __init__(
@@ -385,6 +389,8 @@ class WebUILauncher:
         self._on_lock_wait = on_lock_wait
         self._backend_proc: subprocess.Popen | None = None
         self._backend_started = False
+        # Set once start() finished: the backend then outlives the launcher.
+        self._launched = False
         # True from just before start_langgraph_dev() until its proc handle is
         # wired. start_langgraph_dev blocks up to 60s on health, so a stop()
         # during that window has no _backend_proc to kill yet — this flag lets
@@ -397,6 +403,7 @@ class WebUILauncher:
         # stop() from another.
         self._lock = threading.Lock()
         self._warnings: list[str] = []
+        self._exposure: ServerExposure | None = None
 
     # -- properties ------------------------------------------------------- #
     @property
@@ -445,6 +452,7 @@ class WebUILauncher:
                 if decision.action == "start":
                     self._start_backend()
             self._raise_if_stopped()
+            self._register()
 
             # Front-end port: a non-fatal warning (node will surface a hard
             # bind failure if it actually can't listen).
@@ -457,12 +465,24 @@ class WebUILauncher:
 
             env = self._build_frontend_env()
             self._webui_proc = self._runner.start(self._cfg, env)
-            self._raise_if_stopped()
+            with self._lock:
+                # From here the backend this launch started outlives it, for
+                # every session to share; a stop() that came first still
+                # tears it down.
+                self._raise_if_stopped()
+                self._launched = True
         except BaseException:
             self._teardown()
             raise
 
         return self._result()
+
+    def _register(self) -> None:
+        """Register the workspace with the backend this launch started or
+        reuses."""
+        self._exposure = register_launch_folder(
+            self._cfg.workspace_dir, url=self.backend_url
+        )
 
     def _raise_if_stopped(self) -> None:
         """Abort startup if ``stop()`` fired on another thread mid-boot."""
@@ -530,7 +550,8 @@ class WebUILauncher:
 
     def stop(self) -> None:
         """Idempotent teardown. Stops the front-end always; stops the backend
-        only if we started it and keepalive is off. Safe before/during
+        only if we started it and the launch did not finish (a started
+        backend outlives the WebUI, for every session). Safe before/during
         ``start()``: always marks the launcher stopped so an in-flight
         ``start()`` aborts and cleans up what it spawned."""
         self._stopped = True
@@ -554,12 +575,12 @@ class WebUILauncher:
             release = getattr(self._runner, "release", None)
             if release is not None:
                 release()
-            if self._backend_proc is not None and not self._cfg.keepalive:
+            if self._backend_proc is not None and not self._launched:
                 from ..langgraph_dev.manager import stop_langgraph_dev
 
                 proc, self._backend_proc = self._backend_proc, None
                 stop_langgraph_dev(proc)
-            elif self._backend_start_initiated and not self._cfg.keepalive:
+            elif self._backend_start_initiated and not self._launched:
                 # stop() fired while start_langgraph_dev was still running, so we
                 # have no proc handle yet. Stop only the process THIS launcher
                 # spawned (the manager's in-memory record), never the shared
@@ -695,6 +716,7 @@ class WebUILauncher:
             webui_url=self.webui_url,
             backend_started=self._backend_started,
             warnings=list(self._warnings),
+            exposure=self._exposure,
         )
 
 
@@ -707,7 +729,8 @@ def _record_serves_host(recorded: object, host: str) -> bool:
     them. A record without a host, written by an older release, is not
     checked.
     """
-    from ..langgraph_dev.manager import _WILDCARD_HOSTS, _is_loopback_host, _probe_host
+    from ..langgraph_dev.boundary import is_loopback_host
+    from ..langgraph_dev.manager import _WILDCARD_HOSTS, _probe_host
 
     if not isinstance(recorded, str):
         return True
@@ -718,7 +741,7 @@ def _record_serves_host(recorded: object, host: str) -> bool:
     if recorded in _WILDCARD_HOSTS:
         return True
     if "localhost" in (recorded, host):
-        return _is_loopback_host(recorded) and _is_loopback_host(_probe_host(host))
+        return is_loopback_host(recorded) and is_loopback_host(_probe_host(host))
     return _probe_host(recorded) == _probe_host(host)
 
 
@@ -730,12 +753,20 @@ def _resolve_backend(
 ) -> _BackendDecision:
     """Decide whether to reuse an already-running backend or start a fresh one.
 
-    Pure decision logic: raises :class:`LauncherError` for foreign occupants,
-    workspace mismatch and sidecar port mismatches; returns ``reuse`` or
-    ``start`` otherwise. Config-fingerprint drift (configuration or version)
+    Pure decision logic: raises :class:`LauncherError` for foreign occupants
+    and sidecar port mismatches; returns ``reuse`` or ``start`` otherwise.
+    The backend serves every registered project, so the launch registers its
+    own after a reuse. Config-fingerprint drift (configuration or version)
     is a warning, not an error. A reuse carries the ownership record it was
     decided on. With ``require_record``, a server without one is a
     ``port_conflict`` instead of a reuse.
+
+    A backend started from another project is ``workspace_mismatch``: the
+    front-ends launched here (the WebUI, the desktop app behind ``deploy
+    --json``) do not name their project in every call, so they get the
+    backend's default one, the project of the client that started it
+    (``GET /api/workspace``). A client that names its project, as the CLI
+    does, shares any backend.
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
@@ -758,10 +789,9 @@ def _resolve_backend(
             fields={"reason": "foreign"},
         )
 
-    # An EvoSci server is already there — reuse only if it serves THIS
-    # workspace, and (soft) matches the current config and version.
+    # An EvoSci server is already there — reuse it, warning when it does not
+    # match the current config and version.
     sidecar = _read_workspace_sidecar()
-    ws = Path(cfg.workspace_dir).resolve()
     if sidecar is None:
         # No ownership record for the server on this port. The single global
         # sidecar is unlinked when any EvoSci server stops, so a surviving
@@ -771,15 +801,15 @@ def _resolve_backend(
             raise LauncherError(
                 "port_conflict",
                 f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
-                f"has no ownership record for, so its workspace is unknown.",
+                f"has no ownership record for.",
                 "Stop it, or use another port (--port).",
                 fields={"reason": "no_record"},
             )
         return _BackendDecision(action="reuse", warnings=warnings)
     # A sidecar is present. It is a single global record with no port field, so a
     # launch on another port can overwrite it. Confirm its PID actually serves
-    # THIS port before trusting its workspace — otherwise a stale record could
-    # reuse the wrong workspace, and teardown could stop the wrong server.
+    # THIS port before trusting it — otherwise a stale record could describe
+    # another server, and teardown could stop the wrong one.
     # Two servers can share a port on different interfaces, so the recorded
     # bind must also be the one the probe reached.
     if not _pid_serves_port(
@@ -795,30 +825,18 @@ def _resolve_backend(
             f"port or interface, not this one.",
             fields={"reason": "record_mismatch"},
         )
-    if Path(sidecar["workspace"]).resolve() != ws:
+    if Path(sidecar["workspace"]).resolve() != Path(cfg.workspace_dir).resolve():
+        from ..paths import command_arg
+
         raise LauncherError(
             "workspace_mismatch",
-            f"Port {cfg.backend_port} is already serving a langgraph dev "
-            f"for a different workspace ({sidecar['workspace']}).",
-            f"Stop that EvoSci session, or launch from that workspace "
-            f"(--workdir {sidecar['workspace']}).",
+            f"Port {cfg.backend_port} is serving the backend started from "
+            f"{sidecar['workspace']}, and this front-end shows the project of "
+            "the client that started the backend.",
+            f"Launch from that folder (--workdir {command_arg(sidecar['workspace'])}), or "
+            "stop the backend with `EvoSci server stop` and launch again; that "
+            "ends the background work of every EvoSci session using it.",
             fields={"workspace": sidecar["workspace"]},
-        )
-    # The WebUI works in the workspace root; a server started for a
-    # ``--mode=run`` session works in one of its run folders.
-    if sidecar.get("run_dir"):
-        raise LauncherError(
-            "workspace_mismatch",
-            f"Port {cfg.backend_port} is already serving a langgraph dev "
-            f"for a run folder of this workspace ({sidecar['run_dir']}).",
-            "Stop that EvoSci --mode=run session, then launch again."
-            + (
-                " If that session already ended, stop its kept-alive server "
-                "with 'EvoSci server stop'."
-                if cfg.keepalive
-                else ""
-            ),
-            fields={"workspace": sidecar["workspace"], "run_dir": sidecar["run_dir"]},
         )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
@@ -961,6 +979,40 @@ def _poll_ready(
 # --------------------------------------------------------------------------- #
 # Launcher-config resolution (shared by every front-end)
 # --------------------------------------------------------------------------- #
+def prepare_launch_folder(ws: str) -> None:
+    """:func:`~EvoScientist.langgraph_dev.registration.prepare_workdir`, a
+    refusal raised as its :class:`LauncherError`."""
+    from ..langgraph_dev import registration
+
+    try:
+        registration.prepare_workdir(ws)
+    except registration.ServerUnusableError as exc:
+        raise _launcher_error(exc, ws) from exc
+
+
+def register_launch_folder(ws: str, *, url: str) -> ServerExposure:
+    """Register *ws* with the backend at *url*; how that backend can be
+    reached from other machines. A failure is raised as its
+    :class:`LauncherError` (``folder_missing``, ``server_outdated`` or
+    ``registration_failed``)."""
+    from ..langgraph_dev import registration
+    from ..paths import Workspace
+
+    try:
+        return registration.register_folder(Workspace(ws), url=url)
+    except (registration.ServerUnusableError, registration.RegistrationError) as exc:
+        raise _launcher_error(exc, ws) from exc
+
+
+def _launcher_error(exc: Exception, ws: str) -> LauncherError:
+    """*exc*'s :class:`LauncherError`, its folder spelled as launched, as the
+    ``starting`` and ``ready`` events spell it."""
+    fields = dict(exc.fields)
+    if "workspace" in fields:
+        fields["workspace"] = ws
+    return LauncherError(exc.code, str(exc), fields=fields)
+
+
 def build_launcher_config(
     config: Any,
     workspace_dir: str | None,
@@ -974,7 +1026,7 @@ def build_launcher_config(
     ws = str(
         start_workspace_path(workspace_dir, getattr(config, "default_workdir", ""))
     )
-    os.makedirs(ws, exist_ok=True)
+    prepare_launch_folder(ws)
 
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     webui_port = int(getattr(config, "webui_port", _DEFAULT_WEBUI_PORT))
@@ -990,6 +1042,5 @@ def build_launcher_config(
         backend_port=backend_port,
         webui_host=webui_host,
         webui_port=webui_port,
-        keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
         open_browser=True,
     )
