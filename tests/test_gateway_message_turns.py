@@ -712,6 +712,66 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     }
 
 
+async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
+    """When the interrupted flag is already set, a failing state read must not cancel.
+
+    ``_pending_interrupt_events`` owns that read; ``_paused_interrupt_events``
+    converts the failure so the resume path on ``_pending`` is untouched.
+    """
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_lifecycle("run-1", "running"), _input_requested([])],
+        interrupted=True,
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    client = gateway.thread_store.client
+    cancelled: list[list[str]] = []
+
+    class _Runs:
+        async def list(self, thread_id: str, **kwargs):
+            return [{"run_id": "run-1", "status": "running", "metadata": {}}]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancelled.append(list(run_ids))
+
+    client.runs = _Runs()
+
+    real_get_state = threads.get_state
+    calls = {"n": 0}
+
+    async def boom(thread_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real_get_state(thread_id)
+        raise ConnectionError("state store unavailable")
+
+    stream.interrupts = []
+    threads.get_state = boom  # type: ignore[method-assign]
+
+    events: list[dict] = []
+
+    async def collect() -> None:
+        async with asyncio.timeout(GUARD_SECONDS):
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id=THREAD_ID)
+            ):
+                events.append(event)
+
+    with pytest.raises(
+        server_mod._PauseStateReadError,
+        match="Could not read the pause state",
+    ):
+        await collect()
+
+    assert cancelled == []
+    assert [event["type"] for event in events] == ["error"]
+    assert events[-1] == {
+        "type": "error",
+        "message": f"Could not read the pause state for thread {THREAD_ID}",
+    }
+
+
 async def test_root_failed_lifecycle_emits_done_like_main():
     """A root ``failed`` ends the turn the same way main's subscribe path does.
 
