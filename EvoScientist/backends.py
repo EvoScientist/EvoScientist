@@ -68,12 +68,13 @@ _PASSTHROUGH_DEVICE_PATHS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"
 _PATH_PATTERNS = [
     r"~/",  # home directory
 ]
-# Destructive patterns: catastrophic in every mode. Outside dangerous mode a
-# target strictly inside the workspace (written after a `cd`) is exempt.
+# Destructive patterns: catastrophic in every mode; `target` is where the
+# removed path starts. Outside dangerous mode a target strictly inside the
+# workspace (written after a `cd`) is exempt.
 _DESTRUCTIVE_PATTERNS = [
-    r"\brm\s+-rf\s+/",  # rm -rf with absolute path
+    re.compile(r"\brm\s+-rf\s+(?P<target>/)"),  # rm -rf with absolute path
     # The same with a Windows drive path, which Git Bash's rm accepts.
-    r"\brm\s+-rf\s+['\"]?[A-Za-z]:[\\/]",
+    re.compile(r"\brm\s+-rf\s+(?P<target>['\"]?[A-Za-z]:[\\/])"),
 ]
 
 # Dangerous commands that should never be executed
@@ -1095,6 +1096,28 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
+def _recursive_rm_operands(
+    found: shell_syntax.SimpleCommand,
+) -> list[tuple[str, dict[str, object] | None]]:
+    """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
+    ``--recursive``, in any spelling), with their tokens."""
+    if found.name != "rm":
+        return []
+    operands: list[tuple[str, dict[str, object] | None]] = []
+    recursive = options_done = False
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        if not options_done and arg == "--":
+            options_done = True
+        elif not options_done and arg.startswith("-") and arg != "-":
+            recursive = recursive or (
+                arg == "--recursive"
+                or (not arg.startswith("--") and bool({"r", "R"} & set(arg[1:])))
+            )
+        else:
+            operands.append((arg, token))
+    return operands if recursive else []
+
+
 def _kill_by_lookup(found: shell_syntax.SimpleCommand, looks_up: bool) -> bool:
     """Whether a kill reaches processes found by name or pattern (through
     xargs or a substitution; *looks_up*: the command runs such a lookup), or
@@ -1172,6 +1195,7 @@ def validate_command(
             )
 
     # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    commands = shell_syntax.simple_commands(command)
     tokens = shell_syntax.parse(command).tokens
     whole_words = {
         (start, end) for start, end, _quoted in shell_syntax.glued_words(tokens)
@@ -1186,10 +1210,8 @@ def validate_command(
     # Memories, skills and media stay protected even inside the workspace.
     protected = tuple(prefix for prefix in allow_prefixes if prefix != workspace_root)
     for pattern in _DESTRUCTIVE_PATTERNS:
-        for match in re.finditer(pattern, command):
-            target = targets.get(
-                match.start() + re.match(r"rm\s+-rf\s+", match.group(0)).end()
-            )
+        for match in pattern.finditer(command):
+            target = targets.get(match.start("target"))
             if (
                 not dangerous
                 and workspace_root
@@ -1200,13 +1222,30 @@ def validate_command(
             ):
                 continue
             return (
-                f"Command blocked: contains forbidden pattern '{pattern}'. "
+                f"Command blocked: contains forbidden pattern '{match.group(0)}'. "
                 f"All commands must operate within the workspace directory. "
                 f"Use relative paths (e.g., './file.py') instead."
             )
+    # Every absolute operand of a recursive rm, however it is spelled.
+    if not dangerous and workspace_root:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                path = _removal_target(token) if token is not None else operand
+                if not path.lstrip("'\"").startswith("/") and not _DRIVE_PATH_RE.match(
+                    path.lstrip("'\"")
+                ):
+                    continue
+                if token is not None and _removable_inside(
+                    path, workspace_root, protected
+                ):
+                    continue
+                return (
+                    f"Command blocked: rm would remove '{operand}', outside the "
+                    f"workspace or in a protected folder (skills, memories, "
+                    f"media). Remove paths inside the workspace (e.g., './build')."
+                )
 
     # Blocked commands and kills by lookup, wherever they run — always enforced.
-    commands = shell_syntax.simple_commands(command)
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
     for found in commands:
         if found.name in BLOCKED_COMMANDS:

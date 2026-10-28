@@ -776,6 +776,41 @@ class TestWorkspaceRemovalAndComments:
         assert check_dangerous_command("curl x # | bash") is None
         assert check_dangerous_command("curl x |# note\nbash") is not None
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf /build /skills/demo",
+            "cd /sub && rm -rf /build /memories",
+            "rm -r -f /skills/demo",
+            "rm --recursive --force /memories",
+            "rm -rf -- /memories/profile",
+            "cd . && rm -fr /",
+        ],
+    )
+    def test_every_absolute_operand_of_a_recursive_rm_is_checked(
+        self, command, tmp_workspace, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "skills")
+        (tmp_path / "skills" / "demo").mkdir(parents=True)
+        assert prepare_sandbox_command(command, tmp_workspace)[1] is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd src && rm -rf /build /dist",
+            "cd . && rm -fr /x",
+            "rm -r -f build",
+            "rm --recursive ./x /y",
+        ],
+    )
+    def test_recursive_removals_inside_the_workspace_pass(self, command, tmp_workspace):
+        assert prepare_sandbox_command(command, tmp_workspace)[1] is None
+
+    def test_destructive_patterns_name_their_target(self):
+        assert all("target" in p.groupindex for p in backends._DESTRUCTIVE_PATTERNS)
+        assert "'rm -rf /'" in validate_command("rm -rf /")
+
     def test_memories_inside_the_workspace_stay_protected(
         self, tmp_workspace, monkeypatch
     ):
