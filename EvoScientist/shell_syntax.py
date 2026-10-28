@@ -21,6 +21,19 @@ ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
 HEREDOC_OP_RE = re.compile(r"\d*<<")
 SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
 SHELL_C_OPTION_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+# Commands that run the command named by their first operand.
+WRAPPER_NAMES = frozenset(
+    {"env", "nohup", "timeout", "xargs", "exec", "command", "nice", "setsid"}
+)
+# Wrapper operands before the command: a duration or niceness (`5`, `1.5m`).
+_WRAPPER_VALUE_RE = re.compile(r"-?\d+(\.\d+)?[smhd]?")
+# Wrapper options whose value is the next word.
+_WRAPPER_OPTIONS_WITH_VALUE = {
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
+}
 
 
 def tokenize(command: str) -> list[dict[str, object]]:
@@ -203,6 +216,7 @@ class ShellWords(NamedTuple):
     delimiters: frozenset[int]  # starts of here-document delimiter words
     arithmetic: frozenset[int]  # starts of tokens inside $(( )) / (( ))
     name_flags: tuple[bool, ...]  # per token: a word in command-name position
+    body_delimiters: tuple[int, ...]  # per body: the start of its delimiter word
 
 
 @functools.lru_cache(maxsize=128)
@@ -217,6 +231,8 @@ def parse(command: str) -> ShellWords:
     delimiters: set[int] = set()
     in_arithmetic: set[int] = set()
     pending: list[tuple[str, bool, bool]] = []
+    pending_starts: list[int] = []
+    body_delimiters: list[int] = []
     # One flag per open "(", True inside arithmetic, where "<<" is a shift.
     parens: list[bool] = []
     awaiting: tuple[int, bool] | None = None  # heredoc operator end, strip tabs
@@ -229,9 +245,10 @@ def parse(command: str) -> ShellWords:
         newline = COMMAND_NEWLINE_RE.search(command, prev_end, token_start)
         if pending and newline is not None:
             spans = _heredoc_spans(command, newline.end(), pending)
-            pending = []
+            starts, pending, pending_starts = pending_starts, [], []
             if spans is not None:
                 bodies.extend(spans)
+                body_delimiters.extend(starts)
                 stream = iter_tokens(command, spans[-1][1])
                 continue
         if token is None:
@@ -267,6 +284,7 @@ def parse(command: str) -> ShellWords:
                     # A quoted or escaped delimiter makes the body literal.
                     expands = not token["quoted"] and "\\" not in raw
                     pending.append((value, strip_tabs, expands))
+                    pending_starts.append(token_start)
                     delimiters.add(token_start)
                 awaiting = None
         prev_end = int(token["end"])
@@ -277,6 +295,7 @@ def parse(command: str) -> ShellWords:
         frozenset(delimiters),
         frozenset(in_arithmetic),
         tuple(command_name_flags(command, tokens)),
+        tuple(body_delimiters),
     )
 
 
@@ -432,30 +451,167 @@ def rewrite_substitutions(
     return "".join(out), uses_tmp
 
 
-def command_names(command: str) -> list[str]:
-    """The command names of a compound shell command: the first word of each
-    command, on every line; here-document bodies are skipped. Redirection
-    operands are filenames, not commands.
-    """
+class SimpleCommand(NamedTuple):
+    name: str  # basename of the command word
+    args: tuple[str, ...]  # the words after it as written; redirection targets left out
+    tokens: tuple[
+        dict[str, object] | None, ...
+    ]  # per arg: its token, or None if several
+    via: tuple[str, ...]  # wrappers it runs under, outermost first
+
+
+def _command_word_end(
+    tokens: Sequence[dict[str, object]], index: int, closing_backtick: bool
+) -> int:
+    """Index after the last token of the shell word starting at *index*: glued
+    tokens, a whole ``$(...)`` and a whole backtick substitution; with
+    *closing_backtick* a backtick after the start ends the word."""
+    first = tokens[index]
+    end = int(first["end"])
+    depth = 0
+    in_backtick = first["type"] == "op" and first["value"] == "`"
+    index += 1
+    while index < len(tokens):
+        token = tokens[index]
+        if not depth and not in_backtick and int(token["start"]) != end:
+            break
+        if token["type"] == "op":
+            value = token["value"]
+            if value == "(":
+                depth += 1
+            elif value == ")":
+                if not depth:
+                    break
+                depth -= 1
+            elif value == "`":
+                if closing_backtick and not in_backtick and not depth:
+                    break
+                in_backtick = not in_backtick
+            elif not depth and not in_backtick:
+                break
+        end = int(token["end"])
+        index += 1
+    return index
+
+
+def _command_arguments(
+    command: str, words: ShellWords, index: int, in_backtick: bool
+) -> tuple[list[tuple[str, dict[str, object] | None]], list[int]]:
+    """The arguments of the command whose name is token *index*, and the
+    here-document bodies it reads; inside a backtick substitution the
+    closing backtick ends them."""
+    tokens = words.tokens
+    args: list[tuple[str, dict[str, object] | None]] = []
+    heredocs: list[int] = []
+    redirect_target = False
+    previous_end = int(tokens[index]["end"])
+    index += 1
+    while index < len(tokens):
+        token = tokens[index]
+        if COMMAND_NEWLINE_RE.search(command, previous_end, int(token["start"])):
+            break
+        value = str(token["value"])
+        if token["type"] == "op" and (value != "`" or in_backtick):
+            if "<" not in value and ">" not in value:
+                break
+            redirect_target = True
+            previous_end = int(token["end"])
+            index += 1
+            continue
+        end = _command_word_end(tokens, index, in_backtick)
+        start = int(token["start"])
+        if start in words.delimiters:
+            if start in words.body_delimiters:
+                heredocs.append(words.body_delimiters.index(start))
+        elif not redirect_target:
+            single = token if end == index + 1 and token["type"] == "word" else None
+            args.append((command[start : int(tokens[end - 1]["end"])], single))
+        redirect_target = False
+        previous_end = int(tokens[end - 1]["end"])
+        index = end
+    return args, heredocs
+
+
+def _unwrap(
+    name: str, args: list[tuple[str, dict[str, object] | None]], via: tuple[str, ...]
+) -> list[SimpleCommand]:
+    """The command and, through wrappers such as ``env`` or ``xargs``, the
+    commands it runs."""
+    found = [
+        SimpleCommand(name, tuple(a for a, _ in args), tuple(t for _, t in args), via)
+    ]
+    if name not in WRAPPER_NAMES:
+        return found
+    takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
+    skip = False
+    for position, (arg, _token) in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if arg in takes_value:
+            skip = True
+            continue
+        if (
+            arg.startswith("-")
+            or ASSIGNMENT_RE.match(arg)
+            or _WRAPPER_VALUE_RE.fullmatch(arg)
+        ):
+            continue
+        inner = re.split(r"[\\/]", arg)[-1]
+        return found + _unwrap(inner, args[position + 1 :], (*via, name))
+    return found
+
+
+def simple_commands(command: str) -> list[SimpleCommand]:
+    """Every command *command* runs, with its arguments: at each command-name
+    position, through wrappers, and inside substitutions, ``sh -c`` scripts and
+    here-documents fed to a shell."""
     words = parse(command)
     tokens = words.tokens
-    names = [
-        str(token["value"])
-        for token, is_command_name in zip(tokens, words.name_flags, strict=True)
-        if is_command_name
-    ]
-    bodies: list[str] = []
+    scripts = shell_script_words(tokens)
+    found: list[SimpleCommand] = []
+    nested: list[str] = []
+    in_backtick = False
+    for index, (token, is_name) in enumerate(
+        zip(tokens, words.name_flags, strict=True)
+    ):
+        value = str(token["value"])
+        if token["type"] == "op" and value == "`":
+            in_backtick = not in_backtick
+        if (
+            not is_name
+            or value in COMMAND_PREFIX_WORDS
+            or ASSIGNMENT_RE.match(str(token["raw"]))
+        ):
+            continue
+        args, heredocs = _command_arguments(command, words, index, in_backtick)
+        name = re.split(r"[\\/]", value)[-1]
+        found.extend(_unwrap(name, args, ()))
+        if name in SHELL_NAMES:
+            for body in heredocs:
+                start, end, _expands = words.bodies[body]
+                text = command[start:end].rstrip("\n")
+                nested.append(text[: text.rfind("\n") + 1])  # without the end line
 
     def collect(body: str) -> tuple[str, bool]:
-        bodies.append(body)
+        nested.append(body)
         return body, False
 
     for token in tokens:
-        if token["type"] == "word" and token["quoted"]:
+        if token["type"] != "word":
+            continue
+        if int(token["start"]) in scripts:
+            nested.append(str(token["value"]))
+        elif token["quoted"]:
             rewrite_substitutions(str(token["raw"]), collect)
     for start, end, expands in words.bodies:
         if expands:
             rewrite_substitutions(command[start:end], collect, heredoc=True)
-    for body in bodies:
-        names.extend(command_names(body))
-    return names
+    for body in nested:
+        found.extend(simple_commands(body))
+    return found
+
+
+def command_names(command: str) -> list[str]:
+    """The basenames of the commands *command* runs (see :func:`simple_commands`)."""
+    return [found.name for found in simple_commands(command)]

@@ -2432,6 +2432,15 @@ class TestProcessKillByName:
             "ls\npkill -f x",
             "/usr/bin/pkill x",
             "cat <<EOF\n$(pkill -f x)\nEOF",
+            "bash -c 'pkill -f python'",
+            'sh -c "killall python"',
+            "sh <<'EOF'\npkill -f train\nEOF",
+            "nohup pkill -f x",
+            "env FOO=1 pkill -f x",
+            "timeout -s KILL 5 pkill x",
+            "xargs pkill < pids",
+            "exec pkill x",
+            "command pkill x",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -2439,6 +2448,25 @@ class TestProcessKillByName:
         error = validate_command(command, dangerous=dangerous)
         assert "stop_process" in error
         assert "kill <PID>" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "kill $(pgrep -f python)",
+            "kill -9 `pidof node`",
+            "pgrep -f train | xargs kill",
+            "ps aux | grep python | awk '{print $2}' | xargs kill -9",
+            "kill -9 -1",
+            "kill 0",
+            "kill -s TERM -- -1234",
+            "x=$(echo) kill $(pgrep x)",
+            "kill $(ps aux | grep train | awk '{print $2}')",
+            "kill $(lsof -t -i :6174)",
+        ],
+    )
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_kills_of_looked_up_ids_are_blocked(self, command, dangerous):
+        assert "pgrep, ps, lsof" in validate_command(command, dangerous=dangerous)
 
     @pytest.mark.parametrize(
         "command",
@@ -2461,6 +2489,14 @@ class TestProcessKillByName:
         "command",
         [
             "kill 1234",
+            "kill -9 1234",
+            "kill -TERM $PID",
+            "python train.py & PID=$!; sleep 5; kill $PID",
+            "kill -1 1234",
+            "kill $((PID + 0))",
+            "kill -l",
+            "kill $(cat logs/train.pid)",
+            "cat logs/pids | xargs kill",
             "ps aux | grep pkill",
             "cat > n.md <<'EOF'\npkill is blocked\nEOF",
             "cat > n.md <<'EOF'\n$(pkill -f x)\nEOF",

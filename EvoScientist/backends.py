@@ -91,9 +91,18 @@ BLOCKED_COMMANDS = [
 ]
 _BLOCKED_COMMAND_HINTS = dict.fromkeys(
     ("pkill", "killall"),
-    "Stop a process by its id instead: stop_process with the id "
-    "run_in_background returned, or kill <PID> with the PID from ps.",
+    "Stop only a process you started, by its id: stop_process with the id "
+    "run_in_background returned, or kill <PID> with the PID you captured. "
+    "Never by name or pattern, which can reach EvoScientist itself.",
 )
+_KILL_BY_LOOKUP_ERROR = (
+    "Command blocked: kill takes only the id of a process you started (kill "
+    "12345, or stop_process with the id run_in_background returned). Ids looked "
+    "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
+    "itself."
+)
+# Commands that find processes by name, pattern or resource.
+_PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
 _BLOCKED_COMMAND_HINTS["chmod"] = (
     "To run a script, call it through its interpreter (bash run.sh, "
     "python run.py) instead of making it executable."
@@ -1086,6 +1095,29 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
+def _kill_by_lookup(found: shell_syntax.SimpleCommand, looks_up: bool) -> bool:
+    """Whether a kill reaches processes found by name or pattern (through
+    xargs or a substitution; *looks_up*: the command runs such a lookup), or
+    -1, 0 or a process group."""
+    if "xargs" in found.via:
+        return looks_up
+    args = list(found.args)
+    if args and args[0] in ("-l", "-L"):
+        return False
+    if args and args[0] in ("-s", "-n"):
+        args = args[2:]
+    elif args and args[0].startswith("-") and args[0] != "--":
+        args = args[1:]  # the signal: -9, -TERM
+    if args and args[0] == "--":
+        args = args[1:]
+    return any(
+        (re.fullmatch(r"-?\d+", arg) and int(arg) <= 0)
+        or _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
+        for arg in args
+        if "$(" in arg or "`" in arg or arg[:1] in "-0"
+    )
+
+
 def validate_command(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
@@ -1173,14 +1205,20 @@ def validate_command(
                 f"Use relative paths (e.g., './file.py') instead."
             )
 
-    # Check for dangerous commands (pipeline-aware) — always enforced.
-    for base_cmd in shell_syntax.command_names(command):
-        name = re.split(r"[\\/]", base_cmd)[-1]
-        if name in BLOCKED_COMMANDS:
+    # Blocked commands and kills by lookup, wherever they run — always enforced.
+    commands = shell_syntax.simple_commands(command)
+    looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
+    for found in commands:
+        if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
-                name, "Only standard development commands are permitted."
+                found.name, "Only standard development commands are permitted."
             )
-            return f"Command blocked: '{name}' is not allowed in sandbox mode. {hint}"
+            return (
+                f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
+                f"{hint}"
+            )
+        if found.name == "kill" and _kill_by_lookup(found, looks_up):
+            return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.
     # Catches attacks like: python -c "os.remove('/Users/foo/file')"
