@@ -1348,6 +1348,8 @@ class LangGraphServerGateway:
         ``stream.interrupted`` from a separate SSE that can lag this one, so a
         pause seen here reads thread state without waiting for the flag.
         """
+        if not paused:
+            return []
         try:
             events = await self._pending_interrupt_events(stream, thread_id, processor)
         except Exception as exc:

@@ -202,6 +202,38 @@ async def test_completed_run_does_not_read_state_interrupts():
     assert [event["type"] for event in events] == ["text", "done"]
 
 
+async def test_completed_turn_skips_pause_read_when_not_paused():
+    """A finished turn must not read ``stream.interrupts`` or report a pause error.
+
+    ``stream.interrupted`` can still be true and ``get_state`` can fail after a
+    completed root run; the pause helper returns before either is consulted.
+    """
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_text("hello"), _finish(), _lifecycle("run-1", "completed")],
+        interrupted=True,
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    stream.interrupts = [_STATE_INTERRUPT]
+
+    real_get_state = threads.get_state
+    calls = {"n": 0}
+
+    async def boom(thread_id: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real_get_state(thread_id)
+        raise ConnectionError("state store unavailable")
+
+    threads.get_state = boom  # type: ignore[method-assign]
+
+    events = await _turn(gateway, "hi")
+
+    assert [event["type"] for event in events] == ["text", "done"]
+    assert calls["n"] == 1
+
+
 # --- state: pause after a completed turn ------------------------------------
 
 
