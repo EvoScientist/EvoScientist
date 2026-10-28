@@ -239,13 +239,13 @@ class TestConvertVirtualPaths:
         )
         assert result == "ls ."
 
-    def test_system_path_no_workspace_name_fallthrough(self):
-        """Without workspace_name, system paths get normal ./ treatment."""
+    def test_system_path_outside_the_workspace_is_left_for_validation(self):
+        """A host path that names no workspace stays, so validation reports it."""
         result = convert_virtual_paths_in_command(
             "cat /Users/user/workspace/file.txt",
             workspace_name=None,
         )
-        assert result == "cat ./Users/user/workspace/file.txt"
+        assert result == "cat /Users/user/workspace/file.txt"
 
     def test_system_path_without_workspace_unchanged(self):
         """System paths not referencing workspace fall through to normal ./"""
@@ -267,9 +267,9 @@ class TestConvertVirtualPaths:
         assert result == "cat ./debate_sim.py"
 
     def test_convert_virtual_paths_has_no_ssh_remote_path_exemption(self):
-        command = "ssh host 'ls /home/username/project'"
-        result = convert_virtual_paths_in_command(command)
-        assert result == "ssh host 'ls ./home/username/project'"
+        """Masking remote commands is prepare_sandbox_command's job."""
+        result = convert_virtual_paths_in_command("ssh host ls /project")
+        assert result == "ssh host ls ./project"
 
     def test_bare_quoted_path_left_alone(self):
         """A quoted bare ``/...`` path that is not a virtual mount
@@ -410,6 +410,513 @@ class TestConvertVirtualPaths:
 
 
 # === tier-aware virtual mounts (/skills/, /memories/) ===
+
+
+class TestShellWordRewrite:
+    """Only whole unquoted words starting with ``/`` are paths."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'python3 -c "print(6 / 3)"',
+            "jq '.a // 1' data.json",
+            "awk '{ print $1 / 2 }' data.txt",
+            "sed '/a/d' data.txt",
+            "grep -c ' / ' data.txt",
+            'echo "RRSI / Self-Healing"',
+        ],
+    )
+    def test_quoted_text_is_data(self, command):
+        assert convert_virtual_paths_in_command(command, workspace_root="/W") == command
+
+    def test_heredoc_bodies_are_data(self):
+        command = (
+            "cat > report.md <<'EOF'\nRRSI / Self-Healing\nsee /x\nEOF\n"
+            "python3 - <<EOF\nprint(6 / 3)\nEOF\ncat /report.md"
+        )
+        assert convert_virtual_paths_in_command(command, workspace_root="/W") == (
+            command.replace("cat /report.md", "cat ./report.md")
+        )
+
+    def test_tab_stripped_heredoc_ends_at_its_indented_delimiter(self):
+        command = "cat <<-'EOF' > out.txt\n\t/x / y\n\tEOF\nls /data"
+        assert convert_virtual_paths_in_command(command) == command.replace(
+            "ls /data", "ls ./data"
+        )
+
+    def test_unterminated_heredoc_operator_is_not_a_body(self):
+        assert convert_virtual_paths_in_command("echo $((1<<2)) /x") == (
+            "echo $((1<<2)) ./x"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls nope 2>/dev/null",
+            "echo hi > /dev/null",
+            "ls nope &>/dev/null",
+            "echo warn >/dev/stderr",
+            "cat file > /dev/stdout",
+        ],
+    )
+    def test_plumbing_device_files_stay(self, command):
+        assert convert_virtual_paths_in_command(command, workspace_root="/W") == command
+
+    def test_paths_after_cd_are_absolute(self):
+        root = _platform_quote_for_test("/W")
+        command = "ls /x; cd /artifacts/x && python3 /tools/f.py && ls /data/*.csv"
+        assert convert_virtual_paths_in_command(command, workspace_root="/W") == (
+            f"ls ./x; cd {root}/artifacts/x && python3 {root}/tools/f.py "
+            f"&& ls {root}/data/*.csv"
+        )
+
+    def test_absolute_paths_quote_the_root_only(self):
+        root = _platform_quote_for_test("/W s")
+        assert (
+            convert_virtual_paths_in_command(
+                "pushd /src && cat /a*.txt", workspace_root="/W s"
+            )
+            == f"pushd {root}/src && cat {root}/a*.txt"
+        )
+
+    def test_host_paths_under_the_workspace_map_into_it(self):
+        assert (
+            convert_virtual_paths_in_command(
+                "cat /W/data.csv /W-old/x /backup/W/y && ls /W", workspace_root="/W"
+            )
+            == "cat ./data.csv ./W-old/x ./backup/W/y && ls ."
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        ["/usr/bin/env python3 run.py", "cat /etc/hosts", "cd /etc && ls"],
+    )
+    def test_host_system_paths_stay(self, command):
+        assert convert_virtual_paths_in_command(command, workspace_root="/W") == command
+
+    def test_system_named_path_the_workspace_has_maps_into_it(self, tmp_path):
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "run.sh").write_text("echo ws", encoding="utf-8")
+        assert (
+            convert_virtual_paths_in_command(
+                "sh /bin/run.sh && /bin/sh -c true", workspace_root=str(tmp_path)
+            )
+            == "sh ./bin/run.sh && /bin/sh -c true"
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("mkdir -p /Users/$(whoami)/workspace/notes", "mkdir -p ./notes"),
+            ("echo $(cat /x)", "echo $(cat ./x)"),
+            ("echo `pwd`/x", "echo `pwd`/x"),
+            ("ls `ls /x`", "ls `ls ./x`"),
+            ("diff <(sort /a) /b", "diff <(sort ./a) ./b"),
+        ],
+    )
+    def test_substitutions_keep_their_words_whole(self, command, expected):
+        assert (
+            convert_virtual_paths_in_command(command, workspace_name="workspace")
+            == expected
+        )
+
+
+class TestShellWordEdges:
+    """Shell syntax around heredocs, substitutions and partly quoted words."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo $((1 << true))\necho safe; sudo true\ntrue",
+            "(( x << 2 ))\nsudo ls\nx",
+        ],
+    )
+    def test_arithmetic_shifts_are_no_heredocs(self, command):
+        assert "'sudo' is not allowed" in validate_command(command)
+
+    def test_heredoc_delimiters_are_never_rewritten(self):
+        command = "cat << /EOF\npayload / x\n/EOF\nprintf END"
+        assert convert_virtual_paths_in_command(command) == command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat <<- EOF\n\t/x / pkill is mentioned\n\tEOF\nls /data",
+            "cat 0<<EOF\n/x / pkill\nEOF\nls /data",
+        ],
+    )
+    def test_spaced_and_numbered_heredoc_operators(self, command):
+        assert validate_command(command) is None
+        assert convert_virtual_paths_in_command(command) == command.replace(
+            "ls /data", "ls ./data"
+        )
+
+    def test_many_heredocs_are_prepared_quickly(self, tmp_workspace):
+        command = "\n".join(
+            f"cat > f{i}.txt <<'EOF'\nline / {i}\nEOF" for i in range(300)
+        )
+        started = time.monotonic()
+        assert prepare_sandbox_command(command, tmp_workspace) == (command, None)
+        assert time.monotonic() - started < 2
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ('mkdir -p /results/"$RUN"', 'mkdir -p ./results/"$RUN"'),
+            ('cat /"etc"/hosts', 'cat ./"etc"/hosts'),
+            ('cp /data/x.csv /tmp/"$n".csv', 'cp ./data/x.csv ./tmp/"$n".csv'),
+        ],
+    )
+    def test_the_unquoted_head_of_a_partly_quoted_word_is_a_path(
+        self, command, expected
+    ):
+        assert convert_virtual_paths_in_command(command) == expected
+
+    def test_a_partly_quoted_host_path_is_still_blocked(self):
+        assert (
+            validate_command(convert_virtual_paths_in_command('cat /Users/"bob"/x'))
+            is not None
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                'echo "rows=$(wc -l < /data/x.csv)"',
+                'echo "rows=$(wc -l < ./data/x.csv)"',
+            ),
+            ('echo "`cat /data/x.csv`"', 'echo "`cat ./data/x.csv`"'),
+            ("echo \"$((6 / 3)) / '$(cat /x)'\"", "echo \"$((6 / 3)) / '$(cat ./x)'\""),
+            ("echo '$(cat /x)'", "echo '$(cat /x)'"),
+        ],
+    )
+    def test_commands_substituted_inside_double_quotes_are_rewritten(
+        self, command, expected
+    ):
+        assert convert_virtual_paths_in_command(command) == expected
+
+    def test_substitutions_after_cd_are_absolute(self):
+        root = _platform_quote_for_test("/W")
+        assert (
+            convert_virtual_paths_in_command(
+                'cd /src && echo "n=$(ls /data | wc -l)"', workspace_root="/W"
+            )
+            == f'cd {root}/src && echo "n=$(ls {root}/data | wc -l)"'
+        )
+
+    def test_cd_inside_a_group_switches_to_absolute_paths(self):
+        root = _platform_quote_for_test("/W")
+        assert (
+            convert_virtual_paths_in_command(
+                "{ cd /src; ls /data; }", workspace_root="/W"
+            )
+            == f"{{ cd {root}/src; ls {root}/data; }}"
+        )
+
+    def test_missing_skill_paths_after_cd_are_absolute(self, tmp_workspace):
+        command, error = prepare_sandbox_command(
+            "cd /src && cp /tool.py /skills/new.py", tmp_workspace
+        )
+        assert error is None
+        assert command.endswith(
+            f"{_platform_quote_for_test(tmp_workspace)}/skills/new.py"
+        )
+
+    def test_removing_a_workspace_path_after_cd_is_allowed(self, tmp_workspace):
+        command, error = prepare_sandbox_command("cd .; rm -rf /build", tmp_workspace)
+        assert error is None
+        assert (
+            command == f"cd .; rm -rf {_platform_quote_for_test(tmp_workspace)}/build"
+        )
+        assert validate_command("cd .; rm -rf /etc/x") is not None
+
+    def test_a_tmp_file_in_the_workspace_does_not_break_preparation(
+        self, tmp_workspace
+    ):
+        (Path(tmp_workspace) / "tmp").write_text("", encoding="utf-8")
+        assert prepare_sandbox_command("echo hi > /tmp/x", tmp_workspace) == (
+            "echo hi > ./tmp/x",
+            None,
+        )
+
+
+class TestWorkspaceRemovalAndComments:
+    """Removals and kills here are only checked, never run."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd src && rm -rf /",
+            "cd src && rm -rf /$UNSET",
+            "cd src && rm -rf /./",
+            "cd . && rm -rf /..''/outside",
+        ],
+    )
+    def test_the_workspace_itself_and_escapes_stay_blocked(
+        self, command, tmp_workspace
+    ):
+        _command, error = prepare_sandbox_command(command, tmp_workspace)
+        assert "forbidden pattern" in error
+
+    def test_memories_and_installed_skills_stay_protected(
+        self, tmp_workspace, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "skills")
+        (tmp_path / "skills" / "demo").mkdir(parents=True)
+        for command in (
+            "rm -rf /memories",
+            "rm -rf /memories/profile",
+            "rm -rf /skills/demo",
+            "cd /memories && rm -rf *",
+        ):
+            _prepared, error = prepare_sandbox_command(command, tmp_workspace)
+            assert error is not None, command
+
+    def test_a_shell_script_argument_is_rewritten_like_a_command(self, tmp_workspace):
+        assert prepare_sandbox_command(
+            f'bash -c "{tmp_workspace}/x; rm -rf /*"', tmp_workspace
+        ) == ('bash -c "./x; rm -rf ./*"', None)
+
+    def test_many_removals_are_checked_quickly(self, tmp_workspace):
+        command = "cd .\n" + "\n".join(f"rm -rf /d{i}" for i in range(1000))
+        started = time.monotonic()
+        assert prepare_sandbox_command(command, tmp_workspace)[1] is None
+        assert time.monotonic() - started < 2
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                "# Here's the plan\npython3 /scripts/run.py --out /results",
+                "# Here's the plan\npython3 ./scripts/run.py --out ./results",
+            ),
+            ("ls /data # what's here\nls /x", "ls ./data # what's here\nls ./x"),
+            ("echo a#b /data", "echo a#b ./data"),
+        ],
+    )
+    def test_comments_do_not_open_quotes(self, command, expected):
+        assert convert_virtual_paths_in_command(command) == expected
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                "PYTHONPATH=$(pwd) python3 /scripts/a.py",
+                "PYTHONPATH=$(pwd) python3 ./scripts/a.py",
+            ),
+            ("echo $((6 / 3)) /data", "echo $((6 / 3)) ./data"),
+            ('echo "`printf \\`x; cat /data`"', 'echo "`printf \\`x; cat ./data`"'),
+            (
+                'printf "%s" "/memories/$(cat /data)"',
+                'printf "%s" "/memories/$(cat ./data)"',
+            ),
+        ],
+    )
+    def test_assignments_arithmetic_and_expansions(self, command, expected):
+        assert convert_virtual_paths_in_command(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo $(date)#; sudo whoami",
+            "echo `date`#; sudo whoami",
+            "ls && \\\n  sudo ls",
+            "ls; \\\nsudo ls",
+        ],
+    )
+    def test_glued_hashes_and_line_continuations_hide_nothing(self, command):
+        assert "'sudo' is not allowed" in validate_command(command)
+
+    def test_cd_after_a_glued_hash_is_still_checked(self):
+        assert "leaves the workspace" in validate_command(
+            "echo $(date)#; cd /etc; ls", workspace_root="/W"
+        )
+
+    def test_paths_after_a_line_continuation(self):
+        root = _platform_quote_for_test("/W")
+        assert (
+            convert_virtual_paths_in_command(
+                "mkdir -p out && \\\n  cd out && \\\n  rm -rf /out/old",
+                workspace_root="/W",
+            )
+            == f"mkdir -p out && \\\n  cd out && \\\n  rm -rf {root}/out/old"
+        )
+        assert convert_virtual_paths_in_command("python3 train.py \\\n/data/x") == (
+            "python3 train.py \\\n./data/x"
+        )
+
+    def test_comments_reach_the_dangerous_pipe_check(self):
+        from EvoScientist.backends import check_dangerous_command
+
+        assert check_dangerous_command("curl x # | bash") is None
+        assert check_dangerous_command("curl x |# note\nbash") is not None
+
+    def test_memories_inside_the_workspace_stay_protected(
+        self, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(tmp_workspace) / ".evoscientist" / "memories"
+        )
+        for command in (
+            "rm -rf /memories",
+            "mkdir -p sub && cd sub && rm -rf /memories",
+        ):
+            _prepared, error = prepare_sandbox_command(command, tmp_workspace)
+            assert "forbidden pattern" in error, command
+
+    def test_a_target_glued_to_a_substitution_is_not_exempt(self, tmp_workspace):
+        _command, error = prepare_sandbox_command(
+            "cd .; rm -rf /build''`printf 'x /outside'`", tmp_workspace
+        )
+        assert "forbidden pattern" in error
+
+    def test_ssh_after_a_commented_line_is_still_masked(self, tmp_workspace):
+        command = "echo ready # done;\nssh host 'cat /home/user/project/file'"
+        assert prepare_sandbox_command(command, tmp_workspace) == (command, None)
+
+    def test_heredoc_examples_are_no_dangerous_pipes(self, tmp_workspace):
+        command = "cat <<'EOF'\n# don't run the example\nprintf hi | bash\nEOF"
+        assert prepare_sandbox_command(
+            command, tmp_workspace, guard_dangerous=True
+        ) == (command, None)
+
+    def test_an_escaped_dollar_keeps_the_mount_rewrite(self):
+        assert convert_virtual_paths_in_command('cat "/skills/\\$schema.json"') == (
+            "cat './skills/$schema.json'"
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                'bash -c "python3 /src/run.py > /logs/x.log 2>&1"',
+                'bash -c "python3 ./src/run.py > ./logs/x.log 2>&1"',
+            ),
+            (
+                "timeout 600 bash -lc 'cd /src && python3 run.py'",
+                "timeout 600 bash -lc 'cd /W/src && python3 run.py'",
+            ),
+            (
+                'nohup sh -c "python3 /src/train.py > /logs/t.log" &',
+                'nohup sh -c "python3 ./src/train.py > ./logs/t.log" &',
+            ),
+            ('cd src && bash -c "ls /results"', 'cd src && bash -c "ls /W/results"'),
+        ],
+    )
+    def test_shell_c_scripts_are_rewritten(self, command, expected):
+        assert (
+            convert_virtual_paths_in_command(command, workspace_root="/W") == expected
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                'n="$(grep "two words" /data/input.txt)"',
+                'n="$(grep "two words" ./data/input.txt)"',
+            ),
+            (
+                "cat <<EOF\nRows: $(wc -l < /data/a.csv) in /data\nEOF",
+                "cat <<EOF\nRows: $(wc -l < ./data/a.csv) in /data\nEOF",
+            ),
+            (
+                "cat <<'EOF'\nRows: $(wc -l < /data/a.csv)\nEOF",
+                "cat <<'EOF'\nRows: $(wc -l < /data/a.csv)\nEOF",
+            ),
+            (
+                'files="$(\n# 1) Collect inputs\nfind /data -type f\n)"',
+                'files="$(\n# 1) Collect inputs\nfind ./data -type f\n)"',
+            ),
+        ],
+    )
+    def test_substitutions_that_run_are_rewritten(self, command, expected):
+        assert convert_virtual_paths_in_command(command) == expected
+
+    @pytest.mark.parametrize(
+        "command",
+        ["cd src && rm -rf /results/$RUN_ID", 'cd src && rm -rf /results/"$RUN"'],
+    )
+    def test_removals_with_variables_below_a_literal_folder_pass(
+        self, command, tmp_workspace
+    ):
+        assert prepare_sandbox_command(command, tmp_workspace)[1] is None
+
+    def test_quoted_skill_paths_after_cd_are_absolute(self):
+        assert (
+            convert_virtual_paths_in_command(
+                'cd /src && cat "/skills/new.py"', workspace_root="/W"
+            )
+            == "cd /W/src && cat '/W/skills/new.py'"
+        )
+
+
+def _platform_quote_for_test(path: str) -> str:
+    from EvoScientist.backends import _platform_quote
+
+    return _platform_quote(path)
+
+
+class TestSandboxCommandChecks:
+    def test_plumbing_device_files_pass_validation(self):
+        assert validate_command("ls nope 2>/dev/null") is None
+        assert validate_command("python -c \"open('/dev/null', 'w')\"") is None
+        assert validate_command("cat /dev/sda") is not None
+
+    def test_cd_outside_the_workspace_is_refused_with_the_reason(self):
+        error = validate_command("cd /etc && ls", workspace_root="/W")
+        assert "'cd /etc' leaves the workspace" in error
+        assert validate_command("cd /W/src && ls", workspace_root="/W") is None
+        # Allowed for reading, never as a place to cd into.
+        assert validate_command("cd /M && ls", allow_prefixes=("/M",)) is not None
+
+    def test_workspace_host_paths_pass(self, tmp_workspace):
+        command, error = prepare_sandbox_command(
+            f"rm -rf {tmp_workspace}/build && python -c \"open('{tmp_workspace}/a')\"",
+            tmp_workspace,
+        )
+        assert error is None
+        assert command.startswith("rm -rf ./build && ")
+
+    def test_tmp_is_created_on_demand(self, tmp_workspace):
+        _command, error = prepare_sandbox_command(
+            "cat /etc/hosts > /tmp/x", tmp_workspace
+        )
+        assert error is not None
+        assert not (Path(tmp_workspace) / "tmp").exists()
+        command, error = prepare_sandbox_command("echo hi > /tmp/x", tmp_workspace)
+        assert (command, error) == ("echo hi > ./tmp/x", None)
+        assert (Path(tmp_workspace) / "tmp").is_dir()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+class TestShellWordRewriteRuns:
+    @pytest.mark.parametrize(
+        ("command", "output"),
+        [
+            ('python3 -c "print(6 / 3)"', "2.0"),
+            ("python3 - <<'EOF'\nprint(6 / 3)\nEOF", "2.0"),
+            ("ls nope 2>/dev/null; echo done", "done"),
+            (
+                "mkdir -p a/x t && echo 'print(1)' > t/f.py && cd /a/x && python3 /t/f.py",
+                "1",
+            ),
+            ("echo hi > /tmp/t.txt && cat /tmp/t.txt", "hi"),
+        ],
+    )
+    def test_commands_run_as_written(self, tmp_workspace, command, output):
+        resp = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True).execute(
+            command
+        )
+        assert (resp.exit_code, resp.output.strip()) == (0, output)
+
+    def test_heredoc_writes_the_text_as_given(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        resp = backend.execute("cat > report.md <<'EOF'\nRRSI / Self-Healing\nEOF")
+        assert resp.exit_code == 0
+        assert (
+            Path(tmp_workspace) / "report.md"
+        ).read_text() == "RRSI / Self-Healing\n"
 
 
 class TestVirtualMountResolution:
@@ -1526,8 +2033,9 @@ class TestExecuteCwdSanitization:
         ("ssh_path", "expected_path"),
         [
             ("/tmp/ssh", "./tmp/ssh"),
-            ("/usr/bin/ssh", "./usr/bin/ssh"),
-            ("/opt/homebrew/bin/ssh", "./opt/homebrew/bin/ssh"),
+            # Host programs run as they are.
+            ("/usr/bin/ssh", "/usr/bin/ssh"),
+            ("/opt/homebrew/bin/ssh", "/opt/homebrew/bin/ssh"),
         ],
     )
     def test_execute_does_not_recognize_path_named_ssh_as_ssh(
@@ -1544,10 +2052,10 @@ class TestExecuteCwdSanitization:
         )
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
 
-        resp = backend.execute(f"{ssh_path} host ls /home/username/project", timeout=30)
+        resp = backend.execute(f"{ssh_path} host ls /project", timeout=30)
 
         assert resp.exit_code == 0
-        assert captured["command"] == f"{expected_path} host ls ./home/username/project"
+        assert captured["command"] == f"{expected_path} host ls ./project"
 
     def test_execute_ssh_remote_path_untouched_in_compound_cmd(
         self, tmp_workspace, monkeypatch
@@ -1939,12 +2447,15 @@ class TestAbsolutePathDetection:
     def test_safe_homebrew_executable(self):
         assert validate_command("/opt/homebrew/bin/python3 script.py") is None
 
-    def test_safe_pip_install_absolute(self):
-        """pip install from absolute path should pass."""
-        assert validate_command("pip install /tmp/my_package.whl") is None
+    def test_pip_install_from_tmp_uses_the_workspace_tmp(self, tmp_workspace):
+        assert prepare_sandbox_command(
+            "pip3 install /tmp/my_package-1.0.tar.gz", tmp_workspace
+        ) == ("pip3 install ./tmp/my_package-1.0.tar.gz", None)
 
-    def test_safe_pip3_install_absolute(self):
-        assert validate_command("pip3 install /tmp/my_package-1.0.tar.gz") is None
+    def test_pip_install_from_a_host_path_is_blocked(self):
+        assert "'/opt/local-package'" in validate_command(
+            "pip install /opt/local-package"
+        )
 
     def test_safe_executable_in_pipe(self):
         """System executable as first token after pipe should pass."""

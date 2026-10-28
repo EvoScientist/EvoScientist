@@ -1,5 +1,6 @@
 """Custom backends for EvoScientist agent."""
 
+import contextlib
 import errno
 import os
 import posixpath
@@ -11,11 +12,11 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -59,13 +60,16 @@ _SYSTEM_PATH_PREFIXES = (
     "/root/",
 )
 
+# Device files commands use for plumbing; they are never confinement escapes.
+_PASSTHROUGH_DEVICE_PATHS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+
 # Path-confinement patterns: keep the agent inside the workspace. These are
 # bypassed in dangerous mode (real-filesystem access).
 _PATH_PATTERNS = [
     r"~/",  # home directory
-    r"\bcd\s+/",  # cd to absolute path
 ]
-# Destructive patterns: catastrophic regardless of mode — always enforced.
+# Destructive patterns: catastrophic in every mode. Outside dangerous mode a
+# target strictly inside the workspace (written after a `cd`) is exempt.
 _DESTRUCTIVE_PATTERNS = [
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
     # The same with a Windows drive path, which Git Bash's rm accepts.
@@ -175,13 +179,17 @@ def _unregister_shell_process(
 
 
 def _shell_token_spans(command: str) -> list[dict[str, object]]:
-    """Tokenize enough shell syntax to find quoted SSH remote commands.
+    """Tokenize enough shell syntax for the command checks and path rewriting.
 
-    This is intentionally small: it tracks words, quotes, and command
+    This is intentionally small: it tracks words, quotes, comments and command
     separators, but does not try to be a full POSIX shell parser.
     """
-    tokens: list[dict[str, object]] = []
-    i = 0
+    return list(_iter_shell_tokens(command))
+
+
+def _iter_shell_tokens(command: str, start: int = 0) -> Iterator[dict[str, object]]:
+    """The tokens of :func:`_shell_token_spans`, lazily and from *start*."""
+    i = start
     n = len(command)
 
     def read_operator(index: int) -> str | None:
@@ -217,15 +225,27 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
         if command[i].isspace():
             i += 1
             continue
+        if command.startswith("\\\n", i):
+            i += 2  # line continuation
+            continue
+        if command[i] == "#" and (i == 0 or command[i - 1] not in ")`"):
+            # A comment: its quotes are text, so they open nothing. After a
+            # ")" or backtick the "#" still belongs to the word.
+            newline = command.find("\n", i)
+            i = n if newline == -1 else newline
+            continue
         operator = read_operator(i)
         if operator is not None:
-            tokens.append(
-                {"type": "op", "value": operator, "start": i, "end": i + len(operator)}
-            )
+            yield {
+                "type": "op",
+                "value": operator,
+                "start": i,
+                "end": i + len(operator),
+            }
             i += len(operator)
             continue
 
-        start = i
+        word_start = i
         value: list[str] = []
         quoted = False
         while i < n:
@@ -243,6 +263,17 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
                     if inner == quote:
                         i += 1
                         break
+                    if (
+                        quote == '"'
+                        and command.startswith("$(", i)
+                        and not command.startswith("$((", i)
+                    ):
+                        # Quotes inside the substitution do not end the string.
+                        close = _matching_paren(command, i + 2)
+                        if close is not None:
+                            value.append(command[i : close + 1])
+                            i = close + 1
+                            continue
                     if inner == "\\" and quote == '"' and i + 1 < n:
                         value.append(command[i + 1])
                         i += 2
@@ -257,17 +288,14 @@ def _shell_token_spans(command: str) -> list[dict[str, object]]:
             value.append(ch)
             i += 1
 
-        tokens.append(
-            {
-                "type": "word",
-                "value": "".join(value),
-                "raw": command[start:i],
-                "start": start,
-                "end": i,
-                "quoted": quoted,
-            }
-        )
-    return tokens
+        yield {
+            "type": "word",
+            "value": "".join(value),
+            "raw": command[word_start:i],
+            "start": word_start,
+            "end": i,
+            "quoted": quoted,
+        }
 
 
 # Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
@@ -329,7 +357,7 @@ def check_dangerous_command(command: str) -> str | None:
     not detected — this is a known limitation, not a bug to fix here.
     """
     after_pipe = False
-    for token in _shell_token_spans(command):
+    for token in _shell_words(command).tokens:
         if token.get("type") == "op":
             value = token.get("value")
             if value == "|":
@@ -859,7 +887,7 @@ def _ssh_invocations(
         >>> _ssh_invocations("/tmp/ssh host 'pwd'")
         []
     """
-    tokens = _shell_token_spans(command)
+    tokens = _shell_words(command).tokens
     invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
     segment: list[dict[str, object]] = []
 
@@ -880,12 +908,17 @@ def _ssh_invocations(
             (words, ssh_idx, host_idx, remote_idx, remote_extra_argv_count)
         )
 
+    prev_end = 0
     for token in tokens:
-        if token.get("type") == "op":
+        ends_command = _COMMAND_NEWLINE_RE.search(
+            command, prev_end, int(token["start"])
+        )
+        if token.get("type") == "op" or ends_command is not None:
             flush_segment()
             segment = []
-        else:
+        if token.get("type") != "op":
             segment.append(token)
+        prev_end = int(token["end"])
     flush_segment()
     return invocations
 
@@ -1061,8 +1094,7 @@ def _collect_executable_positions(command: str) -> set[int]:
 
     These are command names/paths that appear in executable position (e.g.
     ``/usr/bin/python`` in ``/usr/bin/python script.py``) and should not be
-    treated as dangerous operand paths.  Also covers the argument position
-    right after ``pip install`` / ``pip3 install`` (package path).
+    treated as dangerous operand paths.
     """
     offsets: set[int] = set()
     for segment in re.split(r"\s*(?:&&|\|\||;)\s*", command):
@@ -1080,19 +1112,6 @@ def _collect_executable_positions(command: str) -> set[int]:
                 continue
             # First token is the executable itself — mark its offset
             offsets.add(seg_start)
-            # pip install <path> — mark the install-target token
-            if (
-                len(tokens) >= 3
-                and tokens[0] in ("pip", "pip3")
-                and tokens[1] == "install"
-            ):
-                # Find position of the 3rd token (the package arg) onwards
-                rest = pipe_seg_stripped
-                for t in tokens[:2]:
-                    idx = rest.find(t)
-                    rest = rest[idx + len(t) :]
-                pkg_offset = seg_start + (len(pipe_seg_stripped) - len(rest.lstrip()))
-                offsets.add(pkg_offset)
     return offsets
 
 
@@ -1122,7 +1141,7 @@ def _extract_all_paths(
 
     Scans both shell tokens and string literals (single/double quoted) to find
     paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
-    Skips paths in executable position (command name) and pip install targets.
+    Skips paths in executable position (command name).
 
     Paths matched by ``allow_prefixes`` (via ``_is_under_allowed_prefix``)
     are dropped.
@@ -1142,10 +1161,44 @@ def _extract_all_paths(
         if m.start(1) in exe_offsets:
             continue
         extracted = m.group(1)
+        if extracted in _PASSTHROUGH_DEVICE_PATHS:
+            continue
         if _is_under_allowed_prefix(extracted, allow_prefixes):
             continue
         paths.append(extracted)
     return paths
+
+
+def _inside_workspace(token: dict[str, object], workspace_root: str) -> bool:
+    """Whether a word is a path strictly inside the workspace, such as one
+    written after a ``cd``: not the root and no ``..``."""
+    path = str(token["value"]).replace("\\", "/")
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    if not path.startswith(root + "/"):
+        return False
+    rest = path[len(root) + 1 :]
+    segments = [part for part in rest.split("/") if part not in ("", ".")]
+    # A literal first segment keeps the target below the root whatever the
+    # rest expands to.
+    return (
+        bool(segments) and ".." not in segments and not re.search(r"[$`]", segments[0])
+    )
+
+
+def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The absolute ``cd`` / ``pushd`` target outside *allow_prefixes*, if any."""
+    tokens = _shell_words(command).tokens
+    flags = _command_name_flags(command, tokens)
+    for index, (token, is_command_name) in enumerate(zip(tokens, flags, strict=True)):
+        if not (is_command_name and token["value"] in ("cd", "pushd")):
+            continue
+        target = tokens[index + 1] if index + 1 < len(tokens) else None
+        if target is None or target["type"] != "word":
+            continue
+        path = str(target["value"])
+        if path.startswith("/") and not _is_under_allowed_prefix(path, allow_prefixes):
+            return path
+    return None
 
 
 def validate_command(
@@ -1153,6 +1206,7 @@ def validate_command(
     allow_prefixes: tuple[str, ...] = (),
     *,
     dangerous: bool = False,
+    workspace_root: str | None = None,
 ) -> str | None:
     """
     Validate a shell command for safety.
@@ -1162,10 +1216,12 @@ def validate_command(
         allow_prefixes: Absolute path prefixes exempt from the system-path
             block list (matching rules in ``_is_under_allowed_prefix``).
         dangerous: When True (real-filesystem mode), skip the path-confinement
-            checks (``..`` traversal, ``~/``/``cd /`` patterns, absolute system
-            paths). Privileged commands (:data:`BLOCKED_COMMANDS`) and
-            catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
+            checks (``..`` traversal, ``~/``, ``cd`` out of the workspace,
+            absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
+            and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
             enforced.
+        workspace_root: The workspace; ``cd`` may enter it, and a destructive
+            pattern whose target lies strictly inside it is allowed.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1188,9 +1244,41 @@ def validate_command(
                     f"Use relative paths (e.g., './file.py') instead."
                 )
 
+        outside = _cd_target_outside(
+            command, (workspace_root,) if workspace_root else ()
+        )
+        if outside is not None:
+            return (
+                f"Command blocked: 'cd {outside}' leaves the workspace. "
+                f"Commands start in the workspace root; change into a directory "
+                f"inside it (e.g., 'cd ./subdir')."
+            )
+
     # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    tokens = _shell_words(command).tokens
+    whole_words = {(start, end) for start, end, _quoted in _glued_words(tokens)}
+    # A target glued to a substitution can expand to more paths than it shows.
+    targets = {
+        int(token["start"]): token
+        for token in tokens
+        if token["type"] == "word"
+        and (int(token["start"]), int(token["end"])) in whole_words
+    }
+    # Memories, skills and media stay protected even inside the workspace.
+    protected = tuple(prefix for prefix in allow_prefixes if prefix != workspace_root)
     for pattern in _DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command):
+        for match in re.finditer(pattern, command):
+            target = targets.get(
+                match.start() + re.match(r"rm\s+-rf\s+", match.group(0)).end()
+            )
+            if (
+                not dangerous
+                and workspace_root
+                and target is not None
+                and _inside_workspace(target, workspace_root)
+                and not _is_under_allowed_prefix(str(target["value"]), protected)
+            ):
+                continue
             return (
                 f"Command blocked: contains forbidden pattern '{pattern}'. "
                 f"All commands must operate within the workspace directory. "
@@ -1365,18 +1453,32 @@ def _rewrite_quoted_path(
     workspace_name: str | None,
     skills_dir: str | Path | None = None,
     media_dirs: tuple[Path, ...] = (),
+    anchor: str | None = None,
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
-    or ``None`` if no rewrite applies.
+    or ``None`` if no rewrite applies. With *anchor* (the workspace root,
+    after a ``cd``) workspace-relative results become absolute.
     """
     if not path or "://" in path[max(0, len(path) - 10) :]:
         return None
     if not path.startswith("/"):
         return None
 
+    def in_workspace(relative: str) -> str:
+        if anchor:
+            return _platform_quote(
+                anchor.rstrip("/") + ("/" + relative if relative else "")
+            )
+        return shlex.quote("./" + relative if relative else ".")
+
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        if skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        ):
+            resolved = in_workspace("skills/" + skill if skill else "skills")
         return _guard_bare_absolute(resolved)  # already shlex.quoted
 
     # Fix hallucinated system absolute paths that reference the workspace.
@@ -1386,15 +1488,488 @@ def _rewrite_quoted_path(
                 marker = f"/{workspace_name}/"
                 idx = path.rfind(marker)
                 if idx != -1:
-                    relative = path[idx + len(marker) :]
-                    return _guard_bare_absolute(
-                        shlex.quote("./" + relative if relative else ".")
-                    )
+                    return _guard_bare_absolute(in_workspace(path[idx + len(marker) :]))
                 if path.endswith(f"/{workspace_name}"):
-                    return _guard_bare_absolute(shlex.quote("."))
+                    return _guard_bare_absolute(in_workspace(""))
                 break
 
     return None
+
+
+_QUOTED_SPAN_RE = re.compile(r'(["\'])((?:\\.|(?!\1).)*?)\1')
+# Operators after which the next word is a command name.
+_COMMAND_START_OPS = frozenset({";", "&&", "||", "|", "&", "(", ")", "`"})
+
+
+def _heredoc_spans(
+    command: str, start: int, delimiters: list[tuple[str, bool, bool]]
+) -> list[tuple[int, int, bool]] | None:
+    """``(start, end, expands)`` of the here-document bodies that begin at
+    *start*, one per ``(delimiter, strip_tabs, expands)``; ``None`` when one
+    is unterminated."""
+    spans: list[tuple[int, int, bool]] = []
+    pos = start
+    for delimiter, strip_tabs, expands in delimiters:
+        body_start = pos
+        while True:
+            if pos >= len(command):
+                return None
+            newline = command.find("\n", pos)
+            line_end = len(command) if newline == -1 else newline
+            line = command[pos:line_end]
+            pos = line_end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+        spans.append((body_start, min(pos, len(command)), expands))
+    return spans
+
+
+class _ShellWords(NamedTuple):
+    tokens: list[dict[str, object]]
+    bodies: list[
+        tuple[int, int, bool]
+    ]  # start, end, expands $(...) (unquoted delimiter)
+    delimiters: frozenset[int]  # starts of here-document delimiter words
+    arithmetic: frozenset[int]  # starts of tokens inside $(( )) / (( ))
+
+
+_HEREDOC_OP_RE = re.compile(r"\d*<<")
+
+
+def _shell_words(command: str) -> _ShellWords:
+    """Tokens of *command* outside here-document bodies; a body is data and is
+    never tokenized, so quotes in it cannot swallow the commands after it."""
+    tokens: list[dict[str, object]] = []
+    bodies: list[tuple[int, int, bool]] = []
+    delimiters: set[int] = set()
+    in_arithmetic: set[int] = set()
+    pending: list[tuple[str, bool, bool]] = []
+    # One flag per open "(", True inside arithmetic, where "<<" is a shift.
+    parens: list[bool] = []
+    awaiting: tuple[int, bool] | None = None  # heredoc operator end, strip tabs
+    stream = _iter_shell_tokens(command)
+    prev_end = 0
+    previous: dict[str, object] | None = None
+    while True:
+        token = next(stream, None)
+        token_start = len(command) if token is None else int(token["start"])
+        newline = _COMMAND_NEWLINE_RE.search(command, prev_end, token_start)
+        if pending and newline is not None:
+            spans = _heredoc_spans(command, newline.end(), pending)
+            pending = []
+            if spans is not None:
+                bodies.extend(spans)
+                stream = _iter_shell_tokens(command, spans[-1][1])
+                continue
+        if token is None:
+            break
+        tokens.append(token)
+        if any(parens):
+            in_arithmetic.add(token_start)
+        value = str(token["value"])
+        if token["type"] == "op":
+            awaiting = None
+            if value == "(":
+                arithmetic = (
+                    previous is not None
+                    and previous["value"] == "("
+                    and int(previous["end"]) == token_start
+                )
+                if arithmetic and parens:
+                    parens[-1] = True
+                parens.append(arithmetic)
+            elif value == ")" and parens:
+                parens.pop()
+            elif _HEREDOC_OP_RE.fullmatch(value) and not any(parens):
+                awaiting = (int(token["end"]), False)
+        elif awaiting is not None:
+            op_end, strip_tabs = awaiting
+            raw = str(token["raw"])
+            if raw == "-" and token_start == op_end:
+                awaiting = (int(token["end"]), True)
+            else:
+                if token_start == op_end and raw.startswith("-"):
+                    strip_tabs, value = True, value[1:]
+                if value:
+                    # A quoted or escaped delimiter makes the body literal.
+                    expands = not token["quoted"] and "\\" not in raw
+                    pending.append((value, strip_tabs, expands))
+                    delimiters.add(token_start)
+                awaiting = None
+        prev_end = int(token["end"])
+        previous = token
+    return _ShellWords(tokens, bodies, frozenset(delimiters), frozenset(in_arithmetic))
+
+
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
+_SHELL_C_OPTION_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+
+
+def _shell_script_words(tokens: list[dict[str, object]]) -> set[int]:
+    """Starts of the script arguments of ``sh -c '...'`` / ``bash -lc "..."``."""
+    starts: set[int] = set()
+    for index, token in enumerate(tokens):
+        name = re.split(r"[\\/]", str(token["value"]))[-1]
+        if token["type"] != "word" or name not in _SHELL_NAMES:
+            continue
+        for option, script in zip(
+            tokens[index + 1 :], tokens[index + 2 :], strict=False
+        ):
+            if option["type"] != "word" or not str(option["raw"]).startswith("-"):
+                break
+            if _SHELL_C_OPTION_RE.fullmatch(str(option["raw"])):
+                if script["type"] == "word":
+                    starts.add(int(script["start"]))
+                break
+    return starts
+
+
+# Words after which the next word is still a command name.
+_COMMAND_PREFIX_WORDS = frozenset(
+    {"do", "then", "else", "elif", "if", "while", "until", "!", "time", "{"}
+)
+# A newline that ends a command, not a backslash line continuation.
+_COMMAND_NEWLINE_RE = re.compile(r"(?<!\\)\n")
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
+
+
+def _command_name_flags(command: str, tokens: list[dict[str, object]]) -> list[bool]:
+    """For each token, whether it is a word in command-name position."""
+    flags: list[bool] = []
+    previous: dict[str, object] | None = None
+    carried = timing = False
+    for token in tokens:
+        starts_command = (
+            carried
+            or previous is None
+            or (previous["type"] == "op" and previous["value"] in _COMMAND_START_OPS)
+            or _COMMAND_NEWLINE_RE.search(
+                command, int(previous["end"]), int(token["start"])
+            )
+            is not None
+        )
+        value = str(token["value"])
+        is_name = token["type"] == "word" and starts_command
+        time_option = is_name and timing and value.startswith("-")
+        flags.append(is_name and not time_option)
+        timing = time_option or (is_name and value == "time")
+        carried = timing or (
+            is_name
+            and (
+                value in _COMMAND_PREFIX_WORDS
+                or bool(_ASSIGNMENT_RE.match(str(token["raw"])))
+            )
+        )
+        previous = token
+    return flags
+
+
+def _glued_words(tokens: list[dict[str, object]]) -> list[tuple[int, int, bool]]:
+    """``(start, end, quoted)`` of each shell word: tokens with nothing between
+    them, so ``/Users/$(whoami)/x`` is one word; an enclosing closer ends it."""
+    words: list[tuple[int, int, bool]] = []
+    in_backtick = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        previous = tokens[index - 1] if index else None
+        if token["type"] == "op":
+            if token["value"] == "`":
+                in_backtick = not in_backtick
+            index += 1
+            continue
+        continues_previous = (
+            previous is not None
+            and int(previous["end"]) == int(token["start"])
+            and previous["type"] == "op"
+            and (
+                previous["value"] == ")"
+                or (previous["value"] == "`" and not in_backtick)
+            )
+        )
+        if continues_previous:
+            index += 1
+            continue
+        start, end = int(token["start"]), int(token["end"])
+        quoted = bool(token["quoted"])
+        depth = 0
+        own_backtick = False
+        index += 1
+        while index < len(tokens):
+            following = tokens[index]
+            if int(following["start"]) != end:
+                break
+            value = following["value"]
+            if following["type"] == "word":
+                quoted = quoted or bool(following["quoted"])
+            elif value == "(":
+                depth += 1
+            elif value == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif value == "`":
+                if not own_backtick and in_backtick:
+                    break
+                own_backtick = not own_backtick
+            else:
+                break
+            end = int(following["end"])
+            index += 1
+        if own_backtick:
+            in_backtick = not in_backtick
+        words.append((start, end, quoted))
+    return words
+
+
+def _is_system_path(path: str) -> bool:
+    return any((path + "/").startswith(prefix) for prefix in _SYSTEM_PATH_PREFIXES)
+
+
+def _rewrite_path_word(
+    raw: str,
+    *,
+    workspace_root: str | None,
+    workspace_name: str | None,
+    skills_dir: str | Path | None,
+    media_dirs: tuple[Path, ...],
+    absolute: bool,
+) -> tuple[str | None, bool]:
+    """Replacement for an unquoted path word (``None`` keeps it), and whether it
+    maps to the workspace's ``tmp/``. After a ``cd`` (*absolute*) workspace
+    paths are the quoted root plus the raw rest, so globs keep working."""
+
+    def in_workspace(rest: str) -> str:
+        if absolute and workspace_root:
+            return _platform_quote(workspace_root) + rest
+        return "." + rest if rest else "."
+
+    path = raw
+    if path in _PASSTHROUGH_DEVICE_PATHS:
+        return None, False
+
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
+    if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        missing_skill = skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        )
+        if missing_skill and absolute and workspace_root:
+            return in_workspace(path), False
+        return resolved, False
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        return in_workspace(path[len(workspace_root.rstrip("/")) :]), False
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name and _is_system_path(path):
+        marker = f"/{workspace_name}/"
+        idx = path.rfind(marker)
+        if idx != -1:
+            rest = path[idx + len(marker) - 1 :]
+            return in_workspace("" if rest == "/" else rest), False
+        if path.endswith(f"/{workspace_name}"):
+            return in_workspace(""), False
+
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path), True
+
+    if _is_system_path(path):
+        # A host path, unless the workspace has it; validation reports the rest.
+        if workspace_root and Path(workspace_root + path).exists():
+            return in_workspace(path), False
+        return None, False
+
+    return in_workspace("" if path == "/" else path), False
+
+
+def _matching_paren(text: str, start: int) -> int | None:
+    """Index of the ``)`` closing a ``$(`` whose body begins at *start*."""
+    depth = 0
+    quote: str | None = None
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == start or text[i - 1] in " \t\n;|&("):
+            newline = text.find("\n", i)
+            if newline == -1:
+                return None
+            i = newline
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return i
+            depth -= 1
+        i += 1
+    return None
+
+
+def _rewrite_quoted_substitutions(
+    raw: str, convert: Callable[[str], tuple[str, bool]], *, heredoc: bool = False
+) -> tuple[str, bool]:
+    """Convert the commands inside ``$(...)`` and backticks within double
+    quotes (or anywhere in an expanding *heredoc* body); they run, while the
+    text around them is data."""
+    out: list[str] = []
+    uses_tmp = False
+    quote: str | None = '"' if heredoc else None
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        body: tuple[int, int, str, str] | None = None
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\":
+            out.append(raw[i : i + 2])
+            i += 2
+            continue
+        elif ch in "'\"" and not heredoc and (quote is None or quote == ch):
+            quote = None if quote == ch else ch
+        elif quote == '"' and raw.startswith("$(", i) and not raw.startswith("$((", i):
+            close = _matching_paren(raw, i + 2)
+            if close is not None:
+                body = (i + 2, close, "$(", ")")
+        elif quote == '"' and ch == "`":
+            close = i + 1
+            while close < len(raw) and raw[close] != "`":
+                close += 2 if raw[close] == "\\" else 1
+            if close < len(raw):
+                body = (i + 1, close, "`", "`")
+        if body is None:
+            out.append(ch)
+            i += 1
+            continue
+        inner_start, close, opener, closer = body
+        inner, tmp = convert(raw[inner_start:close])
+        uses_tmp = uses_tmp or tmp
+        out.append(opener + inner + closer)
+        i = close + 1
+    return "".join(out), uses_tmp
+
+
+def _convert_command_paths(
+    command: str,
+    workspace_name: str | None = None,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
+    after_cd: bool = False,
+) -> tuple[str, bool]:
+    """:func:`convert_virtual_paths_in_command`, plus whether the result uses
+    the workspace's ``tmp/``; *after_cd* marks a substitution that runs after one."""
+    words = _shell_words(command)
+    flags = _command_name_flags(command, words.tokens)
+    cd_starts = [
+        int(token["start"])
+        for token, is_command_name in zip(words.tokens, flags, strict=True)
+        if is_command_name and token["value"] in ("cd", "pushd")
+    ]
+    rules = {
+        "workspace_root": workspace_root,
+        "workspace_name": workspace_name,
+        "skills_dir": skills_dir,
+        "media_dirs": media_dirs,
+    }
+    scripts = _shell_script_words(words.tokens)
+    edits: list[tuple[int, int, str]] = []
+    uses_tmp = False
+    for start, end, quoted in _glued_words(words.tokens):
+        if start in words.delimiters or start in words.arithmetic:
+            continue
+        raw = command[start:end]
+        absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        script = raw[1:-1]
+        if (
+            start in scripts
+            and len(raw) >= 2
+            and raw[0] in "'\""
+            and raw[-1] == raw[0]
+            and raw[0] not in script.replace('\\"', "")
+        ):
+            # The script of `sh -c` runs as a command line of its own.
+            converted, tmp = _convert_command_paths(script, **rules, after_cd=absolute)
+            uses_tmp = uses_tmp or tmp
+            replacement = (
+                raw
+                if converted == script
+                else shlex.quote(converted)
+                if raw[0] == "'"
+                else '"' + converted + '"'
+            )
+        elif quoted:
+            anchor = workspace_root if absolute else None
+            replacement: str | None = _QUOTED_SPAN_RE.sub(
+                lambda m, anchor=anchor: (
+                    # Single quotes would freeze a $(...) or $VAR in the path.
+                    m.group(0)
+                    if m.group(1) == '"' and re.search(r"(?<!\\)[$`]", m.group(2))
+                    else _rewrite_quoted_path(
+                        re.sub(r"\\(.)", r"\1", m.group(2)),
+                        workspace_name,
+                        skills_dir,
+                        media_dirs,
+                        anchor,
+                    )
+                    or m.group(0)
+                ),
+                raw,
+            )
+            replacement, tmp = _rewrite_quoted_substitutions(
+                replacement,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
+            # The unquoted head of a word such as /results/"$RUN" is a path.
+            head = re.match(r"/[^'\"]*", replacement)
+            if head is not None:
+                rewritten, tmp = _rewrite_path_word(
+                    head.group(0), **rules, absolute=absolute
+                )
+                if rewritten is not None:
+                    if head.group(0).endswith("/") and not rewritten.endswith("/"):
+                        rewritten += "/"
+                    replacement = rewritten + replacement[head.end() :]
+                    uses_tmp = uses_tmp or tmp
+        elif raw.startswith("/"):
+            replacement, tmp = _rewrite_path_word(raw, **rules, absolute=absolute)
+            uses_tmp = uses_tmp or tmp
+        else:
+            continue
+        if replacement is not None and replacement != raw:
+            edits.append((start, end, replacement))
+    for body_start, body_end, expands in words.bodies:
+        if not expands:
+            continue
+        body = command[body_start:body_end]
+        converted, tmp = _rewrite_quoted_substitutions(
+            body,
+            lambda inner: _convert_command_paths(inner, **rules, after_cd=after_cd),
+            heredoc=True,
+        )
+        if converted != body:
+            edits.append((body_start, body_end, converted))
+            uses_tmp = uses_tmp or tmp
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(edits):
+        pieces.append(command[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(command[cursor:])
+    return "".join(pieces), uses_tmp
 
 
 def convert_virtual_paths_in_command(
@@ -1402,70 +1977,17 @@ def convert_virtual_paths_in_command(
     workspace_name: str | None = None,
     skills_dir: str | Path | None = None,
     media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
 ) -> str:
-    """Convert virtual paths (starting with ``/``) in commands to relative paths.
+    """Map virtual paths in a shell command into the workspace.
 
-    Also auto-corrects hallucinated system absolute paths that reference the
-    workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
-
-    Pre-process: quoted arguments whose content resolves to a virtual
-    mount (``/skills/...``, ``/memories/...``) or a workspace-prefixed
-    system path are rewritten as a single shell token — this fixes #237
-    where ``python "/skills/my skill/main.py"`` was truncated at the
-    embedded space.  Bare quoted ``/...`` paths (e.g. ``echo "/hi"``)
-    are left untouched since their semantics are ambiguous.
-    After pre-processing, the original regex handles unquoted
-    paths and workspace-name correction as before.
+    Only unquoted words starting with ``/`` are paths; quoted text and
+    here-document bodies are data (``print(6 / 3)``), except a quoted whole
+    mount path and commands substituted inside double quotes.
     """
-    # Pre-process: rewrite quoted paths whose decoded content starts with /
-    command = re.sub(
-        r'(["\'])((?:\\.|(?!\1).)*?)\1',
-        lambda m: (
-            _rewrite_quoted_path(
-                re.sub(r"\\(.)", r"\1", m.group(2)),
-                workspace_name,
-                skills_dir,
-                media_dirs,
-            )
-            or m.group(0)
-        ),
-        command,
-    )
-
-    def replace_virtual_path(match: re.Match[str]) -> str:
-        path = match.group(0)
-
-        # Skip content that looks like a URL
-        if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
-            return path
-
-        resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
-        if resolved is not None:
-            return resolved
-
-        # Fix hallucinated system absolute paths that reference the workspace.
-        if workspace_name:
-            for prefix in _SYSTEM_PATH_PREFIXES:
-                if path.startswith(prefix):
-                    marker = f"/{workspace_name}/"
-                    idx = path.rfind(marker)
-                    if idx != -1:
-                        relative = path[idx + len(marker) :]
-                        return "./" + relative if relative else "."
-                    elif path.endswith(f"/{workspace_name}"):
-                        return "."
-                    break  # Matched system prefix but no workspace → fall through
-
-        # Convert virtual path
-        if path == "/":
-            return "."
-        return "." + path
-
-    # Match pattern: paths starting with / (but not URLs)
-    pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
-    converted = re.sub(pattern, replace_virtual_path, command)
-
-    return converted
+    return _convert_command_paths(
+        command, workspace_name, skills_dir, media_dirs, workspace_root
+    )[0]
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):
@@ -1790,7 +2312,8 @@ def prepare_sandbox_command(
     the workspace, not the host root) and the same command validation.
 
     Returns ``(prepared_command, error)``: ``error`` is a message string when the command
-    is rejected (the caller must NOT run it), otherwise ``None``.
+    is rejected (the caller must NOT run it), otherwise ``None``. An accepted command
+    that uses ``/tmp`` gets the workspace's ``tmp/`` created, where the file tools put it.
 
     ``guard_dangerous`` (see :func:`check_dangerous_command`) does not see inside an SSH
     remote payload: a dangerous pipe *inside* a quoted ``ssh host '...'`` argument is not
@@ -1808,31 +2331,24 @@ def prepare_sandbox_command(
     command, ssh_replacements = _mask_ssh_remote_commands(command)
 
     cwd_str = str(cwd).rstrip("/")
-    # Replace literal workspace-root absolute paths with ./ after SSH masking so
-    # remote paths that happen to contain the local cwd are preserved, and before
-    # validation so local workspace paths are sanitized before the system-path
-    # check fires. Skipped in dangerous mode: there is no virtual workspace, the
-    # agent uses real absolute paths, and rewriting would corrupt any argument
-    # (echo text, grep/git pattern) that merely contains the cwd string.
-    if not dangerous:
-        ws = cwd_str + "/"
-        if ws in command:
-            command = command.replace(ws, "./")
     # The media folder as configured and as resolved: the file tools accept
     # both spellings, so commands do too.
     media_dirs: tuple[Path, ...] = ()
     if media_dir is not None:
         configured = Path(media_dir)
         media_dirs = tuple(dict.fromkeys((configured, configured.resolve())))
+    uses_tmp = False
     if virtual_mode:
-        command = convert_virtual_paths_in_command(
-            command=command,
+        # After SSH masking, so remote paths are never rewritten.
+        command, uses_tmp = _convert_command_paths(
+            command,
             workspace_name=Path(cwd_str).name,
             skills_dir=skills_dir,
             media_dirs=media_dirs,
+            workspace_root=cwd_str,
         )
-    # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
-    # before the resolver, so any absolute path it later injects reaches validate unstripped.
+    # The rewrite injects absolute paths under these, and host paths under the
+    # workspace are real paths inside the sandbox.
     allow_prefixes = tuple(
         str(prefix)
         for prefix in (
@@ -1841,11 +2357,15 @@ def prepare_sandbox_command(
             paths.MEMORIES_DIR,
             _BUILTIN_SKILLS_DIR,
             *media_dirs,
+            None if dangerous else cwd_str,
         )
         if prefix is not None
     )
     error = validate_command(
-        command, allow_prefixes=allow_prefixes, dangerous=dangerous
+        command,
+        allow_prefixes=allow_prefixes,
+        dangerous=dangerous,
+        workspace_root=None if dangerous else cwd_str,
     )
     if error:
         return command, error
@@ -1862,6 +2382,11 @@ def prepare_sandbox_command(
                 f"(the orchestrator can re-issue it after approval)."
             )
 
+    if uses_tmp:
+        # `/tmp` maps to the workspace's tmp/, as in the file tools; if it
+        # cannot be created the command reports that itself.
+        with contextlib.suppress(OSError):
+            Path(cwd_str, "tmp").mkdir(exist_ok=True)
     return _restore_spans(command, ssh_replacements), None
 
 
