@@ -39,6 +39,7 @@ class AutoSkillsCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        """Dispatch one ``autoskills`` subcommand."""
         sub = args[0].lower() if args else "help"
         rest = args[1:]
         if sub in {"help", "-h", "--help", "?"}:
@@ -166,6 +167,7 @@ class AutoSkillsCommand(Command):
         await self._list(ctx, status=status)
 
     async def _list(self, ctx: CommandContext, *, status: str | None = None) -> None:
+        """Render the proposal table, optionally filtered by status."""
         from ... import paths
         from ...memory.autoskills.proposals import list_skill_proposals
 
@@ -223,6 +225,7 @@ class AutoSkillsCommand(Command):
         *,
         scope: str | None = None,
     ) -> None:
+        """Approve a proposal, optionally into a given scope."""
         from ... import paths
         from ...memory.autoskills.proposals import approve_skill_proposal
 
@@ -403,6 +406,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _show_help(ctx: CommandContext, *, prefix: str | None = None) -> None:
+        """Render the command reference."""
         if prefix:
             ctx.ui.append_system(prefix, style="yellow")
         ctx.ui.append_system(
@@ -451,6 +455,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:
+        """The first argument, or ``None`` when there is none."""
         return args[0] if args else None
 
     @staticmethod

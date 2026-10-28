@@ -602,6 +602,7 @@ def test_update_global_skill_does_not_overwrite_nonmatching_local_dir(
     tmp_path,
     monkeypatch,
 ):
+    """A global update must not clobber a local skill of the same folder name."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -652,6 +653,7 @@ def test_update_global_skill_does_not_overwrite_nonmatching_local_dir(
 
 
 def test_create_proposal_can_target_global_scope(tmp_path, monkeypatch):
+    """A create proposal may target the global scope and install there."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -684,6 +686,7 @@ def test_create_proposal_can_target_global_scope(tmp_path, monkeypatch):
 
 
 def test_create_proposal_defaults_to_workspace_scope(tmp_path, monkeypatch):
+    """A create proposal without a scope stays in the workspace."""
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
@@ -709,6 +712,7 @@ def test_create_proposal_defaults_to_workspace_scope(tmp_path, monkeypatch):
 
 
 def test_submit_proposal_rejects_unknown_scope(tmp_path):
+    """An unknown scope is rejected and leaves no pending proposal."""
     memory_dir = tmp_path / "memories"
     _write_skill_folder(
         memory_dir,

@@ -177,6 +177,7 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
 def _proposal_from_manifest(
     path: Path, manifest: dict[str, Any]
 ) -> SkillProposal | None:
+    """Build a proposal from its manifest, or ``None`` if it is incomplete."""
     created_at = _manifest_timestamp(manifest, "created_at")
     updated_at = _manifest_timestamp(manifest, "updated_at")
     if created_at is None or updated_at is None:
@@ -411,6 +412,7 @@ def _find_installed_user_skill(
     *,
     roots: list[Path],
 ) -> Path | None:
+    """Find an installed skill by name across the given roots."""
     for root in roots:
         if not root.exists():
             continue

@@ -131,6 +131,7 @@ def create_submit_autoskill_proposal_tool(
         target_skill_name: str | None = None,
         scope: str | None = None,
     ) -> str:
+        """Register a proposal and auto-approve it when the mode allows."""
         proposal = submit_autoskill_proposal(
             memory_dir=memory_dir,
             skill_name=skill_name,
