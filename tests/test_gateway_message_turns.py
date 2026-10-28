@@ -29,6 +29,17 @@ from tests.fakes.common import (
     FakeLangGraphThreadStream,
 )
 
+@pytest.fixture(autouse=True)
+def _fast_thread_replay_skip_timeouts(monkeypatch):
+    """Keep ``_ThreadEvents.skip_replay`` off the wall clock in the suite.
+
+    Production defaults stay in ``EvoScientist.gateway.server``; skip_replay
+    reads them at call time when the constructor left timeouts unset.
+    """
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.01)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_FIRST_EVENT_SECONDS", 0.05)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.5)
+
 THREAD_ID = "abc12345"
 # Each turn gets a guard so a hang fails the test instead of the suite.
 # Nothing below asserts on elapsed time.
