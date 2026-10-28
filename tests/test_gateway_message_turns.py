@@ -293,22 +293,41 @@ async def test_run_started_during_the_replay_loses_its_events():
 
 
 @pytest.mark.parametrize(
-    ("values", "replay", "skips"),
+    ("values", "replay", "skips", "fail_state"),
     [
-        pytest.param({}, None, 0, id="new-thread"),
+        pytest.param({}, None, 0, False, id="new-thread"),
         pytest.param(
-            _EARLIER_STATE, _earlier_run("run-0", "old"), 1, id="thread-with-state"
+            _EARLIER_STATE,
+            _earlier_run("run-0", "old"),
+            1,
+            False,
+            id="thread-with-state",
+        ),
+        pytest.param(
+            {},
+            _earlier_run("run-0", "old"),
+            1,
+            True,
+            id="state-read-fails",
         ),
     ],
 )
-async def test_replay_is_skipped_only_when_the_thread_has_state(values, replay, skips):
+async def test_replay_is_skipped_only_when_the_thread_has_state(
+    values, replay, skips, fail_state
+):
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[_text("hello"), _finish(), _lifecycle("run-1", "completed")],
         replay=replay,
         stay_open=True,
     )
-    gateway, _ = _gateway(stream, values=values)
+    gateway, threads = _gateway(stream, values=values)
+    if fail_state:
+
+        async def boom(thread_id: str):
+            raise ConnectionError("state store unavailable")
+
+        threads.get_state = boom  # type: ignore[method-assign]
     calls = 0
     original = _ThreadEvents.skip_replay
 
@@ -323,6 +342,7 @@ async def test_replay_is_skipped_only_when_the_thread_has_state(values, replay, 
     assert calls == skips
     assert _texts(events) == ["hello"]
     assert len(stream.run.starts) == 1
+    assert stream.lost_live_events is False
 
 
 async def test_events_from_another_run_are_dropped():

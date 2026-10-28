@@ -1500,7 +1500,10 @@ class LangGraphServerGateway:
                 paused = False
                 async with stream, _ThreadEvents(stream.events) as events:
                     # A thread without state has no earlier runs to replay.
-                    if state_values:
+                    # Skip also when the state read failed: an empty baseline
+                    # would leave us draining history and risk losing live
+                    # envelopes for the run we are about to start.
+                    if state_values or not process_value_messages:
                         await events.skip_replay()
                     run_id = await self._start_or_resume(
                         stream,
