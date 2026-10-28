@@ -364,7 +364,8 @@ The image does not include the agent's research Python; run `EvoSci setup` once 
 > The image runs as a non-root user (`evosci`, UID `1000`). On Linux hosts:
 >
 > - Create the workspace before the first run with `mkdir -p workspace`. Otherwise Docker creates it as `root` and the container can't write to it, even with UID `1000`.
-> - If your host user ID isn't `1000`, build the image as yourself from a clone of this repository, so the host and the container can both write to `./workspace`:
+> - If you work as `root`, run `chown -R 1000:1000 ./workspace` once after creating it. The build below doesn't work for UID `0`, and as `root` you can still edit those files from the host.
+> - If your host user ID is neither `1000` nor `0`, build the image as yourself from a clone of this repository, so the host and the container can both write to `./workspace`:
 >
 >   ```bash
 >   docker build --build-arg UID="$(id -u)" -t evoscientist:local .
@@ -384,7 +385,7 @@ The image does not include the agent's research Python; run `EvoSci setup` once 
 >
 >   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
 >
-> Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.
+> Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Apart from the one-off `chown` commands above, don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.
 
 Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included; it reads your API keys from a `.env` file next to it, one `NAME=value` per line, which you create):
 
