@@ -480,6 +480,44 @@ async def test_skip_replay_raises_when_the_cap_is_hit_while_still_receiving():
             await events.skip_replay()
 
 
+async def test_skip_replay_raises_when_the_cap_trims_the_quiet_window():
+    """A quiet wait cut short by the cap is unfinished replay, not a gap."""
+    clock = _Clock()
+    yielded = {"n": 0}
+
+    async def source() -> AsyncIterator[Any]:
+        while yielded["n"] < 3:
+            yield {"n": yielded["n"]}
+            yielded["n"] += 1
+        await asyncio.Event().wait()
+
+    async def wait_for(awaitable, timeout):
+        task = asyncio.ensure_future(awaitable)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        if task.done():
+            clock.now += 0.2
+            return task.result()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        # After three events, clock is 0.6; left under max=1.0 is 0.4, so the
+        # caller asks for timeout=0.4 which is under quiet=0.5.
+        clock.now += timeout
+        raise TimeoutError
+
+    async with _ThreadEvents(
+        source(),
+        quiet_seconds=0.5,
+        first_event_seconds=2.0,
+        max_seconds=1.0,
+        clock=clock,
+        wait_for=wait_for,
+    ) as events:
+        with pytest.raises(RuntimeError, match="replay did not finish within 1s"):
+            await events.skip_replay()
+
+
 async def test_skip_replay_keeps_the_end_of_stream():
     clock = _Clock()
     async with _ThreadEvents(

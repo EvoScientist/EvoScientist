@@ -315,6 +315,13 @@ class _ThreadEvents:
             try:
                 event = await self._wait_for(self._queue.get(), timeout)
             except TimeoutError:
+                # A wait shorter than the quiet window means the overall cap
+                # trimmed the timeout, so replay is still unfinished.
+                if skipped > 0 and timeout < self._quiet_seconds:
+                    raise RuntimeError(
+                        "Thread history replay did not finish within "
+                        f"{self._max_seconds:g}s"
+                    ) from None
                 return skipped
             if event is None or isinstance(event, Exception):
                 self._queue.put_nowait(event)
