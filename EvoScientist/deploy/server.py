@@ -12,8 +12,8 @@ The server is the same one ``EvoSci`` / ``EvoSci serve`` start in the
 background.
 
 ``--json`` is for a program that starts the server (the desktop app): JSON
-event lines on stdout, an attach to a running server for the same workspace,
-and a stop when stdin closes. :mod:`.json_mode` documents the events.
+event lines on stdout, an attach to a running server started from the same
+project, and a stop when stdin closes. :mod:`.json_mode` documents the events.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -52,13 +53,15 @@ def deploy(
         "--host",
         help="Interface to bind (default: config.langgraph_dev_host = "
         "127.0.0.1, i.e. this machine only — pass 0.0.0.0 to reach it from "
-        "other machines, but note the server has no auth)",
+        "other machines, but note the server has no auth and serves every "
+        "project)",
     ),
     tunnel: bool = typer.Option(
         False,
         "--tunnel",
         help="Expose the server over a public Cloudflare tunnel (no auth — "
-        "anyone with the URL can drive the agent; trusted use only)",
+        "anyone with the URL can read every project the server serves and run "
+        "the agent in any of them; trusted use only)",
     ),
     debug: bool = typer.Option(
         False,
@@ -70,7 +73,7 @@ def deploy(
         typer.Option(
             "--json",
             help="Print one JSON event per line, attach to a running backend "
-            "for the same workspace, and stop when stdin closes",
+            "started from the same project, and stop when stdin closes",
         ),
     ] = False,
 ):
@@ -93,12 +96,12 @@ def deploy(
     from ..langgraph_dev.manager import (
         RUNTIME,
         _base_url,
-        _is_loopback_host,
         _is_port_occupied,
         _pid_serves_port,
         _read_workspace_sidecar,
         _server_config_fingerprint,
         is_langgraph_dev_running,
+        is_lasting,
         read_tunnel_url,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -114,13 +117,19 @@ def deploy(
     _require_chatgpt_sign_in(config, interactive=False)
 
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
-    from ..paths import start_workspace_path
+    from ..cli.commands import _prepare_workdir_or_exit
+    from ..langgraph_dev.registration import (
+        RegistrationError,
+        ServerUnusableError,
+        register_folder,
+    )
+    from ..paths import Workspace, start_workspace_path
 
     ws = str(start_workspace_path(workdir, config.default_workdir))
-    # Subprocess inherits this path via EVOSCIENTIST_WORKSPACE_DIR (set inside
-    # start_langgraph_dev). Ensure the dir exists; do NOT mutate the parent
-    # process's paths module state — the deploy parent has no in-process agent.
-    os.makedirs(ws, exist_ok=True)
+    # Create the folder (or refuse a known project's missing one); do NOT
+    # mutate the parent process's paths module state — the deploy parent has
+    # no in-process agent.
+    _prepare_workdir_or_exit(ws)
 
     # 3. Resolve port, then validate range so misconfigurations fail fast
     # with a clear message instead of an opaque socket error from langgraph
@@ -148,20 +157,31 @@ def deploy(
                 if sidecar is not None and _pid_serves_port(
                     sidecar.get("pid"), effective_port
                 ):
-                    # Surface what we know about the occupant — with keepalive it
-                    # may be an ownerless leftover rather than a live session.
-                    # Only when the recorded pid verifiably serves THIS port, so a
-                    # stale or other-port record is never blamed.
-                    console.print(
-                        f"[dim]It serves workspace {sidecar.get('workspace')} "
-                        f"(pid {sidecar.get('pid')}). Stop it with "
-                        f"[bold]EvoSci server stop[/bold], or use "
-                        f"[bold]--port[/bold] to deploy on a different port.[/dim]"
-                    )
+                    # Surface what we know about the occupant: usually the
+                    # background server earlier sessions left running for every
+                    # session to share, else another deploy's (or the desktop
+                    # app's). Only when the recorded pid verifiably serves THIS
+                    # port, so a stale or other-port record is never blamed.
+                    if not is_lasting(sidecar):
+                        console.print(
+                            f"[dim]It is not the background service: another "
+                            f"EvoSci deploy, the desktop app or an older release "
+                            f"runs it, started from "
+                            f"{sidecar.get('workspace')} (pid {sidecar.get('pid')}). "
+                            "Stop that one first.[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[dim]It is the background agent server started "
+                            f"from {sidecar.get('workspace')} (pid "
+                            f"{sidecar.get('pid')}), which your EvoSci sessions "
+                            "share. Use it as it is, or stop it with [bold]EvoSci "
+                            "server stop[/bold] to deploy here (that ends the "
+                            "background work of the sessions using it).[/dim]"
+                        )
                 else:
                     console.print(
-                        "[dim]Stop the existing EvoSci/serve session first, or use "
-                        "[bold]--port[/bold] to deploy on a different port.[/dim]"
+                        "[dim]Stop the existing EvoSci/serve session first.[/dim]"
                     )
             else:
                 console.print(
@@ -198,20 +218,6 @@ def deploy(
                 f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
             )
 
-        if not _is_loopback_host(effective_host):
-            console.print(
-                "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-                f"[bold red]Listening on {effective_host} — no auth, and the agent "
-                f"can run shell. Trusted networks only.[/bold red]"
-            )
-
-        if tunnel:
-            console.print(
-                "[bold white on red] ⚠ PUBLIC TUNNEL [/bold white on red] "
-                "[bold red]Public URL, no auth — share only with people you "
-                "trust.[/bold red]"
-            )
-
         # 6. ccproxy lifecycle (Anthropic OAuth only)
         _ccproxy_proc = None
         if config.anthropic_auth_mode == "oauth":
@@ -226,7 +232,7 @@ def deploy(
                     atexit.register(stop_ccproxy, _ccproxy_proc)
                     console.print("[green]✓[/green] ccproxy started")
             except RuntimeError as exc:
-                console.print(f"[red]ccproxy startup failed:[/red] {exc}")
+                console.print(f"[red]ccproxy startup failed:[/red] {escape(str(exc))}")
                 raise typer.Exit(1) from exc
 
         # 7. Start langgraph dev
@@ -246,19 +252,31 @@ def deploy(
                     tunnel=tunnel,
                     config_fingerprint=_server_config_fingerprint(config),
                     allowed_origins=getattr(config, "backend_allowed_origins", ""),
+                    # deploy is the server's foreground owner: it stops it.
+                    lasting=False,
                 )
             atexit.register(stop_langgraph_dev, proc)
         except Exception as exc:
             console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
 
+    # The server serves the projects its clients register, this one too.
+    try:
+        exposure = register_folder(
+            Workspace(ws), url=_base_url(effective_port, effective_host)
+        )
+    except (ServerUnusableError, RegistrationError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
     # start_langgraph_dev already health-polled before returning; if we got
     # here, the subprocess is up.
     console.print("[green]✓[/green] langgraph dev ready")
+    from ..cli.commands import print_exposure_warnings
+
+    print_exposure_warnings(exposure, to=console)
     # The agent is built inside the server, so its own hint lands in the
     # server log; show it here.
-    from rich.markup import escape
-
     from ..agent_shell import setup_hint
 
     hint = setup_hint()
@@ -286,13 +304,17 @@ def deploy(
     # 9. Ready banner
     log_hint = _shorten(str(RUNTIME.log_file))
     public_line = f"[bold]Public URL:[/bold]   {public_url}\n" if public_url else ""
+    from ..langgraph_dev.assistants import chat_assistant_id
+    from ..paths import Workspace
+
+    assistant_id = chat_assistant_id(Workspace(ws))
     console.print(
         Panel(
             Text.from_markup(
                 f"[bold]Endpoint:[/bold]     "
                 f"{_base_url(effective_port, effective_host)}\n"
                 f"{public_line}"
-                f"[bold]Assistant ID:[/bold] EvoScientist\n"
+                f"[bold]Assistant ID:[/bold] {assistant_id}\n"
                 f"[bold]Connect via:[/bold]  any LangChain SDK / "
                 f"LangGraph-compatible UI\n"
                 f"[bold]Logs:[/bold]         {log_hint}\n\n"

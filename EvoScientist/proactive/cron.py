@@ -64,7 +64,7 @@ def create_proactive_cron(
     return create_cron(
         client,
         workspace=workspace,
-        assistant_id=PROACTIVE_GRAPH_ID,
+        graph_id=PROACTIVE_GRAPH_ID,
         schedule=PROACTIVE_SCHEDULE,
         input=cron_input(candidates),
         metadata={"run_kind": PROACTIVE_RUN_KIND},

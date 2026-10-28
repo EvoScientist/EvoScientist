@@ -22,6 +22,9 @@ import typer
 from EvoScientist import paths
 from EvoScientist.deploy import json_mode
 from EvoScientist.deploy import server as deploy_server
+from EvoScientist.langgraph_dev import registration
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
+from EvoScientist.paths import Workspace
 from tests.fakes.langgraph_dev import LockHolder
 
 
@@ -59,7 +62,6 @@ class Harness:
         from EvoScientist import agent_shell, ccproxy_manager
         from EvoScientist.deploy import backend_job
         from EvoScientist.langgraph_dev import manager as lgm
-        from EvoScientist.stream.console import console
 
         self.mp = monkeypatch
         self.tmp_path = tmp_path
@@ -75,6 +77,8 @@ class Harness:
         self.sidecar: dict[str, Any] | None = None
         self.pid_serves = True
         self.tunnel_url: str | None = None
+        # What a reused backend answers the registration.
+        self.exposure = registration.ServerExposure()
         self.job: Any = None
         # "eof": a pipe closed right after ``ready``; "eof-now": already
         # closed; "devnull"; or a file object.
@@ -82,8 +86,6 @@ class Harness:
         self._stdin_write: int | None = None
         self._stdin: Any = None
 
-        # redirect_console_to_stderr() rebinds the shared console's file.
-        monkeypatch.setattr(console, "_file", console._file)
         monkeypatch.setattr(
             config_mod, "get_effective_config", lambda _o=None: self.config
         )
@@ -99,6 +101,7 @@ class Harness:
         monkeypatch.setattr(lgm, "start_langgraph_dev", self._start)
         monkeypatch.setattr(lgm, "stop_langgraph_dev", self._stop)
         monkeypatch.setattr(lgm, "read_tunnel_url", lambda *a, **k: self.tunnel_url)
+        monkeypatch.setattr(registration, "register_folder", self._register)
         monkeypatch.setattr(lgm, "_PROCESS", None)
         # The pid file, sidecar, log and start lock under tmp_path.
         monkeypatch.setattr(
@@ -146,6 +149,14 @@ class Harness:
 
     def _stop(self, proc=None):
         self.log.append(("backend stop", proc))
+
+    def _register(self, _workspace, *, url):
+        """The backend's answer: one this run started reports its options."""
+        if self.started is None:
+            return self.exposure
+        return registration.ServerExposure.of(
+            self.started["host"], self.started.get("tunnel")
+        )
 
     # -- running ---------------------------------------------------------- #
     def close_stdin(self) -> None:
@@ -232,7 +243,9 @@ def test_owned_run_prints_starting_ready_stopped(h, capsys):
     assert ready["url"] == "http://127.0.0.1:6174"
     assert ready["owned"] is True
     assert ready["workspace"] == h.workspace
-    assert ready["assistant_id"] == "EvoScientist"
+    assert ready["assistant_id"] == workspace_assistant_id(
+        "EvoScientist", Workspace(h.workspace)
+    )
     assert ready["warnings"] == []
     assert "mode" not in ready
     assert "public_url" not in ready
@@ -344,9 +357,10 @@ def test_tunnel_without_url_reports_null(h, capsys):
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5"])
 def test_public_bind_warns_in_ready(h, capsys, exposed):
     _, lines = h.run(capsys, host=exposed)
-    assert any(
-        f"Listening on {exposed}" in w for w in _by_event(lines, "ready")["warnings"]
+    expected = registration.exposure_messages(
+        registration.ServerExposure.of(exposed, False)
     )
+    assert set(expected) <= set(_by_event(lines, "ready")["warnings"])
 
 
 def test_dangerous_mode_and_tunnel_warn_in_ready(h, capsys):
@@ -354,7 +368,8 @@ def test_dangerous_mode_and_tunnel_warn_in_ready(h, capsys):
     _, lines = h.run(capsys, tunnel=True)
     warnings = _by_event(lines, "ready")["warnings"]
     assert any("DANGEROUS MODE" in w for w in warnings)
-    assert any("Public tunnel" in w for w in warnings)
+    tunnel = registration.ServerExposure.of("127.0.0.1", True)
+    assert set(registration.exposure_messages(tunnel)) <= set(warnings)
 
 
 def test_anthropic_oauth_starts_and_stops_ccproxy(h, capsys):
@@ -499,21 +514,31 @@ def test_attached_legacy_stripped_backend_gets_the_drift_warning(h, capsys):
 
 
 @pytest.mark.parametrize(
-    ("recorded", "requested", "warns"),
+    ("answered", "requested", "warns"),
     [
         ("0.0.0.0", "127.0.0.1", True),  # the backend is public, the request not
         ("127.0.0.1", "0.0.0.0", False),  # the request is public, the backend not
-        (None, "0.0.0.0", False),  # an older record: no bind to report
     ],
 )
-def test_attached_public_bind_warning_follows_the_backend(
-    h, capsys, recorded, requested, warns
+def test_attached_public_bind_warning_follows_backend(
+    h, capsys, answered, requested, warns
 ):
-    record = {} if recorded is None else {"host": recorded}
-    _attach(h, **record)
+    """The backend says how it is bound when it registers the workspace."""
+    _attach(h)
+    h.exposure = registration.ServerExposure.of(answered, False)
     _, lines = h.run(capsys, host=requested)
-    warnings = _by_event(lines, "ready")["warnings"]
-    assert any(w.startswith("Listening on") for w in warnings) is warns
+    (bind,) = registration.exposure_messages(
+        registration.ServerExposure.of("0.0.0.0", False)
+    )
+    assert (bind in _by_event(lines, "ready")["warnings"]) is warns
+
+
+def test_attached_tunneled_backend_warns(h, capsys):
+    _attach(h)
+    h.exposure = registration.ServerExposure.of("127.0.0.1", True)
+    _, lines = h.run(capsys)
+    expected = registration.exposure_messages(h.exposure)
+    assert set(expected) <= set(_by_event(lines, "ready")["warnings"])
 
 
 def test_attached_tunnel_warns_and_reports_null(h, capsys):
@@ -592,22 +617,16 @@ def test_record_for_another_port_is_port_conflict(h, capsys):
     assert lines[-1]["detail"]["reason"] == "record_mismatch"
 
 
-def test_other_workspace_is_workspace_conflict(h, capsys):
+def test_backend_started_from_another_project_is_workspace_conflict(h, capsys):
+    """The app gets the backend's default project from calls that name none."""
     h.occupied = True
     h.sidecar = {"workspace": str(h.tmp_path / "other"), "pid": 1}
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "workspace_conflict"
     assert lines[-1]["detail"]["workspace"] == str(h.tmp_path / "other")
+    assert "hint" in lines[-1]["detail"]
     assert h.started is None
-
-
-def test_run_folder_session_is_workspace_conflict_with_run_dir(h, capsys):
-    run_dir = str(h.tmp_path / "ws" / "runs" / "20260930_120000")
-    _attach(h, run_dir=run_dir)
-    _, lines = h.run(capsys)
-    assert lines[-1]["code"] == "workspace_conflict"
-    assert lines[-1]["detail"]["run_dir"] == run_dir
 
 
 @pytest.mark.parametrize("problem", [None, "The saved sign-in is corrupt."])
@@ -1112,6 +1131,8 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
         "m.start_langgraph_dev = lambda **k: P()\n"
         "m.stop_langgraph_dev = lambda p=None: print('stopped backend', file=sys.stderr)\n"
+        "from EvoScientist.langgraph_dev import registration as r\n"
+        "r.register_folder = lambda *a, **k: None\n"
         + (_GRANDCHILD if grandchild else "")
         + "from EvoScientist.deploy import json_mode\n"
         "sys.exit(json_mode.run_json(workdir=None, port=None, host=None,\n"

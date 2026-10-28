@@ -373,7 +373,7 @@ docker run -it --rm \
 
 | 挂载 | 用途 |
 | --- | --- |
-| `--env-file .env` | API 密钥（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等） |
+| `--env-file .env` | API 密钥（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等），作为容器的环境变量设置 |
 | `./workspace:/workspace` | 智能体的工作目录 |
 | `evosci-data:/home/evosci/.evoscientist` | 持久化应用状态：会话数据库、全局技能、记忆，以及 `config.yaml` / `mcp.yaml` |
 
@@ -405,7 +405,7 @@ docker run -it --rm \
 >
 > Docker Desktop（macOS、Windows）通常会自行处理 bind 挂载权限，无需这些步骤。不要给 `docker run` 传 `--user`，也不要在 compose 中设置 `user:`：镜像的数据和配置保存在 `/home/evosci/.evoscientist`，该目录属于构建时的 UID，其他 UID 运行会因 `Permission denied` 而失败。
 
-也可使用 `docker compose`（仓库自带一个起步用的 [`docker-compose.yml`](./docker-compose.yml)）：
+也可使用 `docker compose`（仓库自带一个起步用的 [`docker-compose.yml`](./docker-compose.yml)；它从同目录下你自己创建的 `.env` 文件读取 API 密钥，每行一个 `NAME=value`）：
 
 ```bash
 docker compose run --rm evoscientist
@@ -475,13 +475,9 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 也可以使用 `EvoSci config set` 将密钥持久化到 `~/.config/evoscientist/config.yaml`。
 
-或者复制示例 `.env` 文件用于项目级配置：
+所有智能体都从 `config.yaml` 或环境变量中读取密钥。项目目录中的 `.env` 只包含在该目录启动的 `EvoSci` 命令自身的设置，例如 `EVOSCIENTIST_DEFAULT_MODE` 或 `EVOSCIENTIST_UI_BACKEND`；其中凡是 EvoScientist 读取的密钥或其他设置，都会被 `EvoSci` 忽略并给出警告。其中的其他变量（例如 `HF_TOKEN`）同样会被忽略：请在启动 EvoSci 之前在 shell 中 export。
 
-```bash
-cp .env.example .env  # 填入你的密钥
-```
-
-> ⚠️ 切勿将包含真实密钥的 `.env` 文件提交到版本库。该文件已在 `.gitignore` 中。
+后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它（WebUI 和桌面应用打开的就是这个项目）；修改环境后，运行 `EvoSci service stop` 再重新启动。
 
 </details>
 
@@ -525,7 +521,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；�
 <details>
 <summary>Desktop WebUI</summary>
 
-将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端，无需管理第二个进程：
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci service stop`；`EvoSci --ui webui` 只能打开启动该服务器的项目，要打开其他项目请先停止它：
 
 ```bash
 EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用
@@ -538,7 +534,7 @@ EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev
 **从其他机器访问。** 两个服务默认都绑定回环地址（`127.0.0.1`），WebUI 开箱即为仅本机可用。要在局域网使用，需把两者一并放开——UI 是**从浏览器**直连后端的，因此还要把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
 
 ```bash
-EvoSci --host 0.0.0.0                          # 仅本次会话，两个服务一起
+EvoSci --host 0.0.0.0                          # 两个服务一起；已在运行的后端保持原来的地址，直到 EvoSci server stop
 EvoSci config set webui_host 0.0.0.0           # 持久化，前端（4716 端口）
 EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端口）
 ```
@@ -553,7 +549,7 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端�
 >
 > 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
 
-**来自其他来源的页面。** 在所有模式下（包括 `EvoSci deploy`），后端只响应本机页面（任意端口）的浏览器请求；后端监听网络时，也响应本机自身地址上的页面。其他页面会收到 `403`，浏览器里显示为 CORS 或网络错误，后端日志会记下被拒的来源；使用 `--tunnel` 时，调用公网地址的页面也在此列。要让其他页面（例如 LangSmith Studio）使用后端，请加入它的来源并重启后端：
+**来自其他来源的页面。** 在所有模式下（包括 `EvoSci deploy`），后端只响应本机页面（任意端口）的浏览器请求；后端监听网络时，也响应本机自身地址上的页面。其他页面会收到 `403`，浏览器里显示为 CORS 或网络错误，后端日志会记下被拒的来源；使用 `--tunnel` 时，调用公网地址的页面也在此列。要让其他页面（例如 LangSmith Studio）使用后端，请加入它的来源并重启后端（`EvoSci server stop`；下一个会话会重新启动它）：
 
 ```bash
 EvoSci config set backend_allowed_origins https://smith.langchain.com
@@ -586,8 +582,8 @@ EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"
 > **危险模式（Dangerous mode）** 会完全解除工作区沙箱——智能体可以读写、删除**真实文件系统上任意位置**的文件（`sudo`/`rm -rf /` 等高危命令仍被拦截）。它隐含 `--auto-approve`（不再提示审批）。请仅在你完全信任该任务时使用。
 >
 > ```bash
-> EvoSci --dangerous                       # 单次会话
-> EvoSci config set dangerous_mode true    # 持久化
+> EvoSci --dangerous                       # 仅本次会话自己的智能体
+> EvoSci config set dangerous_mode true    # 持久化，后台服务器和 WebUI 也生效
 > ```
 
 </details>

@@ -212,7 +212,7 @@ def stop_process(process_id: str, runtime: ToolRuntime = None) -> "str | Command
         process_id: The id returned by run_in_background.
     """
     # Thread-scoped ownership (matches list_processes' default scoping): under
-    # a shared keepalive server, one session's agent must not kill another
+    # a shared server, one session's agent must not kill another
     # session's processes. Legacy records without an origin thread stay
     # stoppable; a caller without a resolvable thread id is treated as
     # legacy-owner too.

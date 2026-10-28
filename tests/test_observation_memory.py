@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
 from EvoScientist.gateway import background_runs
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.memory import (
     launch as memory_launch,
 )
@@ -2072,7 +2073,10 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
         thread_id="worker-thread",
     )
 
-    assert kwargs["assistant_id"] == memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    # The run goes to the worker graph's assistant for the run's workspace.
+    assert kwargs["assistant_id"] == workspace_assistant_id(
+        memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID, "/tmp/ws"
+    )
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
@@ -2650,11 +2654,12 @@ def test_memory_worker_observation_writer_modes(
         observation_writer=observation_writer,
     )
 
-    # ErrorNormalizationMiddleware wraps outermost so provider-SDK
-    # exceptions from the auxiliary model call get normalized before
-    # the tool-error handler sees them.
-    assert type(middleware[0]).__name__ == "ErrorNormalizationMiddleware"
-    assert type(middleware[1]).__name__ == "ToolErrorHandlerMiddleware"
+    # The retry layer wraps outermost; inside it, provider-SDK exceptions
+    # from the auxiliary model call are normalized before the tool-error
+    # handler sees them.
+    assert type(middleware[0]).__name__ == "ModelRetryMiddleware"
+    assert type(middleware[1]).__name__ == "ErrorNormalizationMiddleware"
+    assert type(middleware[2]).__name__ == "ToolErrorHandlerMiddleware"
     assert _memory_tool_names(middleware) == expected_tools
 
 

@@ -140,8 +140,10 @@ def _run_deploy_once(
         tunnel=False,
         config_fingerprint=None,
         allowed_origins="",
+        lasting=True,
     ):
         captured["langgraph_dev_started"] = True
+        captured["lasting"] = lasting
         captured["allowed_origins_passed"] = allowed_origins
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
@@ -156,6 +158,16 @@ def _run_deploy_once(
 
     monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
+    from EvoScientist.langgraph_dev import registration
+
+    # The started server's answer: the options it started with.
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of(
+            captured["host_passed"], captured.get("tunnel_passed")
+        ),
+    )
     # Never poll a real log for the tunnel URL in tests.
     monkeypatch.setattr(
         lgm, "read_tunnel_url", lambda *a, **k: tunnel_url, raising=False
@@ -280,6 +292,7 @@ def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
     )
 
     assert captured["tunnel_passed"] is True
+    assert any("PUBLIC TUNNEL" in line for line in captured["printed"])
 
 
 def test_deploy_workdir_cli_arg_beats_config(monkeypatch, tmp_path):
@@ -435,7 +448,7 @@ def test_deploy_whitespace_config_host_collapses_to_default(monkeypatch, tmp_pat
 
 
 def test_deploy_padded_loopback_config_host_suppresses_warning(monkeypatch, tmp_path):
-    """Consequence of the unstripped path: `_is_loopback_host` would not match
+    """Consequence of the unstripped path: `is_loopback_host` would not match
     " 127.0.0.1 ", so a padded loopback config would print a false PUBLIC BIND
     warning while binding a value socket.bind() rejects outright."""
     config = _make_config(

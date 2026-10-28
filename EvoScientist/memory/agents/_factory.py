@@ -13,8 +13,8 @@ from langgraph.graph.state import CompiledStateGraph
 
 from ... import paths as _paths
 from ...paths import Workspace
+from ..types import MEMORY_AGENT_RECURSION_LIMIT
 
-MEMORY_AGENT_RECURSION_LIMIT = 100
 MEMORY_MAINTENANCE_EXCLUDED_TOOLS = frozenset(
     {
         "delete",
@@ -51,13 +51,23 @@ def resolve_memory_agent_paths(
 def memory_agent_middleware(
     *extra_middleware: AgentMiddleware,
     excluded_tools: Iterable[str] = MEMORY_MAINTENANCE_EXCLUDED_TOOLS,
+    unattended_retry: bool = False,
 ) -> list[AgentMiddleware]:
-    """Compose the standard middleware stack for unattended memory agents."""
+    """Compose the standard middleware stack for the background memory agents."""
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 
+    from ...EvoScientist import _model_retry_middleware
+    from ...middleware.error_normalization import ErrorNormalizationMiddleware
     from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
 
     middleware: list[AgentMiddleware] = [
+        # Workers and the linker share the server's run slots between turns, so
+        # they keep the short budget; AutoSkills runs alone on a schedule.
+        _model_retry_middleware(
+            unattended=unattended_retry, follow_auto_mode=False, honor_run_key=False
+        ),
+        # Inside the retry: provider-SDK exceptions reach it normalized.
+        ErrorNormalizationMiddleware(),
         ToolErrorHandlerMiddleware(),
         *extra_middleware,
     ]

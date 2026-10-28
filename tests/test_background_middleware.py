@@ -428,7 +428,7 @@ def test_list_processes_forwards_all_threads(monkeypatch):
 
 def test_stop_process_is_scoped_to_the_launching_thread(tmp_path, monkeypatch):
     """A session's agent cannot stop another session's process (shared
-    keepalive server); the launching session can."""
+    server); the launching session can."""
     owner = SimpleNamespace(
         tool_call_id="call-owner", config={"configurable": {"thread_id": "T-owner"}}
     )

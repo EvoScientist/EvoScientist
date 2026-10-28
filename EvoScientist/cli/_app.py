@@ -31,7 +31,7 @@ Examples:
   # Add a stdio server with env vars (hardcoded):
   EvoSci mcp add my-server node --env API_KEY=xxx -- server.js
 
-  # Add a server with runtime env ref (resolved from .env at startup):
+  # Add a server with runtime env ref (resolved from the environment at startup):
   EvoSci mcp add brave-search npx --env-ref BRAVE_API_KEY -- -y @modelcontextprotocol/server-brave-search
 
   # Expose to a specific sub-agent (e.g. research-agent):
@@ -59,11 +59,19 @@ sessions_app = typer.Typer(
 )
 app.add_typer(sessions_app, name="sessions")
 
-# Background langgraph dev server management — the explicit counterpart to
-# langgraph_dev_keepalive: a server that outlives its CLI needs a first-class
-# way to inspect and stop it.
+# Background langgraph dev server management: the server outlives the sessions
+# that use it, so it needs a first-class way to start, inspect and stop it.
 server_app = typer.Typer(help="Manage the background langgraph dev server")
 app.add_typer(server_app, name="server")
+# The background agent service: the server and, with Anthropic OAuth, the
+# ccproxy it and the sessions route through.
+service_app = typer.Typer(
+    help="Manage the background agent service (the server, and ccproxy with "
+    "Anthropic OAuth)"
+)
+app.add_typer(service_app, name="service")
+ccproxy_app = typer.Typer(help="Manage ccproxy, which Anthropic OAuth routes through")
+app.add_typer(ccproxy_app, name="ccproxy")
 
 # Configure subcommand group — re-run a single onboarding section.
 configure_app = typer.Typer(
