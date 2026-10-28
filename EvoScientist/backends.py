@@ -1036,7 +1036,8 @@ def _split_shell_commands(command: str) -> list[str]:
     command, on every line; here-document bodies are skipped. Redirection
     operands are filenames, not commands.
     """
-    tokens = _shell_words(command).tokens
+    words = _shell_words(command)
+    tokens = words.tokens
     flags = _command_name_flags(command, tokens)
     names = [
         str(token["value"])
@@ -1052,6 +1053,9 @@ def _split_shell_commands(command: str) -> list[str]:
     for token in tokens:
         if token["type"] == "word" and token["quoted"]:
             _rewrite_quoted_substitutions(str(token["raw"]), collect)
+    for start, end, expands in words.bodies:
+        if expands:
+            _rewrite_quoted_substitutions(command[start:end], collect, heredoc=True)
     for body in bodies:
         names.extend(_split_shell_commands(body))
     return names
@@ -1181,27 +1185,36 @@ def _extract_all_paths(
     return paths
 
 
-def _inside_workspace(token: dict[str, object], workspace_root: str) -> bool:
-    """Whether a word is a path strictly inside the workspace, such as one
-    written after a ``cd``: not the root and no ``..``."""
-    words = [str(token["value"])]
+def _removal_target(token: dict[str, object]) -> str:
+    """A removal target as the agent's shell reads it, with ``/`` separators."""
     if _is_windows():
-        # cmd.exe keeps the backslashes that POSIX word decoding drops.
-        words.append(str(token["raw"]).replace('"', ""))
-    return any(_strictly_inside(word, workspace_root) for word in words)
+        from . import agent_shell
+
+        if not agent_shell.uses_bash():
+            # cmd.exe keeps backslashes; drop quotes of both kinds, which a
+            # program such as MSYS rm may still strip.
+            return re.sub("[\"']", "", str(token["raw"])).replace("\\", "/")
+    return str(token["value"]).replace("\\", "/")
 
 
-def _strictly_inside(word: str, workspace_root: str) -> bool:
-    path = word.replace("\\", "/")
+def _removable_inside(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> bool:
+    """Whether *path* lies strictly inside the workspace and outside the
+    *protected* folders: not the root and no ``..``."""
     root = workspace_root.replace("\\", "/").rstrip("/")
-    if not path.startswith(root + "/"):
+    guarded = tuple(prefix.replace("\\", "/") for prefix in protected)
+    if _is_windows():  # case-insensitive file systems
+        path, root = path.lower(), root.lower()
+        guarded = tuple(prefix.lower() for prefix in guarded)
+    if not path.startswith(root + "/") or _is_under_allowed_prefix(path, guarded):
         return False
     rest = path[len(root) + 1 :]
     segments = [part for part in rest.split("/") if part not in ("", ".")]
     # A literal first segment keeps the target below the root whatever the
-    # rest expands to.
+    # rest expands to (`%` expands under cmd.exe).
     return (
-        bool(segments) and ".." not in segments and not re.search(r"[$`]", segments[0])
+        bool(segments) and ".." not in segments and not re.search(r"[$`%]", segments[0])
     )
 
 
@@ -1295,8 +1308,9 @@ def validate_command(
                 not dangerous
                 and workspace_root
                 and target is not None
-                and _inside_workspace(target, workspace_root)
-                and not _is_under_allowed_prefix(str(target["value"]), protected)
+                and _removable_inside(
+                    _removal_target(target), workspace_root, protected
+                )
             ):
                 continue
             return (

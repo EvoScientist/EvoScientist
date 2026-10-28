@@ -913,6 +913,11 @@ class TestSandboxCommandChecks:
         )
         assert prepare_sandbox_command("cd src && rm -rf /build/$RUN", ws)[1] is None
         assert prepare_sandbox_command("cd src && rm -rf /", ws)[1] is not None
+        assert prepare_sandbox_command("cd . && rm -rf /..''/out", ws)[1] is not None
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(ws + r"\.evoscientist\memories")
+        )
+        assert prepare_sandbox_command("cd . && rm -rf /memories", ws)[1] is not None
 
     def test_workspace_host_paths_pass(self, tmp_workspace):
         command, error = prepare_sandbox_command(
@@ -2405,6 +2410,7 @@ class TestProcessKillByName:
             "ps aux | grep x; pkill x",
             "ls\npkill -f x",
             "/usr/bin/pkill x",
+            "cat <<EOF\n$(pkill -f x)\nEOF",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -2424,6 +2430,7 @@ class TestProcessKillByName:
             "! sudo ls",
             "time sudo ls",
             "{ sudo ls; }",
+            "cat <<EOF\n$(sudo ls)\nEOF",
         ],
     )
     def test_blocked_commands_wherever_a_command_starts(self, command):
@@ -2435,6 +2442,7 @@ class TestProcessKillByName:
             "kill 1234",
             "ps aux | grep pkill",
             "cat > n.md <<'EOF'\npkill is blocked\nEOF",
+            "cat > n.md <<'EOF'\n$(pkill -f x)\nEOF",
         ],
     )
     def test_kill_by_pid_and_mentions_stay_allowed(self, command):
