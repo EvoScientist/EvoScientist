@@ -36,6 +36,7 @@ from tests.fakes.common import (
     _not_found_response,
 )
 
+
 @pytest.fixture(autouse=True)
 def _fast_thread_replay_skip_timeouts(monkeypatch):
     """Keep ``_ThreadEvents.skip_replay`` off the wall clock in the suite.

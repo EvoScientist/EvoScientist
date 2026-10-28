@@ -584,4 +584,3 @@ def no_git(tmp_path, monkeypatch):
 
     with patch("EvoScientist.git_cli.subprocess.run", side_effect=fake_run):
         yield
-
