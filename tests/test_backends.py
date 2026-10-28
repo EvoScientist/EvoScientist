@@ -999,6 +999,24 @@ class TestSandboxCommandChecks:
             paths, "MEMORIES_DIR", Path(ws + r"\.evoscientist\memories")
         )
         assert prepare_sandbox_command("cd . && rm -rf /memories", ws)[1] is not None
+        skills = ws + r"\skills"
+        for spelling in (ws.replace("\\", "/"), ws.lower().replace("\\", "/"), ws):
+            command = f"rm -rf {spelling}/skills/demo"
+            assert prepare_sandbox_command(command, ws, skills_dir=skills)[1], command
+        assert prepare_sandbox_command(
+            f"rm -rf {ws.replace(chr(92), '/')}/build", ws, skills_dir=skills
+        ) == ("rm -rf ./build", None)
+
+    def test_protected_folders_inside_the_workspace_keep_their_host_path(
+        self, tmp_workspace
+    ):
+        skills = f"{tmp_workspace}/skills"
+        assert prepare_sandbox_command(
+            f"rm -rf {skills}/demo", tmp_workspace, skills_dir=skills
+        )[1]
+        assert prepare_sandbox_command(
+            f"cat {skills}/demo/SKILL.md", tmp_workspace, skills_dir=skills
+        ) == (f"cat {skills}/demo/SKILL.md", None)
 
     def test_workspace_host_paths_pass(self, tmp_workspace):
         command, error = prepare_sandbox_command(

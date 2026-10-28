@@ -1059,17 +1059,25 @@ def _removal_target(token: dict[str, object]) -> str:
     return str(token["value"]).replace("\\", "/")
 
 
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether *path* is one of *folders* or inside one, with either separator
+    (case-insensitive on Windows)."""
+    path = path.replace("\\", "/")
+    folders = tuple(folder.replace("\\", "/") for folder in folders)
+    if _is_windows():
+        path, folders = path.lower(), tuple(folder.lower() for folder in folders)
+    return _is_under_allowed_prefix(path, folders)
+
+
 def _removable_inside(
     path: str, workspace_root: str, protected: tuple[str, ...]
 ) -> bool:
     """Whether *path* lies strictly inside the workspace and outside the
     *protected* folders: not the root and no ``..``."""
     root = workspace_root.replace("\\", "/").rstrip("/")
-    guarded = tuple(prefix.replace("\\", "/") for prefix in protected)
     if _is_windows():  # case-insensitive file systems
-        path, root = path.lower(), root.lower()
-        guarded = tuple(prefix.lower() for prefix in guarded)
-    if not path.startswith(root + "/") or _is_under_allowed_prefix(path, guarded):
+        path, root = path.replace("\\", "/").lower(), root.lower()
+    if not path.startswith(root + "/") or _under_any(path, protected):
         return False
     rest = path[len(root) + 1 :]
     segments = [part for part in rest.split("/") if part not in ("", ".")]
@@ -1525,9 +1533,22 @@ def _rewrite_path_word(
     path = raw
     if path in _PASSTHROUGH_DEVICE_PATHS:
         return None, False
+    # Skills, memories and media inside the workspace keep their host path,
+    # so validation still sees them as protected.
+    protected = tuple(
+        str(folder)
+        for folder in (
+            skills_dir,
+            paths.GLOBAL_SKILLS_DIR,
+            paths.MEMORIES_DIR,
+            _BUILTIN_SKILLS_DIR,
+            *media_dirs,
+        )
+        if folder is not None
+    )
     rest = _windows_workspace_rest(path, workspace_root)
     if rest is not None:
-        return in_workspace(rest), False
+        return (None if _under_any(path, protected) else in_workspace(rest)), False
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
@@ -1540,6 +1561,8 @@ def _rewrite_path_word(
         return resolved, False
 
     if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        if _under_any(path, protected):
+            return None, False
         return in_workspace(path[len(workspace_root.rstrip("/")) :]), False
 
     # Fix hallucinated system absolute paths that reference the workspace.
