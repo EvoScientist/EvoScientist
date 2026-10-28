@@ -102,6 +102,8 @@ _KILL_BY_LOOKUP_ERROR = (
     "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
     "itself."
 )
+# `$HOME` / `${HOME}` at the start of a path.
+_HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
 # Commands that find processes by name, pattern or resource.
 _PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
 _BLOCKED_COMMAND_HINTS["chmod"] = (
@@ -1079,20 +1081,32 @@ def _removable_inside(
 
 
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
-    """The absolute ``cd`` / ``pushd`` target outside *allow_prefixes*, if any."""
-    words = shell_syntax.parse(command)
-    tokens = words.tokens
-    for index, (token, is_command_name) in enumerate(
-        zip(tokens, words.name_flags, strict=True)
-    ):
-        if not (is_command_name and token["value"] in ("cd", "pushd")):
+    """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
+    absolute target outside them, the home folder (``~``, ``$HOME``) or a
+    bare ``cd``."""
+    for found in shell_syntax.simple_commands(command):
+        if found.name not in ("cd", "pushd"):
             continue
-        target = tokens[index + 1] if index + 1 < len(tokens) else None
-        if target is None or target["type"] != "word":
+        targets = [
+            (arg, token)
+            for arg, token in zip(found.args, found.tokens, strict=True)
+            if not (arg.startswith("-") and arg != "-")
+        ]
+        if not targets:
+            if found.name == "cd":
+                return "cd"
             continue
-        path = str(target["value"])
-        if path.startswith("/") and not _is_under_allowed_prefix(path, allow_prefixes):
-            return path
+        arg, token = targets[0]
+        path = str(token["value"]) if token is not None else arg
+        if (
+            path.startswith("~")
+            or _HOME_VARIABLE_RE.match(path)
+            or (
+                path.startswith("/")
+                and not _is_under_allowed_prefix(path, allow_prefixes)
+            )
+        ):
+            return f"{found.name} {arg}"
     return None
 
 
@@ -1189,7 +1203,7 @@ def validate_command(
         )
         if outside is not None:
             return (
-                f"Command blocked: 'cd {outside}' leaves the workspace. "
+                f"Command blocked: '{outside}' leaves the workspace. "
                 f"Commands start in the workspace root; change into a directory "
                 f"inside it (e.g., 'cd ./subdir')."
             )

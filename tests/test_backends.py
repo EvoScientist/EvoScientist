@@ -954,6 +954,31 @@ class TestSandboxCommandChecks:
         # Allowed for reading, never as a place to cd into.
         assert validate_command("cd /M && ls", allow_prefixes=("/M",)) is not None
 
+    @pytest.mark.parametrize(
+        ("command", "shown"),
+        [
+            ("cd && cat .ssh/config", "'cd'"),
+            ("cd ~", "'cd ~'"),
+            ("cd $HOME && ls", "'cd $HOME'"),
+            ('cd "$HOME" && ls', "'cd \"$HOME\"'"),
+            ("cd ${HOME}/x", "'cd ${HOME}/x'"),
+            ("pushd ~", "'pushd ~'"),
+            ("pushd /usr", "'pushd /usr'"),
+            ("bash -c 'cd ~ && ls'", "'cd ~'"),
+        ],
+    )
+    def test_cd_home_leaves_the_workspace(self, command, shown):
+        assert f"{shown} leaves the workspace" in validate_command(
+            command, workspace_root="/W"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        ["cd src", "cd ./src && cd -", "cd -P src", "cd $HOMEDIR", "pushd src"],
+    )
+    def test_cd_inside_the_workspace_passes(self, command):
+        assert validate_command(command, workspace_root="/W") is None
+
     @pytest.mark.parametrize("bash", [False, True])
     def test_windows_workspace_paths_map_into_the_workspace(self, monkeypatch, bash):
         from EvoScientist import agent_shell
