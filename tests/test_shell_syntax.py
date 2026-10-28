@@ -134,8 +134,9 @@ class TestSimpleCommands:
             "bash -n -c 'pkill x'",
         ):
             assert "pkill" not in [name for name, _ in self._found(data)]
-        # After the script, -n is only $0.
+        # After the script, -n is only $0; +n undoes an earlier -n.
         assert ("pkill", ()) in self._found("bash -c 'pkill x' -n")
+        assert ("pkill", ()) in self._found("bash -n +n -c 'pkill x'")
 
     def test_nested_scripts_are_read_once(self):
         command = "echo hi"

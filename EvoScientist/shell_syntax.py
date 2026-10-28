@@ -591,8 +591,10 @@ def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
         elif value in ("-", "--"):
             first = position + 1 if position + 1 < len(shell.args) else None
             break
-        elif value.startswith("--") or value.startswith("+"):
+        elif value.startswith("--"):
             continue
+        elif value.startswith("+") and len(value) > 1:
+            letters = "".join(c for c in letters if c not in value[1:])  # +n undoes -n
         elif value.startswith("-") and len(value) > 1:
             letters += value[1:]
         else:

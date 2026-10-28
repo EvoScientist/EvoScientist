@@ -1049,6 +1049,10 @@ class TestSandboxCommandChecks:
         for command in ("cd src && cd /results && ls", f"cd {ws}\\src && dir"):
             assert prepare_sandbox_command(command, ws)[1] is None, command
 
+    def test_a_drive_like_folder_is_relative_on_posix(self, monkeypatch):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        assert validate_command("cd C:/data && ls", workspace_root="/W") is None
+
     def test_a_bare_cd_only_prints_the_folder_in_cmd(self, monkeypatch):
         from EvoScientist import agent_shell
 

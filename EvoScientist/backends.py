@@ -1142,7 +1142,7 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
         # As the agent's shell reads it, so a Windows drive path is absolute too.
         path = _removal_target(token) if token is not None else arg
         if _is_home_word(arg) or (
-            (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+            (path.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(path)))
             and not _under_any(path, allow_prefixes)
         ):
             return f"{found.name} {arg}"
