@@ -1552,6 +1552,7 @@ class LangGraphServerGateway:
                             f"Could not identify the run for thread {request.thread_id}"
                         )
                     accepting_run = True
+                    # See #709
                     async for event in events:
                         raw_event = _as_raw_map(event)
                         if raw_event is None:
