@@ -668,10 +668,16 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf /memories",
             "rm -rf /memories/profile",
             "rm -rf /skills/demo",
-            "cd /memories && rm -rf *",
         ):
             _prepared, error = prepare_sandbox_command(command, tmp_workspace)
             assert error is not None, command
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="cd into a drive path is not checked"
+    )
+    def test_cd_into_memories_stays_blocked(self, tmp_workspace, tmp_path, monkeypatch):
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        assert prepare_sandbox_command("cd /memories && rm -rf *", tmp_workspace)[1]
 
     def test_a_shell_script_argument_is_rewritten_like_a_command(self, tmp_workspace):
         assert prepare_sandbox_command(
@@ -891,6 +897,22 @@ class TestSandboxCommandChecks:
         assert validate_command("cd /W/src && ls", workspace_root="/W") is None
         # Allowed for reading, never as a place to cd into.
         assert validate_command("cd /M && ls", allow_prefixes=("/M",)) is not None
+
+    @pytest.mark.parametrize("bash", [False, True])
+    def test_windows_workspace_paths_map_into_the_workspace(self, monkeypatch, bash):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            agent_shell, "agent_bash", lambda: object() if bash else None
+        )
+        ws = r"C:\Users\me\proj"
+        assert prepare_sandbox_command(f"cat {ws}/data/x.csv", ws) == (
+            "cat ./data/x.csv",
+            None,
+        )
+        assert prepare_sandbox_command("cd src && rm -rf /build/$RUN", ws)[1] is None
+        assert prepare_sandbox_command("cd src && rm -rf /", ws)[1] is not None
 
     def test_workspace_host_paths_pass(self, tmp_workspace):
         command, error = prepare_sandbox_command(

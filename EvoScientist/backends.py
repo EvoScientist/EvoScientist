@@ -1184,7 +1184,15 @@ def _extract_all_paths(
 def _inside_workspace(token: dict[str, object], workspace_root: str) -> bool:
     """Whether a word is a path strictly inside the workspace, such as one
     written after a ``cd``: not the root and no ``..``."""
-    path = str(token["value"]).replace("\\", "/")
+    words = [str(token["value"])]
+    if _is_windows():
+        # cmd.exe keeps the backslashes that POSIX word decoding drops.
+        words.append(str(token["raw"]).replace('"', ""))
+    return any(_strictly_inside(word, workspace_root) for word in words)
+
+
+def _strictly_inside(word: str, workspace_root: str) -> bool:
+    path = word.replace("\\", "/")
     root = workspace_root.replace("\\", "/").rstrip("/")
     if not path.startswith(root + "/"):
         return False
@@ -1739,6 +1747,22 @@ def _is_system_path(path: str) -> bool:
     return any((path + "/").startswith(prefix) for prefix in _SYSTEM_PATH_PREFIXES)
 
 
+_DRIVE_PATH_RE = re.compile(r"[A-Za-z]:([\\/]|$)")
+
+
+def _windows_workspace_rest(word: str, workspace_root: str | None) -> str | None:
+    """The ``/...`` rest of a word that starts with the workspace root, written
+    with either separator, or ``None``; only for a root with a drive (Windows)."""
+    if not workspace_root or not _DRIVE_PATH_RE.match(workspace_root):
+        return None
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    head = word[: len(root)].replace("\\", "/")
+    rest = word[len(root) :]
+    if head.lower() != root.lower() or not (rest == "" or rest.startswith("/")):
+        return None
+    return rest
+
+
 def _rewrite_path_word(
     raw: str,
     *,
@@ -1760,6 +1784,9 @@ def _rewrite_path_word(
     path = raw
     if path in _PASSTHROUGH_DEVICE_PATHS:
         return None, False
+    rest = _windows_workspace_rest(path, workspace_root)
+    if rest is not None:
+        return in_workspace(rest), False
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
@@ -1956,7 +1983,10 @@ def _convert_command_paths(
                         rewritten += "/"
                     replacement = rewritten + replacement[head.end() :]
                     uses_tmp = uses_tmp or tmp
-        elif raw.startswith("/"):
+        elif (
+            raw.startswith("/")
+            or _windows_workspace_rest(raw, workspace_root) is not None
+        ):
             replacement, tmp = _rewrite_path_word(raw, **rules, absolute=absolute)
             uses_tmp = uses_tmp or tmp
         else:
