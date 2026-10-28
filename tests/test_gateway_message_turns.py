@@ -722,3 +722,13 @@ async def test_root_failed_lifecycle_emits_done_like_main():
 
 def test_quiet_window_defaults():
     assert server_mod._REPLAY_QUIET_SECONDS < server_mod._REPLAY_MAX_SECONDS
+
+
+def test_synth_event_run_id_parses_server_lifecycle_ids(monkeypatch):
+    monkeypatch.setenv("REDIS_URI", "redis://localhost")
+    from langgraph_api.event_streaming.session import _synth_event_id
+
+    from EvoScientist.gateway.server import _synth_event_run_id
+
+    event = {"event_id": _synth_event_id("run-abc", "lc", "", "running")}
+    assert _synth_event_run_id(event) == "run-abc"
