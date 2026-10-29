@@ -1334,7 +1334,7 @@ def test_second_helper_ends_while_one_waits(tmp_path):
 def test_helper_waits_for_its_exiting_caller(tmp_path):
     """The caller still exiting when the helper starts is waited for, not
     reported as a process that blocks the environment."""
-    exiting_pid = _start_blocker(tmp_path / "env" / "bin" / "caller", seconds=2)
+    exiting_pid = _start_blocker(tmp_path / "env" / "bin" / "caller", seconds=10)
     try:
         result = subprocess.run(
             _helper(tmp_path, wait_pids=[exiting_pid]),
