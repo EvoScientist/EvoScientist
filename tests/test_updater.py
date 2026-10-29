@@ -1257,6 +1257,9 @@ def test_helper_cancel_before_retry_is_install_failed(tmp_path):
     end = events[-1]
     assert end["status"] == "error"
     assert end["code"] == "install_failed"
+    # The cancel before the retry, not a second failed uv run, which ends on
+    # install_failed with the install command too.
+    assert end["message"].startswith("Update cancelled after a failed install")
     assert "install-script" in end["message"]
     assert any("trying once more" in e.get("message", "") for e in events)
 
