@@ -414,6 +414,7 @@ def test_start_records_that_the_server_leads_its_process_group(
     monkeypatch.setattr(research_env, "agent_python", lambda: None)
     monkeypatch.setattr(agent_shell, "sidecar_bash", lambda: None)
     monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", set())
+    monkeypatch.setattr(manager, "_create_time", lambda pid: 1234.5)
     monkeypatch.setattr(manager.os, "name", os_name)
 
     def _poll():
@@ -424,10 +425,11 @@ def test_start_records_that_the_server_leads_its_process_group(
     )
     with pytest.raises(PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
-    monkeypatch.setattr(manager.os, "name", os.name)
     sidecar = json.loads((tmp_path / "workspace.json").read_text())
     windows = os_name == "nt"
     assert sidecar.get("ctrl_break_group", False) is windows
+    # A stop checks the live process against it, so a reused PID gets nothing.
+    assert sidecar.get("create_time") == (1234.5 if windows else None)
     assert (4242 in manager._BREAK_GROUP_PIDS) is windows
 
 

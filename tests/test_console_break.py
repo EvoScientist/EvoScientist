@@ -28,23 +28,17 @@ class _Kernel32:
         self.calls.append(("AttachConsole", pid))
         return int(self._attach)
 
-    def SetConsoleCtrlHandler(self, handler, add):
-        self.calls.append(("SetConsoleCtrlHandler", handler, add))
-        return 1
-
     def GenerateConsoleCtrlEvent(self, event, group):
         self.calls.append(("GenerateConsoleCtrlEvent", event, group))
         return int(self._send)
 
 
-def test_send_break_attaches_ignores_the_event_and_sends_to_the_group():
+def test_send_break_attaches_and_sends_to_the_group():
     k32 = _Kernel32()
     assert console_break.send_break(4242, k32, lambda: 0) == console_break.EXIT_SENT
     assert k32.calls == [
         ("FreeConsole",),
         ("AttachConsole", 4242),
-        # Set before the send: the helper is on that console too.
-        ("SetConsoleCtrlHandler", None, True),
         ("GenerateConsoleCtrlEvent", 1, 4242),
         ("FreeConsole",),
     ]

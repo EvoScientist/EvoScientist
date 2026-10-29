@@ -281,7 +281,7 @@ def _write_workspace_sidecar(
     agent_bash: str | object | None = _NOT_RECORDED,
     host: str | None = None,
     lasting: bool | None = None,
-    break_group: bool = False,
+    break_group_created: float | None = None,
 ) -> None:
     """Record the pid of the langgraph dev we just started, and the project
     of the client that started it.
@@ -297,9 +297,10 @@ def _write_workspace_sidecar(
     client attaching from another environment reads the server's own.
     ``host`` is the interface the server binds, so a client can tell
     whether its probe reaches this server. ``lasting`` says
-    whether it outlives the process that started it. ``break_group`` says
-    it leads its own process group on Windows, so a stop may send it
-    Ctrl+Break.
+    whether it outlives the process that started it. ``break_group_created``
+    is the server's ``create_time()`` when it leads its own process group on
+    Windows, so a stop may send it Ctrl+Break; the stop sends it only to a
+    live process with that creation time, not to one that reuses the PID.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -323,8 +324,9 @@ def _write_workspace_sidecar(
             payload["host"] = host
         if lasting is not None:
             payload["lasting"] = lasting
-        if break_group:
+        if break_group_created is not None:
             payload[_BREAK_GROUP_KEY] = True
+            payload[_BREAK_GROUP_CREATED_KEY] = break_group_created
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
         if agent_python is not _NOT_RECORDED:
@@ -398,17 +400,22 @@ _PROCESS: subprocess.Popen | None = None
 # Windows: servers this process spawned as the leader of their own process
 # group, the only PIDs a Ctrl+Break may be sent to (for any other PID Windows
 # sends it to every process on the console). The sidecar records the same for
-# a server another process started (``_BREAK_GROUP_KEY``).
+# a server another process started (``_BREAK_GROUP_KEY``), with the server's
+# creation time: a PID reused by another process must not get the event.
 _BREAK_GROUP_PIDS: set[int] = set()
 _BREAK_GROUP_KEY = "ctrl_break_group"
+_BREAK_GROUP_CREATED_KEY = "create_time"
+_CREATE_TIME_TOLERANCE = 1.0
 
 # How long a stop on Windows waits for the server to exit after Ctrl+Break
 # before it ends the process tree hard, and how long the helper that sends it
 # may take.
 CLEAN_STOP_TIMEOUT = 10.0
 _CLEAN_STOP_HELPER_TIMEOUT = 5.0
-# How long a stop waits after terminate() before it kills.
+# How long a stop waits after terminate() before it kills, and how long the
+# server's children get to finish their own shutdown after the server exited.
 _TERMINATE_TIMEOUT = 5.0
+_SURVIVOR_GRACE = 2.0
 
 # Byte offset into ``RUNTIME.log_file`` captured the instant before the current
 # subprocess was spawned. ``read_tunnel_url`` scans only bytes written after
@@ -797,7 +804,9 @@ def _request_clean_stop(pid: int) -> bool:
     A helper process sends it (``console_break``): only a process attached to
     the server's console can, and attaching would cut this one off its own
     terminal. ``CREATE_NO_WINDOW`` keeps a windowless caller (the desktop app)
-    from flashing a console window.
+    from flashing a console window. ``-I`` keeps a module in the caller's
+    working directory (a project's ``signal.py``) from shadowing the
+    standard library the helper imports.
     """
     if os.name != "nt":
         return False
@@ -805,6 +814,7 @@ def _request_clean_stop(pid: int) -> bool:
         result = subprocess.run(
             [
                 sys.executable,
+                "-I",
                 "-m",
                 "EvoScientist.langgraph_dev.console_break",
                 str(pid),
@@ -904,13 +914,29 @@ def _end_server_tree(
 
 
 def _kill_survivors(children: list[psutil.Process]) -> None:
-    """The server exiting does not prove its children did: kill what is left."""
-    for child in children:
+    """The server exiting does not prove its children did: they got the same
+    signal, so give them :data:`_SURVIVOR_GRACE` to finish their own shutdown,
+    then kill what is left."""
+    _, alive = psutil.wait_procs(children, timeout=_SURVIVOR_GRACE)
+    for child in alive:
         try:
-            if child.is_running():
-                child.kill()
+            child.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+
+def _create_time(pid: int) -> float | None:
+    """``pid``'s creation time, or None when it cannot be read."""
+    try:
+        return psutil.Process(pid).create_time()
+    except psutil.Error:
+        return None
+
+
+def _same_process(pid: int, created: float) -> bool:
+    """Whether ``pid`` is still the process created at ``created``."""
+    now = _create_time(pid)
+    return now is not None and abs(now - created) <= _CREATE_TIME_TOLERANCE
 
 
 def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
@@ -922,8 +948,10 @@ def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     (same loose anti-PID-recycling match as ``_kill_owned_stale_process``,
     with PID-file ownership as the primary guard). Holds the cross-process
     file lock so a concurrent start can't have its fresh PID/sidecar records
-    wiped by this stop's cleanup. Kills the whole process tree, then removes
-    the PID file + sidecar. Returns the stopped pid, or ``None`` when nothing
+    wiped by this stop's cleanup. Ends the whole process tree
+    (:func:`_end_server_tree`: on Windows Ctrl+Break first when the record
+    says the server leads its process group), then removes the PID file +
+    sidecar. Returns the stopped pid, or ``None`` when nothing
     was stopped (stale/corrupt files, if any, are still cleaned up).
 
     With *keep_owned* (``EvoSci service stop``), a live server that ``EvoSci
@@ -1002,11 +1030,16 @@ def _stop_recorded_server_locked() -> int | None:
         return None
     # A record from before the server led its own process group, or from
     # another release, does not say so: no Ctrl+Break, the stop ends it hard.
+    # Nor for a PID reused since (a langgraph dev in the user's own terminal
+    # passes the check above): the creation time must match the record's.
     sidecar = _read_workspace_sidecar()
+    recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
     break_group = (
         sidecar is not None
         and sidecar.get("pid") == owned_pid
         and sidecar.get(_BREAK_GROUP_KEY) is True
+        and isinstance(recorded_created, (int, float))
+        and _same_process(owned_pid, recorded_created)
     )
     try:
         _end_server_tree(owned_pid, break_group=break_group)
@@ -1453,7 +1486,7 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         host=host,
         lasting=lasting,
-        break_group=os.name == "nt",
+        break_group_created=_create_time(proc.pid) if os.name == "nt" else None,
     )
 
     # langgraph dev cold-starts in ~10-15s normally, so the budget is
@@ -1534,7 +1567,8 @@ def stop_langgraph_dev(
 
     Sends SIGTERM to the process tree (langgraph dev spawns worker children),
     falling back to SIGKILL after 5 seconds. On Windows a server this process
-    spawned first gets Ctrl+Break (:func:`_end_server_tree`); ``clean=False``
+    spawned first gets Ctrl+Break and up to :data:`CLEAN_STOP_TIMEOUT` to
+    exit before that (:func:`_end_server_tree`); ``clean=False``
     skips that for a server that never became ready, which has no run to put
     back in the queue and would only finish loading first. Safe to call with
     ``None``.

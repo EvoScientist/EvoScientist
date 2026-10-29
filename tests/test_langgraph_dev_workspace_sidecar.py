@@ -830,6 +830,85 @@ def test_server_that_ignores_terminate_is_killed(monkeypatch):
         proc.stdout.close()
 
 
+_SERVER_WITH_CHILD = (
+    "import subprocess, sys, time\n"
+    "child = (\n"
+    "    'import signal, time\\n'\n"
+    "    'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'\n"
+    "    'print(\"ready\", flush=True)\\n'\n"
+    "    'time.sleep(30)\\n'\n"
+    ")\n"
+    "c = subprocess.Popen([sys.executable, '-c', child], stdout=subprocess.PIPE)\n"
+    "c.stdout.readline()\n"
+    "print(c.pid, flush=True)\n"
+    "time.sleep(30)\n"
+)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM can be ignored on POSIX only")
+def test_hard_stop_kills_a_child_that_outlives_its_server(monkeypatch):
+    """The server exits on SIGTERM, its child ignores it: after the grace the
+    sweep kills the child."""
+    monkeypatch.setattr(manager, "_SURVIVOR_GRACE", 0.2)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _SERVER_WITH_CHILD], stdout=subprocess.PIPE
+    )
+    child = None
+    try:
+        child = psutil.Process(int(proc.stdout.readline()))
+        manager._end_server_tree(proc.pid, proc)
+        assert proc.poll() is not None
+        _, alive = psutil.wait_procs([child], timeout=5)
+        assert alive == []
+    finally:
+        for p in (proc, child):
+            try:
+                if p is not None:
+                    p.kill()
+            except psutil.NoSuchProcess:
+                pass
+        proc.wait()
+        proc.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM can be ignored on POSIX only")
+def test_hard_stop_kills_a_child_started_after_the_first_listing(monkeypatch):
+    """A server that ignores SIGTERM and starts a child meanwhile: the kill
+    lists the children again, so that child goes too."""
+    code = (
+        "import signal, subprocess, sys, time\n"
+        "def late(*_):\n"
+        "    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "    print(c.pid, flush=True)\n"
+        "signal.signal(signal.SIGTERM, late)\n"
+        "print('ready', flush=True)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+    monkeypatch.setattr(manager, "_TERMINATE_TIMEOUT", 1.0)
+    monkeypatch.setattr(manager, "_SURVIVOR_GRACE", 0.2)
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+    late = None
+    try:
+        assert proc.stdout.readline().strip() == b"ready"
+        manager._end_server_tree(proc.pid, proc)
+        assert proc.returncode == -9
+        late = psutil.Process(int(proc.stdout.readline()))
+        _, alive = psutil.wait_procs([late], timeout=5)
+        assert alive == []
+    except psutil.NoSuchProcess:
+        pass  # already gone, as it should be
+    finally:
+        for p in (proc, late):
+            try:
+                if p is not None:
+                    p.kill()
+            except psutil.NoSuchProcess:
+                pass
+        proc.wait()
+        proc.stdout.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the POSIX stop")
 def test_request_clean_stop_runs_no_helper_on_posix(monkeypatch):
     monkeypatch.setattr(
@@ -852,6 +931,7 @@ def test_request_clean_stop_runs_the_helper_without_a_window(monkeypatch):
     assert manager._request_clean_stop(4242) is True
     assert seen["args"] == [
         sys.executable,
+        "-I",  # a project's signal.py in the cwd must not shadow the stdlib
         "-m",
         "EvoScientist.langgraph_dev.console_break",
         "4242",
@@ -939,21 +1019,28 @@ def test_stop_inflight_owned_server_skips_the_clean_stop(
 
 
 @pytest.mark.parametrize(
-    ("record", "expected"),
+    ("record", "created_offset", "expected"),
     [
-        ({"ctrl_break_group": True}, True),
-        ({}, False),  # a record from before this release
-        ({"ctrl_break_group": True, "pid": 1}, False),  # names another server
+        ({"ctrl_break_group": True}, 0.0, True),
+        ({}, None, False),  # a record from before this release
+        ({"ctrl_break_group": True}, None, False),  # no creation time recorded
+        ({"ctrl_break_group": True, "pid": 1}, 0.0, False),  # another server
+        # The PID was reused by a process started later: no Ctrl+Break, which
+        # would reach every process on that process's console.
+        ({"ctrl_break_group": True}, -60.0, False),
     ],
 )
 def test_stop_recorded_server_trusts_the_record_for_the_process_group(
-    tmp_path, monkeypatch, runtime_paths, record, expected
+    tmp_path, monkeypatch, runtime_paths, record, created_offset, expected
 ):
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
         pid_file, sidecar = tmp_path / "pid.txt", tmp_path / "ws.json"
         pid_file.write_text(str(victim.pid))
+        if created_offset is not None:
+            created = psutil.Process(victim.pid).create_time() + created_offset
+            record = {**record, "create_time": created}
         sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid, **record}))
         monkeypatch.setattr(
             manager,
@@ -988,9 +1075,15 @@ def test_sidecar_records_the_process_group_only_when_asked(
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
     manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
-    assert "ctrl_break_group" not in manager._read_workspace_sidecar()
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, break_group=True)
-    assert manager._read_workspace_sidecar()["ctrl_break_group"] is True
+    record = manager._read_workspace_sidecar()
+    assert "ctrl_break_group" not in record
+    assert "create_time" not in record
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path, pid=1, break_group_created=1234.5
+    )
+    record = manager._read_workspace_sidecar()
+    assert record["ctrl_break_group"] is True
+    assert record["create_time"] == 1234.5
 
 
 def test_server_config_fingerprint_tracks_dangerous_mode():

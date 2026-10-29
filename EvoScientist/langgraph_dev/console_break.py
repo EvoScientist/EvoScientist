@@ -15,11 +15,13 @@ terminal; so a short helper process does it::
 
 The target must lead a process group (spawned with
 ``CREATE_NEW_PROCESS_GROUP``): for any other PID Windows sends the event to
-every process on that console, the caller included. The caller checks this
-before running the helper.
+every process on that console, the caller and this helper included. The
+caller checks this before running the helper. Sent to a group leader, the
+event does not reach the helper: it is in a group of its own.
 
-Exit codes: 0 sent, 2 bad arguments, 3 attach failed, 4 send failed; the
-Windows error code goes to stderr.
+Exit codes: 0 sent, 2 bad arguments, 3 attach failed, 4 send failed, with
+the Windows error code on stderr; 1 when Python itself fails (an import
+error, no ``kernel32``), with the traceback on stderr.
 """
 
 from __future__ import annotations
@@ -40,7 +42,6 @@ def _kernel32():
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.AttachConsole.argtypes = [wintypes.DWORD]
-    k32.SetConsoleCtrlHandler.argtypes = [wintypes.LPVOID, wintypes.BOOL]
     k32.GenerateConsoleCtrlEvent.argtypes = [wintypes.DWORD, wintypes.DWORD]
     return k32, ctypes.get_last_error
 
@@ -54,8 +55,6 @@ def send_break(pid: int, kernel32=None, get_last_error=None) -> int:
     if not kernel32.AttachConsole(pid):
         print(f"AttachConsole({pid}) failed: error {get_last_error()}", file=sys.stderr)
         return EXIT_ATTACH_FAILED
-    # The helper is on that console now too; it must not end on the event.
-    kernel32.SetConsoleCtrlHandler(None, True)
     if not kernel32.GenerateConsoleCtrlEvent(_CTRL_BREAK_EVENT, pid):
         print(
             f"GenerateConsoleCtrlEvent({pid}) failed: error {get_last_error()}",
