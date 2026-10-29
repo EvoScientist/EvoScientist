@@ -2067,7 +2067,8 @@ def test_auto_mode_holds_when_workspace_tier_root_is_external(
     global_skills = tmp_path / "global-skills"
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
     memory_dir = tmp_path / "memories"
-    workspace = Workspace(tmp_path)
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.root.mkdir()
     other_workspace = tmp_path / "other-workspace-skills"
     target_root = global_skills if target_kind == "global" else other_workspace
     installed = _write_installed_skill(
