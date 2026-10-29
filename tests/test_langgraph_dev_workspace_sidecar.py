@@ -767,6 +767,22 @@ def test_failed_clean_stop_ends_hard_at_once(monkeypatch, stop_steps):
             proc.wait()
 
 
+def test_recorded_server_clean_stop_waits_for_the_exit(monkeypatch, stop_steps):
+    """The recorded-PID stop has no Popen handle: the wait goes through psutil."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE
+    )
+    try:
+        _clean_stop(monkeypatch, stop_steps, then=proc.stdin.close)
+        manager._end_server_tree(proc.pid, break_group=True)
+        assert stop_steps == [("clean", proc.pid)]
+    finally:
+        proc.stdin.close()
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
 def test_no_clean_stop_without_a_known_process_group(monkeypatch, stop_steps):
     proc = _sleeper()
     try:
