@@ -552,7 +552,7 @@ class _Run:
                 # manager records it right after spawning.
                 proc = self.proc if self.proc is not None else lgm._PROCESS
                 if proc is not None:
-                    lgm.stop_langgraph_dev(proc)
+                    lgm.stop_langgraph_dev(proc, clean=self.proc is not None)
         finally:
             try:
                 if self.ccproxy is not None:
