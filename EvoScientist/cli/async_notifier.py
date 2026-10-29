@@ -710,23 +710,16 @@ async def consume_notifications(
     notifs = drain_notifications(current_thread_id)
     if not notifs:
         return
-    try:
-        # Brief fixed grace to catch reader enqueues arriving just before this tick,
-        # so co-completing tasks batch into a single agent turn.
-        await asyncio.sleep(NOTIFICATION_BATCH_GRACE_SECONDS)
-        notifs.extend(drain_notifications(current_thread_id))
+    # Brief fixed grace to catch reader enqueues arriving just before this tick,
+    # so co-completing tasks batch into a single agent turn.
+    await asyncio.sleep(NOTIFICATION_BATCH_GRACE_SECONDS)
+    notifs.extend(drain_notifications(current_thread_id))
 
-        try:
-            async_tasks = await read_async_tasks_state()
-        except Exception:
-            logger.warning("Failed to read async_tasks state for dedup", exc_info=True)
-            async_tasks = {}
-    except asyncio.CancelledError:
-        # Nothing has reached the agent yet. Keep each notification's routing
-        # so a later consumer can deliver it to the originating thread.
-        for notification in notifs:
-            _enqueue(notification)
-        raise
+    try:
+        async_tasks = await read_async_tasks_state()
+    except Exception:
+        logger.warning("Failed to read async_tasks state for dedup", exc_info=True)
+        async_tasks = {}
 
     survivors = dedup_notifications(notifs, async_tasks)
     if not survivors:
