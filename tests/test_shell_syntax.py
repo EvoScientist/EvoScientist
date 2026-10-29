@@ -33,6 +33,14 @@ class TestTokens:
             "a", "&&", "b", "|", "c", ">|", "f", ";", "d", "&>", "g",
         ]  # fmt: skip
 
+    def test_a_backslash_in_double_quotes_escapes_only_what_bash_escapes(self):
+        assert _values(r'cd "D:\data" "a\$b" "say \"hi\""') == [
+            "cd",
+            r"D:\data",
+            "a$b",
+            'say "hi"',
+        ]
+
     def test_comments_and_line_continuations_are_not_words(self):
         assert _values("ls # it's a comment\necho \\\n  hi") == ["ls", "echo", "hi"]
 

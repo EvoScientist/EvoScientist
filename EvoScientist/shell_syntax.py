@@ -136,7 +136,12 @@ def iter_tokens(command: str, start: int = 0) -> Iterator[dict[str, object]]:
                             value.append(command[i : close + 1])
                             i = close + 1
                             continue
-                    if inner == "\\" and quote == '"' and i + 1 < n:
+                    if (
+                        inner == "\\"
+                        and quote == '"'
+                        and i + 1 < n
+                        and command[i + 1] in '$`"\\\n'
+                    ):
                         value.append(command[i + 1])
                         i += 2
                     else:

@@ -1171,6 +1171,20 @@ def _recursive_rm_operands(
     return operands if recursive else []
 
 
+def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
+    """Whether an rm operand is the file system root, a drive root or the home
+    folder itself (optionally followed by ``/`` or ``/*``)."""
+    path = _removal_target(token) if token is not None else operand
+    if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
+        return True
+    value = str(token["value"]) if token is not None else operand
+    home = r"(\$HOME|\$\{HOME\})(/\*?)?"
+    return bool(
+        (operand.startswith("~") and re.fullmatch(r"~(/\*?)?", operand))
+        or (_is_home_word(operand) and re.fullmatch(home, value))
+    )
+
+
 def _kill_by_lookup(
     found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
 ) -> bool:
@@ -1201,7 +1215,7 @@ def _kill_by_lookup(
     if args and args[0] == "--":
         args = args[1:]
     return any(
-        re.fullmatch(r"-\d+|0+", arg)  # -1, a process group, or 0
+        re.fullmatch(r'-\d+|0+|-"?\$.+', arg)  # -1, a process group, or 0
         or (
             by_name
             and "$" in arg
@@ -1322,6 +1336,16 @@ def validate_command(
                         f"Command blocked: rm would remove '{operand}', which is "
                         f"outside the workspace or may expand there. Remove a "
                         f"path inside the workspace (e.g., './build')."
+                    )
+
+    # Dangerous mode allows rm anywhere, but never of the whole system or home.
+    if dangerous:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                if _whole_system_target(operand, token):
+                    return (
+                        f"Command blocked: rm would remove '{operand}', the root, a "
+                        f"drive or the home folder, which is refused in every mode."
                     )
 
     # Blocked commands and kills by lookup, wherever they run — always enforced.

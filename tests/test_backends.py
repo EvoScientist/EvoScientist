@@ -842,9 +842,39 @@ class TestWorkspaceRemovalAndComments:
         )[1]
         assert "may expand" in error
 
-    def test_destructive_patterns_name_their_target(self):
-        assert all("target" in p.groupindex for p in backends._DESTRUCTIVE_PATTERNS)
+    def test_a_refusal_shows_the_matched_text(self):
         assert "'rm -rf /'" in validate_command("rm -rf /")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -r -f /",
+            "rm --recursive --force /",
+            "rm -fr /*",
+            "rm -rf ~",
+            'rm -rf "$HOME"',
+            "rm -r ${HOME}/*",
+        ],
+    )
+    def test_dangerous_mode_never_removes_the_root_or_home(
+        self, command, tmp_workspace
+    ):
+        error = prepare_sandbox_command(
+            command, tmp_workspace, virtual_mode=False, dangerous=True
+        )[1]
+        assert "refused in every mode" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        ["rm -fr /tmp/x", "rm -rf ~/build/cache", "rm -r '$HOME'", 'rm -rf "\\$HOME"'],
+    )
+    def test_dangerous_mode_removes_deeper_paths(self, command, tmp_workspace):
+        assert (
+            prepare_sandbox_command(
+                command, tmp_workspace, virtual_mode=False, dangerous=True
+            )[1]
+            is None
+        )
 
     def test_memories_inside_the_workspace_stay_protected(
         self, tmp_workspace, monkeypatch
@@ -1042,12 +1072,18 @@ class TestSandboxCommandChecks:
             "cd /memories && rm -rf *",
             "cd C:/ && ls",
             "cd D:/data && ls",
+            'cd "D:\\data" && ls',
         ):
             assert "leaves the workspace" in prepare_sandbox_command(command, ws)[1], (
                 command
             )
         for command in ("cd src && cd /results && ls", f"cd {ws}\\src && dir"):
             assert prepare_sandbox_command(command, ws)[1] is None, command
+        # A double-quoted backslash path is read as the shell reads it.
+        assert (
+            "outside the workspace"
+            in prepare_sandbox_command('rm -r -f "D:\\data"', ws)[1]
+        )
 
     def test_a_drive_like_folder_is_relative_on_posix(self, monkeypatch):
         monkeypatch.setattr(backends, "_is_windows", lambda: False)
@@ -2639,6 +2675,8 @@ class TestProcessKillByName:
             "cat logs/pids | xargs kill -9 0",
             "fuser -k 8000/tcp",
             "taskkill -F -IM python.exe",
+            "kill -- -$PGID",
+            "kill -9 -$PGID",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
