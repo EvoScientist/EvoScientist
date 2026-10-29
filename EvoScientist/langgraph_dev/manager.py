@@ -917,8 +917,12 @@ def _end_server_tree(
 def _kill_survivors(children: list[psutil.Process]) -> None:
     """The server exiting does not prove its children did: they got the same
     signal, so give them :data:`_SURVIVOR_GRACE` to finish their own shutdown,
-    then kill what is left."""
-    _, alive = psutil.wait_procs(children, timeout=_SURVIVOR_GRACE)
+    then kill what is left. A wait that is refused (on Windows an elevated
+    child denies the handle) counts every child as left."""
+    try:
+        _, alive = psutil.wait_procs(children, timeout=_SURVIVOR_GRACE)
+    except psutil.Error:
+        alive = children
     for child in alive:
         try:
             child.kill()

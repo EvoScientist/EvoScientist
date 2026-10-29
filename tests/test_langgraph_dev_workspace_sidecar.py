@@ -780,9 +780,15 @@ def test_no_clean_stop_without_a_known_process_group(monkeypatch, stop_steps):
             proc.wait()
 
 
-def test_clean_stop_kills_children_left_after_the_server_exits(monkeypatch, stop_steps):
+@pytest.mark.parametrize("wait_denied", [False, True])
+def test_clean_stop_kills_children_left_after_the_server_exits(
+    monkeypatch, stop_steps, wait_denied
+):
     """The children are listed before the Ctrl+Break: after the server exits
-    they can no longer be found from it."""
+    they can no longer be found from it. A denied wait (an elevated child on
+    Windows) does not end the stop early: every listed child still gets a kill
+    attempt."""
+    wait_procs = psutil.wait_procs
     code = (
         "import subprocess, sys, time\n"
         "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
@@ -793,9 +799,15 @@ def test_clean_stop_kills_children_left_after_the_server_exits(monkeypatch, stop
     grandchild = None
     try:
         grandchild = psutil.Process(int(proc.stdout.readline()))
+        if wait_denied:
+
+            def _denied(*_a, **_k):
+                raise psutil.AccessDenied(grandchild.pid)
+
+            monkeypatch.setattr(psutil, "wait_procs", _denied)
         _clean_stop(monkeypatch, stop_steps, then=proc.kill)  # only the server
         manager._end_server_tree(proc.pid, proc, break_group=True)
-        _, alive = psutil.wait_procs([grandchild], timeout=5)
+        _, alive = wait_procs([grandchild], timeout=5)
         assert alive == []
     finally:
         for p in (proc, grandchild):
