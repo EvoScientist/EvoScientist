@@ -38,12 +38,19 @@ from pathlib import Path
 from typing import Any
 
 from ._install import (
+    PolicyBlocked,
     atomic_write_text,
+    is_policy_block,
     is_under,
+    kill_tree,
     move_into_place,
+    policy_error,
     prepend_to_path,
     remove_stale_temp_dirs,
+    stage_lock,
     tools_dir,
+    tree_signature,
+    which_on_path,
 )
 from .download import download
 from .protocol import (
@@ -59,6 +66,8 @@ logger = logging.getLogger(__name__)
 
 GIT_TAG = "v2.56.0.windows.1"
 GIT_VERSION = "2.56.0.windows.1"
+# Completes policy_error()'s "or ... and run `EvoSci setup` again".
+_POLICY_ALTERNATIVE = "install Git for Windows"
 
 # Asset names are pinned in full: first builds drop the ".1" from them.
 # Values: (asset, SHA-256).
@@ -111,45 +120,13 @@ def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-# Windows errors for a program blocked by a code-integrity policy:
-# ERROR_ACCESS_DISABLED_BY_POLICY (AppLocker) and
-# ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION (WDAC).
-_POLICY_WINERRORS = frozenset({1260, 4551})
-
-
-class _PolicyBlocked(Exception):
-    """A Windows policy refused to start ``path``."""
-
-    def __init__(self, path: str) -> None:
-        super().__init__(path)
-        self.path = path
-
-
-def _is_policy_block(exc: OSError) -> bool:
-    return getattr(exc, "winerror", None) in _POLICY_WINERRORS
-
-
-def _policy_error(path: str | Path) -> StageError:
-    """The readable error for a program of ours that a Windows policy blocked.
-
-    ``probe_failed``, and no new download: the same program would be blocked
-    again.
-    """
-    return StageError(
-        "probe_failed",
-        f"A Windows policy (AppLocker or WDAC) blocked {path}. Ask your "
-        f"administrator to allow programs under {tools_dir()}, or install Git "
-        "for Windows and run `EvoSci setup` again.",
-    )
-
-
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     """Run a probe without a console window; None if it could not run or failed.
 
     ``GIT_EXEC_PATH`` is dropped so ``git --exec-path`` reports the binary's own
     install, not an inherited override. A failure is logged at INFO with its
     reason, so "why was my Git for Windows not used?" has an answer. A program
-    blocked by a Windows policy raises :class:`_PolicyBlocked` instead, so the
+    blocked by a Windows policy raises :class:`PolicyBlocked` instead, so the
     caller can fall back (a system Git) or report it (our PortableGit).
     """
     env = {k: v for k, v in os.environ.items() if k.upper() != "GIT_EXEC_PATH"}
@@ -171,8 +148,8 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         return None
     except OSError as exc:
         logger.info(f"{command} could not run: {exc}")
-        if _is_policy_block(exc):
-            raise _PolicyBlocked(argv[0]) from exc
+        if is_policy_block(exc):
+            raise PolicyBlocked(argv[0]) from exc
         return None
     except subprocess.SubprocessError as exc:
         logger.info(f"{command} could not run: {exc}")
@@ -239,12 +216,7 @@ def _system_git() -> GitInfo | None:
     ``EvoSci setup``, so the private PortableGit would otherwise be found.
     """
     root = tools_dir()
-    search = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not is_under(Path(p), root)
-    )
-    found = shutil.which("git", path=search)
+    found = which_on_path("git", outside=root)
     if found is None:
         return None
     try:
@@ -257,7 +229,7 @@ def _system_git() -> GitInfo | None:
             logger.info(f"Not using {found}: no Git for Windows install found from it")
             return None
         info = _probe_root(install, "system", version)
-    except _PolicyBlocked as exc:
+    except PolicyBlocked as exc:
         logger.info(f"Not using {found}: a Windows policy blocked {exc.path}")
         return None
     if info is None:
@@ -346,21 +318,6 @@ def _arch() -> str:
             "unsupported_platform", f"No PortableGit build for Windows on {machine}."
         )
     return arch
-
-
-def _kill_tree(pid: int) -> None:
-    import psutil
-
-    try:
-        proc = psutil.Process(pid)
-        targets = [*proc.children(recursive=True), proc]
-    except psutil.Error:
-        return
-    for target in targets:
-        try:
-            target.kill()
-        except psutil.Error:
-            pass
 
 
 class _HiddenDesktopProcess:
@@ -486,34 +443,9 @@ def _launch(argv: list[str]) -> _HiddenDesktopProcess:
     return _HiddenDesktopProcess(argv)
 
 
-def _tree_signature(root: Path) -> tuple[int, int]:
-    """(file count, total bytes) under ``root``; changes while files are written.
-
-    Files that vanish or cannot be read mid-walk are skipped: the value only
-    has to differ while the extractor makes progress.
-    """
-    files = size = 0
-    stack = [root]
-    while stack:
-        try:
-            entries = list(os.scandir(stack.pop()))
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-                else:
-                    files += 1
-                    size += entry.stat(follow_symlinks=False).st_size
-            except OSError:
-                continue
-    return files, size
-
-
 def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
     """Kill the extractor's process tree; True once it has exited."""
-    _kill_tree(proc.pid)
+    kill_tree(proc.pid)
     try:
         stopped = proc.wait(30) is not None
     except OSError:
@@ -544,15 +476,15 @@ def _run_sfx(
     try:
         proc = _launch(argv)
     except OSError as exc:
-        if _is_policy_block(exc):
-            raise _policy_error(exe) from exc
+        if is_policy_block(exc):
+            raise policy_error(exe, _POLICY_ALTERNATIVE) from exc
         raise StageError("install_failed", f"Could not run {exe.name}: {exc}") from exc
     try:
         try:
             code = wait_with_heartbeat(
                 proc.wait,
                 beat,
-                lambda: _tree_signature(out),
+                lambda: tree_signature(out),
                 silence_limit=SFX_SILENCE_LIMIT,
             )
         except StepStalled as exc:
@@ -631,6 +563,7 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
             lambda f: report(
                 0.05 + 0.7 * f, f"Downloading Git for Windows {GIT_VERSION}"
             ),
+            cn_hint=mirror != "cn",
         )
         report(0.76, "Verifying checksum")
         if actual.lower() != sha256:
@@ -694,7 +627,7 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
     """
     report = progress or (lambda _f, _m: None)
     root = tools_dir()
-    from filelock import FileLock
+    lock = root / "git.lock"
 
     try:
         system = _system_git()
@@ -702,7 +635,7 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
             root.mkdir(parents=True, exist_ok=True)
             # Under the lock: a concurrent setup (CLI and desktop app) writes
             # the same record.
-            with FileLock(str(root / "git.lock")):
+            with stage_lock(lock, "Git for Windows", progress):
                 _write_record(system)
             return system
 
@@ -711,17 +644,17 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
             return recorded
 
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(root / "git.lock")):
+        with stage_lock(lock, "Git for Windows", progress):
             # Another process may have finished the install while we waited.
             recorded = _recorded_portablegit() or _adopt_installed(root)
             if recorded is not None:
                 return recorded
             remove_stale_temp_dirs(root, ".git-")
             return _install(mirror, report)
-    except _PolicyBlocked as exc:
+    except PolicyBlocked as exc:
         # Our recorded, left-over or fresh PortableGit is blocked: report it
         # instead of downloading the same blocked program again.
-        raise _policy_error(exc.path) from exc
+        raise policy_error(exc.path, _POLICY_ALTERNATIVE) from exc
     except OSError as exc:
         raise StageError(
             "install_failed", f"Could not set up Git in {root}: {exc}"

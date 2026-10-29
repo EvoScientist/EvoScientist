@@ -49,9 +49,12 @@ show_logs() {
 }
 
 # Starts the WebUI in the background, waits until the backend's /ok and the
-# WebUI answer, then stops it with SIGTERM and checks that both ports close.
+# WebUI answer, then stops it with SIGTERM: the WebUI's port closes, the
+# background server keeps answering until EvoSci server stop.
 launch_check() {
   local work log pid i up=0
+  # The background server outlives the session: stop it however this exits.
+  trap '"$EVOSCI" server stop >/dev/null 2>&1 || true' EXIT
   work=$(mktemp -d)
   log="$work.log"
   "$EVOSCI" --ui webui --workdir "$work" </dev/null >"$log" 2>&1 &
@@ -66,6 +69,13 @@ launch_check() {
   done
   if [ "$up" != 1 ]; then
     kill -TERM "$pid" 2>/dev/null || true
+    # Let the session finish exiting, so it starts no server after the
+    # cleanup below has stopped it.
+    for _ in $(seq 1 30); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
     show_logs "$log"
     fail "The backend ($BACKEND_URL) and the WebUI ($WEBUI_URL) did not both answer within $i s"
   fi
@@ -86,10 +96,31 @@ launch_check() {
     fail "EvoSci did not stop within 30 s of SIGTERM"
   fi
   sleep 2
-  if answers "$BACKEND_URL" || answers "$WEBUI_URL"; then
+  if answers "$WEBUI_URL"; then
     show_logs "$log"
-    fail "The backend or the WebUI still answers after EvoSci stopped"
+    fail "The WebUI still answers after EvoSci stopped"
   fi
+  # The backend is the background server every session shares: it outlives
+  # the session that started it, until it is stopped. Checked in PR mode
+  # only: release mode installs the newest release, which may predate that.
+  # Still answering a while later, so not a server that is shutting down.
+  if [ "${MODE:-}" = pr ]; then
+    sleep 5
+    if ! answers "$BACKEND_URL" 300; then
+      show_logs "$log"
+      fail "The background server stopped with the session that started it"
+    fi
+  fi
+  "$EVOSCI" server stop >>"$log" 2>&1 || true
+  for i in $(seq 1 30); do
+    answers "$BACKEND_URL" || break
+    sleep 1
+  done
+  if answers "$BACKEND_URL"; then
+    show_logs "$log"
+    fail "The backend still answers after EvoSci server stop"
+  fi
+  trap - EXIT
   echo "WebUI launch ok"
 }
 

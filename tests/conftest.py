@@ -2,6 +2,7 @@
 
 import errno
 import ipaddress
+import logging
 import os
 import shutil
 import socket
@@ -158,7 +159,6 @@ def _no_network(monkeypatch):
 @pytest.fixture
 def langgraph_api_env(monkeypatch):
     """Read when langgraph-api's config is first imported, as in the server."""
-    import logging
 
     for name, value in {
         "LANGGRAPH_RUNTIME_EDITION": "inmem",
@@ -263,11 +263,10 @@ def _fresh_langgraph_dev_state(monkeypatch):
 
     for name, value in {
         "_PROCESS": None,
-        "_PROCESS_WORKSPACE": None,
-        "_PROCESS_RUN_DIR": None,
-        "SERVED_WORKSPACE": None,
+        "SERVER_UNAVAILABLE": False,
         "CONFIG_DRIFT_SINCE_LAUNCH": False,
         "AGENT_SHELL_DRIFT": None,
+        "SERVER_EXPOSURE": None,
         "_ASYNC_SUBAGENTS_AVAILABLE": False,
         "_LOG_OFFSET_AT_START": 0,
     }.items():
@@ -302,14 +301,39 @@ def _no_health_server(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_process_workspace():
-    """``process_workspace()`` is read once per process; tests change env/cwd."""
-    from EvoScientist.paths import process_session_dirs, process_workspace
+    """``process_workspace()`` and ``launcher_workspace()`` are read once per
+    process; tests change env/cwd."""
+    from EvoScientist.paths import (
+        launcher_workspace,
+        process_session_dirs,
+        process_workspace,
+    )
 
-    process_workspace.cache_clear()
-    process_session_dirs.cache_clear()
+    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+        cached.cache_clear()
     yield
-    process_workspace.cache_clear()
-    process_session_dirs.cache_clear()
+    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+        cached.cache_clear()
+
+
+@pytest.fixture
+def tiny_graph():
+    """A function returning a new small compiled graph, as graph builders do."""
+
+    def build(*_args, **_kwargs):
+        from typing import TypedDict
+
+        from langgraph.graph import StateGraph
+
+        class State(TypedDict):
+            x: int
+
+        builder = StateGraph(State)
+        builder.add_node("n", lambda state: state)
+        builder.set_entry_point("n")
+        return builder.compile()
+
+    return build
 
 
 @pytest.fixture
@@ -393,6 +417,100 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
     monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
     monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_env_origins(monkeypatch):
+    """Where this process's configuration variables came from is recorded in
+    one dict; what one test records (a flag's, say) would change what the
+    server gets and the drift fingerprint in later tests."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
+
+
+@pytest.fixture(autouse=True)
+def _restore_console_stream(monkeypatch):
+    """The CLI points the shared console at stderr (stream-json, ``deploy
+    --json``), and reading ``console.file`` back yields the running test's
+    captured stream: either would stay for every later test in the worker,
+    whose CLI output then goes missing."""
+    from EvoScientist.stream.console import console
+
+    monkeypatch.setattr(console, "_file", console._file)
+    monkeypatch.setattr(console, "stderr", console.stderr)
+
+
+@pytest.fixture(autouse=True)
+def _no_registration(monkeypatch):
+    """Clients register their project with the server they use; tests that
+    fake a running server would otherwise send the request. A test of the
+    registration itself imports ``register_folder`` at module level."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration, "register_folder", lambda *_a, **_k: registration.ServerExposure()
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_dotenv_record(monkeypatch):
+    """The ``.env`` keys a merge warned about are per test."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "_DOTENV_IGNORED", set())
+
+
+@pytest.fixture(autouse=True)
+def _fresh_registry(monkeypatch):
+    """Each test reads the project registry from its own data folder,
+    registers projects with a lock of its own event loop, and starts with no
+    threads restored and no project set up."""
+    import sys
+
+    module = sys.modules.get("EvoScientist.langgraph_dev.registry")
+    if module is not None:
+        monkeypatch.setattr(module, "REGISTRY", module.Registry())
+    module = sys.modules.get("EvoScientist.langgraph_dev.workspace_setup")
+    if module is not None:
+        monkeypatch.setattr(module, "_lock", None)
+        monkeypatch.setattr(module, "_warm_lock", None)
+        monkeypatch.setattr(module, "SET_UP", set())
+    module = sys.modules.get("EvoScientist.sessions")
+    if module is not None:
+        monkeypatch.setattr(module, "RESTORED_WORKSPACES", set())
+
+
+@pytest.fixture
+def no_workspace_setup(monkeypatch):
+    """Start the custom app without setting the registered projects up: that
+    needs the runtime's store, which only ``runtime_store`` provides."""
+    from EvoScientist.langgraph_dev import workspace_setup
+
+    async def skip():
+        return None
+
+    monkeypatch.setattr(workspace_setup, "set_up_at_start", skip)
+
+
+@pytest.fixture
+def runtime_store(langgraph_api_env, monkeypatch):
+    """The in-memory runtime's store, empty, with every served graph registered."""
+    import langgraph_api.graph as lg_graph
+    from langgraph_runtime_inmem.database import GLOBAL_STORE
+
+    from EvoScientist.langgraph_dev.assistants import served_graph_ids
+    from EvoScientist.langgraph_dev.legacy_import import IMPORTED_KEY
+
+    for graph_id in served_graph_ids():
+        monkeypatch.setitem(lg_graph.GRAPHS, graph_id, object())
+    monkeypatch.setitem(GLOBAL_STORE, IMPORTED_KEY, {})
+    tables = ("assistants", "assistant_versions", "threads", "runs", "crons")
+    saved = {key: list(GLOBAL_STORE.get(key, [])) for key in tables}
+    for key in tables:
+        GLOBAL_STORE[key] = []
+    yield GLOBAL_STORE
+    GLOBAL_STORE.update(saved)
 
 
 @pytest.fixture(autouse=True)

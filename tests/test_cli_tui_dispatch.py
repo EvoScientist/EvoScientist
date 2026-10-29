@@ -6,6 +6,7 @@ import pytest
 
 from EvoScientist.cli.commands import _is_fresh_interactive_session
 from EvoScientist.cli.interactive import cmd_interactive
+from EvoScientist.langgraph_dev.registration import ServerExposure
 from EvoScientist.paths import SessionDirs, Workspace
 
 
@@ -127,21 +128,20 @@ def test_no_host_flag_leaves_config_defaults(monkeypatch):
     assert calls["webui_config"].webui_host == "127.0.0.1"
 
 
-def _run_ensure_backend(monkeypatch, config, *, server_up=True):
-    """Drive ``_ensure_async_subagent_server`` and capture console output."""
+def _run_ensure_backend(monkeypatch, config, *, exposure=None):
+    """Drive ``_ensure_async_subagent_server`` with a server whose
+    registration answered *exposure* (``None``: no server registered the
+    project) and capture console output."""
     import EvoScientist.cli.commands as cmds
+    from EvoScientist.langgraph_dev import manager
 
     printed: list[str] = []
-    monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
-        lambda config, *, workspace_dir, run_dir=None, backend=None: None,
-    )
-    monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-        lambda: server_up,
-    )
-    monkeypatch.setattr(cmds, "_reconcile_autoskill_schedule", lambda *a, **k: None)
-    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
+
+    def ensure(config, *, workspace_dir, backend=None):
+        manager.SERVER_EXPOSURE = exposure
+        return exposure is not None
+
+    monkeypatch.setattr(manager, "ensure_langgraph_dev", ensure)
     monkeypatch.setattr(
         cmds.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else "")
     )
@@ -158,12 +158,13 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
 
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5", "::"])
 def test_cli_mode_warns_on_public_backend_bind(monkeypatch, exposed):
-    """The langgraph dev backend is shared across UI modes, so a plain
-    `EvoSci` session must warn too — otherwise `--host 0.0.0.0` (or a config
-    file with it) puts an unauthenticated shell-capable API on the network in
-    every mode with no signal."""
-    config = SimpleNamespace(langgraph_dev_host=exposed)
-    printed = _run_ensure_backend(monkeypatch, config)
+    """The server is shared by every UI mode and project, so a plain `EvoSci`
+    session must warn too, whichever session bound it to the network; the
+    session's own host setting says nothing about it."""
+    config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
+    printed = _run_ensure_backend(
+        monkeypatch, config, exposure=ServerExposure.of(exposed, False)
+    )
 
     assert any("PUBLIC BIND" in line for line in printed)
 
@@ -171,18 +172,31 @@ def test_cli_mode_warns_on_public_backend_bind(monkeypatch, exposed):
 @pytest.mark.parametrize("loopback", ["127.0.0.1", "::1", "localhost"])
 def test_cli_mode_silent_on_loopback_backend_bind(monkeypatch, loopback):
     config = SimpleNamespace(langgraph_dev_host=loopback)
-    printed = _run_ensure_backend(monkeypatch, config)
+    printed = _run_ensure_backend(
+        monkeypatch, config, exposure=ServerExposure.of(loopback, False)
+    )
 
-    assert not any("PUBLIC BIND" in line for line in printed)
+    assert not any("PUBLIC" in line for line in printed)
 
 
-def test_no_warning_when_backend_failed_to_start(monkeypatch):
-    """ensure_langgraph_dev fails soft (async degrades to in-process). Warning
-    about a bind that never happened is worse than saying nothing."""
+def test_cli_mode_warns_on_tunnel_of_shared_server(monkeypatch):
+    """A session in another project that uses a server some EvoSci deploy
+    started with a tunnel is exposed through it too."""
+    config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
+    printed = _run_ensure_backend(
+        monkeypatch, config, exposure=ServerExposure.of("127.0.0.1", True)
+    )
+
+    assert any("PUBLIC TUNNEL" in line for line in printed)
+
+
+def test_no_warning_when_project_not_registered(monkeypatch):
+    """ensure_langgraph_dev fails soft (async degrades to in-process): a
+    server that does not serve the project does not expose it."""
     config = SimpleNamespace(langgraph_dev_host="0.0.0.0")
-    printed = _run_ensure_backend(monkeypatch, config, server_up=False)
+    printed = _run_ensure_backend(monkeypatch, config, exposure=None)
 
-    assert not any("PUBLIC BIND" in line for line in printed)
+    assert not any("PUBLIC" in line for line in printed)
 
 
 @pytest.mark.parametrize("drift", [None, "its agents keep /conda/bin/python"])
@@ -191,7 +205,7 @@ def test_cli_prints_the_server_python_warning(monkeypatch, drift):
 
     monkeypatch.setattr(manager, "AGENT_SHELL_DRIFT", drift)
     config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
-    printed = _run_ensure_backend(monkeypatch, config)
+    printed = _run_ensure_backend(monkeypatch, config, exposure=ServerExposure())
 
     assert any("/conda/bin/python" in line for line in printed) is (drift is not None)
 
@@ -203,21 +217,20 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir, run_dir=None, backend=None):
-        calls.append((config, workspace_dir, run_dir, backend))
+    def fake_ensure(config, *, workspace_dir, backend=None):
+        calls.append((config, workspace_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
         fake_ensure,
     )
-    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
 
     config = SimpleNamespace(enable_async_subagents=False)
     cmds._ensure_async_subagent_server(
         config, dirs=SessionDirs(workspace), backend="langgraph_server"
     )
 
-    assert calls == [(config, workspace.root, None, "langgraph_server")]
+    assert calls == [(config, workspace.root, "langgraph_server")]
 
 
 async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
@@ -227,24 +240,24 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir, run_dir=None, backend=None):
-        calls.append((config, workspace_dir, run_dir, backend))
+    def fake_ensure(config, *, workspace_dir, backend=None):
+        calls.append((config, workspace_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
         fake_ensure,
     )
-    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
 
     run_dir = workspace.root / "runs" / "resumed"
     config = SimpleNamespace(enable_async_subagents=False)
-    await cmds._sync_background_agent_server_workspace(
+    await cmds._register_project(
         config,
         dirs=SessionDirs(workspace, run_dir),
         backend="langgraph_server",
     )
 
-    assert calls == [(config, workspace.root, run_dir, "langgraph_server")]
+    # The server serves the project; a run names its run folder itself.
+    assert calls == [(config, workspace.root, "langgraph_server")]
 
 
 def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
@@ -298,3 +311,43 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
     assert kwargs["channel_send_thinking"] is True
     assert callable(kwargs["load_agent"])
     assert callable(kwargs["create_run_dir"])
+
+
+def test_main_callback_ccproxy_failure_keeps_install_hint(monkeypatch):
+    """The hint's ``[oauth]`` extra is text, not markup."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.cli.commands as cmds
+
+    def missing(config, *, lasting):
+        raise RuntimeError("Install it with: pip install 'evoscientist[oauth]'")
+
+    monkeypatch.setattr(cmds, "uses_oauth", lambda _config: True)
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", missing)
+
+    _calls, result = _invoke_main(monkeypatch, [])
+
+    assert result.exit_code == 1
+    assert "evoscientist[oauth]" in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "noted_for"),
+    [([], ("langgraph_server", True)), (["--resume", "abc123"], ("local", False))],
+    ids=["webui", "terminal"],
+)
+def test_main_callback_says_where_dangerous_applies(monkeypatch, argv, noted_for):
+    """The WebUI's turns run in the background server; the terminal's on the
+    session's own gateway."""
+    import EvoScientist.cli.commands as cmds
+
+    noted: list = []
+    monkeypatch.setattr(
+        cmds,
+        "_print_dangerous_flag_note",
+        lambda backend, *, webui=False: noted.append((backend, webui)),
+    )
+
+    _calls, result = _invoke_main(monkeypatch, argv)
+
+    assert result.exit_code == 0
+    assert noted == [noted_for]

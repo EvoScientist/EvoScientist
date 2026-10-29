@@ -10,11 +10,12 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import EvoScientist.channels.standalone as standalone
-from EvoScientist.channels.base import Channel
+from EvoScientist.channels.base import Channel, ChannelError
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.paths import Workspace
 from tests.fakes.common import QueueFakeChannel
@@ -69,6 +70,47 @@ def test_ensure_dev_server_spawns_on_server_backend(monkeypatch, tmp_path):
     assert ensure_calls[0]["workspace_dir"] == str(tmp_path)
     # The resolved backend is forwarded so the manager spawns in full mode.
     assert ensure_calls[0]["backend"] == "langgraph_server"
+
+
+def test_ensure_dev_server_logs_server_exposure(monkeypatch, tmp_path, caplog):
+    import EvoScientist.langgraph_dev.manager as manager_mod
+    from EvoScientist.langgraph_dev.registration import (
+        ServerExposure,
+        exposure_messages,
+    )
+
+    config, _calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+    exposure = ServerExposure.of("0.0.0.0", False)
+    monkeypatch.setattr(manager_mod, "SERVER_EXPOSURE", exposure)
+
+    with caplog.at_level("WARNING"):
+        standalone._ensure_standalone_dev_server(
+            config, workspace_dir=str(tmp_path), backend="langgraph_server"
+        )
+
+    assert set(exposure_messages(exposure)) <= set(caplog.messages)
+
+
+def test_ensure_dev_server_unusable_server_exits(monkeypatch, tmp_path):
+    import EvoScientist.langgraph_dev.manager as manager_mod
+    from EvoScientist.langgraph_dev.registration import OlderServerError
+
+    config, _calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+
+    def older(_cfg, *, workspace_dir, backend=None):
+        raise OlderServerError()
+
+    monkeypatch.setattr(manager_mod, "ensure_langgraph_dev", older)
+
+    with pytest.raises(SystemExit) as exited:
+        standalone._ensure_standalone_dev_server(
+            config, workspace_dir=str(tmp_path), backend="langgraph_server"
+        )
+    assert exited.value.code == 1
 
 
 def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
@@ -654,7 +696,7 @@ def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
 
     calls: list[object] = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
     )
 
     standalone._ensure_ccproxy(_oauth_config())
@@ -662,15 +704,18 @@ def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
     assert calls == []
 
 
-def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
+def test_ensure_ccproxy_outlives_runner(monkeypatch):
+    """It is shared by every session and the background server; EvoSci
+    ccproxy stop stops it."""
     import atexit as atexit_mod
 
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    proc = object()
-    calls: list[object] = []
+    calls: list = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config) or proc
+        ccproxy_mod,
+        "maybe_start_ccproxy",
+        lambda config, *, lasting: calls.append((config, lasting)),
     )
     registered: list[tuple] = []
     monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
@@ -678,8 +723,8 @@ def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
     cfg = _oauth_config(anthropic_auth_mode="oauth")
     standalone._ensure_ccproxy(cfg)
 
-    assert calls == [cfg]
-    assert registered == [(ccproxy_mod.stop_ccproxy, proc)]
+    assert calls == [(cfg, True)]
+    assert registered == []
 
 
 def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
@@ -688,7 +733,7 @@ def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
 
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config: None)
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: None)
     registered: list[tuple] = []
     monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
 
@@ -703,7 +748,7 @@ def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
 
     calls: list[object] = []
     monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
     )
 
     standalone._ensure_ccproxy(_oauth_config(openai_auth_mode="oauth"))
@@ -714,7 +759,7 @@ def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
 def test_ensure_ccproxy_exits_when_the_proxy_cannot_start(monkeypatch, caplog):
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    def _boom(config):
+    def _boom(config, **_k):
         raise RuntimeError("ccproxy is required for OAuth mode but not found")
 
     monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", _boom)
@@ -741,7 +786,9 @@ def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
         ),
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
     monkeypatch.setattr(
         standalone,
         "_ensure_standalone_dev_server",
@@ -766,7 +813,9 @@ def test_run_standalone_skips_ccproxy_when_chatgpt_sign_in_missing(monkeypatch):
         anthropic_auth_mode="oauth",
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
 
     with pytest.raises(SystemExit):
         standalone.run_standalone(channel=None, bus=None, use_agent=True)
@@ -783,7 +832,9 @@ def test_run_standalone_starts_ccproxy_after_chatgpt_sign_in(monkeypatch):
         anthropic_auth_mode="oauth",
     )
     ensured: list[object] = []
-    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
+    )
 
     standalone.run_standalone(channel=None, bus=None, use_agent=True)
 
@@ -803,7 +854,7 @@ def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
     monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda provider: (True, ""))
-    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port: None)
+    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port, **_k: None)
     seen: list[str] = []
     monkeypatch.setattr(
         manager_mod,
@@ -841,3 +892,187 @@ def test_run_standalone_quiets_httpx(monkeypatch):
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
 
     assert enabled_at_start == dict.fromkeys(leaking_level, False)
+
+
+@pytest.mark.parametrize("use_agent", [False, True])
+@pytest.mark.parametrize("outcome", ["return", "fatal_start"])
+def test_channel_worker_exit_shuts_down_standalone(
+    monkeypatch, tmp_path, caplog, use_agent, outcome
+):
+    from EvoScientist.channels.bus.events import OutboundMessage
+    from EvoScientist.channels.channel_manager import ChannelManager
+
+    bus = MessageBus()
+    consumer_started = asyncio.Event()
+    consumer_stopped = False
+    consumer_cancelled = False
+
+    class _FailedStartChannel(QueueFakeChannel):
+        async def start(self):
+            raise ChannelError("invalid test credentials")
+
+    class _ExitingChannel(QueueFakeChannel):
+        async def run(self):
+            if use_agent:
+                await consumer_started.wait()
+
+    class _Consumer:
+        def __init__(self, **_kwargs):
+            self.metrics = {}
+
+        async def run(self):
+            nonlocal consumer_cancelled
+            consumer_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                consumer_cancelled = True
+
+        async def stop(self):
+            nonlocal consumer_stopped
+            consumer_stopped = True
+            await bus.publish_outbound(
+                OutboundMessage(channel="fake", chat_id="chat", content="last reply")
+            )
+
+    monkeypatch.setattr(standalone, "InboundConsumer", _Consumer)
+    monkeypatch.setattr(standalone, "_create_standalone_agent", AsyncMock())
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+    stop_health = AsyncMock()
+    monkeypatch.setattr(ChannelManager, "stop_health", stop_health)
+    channel = _FailedStartChannel() if outcome == "fatal_start" else _ExitingChannel()
+
+    async def _run():
+        async with asyncio.timeout(1):
+            return await standalone._async_main(
+                channel, bus, use_agent, False, workspace=Workspace(tmp_path)
+            )
+
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(_run()) is True
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == standalone.__name__
+    ] == ["Channel fake stopped; shutting down"]
+    assert channel._stopped
+    stop_health.assert_awaited_once()
+    if use_agent:
+        assert consumer_stopped
+        assert consumer_cancelled
+        assert [message.content for message in channel._sent] == ["last reply"]
+    if outcome == "fatal_start":
+        assert "invalid test credentials" in caplog.text
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_run_standalone_exits_nonzero_when_the_channel_cannot_start(
+    monkeypatch, tmp_path
+):
+    class _FailedStartChannel(QueueFakeChannel):
+        async def start(self):
+            raise ChannelError("invalid test credentials")
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        standalone.run_standalone(_FailedStartChannel(), MessageBus(), use_agent=False)
+
+    assert exc_info.value.code == 1
+
+
+def test_channel_exit_during_shutdown_does_not_force_exit(
+    monkeypatch, tmp_path, caplog
+):
+    handlers = {}
+    exited = asyncio.Event()
+
+    class _StoppingChannel(QueueFakeChannel):
+        async def run(self):
+            handlers[signal.SIGINT]()
+            await exited.wait()
+
+        async def stop(self):
+            exited.set()
+            # Let the worker finish and its done callbacks run before stop completes.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            await super().stop()
+
+    channel = _StoppingChannel()
+
+    async def _run():
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda sig, callback: handlers.__setitem__(sig, callback),
+        )
+        async with asyncio.timeout(1):
+            return await standalone._async_main(
+                channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+            )
+
+    assert asyncio.run(_run()) is False
+    assert channel._stopped
+    assert "forcing" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
+
+
+def test_outer_cancellation_does_not_start_shutdown(monkeypatch, tmp_path, caplog):
+    class _CancelledChannel(QueueFakeChannel):
+        async def run(self):
+            runner.cancel()
+            await asyncio.Future()
+
+    channel = _CancelledChannel()
+    runner = None
+
+    async def _run():
+        nonlocal runner
+        runner = asyncio.current_task()
+        await standalone._async_main(
+            channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+        )
+
+    with caplog.at_level(logging.INFO), pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+
+    assert not channel._stopped
+    assert "Graceful shutdown initiated" not in caplog.text
+    assert "Channel fake stopped; shutting down" not in caplog.messages
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+def test_sigint_forces_shutdown_after_channel_worker_exits(tmp_path, caplog):
+    class _Channel(QueueFakeChannel):
+        signalled = False
+
+        async def run(self):
+            return
+
+        async def stop(self):
+            if not self.signalled:
+                self.signalled = True
+                asyncio.get_running_loop().call_soon(signal.raise_signal, signal.SIGINT)
+            await asyncio.Future()
+
+    channel = _Channel()
+
+    async def _run():
+        async with asyncio.timeout(1):
+            await standalone._async_main(
+                channel, MessageBus(), False, False, workspace=Workspace(tmp_path)
+            )
+
+    asyncio.run(_run())
+    assert "Signal received during shutdown, forcing exit" in caplog.text

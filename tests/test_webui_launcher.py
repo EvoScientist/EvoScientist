@@ -34,7 +34,6 @@ def _make_config(
     langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
     webui_host: str = "127.0.0.1",
-    langgraph_dev_keepalive: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -44,7 +43,6 @@ def _make_config(
         webui_host=webui_host,
         langgraph_dev_jobs_per_worker=10,
         langgraph_dev_file_persistence=True,
-        langgraph_dev_keepalive=langgraph_dev_keepalive,
     )
 
 
@@ -404,6 +402,13 @@ def test_public_bind_warning_when_backend_exposed(monkeypatch):
     """Users who widen the backend get told every time it is reachable
     off-box — an unauthenticated, shell-capable API deserves a standing
     reminder, not a one-time opt-in prompt."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
@@ -427,7 +432,6 @@ def test_public_bind_warning_when_frontend_exposed(monkeypatch):
 
     banner = "\n".join(captured["printed"])
     assert "WebUI listening on 0.0.0.0" in banner
-    assert "Backend listening" not in banner
 
 
 def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):
@@ -442,8 +446,17 @@ def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatc
     assert "langgraph_dev_host" in banner
 
 
-def test_no_remote_hint_when_both_exposed(monkeypatch):
-    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="0.0.0.0")
+def test_no_remote_hint_when_backend_answers_public(monkeypatch):
+    """A reused backend another session bound to the network: the session's
+    own host setting says nothing about it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     banner = "\n".join(captured["printed"])
@@ -451,26 +464,16 @@ def test_no_remote_hint_when_both_exposed(monkeypatch):
 
 
 # =============================================================================
-# Backend keepalive
+# The backend outlives the WebUI
 # =============================================================================
 
 
-def test_backend_default_stops_backend_on_exit(monkeypatch):
-    """Without keepalive the WebUI-started backend dies with the session.
-
-    Teardown moved into ``launcher.stop`` (registered via atexit and also run in
-    the finally block): the contract is now "stop_langgraph_dev is called", not
-    "which callable was handed to atexit"."""
+def test_backend_outlives_webui(monkeypatch):
+    """The backend the WebUI started is shared by every session: closing the
+    WebUI stops only its front-end."""
     captured = _run_webui_once(monkeypatch, _make_config())
-    assert captured["stop_calls"] >= 1
-    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
-
-
-def test_backend_keepalive_leaves_backend_running(monkeypatch):
-    """With keepalive the backend outlives the WebUI session, so the next
-    same-workspace launch reuses it instead of paying the cold boot."""
-    captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
     assert captured["stop_calls"] == 0
+    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
 
 
 def test_teardown_registered_before_output_is_rendered(monkeypatch):

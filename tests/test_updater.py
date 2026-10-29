@@ -637,6 +637,32 @@ def test_owned_server_that_does_not_stop(server):
     assert "ownership record" not in exc.value.message
 
 
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_lasting_server_is_recorded_for_restart(server, monkeypatch, stop_fails):
+    """The setup after the update starts it again, from the same project;
+    a server that did not stop leaves no record."""
+    import EvoScientist.langgraph_dev.manager as manager
+    from EvoScientist.setup import server as server_stage
+
+    monkeypatch.setattr(
+        manager,
+        "_read_workspace_sidecar",
+        lambda: {"pid": 42, "workspace": "/proj", "lasting": True},
+    )
+    server["stop_fails"] = stop_fails
+    recorded: list = []
+    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+    monkeypatch.setattr(server_stage, "forget_restart", lambda: recorded.clear())
+
+    if stop_fails:
+        with pytest.raises(updater.UpdateError):
+            updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+        assert recorded == []
+    else:
+        updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+        assert recorded == ["/proj"]
+
+
 def test_has_busy_thread_asks_for_busy_threads_only(monkeypatch):
     from EvoScientist.deploy import busy
 
@@ -1712,3 +1738,38 @@ def test_ctrl_c_before_the_first_look_has_a_plain_message(uv_install, monkeypatc
     assert code == 1
     assert end["code"] == "environment_busy"
     assert end["message"] == "Update cancelled. Nothing was changed."
+
+
+def test_deploy_owned_server_is_not_restarted(server, monkeypatch):
+    """``EvoSci deploy`` or the desktop app owned it; nobody asked for a
+    lasting one."""
+    import EvoScientist.langgraph_dev.manager as manager
+    from EvoScientist.setup import server as server_stage
+
+    monkeypatch.setattr(
+        manager,
+        "_read_workspace_sidecar",
+        lambda: {"pid": 42, "workspace": "/proj", "lasting": False},
+    )
+    recorded: list = []
+    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+
+    updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+
+    assert recorded == []
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_update_stops_service_ccproxy(server, monkeypatch, running):
+    """It runs from the install the update replaces."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    server["running"] = running
+    stopped = []
+    monkeypatch.setattr(
+        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append(1) or 7
+    )
+
+    updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+
+    assert stopped == [1]

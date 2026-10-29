@@ -1,7 +1,6 @@
 """Tests for EvoScientist configuration management."""
 
 import os
-from pathlib import Path
 
 import pytest
 import yaml
@@ -1234,119 +1233,57 @@ class TestDotenvIsolation:
 
         assert "MINIMAX_BASE_URL" not in os.environ
 
-    def test_env_example_template_parses_to_blank_values(self):
-        """Inline comments would be parsed as values ("KEY=  # note" -> "# note")."""
-        from dotenv import dotenv_values
-
-        template = Path(__file__).resolve().parents[1] / ".env.example"
-        values = dotenv_values(template)
-
-        assert values
-        assert {k: v for k, v in values.items() if v} == {}
-
-    def test_copied_template_does_not_shadow_config_keys(
-        self, temp_config_dir, tmp_path, monkeypatch
-    ):
-        """Copying the template and filling one key must leave config-file keys intact."""
-        template = Path(__file__).resolve().parents[1] / ".env.example"
-        env_file = tmp_path / ".env"
-        env_file.write_text(
-            template.read_text().replace(
-                "ANTHROPIC_API_KEY=\n", "ANTHROPIC_API_KEY=sk-ant-filled\n"
-            )
-        )
-        monkeypatch.setattr(
-            "EvoScientist.config.settings.find_dotenv",
-            lambda *args, **kwargs: str(env_file),
-        )
-        from dotenv import dotenv_values
-
-        # setenv (unlike delenv on an absent key) registers a restore, so the
-        # merge's os.environ writes are undone after the test.
-        for key in dotenv_values(env_file):
-            monkeypatch.setenv(key, "")
-        save_config(EvoScientistConfig(openai_api_key="sk-from-config"))
-
-        config = get_effective_config()
-
-        assert config.anthropic_api_key == "sk-ant-filled"
-        assert config.openai_api_key == "sk-from-config"
-        assert os.environ.get("MINIMAX_BASE_URL", "") == ""
-
-    def test_dotenv_does_not_clobber_oauth_routing(
-        self, temp_config_dir, tmp_path, monkeypatch
-    ):
-        """A workspace ``.env`` credential must not undo ccproxy OAuth routing.
-
-        ``setup_ccproxy_env`` marks the route with a placeholder key; every later
-        ``get_effective_config`` call re-merges ``.env``, so without the guard
-        the key and base URL flip back mid-session.
-        """
-        env_file = tmp_path / ".env"
-        env_file.write_text(
-            "ANTHROPIC_API_KEY=sk-ant-real\n"
-            "ANTHROPIC_BASE_URL=https://api.anthropic.com\n"
-        )
-        monkeypatch.setattr(
-            "EvoScientist.config.settings.find_dotenv",
-            lambda *args, **kwargs: str(env_file),
-        )
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000/claude")
-
-        get_effective_config()
-
-        assert os.environ["ANTHROPIC_API_KEY"] == "ccproxy-oauth"
-        assert os.environ["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000/claude"
-
-    def test_dotenv_guard_matches_lowercase_keys(self, tmp_path, monkeypatch):
-        """Windows env keys are case-insensitive, so a lowercase ``.env`` key
-        would reach the same variable; the guard must not depend on case."""
-        from EvoScientist.config.settings import _oauth_routed
-
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
-
-        assert _oauth_routed("anthropic_api_key")
-        assert _oauth_routed("anthropic_base_url")
-
-    def test_dotenv_credentials_still_merge_without_oauth(
-        self, temp_config_dir, tmp_path, monkeypatch
-    ):
-        """Without the placeholder, ``.env`` credentials keep winning as before."""
-        env_file = tmp_path / ".env"
-        env_file.write_text("OPENAI_API_KEY=sk-from-dotenv\n")
-        monkeypatch.setattr(
-            "EvoScientist.config.settings.find_dotenv",
-            lambda *args, **kwargs: str(env_file),
-        )
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-shell")
-
-        get_effective_config()
-
-        assert os.environ["OPENAI_API_KEY"] == "sk-from-dotenv"
-
     def test_parent_env_wins_over_dotenv_for_mapped_keys(
         self, temp_config_dir, tmp_path, monkeypatch
     ):
         """Parent-process env values for ``EVOSCIENTIST_*`` keys must not be
-        shadowed by a workspace ``.env``. ``EvoSci deploy --port X`` propagates
-        the resolved bind port via ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` on the
-        subprocess env; without the prefix-based merge, a workspace ``.env``
-        with the same key would clobber it and every self-loop async task
-        would target the wrong port.
-        """
+        shadowed by a workspace ``.env``."""
         env_file = tmp_path / ".env"
-        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=9999\n")
+        env_file.write_text("EVOSCIENTIST_UI_BACKEND=cli\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "6606")
+        monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "tui")
 
         config = get_effective_config()
 
-        assert config.langgraph_dev_port == 6606
-        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+        assert config.ui_backend == "tui"
+        assert os.environ["EVOSCIENTIST_UI_BACKEND"] == "tui"
+
+    def test_dotenv_cannot_set_server_config(
+        self, temp_config_dir, tmp_path, monkeypatch, caplog
+    ):
+        """One server serves every project: a cloned repo's ``.env`` must not
+        bind it to every interface, or start another one on its own port."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "EVOSCIENTIST_LANGGRAPH_DEV_HOST=0.0.0.0\n"
+            "EVOSCIENTIST_LANGGRAPH_DEV_PORT=9999\n"
+            "EVOSCIENTIST_UI_BACKEND=cli\n"
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        for key in (
+            "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
+            "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+            "EVOSCIENTIST_UI_BACKEND",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        config = get_effective_config()
+        get_effective_config()  # merged again: warned once
+
+        assert config.langgraph_dev_host == EvoScientistConfig().langgraph_dev_host
+        assert config.langgraph_dev_port == EvoScientistConfig().langgraph_dev_port
+        assert config.ui_backend == "cli"  # a CLI setting it may set
+        assert "EVOSCIENTIST_LANGGRAPH_DEV_HOST" not in os.environ
+        (warning,) = [r for r in caplog.records if "cannot set" in r.getMessage()]
+        assert "EVOSCIENTIST_LANGGRAPH_DEV_HOST, EVOSCIENTIST_LANGGRAPH_DEV_PORT" in (
+            warning.getMessage()
+        )
 
     @pytest.mark.parametrize(
         ("field", "env_var", "value"),
@@ -1368,52 +1305,94 @@ class TestDotenvIsolation:
 
         assert getattr(config, field) == value
 
-    def test_dotenv_wins_over_shell_for_third_party_api_keys(
-        self, temp_config_dir, tmp_path, monkeypatch
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "EVOSCIENTIST_WEBUI_HOST=0.0.0.0",
+            "EVOSCIENTIST_WORKSPACE_DIR=/",
+            "evoscientist_ui_backend=cli",
+        ],
+    )
+    def test_dotenv_ignores_bind_address_and_other_spellings(
+        self, temp_config_dir, tmp_path, monkeypatch, caplog, line
     ):
-        """Third-party API keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``,
-        ...) are conventionally set per-project via a workspace ``.env`` to
-        shadow whatever global key sits in the shell (e.g. ``~/.bashrc``).
-        The prefix-based ``.env`` merge must not disturb that: only
-        ``EVOSCIENTIST_*`` keys are treated as parent-process-authoritative.
-        """
+        """A cloned repo's ``.env`` must not widen the WebUI's bind address or
+        move the agent's workspace; a key in another case would not reach the
+        setting it names."""
         env_file = tmp_path / ".env"
-        env_file.write_text("OPENAI_API_KEY=workspace-key\n")
+        env_file.write_text(line + "\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        key = line.split("=")[0]
+        monkeypatch.delenv(key, raising=False)
+
+        config = get_effective_config()
+
+        assert config.webui_host == EvoScientistConfig().webui_host
+        assert config.default_workdir == EvoScientistConfig().default_workdir
+        assert key not in os.environ
+        assert any(key in r.getMessage() for r in caplog.records)
+
+    def test_dotenv_unrelated_keys_ignored_silently(
+        self, temp_config_dir, tmp_path, monkeypatch, caplog
+    ):
+        """A project's own ``.env`` (``DATABASE_URL``, say) is not EvoSci's."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_URL=postgres://x\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+        get_effective_config()
+
+        assert "DATABASE_URL" not in os.environ
+        assert not [r for r in caplog.records if "cannot set" in r.getMessage()]
+
+    def test_dotenv_provider_keys_are_ignored(
+        self, temp_config_dir, tmp_path, monkeypatch, caplog
+    ):
+        """Every agent takes its keys from config.yaml and the environment:
+        one server serves every project, and the credentials are process-wide."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=workspace-key\nMINIMAX_BASE_URL=x\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
         monkeypatch.setenv("OPENAI_API_KEY", "shell-key")
+        monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
 
         config = get_effective_config()
 
-        assert config.openai_api_key == "workspace-key"
-        assert os.environ["OPENAI_API_KEY"] == "workspace-key"
+        assert config.openai_api_key == "shell-key"
+        assert os.environ["OPENAI_API_KEY"] == "shell-key"
+        assert "MINIMAX_BASE_URL" not in os.environ
+        (warning,) = [r for r in caplog.records if "cannot set" in r.getMessage()]
+        assert "MINIMAX_BASE_URL, OPENAI_API_KEY" in warning.getMessage()
+        assert "EvoSci config set" in warning.getMessage()
 
     def test_snapshot_covers_evoscientist_keys_not_in_env_mappings(
         self, temp_config_dir, tmp_path, monkeypatch
     ):
         """The snapshot must protect every ``EVOSCIENTIST_*`` key in the shell,
-        not just the ones declared in ``_ENV_MAPPINGS``. Concrete case: the
-        langgraph_dev manager sets ``EVOSCIENTIST_SERVER_PROCESS`` on the
-        subprocess env to mark it as the server, but
-        that key is read directly via ``os.environ.get(...)`` and never goes
-        through ``get_effective_config`` — so it never made it into
-        ``_ENV_MAPPINGS``. Without the prefix-based snapshot, a workspace
-        ``.env`` with ``EVOSCIENTIST_SERVER_PROCESS=`` could clobber the
-        parent-injected value and silently disable async subagents.
-        """
+        not just the ones declared in ``_ENV_MAPPINGS``: a workspace ``.env``
+        must not clobber a parent-injected value such as the launcher's
+        project the manager names."""
         env_file = tmp_path / ".env"
-        env_file.write_text("EVOSCIENTIST_SERVER_PROCESS=\n")
+        env_file.write_text("EVOSCIENTIST_LAUNCHER_WORKSPACE=\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setenv("EVOSCIENTIST_LAUNCHER_WORKSPACE", "/proj")
 
         get_effective_config()
 
-        assert os.environ["EVOSCIENTIST_SERVER_PROCESS"] == "1"
+        assert os.environ["EVOSCIENTIST_LAUNCHER_WORKSPACE"] == "/proj"
 
     def test_empty_shell_evoscientist_key_defers_to_dotenv(
         self, temp_config_dir, tmp_path, monkeypatch
@@ -1426,17 +1405,17 @@ class TestDotenvIsolation:
         fall through to file/defaults instead of ``.env``.
         """
         env_file = tmp_path / ".env"
-        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=6606\n")
+        env_file.write_text("EVOSCIENTIST_UI_BACKEND=cli\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "")
+        monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "")
 
         config = get_effective_config()
 
-        assert config.langgraph_dev_port == 6606
-        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+        assert config.ui_backend == "cli"
+        assert os.environ["EVOSCIENTIST_UI_BACKEND"] == "cli"
 
 
 def test_backend_allowed_origins_ignores_the_environment(temp_config_dir, monkeypatch):
@@ -1545,3 +1524,10 @@ def test_config_set_validates_the_proactive_settings(
     assert set_config_value(key, value) is (stored is not None)
     if stored is not None:
         assert getattr(load_config(), key) == stored
+
+
+def test_dotenv_settable_fields_are_client_only():
+    """A project ``.env`` never configures the shared server or an agent."""
+    from EvoScientist.config.settings import DOTENV_FIELDS, is_client_only
+
+    assert all(is_client_only(field) for field in DOTENV_FIELDS)

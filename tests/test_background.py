@@ -52,13 +52,13 @@ def test_launch_returns_id_and_creates_log(tmp_path):
     assert (tmp_path / ".bg_processes" / f"{pid}.log").exists()
 
 
-def test_launch_applies_research_env_overrides(tmp_path, monkeypatch):
+def test_launch_applies_agent_shell_overrides(tmp_path, monkeypatch):
     """Background jobs get the same env overrides as the execute shell, merged
     over the inherited environment."""
-    from EvoScientist.setup import research_env
+    from EvoScientist.setup import agent_env
 
     monkeypatch.setattr(
-        research_env, "research_env_overrides", lambda: {"EVOSCI_BG_PROBE": "venv"}
+        agent_env, "agent_shell_overrides", lambda: {"EVOSCI_BG_PROBE": "venv"}
     )
     monkeypatch.setenv("EVOSCI_BG_INHERITED", "kept")
     if sys.platform == "win32":

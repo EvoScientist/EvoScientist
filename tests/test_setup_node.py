@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import http.client
 import io
 import json
 import os
@@ -53,23 +52,24 @@ def _archive_bytes(extra_member: str | None = None) -> bytes:
 
 
 class FakeNet:
-    """Serves one archive and its SHASUMS256.txt; records requested URLs."""
+    """Serves one archive; records requested URLs and the ``--cn`` hint flag."""
 
-    def __init__(self, data: bytes, *, sums: str | None = None) -> None:
+    def __init__(self, data: bytes) -> None:
         self.data = data
-        self.sums = sums or f"{hashlib.sha256(data).hexdigest()}  {FILENAME}\n"
         self.urls: list[str] = []
+        self.hints: list[bool] = []
 
-    def fetch_text(self, url: str) -> str:
+    def download(self, url, dest: Path, progress=None, *, cn_hint=False) -> str:
         self.urls.append(url)
-        return self.sums
-
-    def download(self, url, dest: Path, progress=None) -> str:
-        self.urls.append(url)
+        self.hints.append(cn_hint)
         dest.write_bytes(self.data)
         if progress:
             progress(1.0)
         return hashlib.sha256(self.data).hexdigest()
+
+
+# A probe result: a Windows policy refuses to start the program.
+BLOCKED = object()
 
 
 class ProbeTable(dict):
@@ -99,15 +99,19 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(node, "platform_id", lambda: PLAT)
     monkeypatch.setattr(node, "_failed_install", None)
     net = FakeNet(_archive_bytes())
-    monkeypatch.setattr(node, "fetch_text", net.fetch_text)
     monkeypatch.setattr(node, "download", net.download)
+    # Pin the fake archive, as NODE_SHA256 pins the real one.
+    monkeypatch.setitem(node.NODE_SHA256, PLAT, hashlib.sha256(net.data).hexdigest())
     probes = ProbeTable()
-    # Anything under our tools dir probes as the pinned version by default.
-    monkeypatch.setattr(
-        node,
-        "_probe",
-        lambda exe: probes.get(exe, tuple(map(int, V.split(".")))),
-    )
+
+    def probe(exe):
+        # Anything under our tools dir probes as the pinned version by default.
+        result = probes.get(exe, tuple(map(int, V.split("."))))
+        if result is BLOCKED:
+            raise node.PolicyBlocked(exe)
+        return result
+
+    monkeypatch.setattr(node, "_probe", probe)
     return {"data": data, "net": net, "probes": probes, "tmp": tmp_path}
 
 
@@ -212,7 +216,7 @@ def test_lasting_access_denied_on_move_is_install_failed(env, monkeypatch):
 
 
 def test_disk_error_while_unpacking_is_install_failed(env, monkeypatch):
-    def disk_full(archive, dest):
+    def disk_full(archive, dest, tick=None):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(node, "_extract", disk_full)
@@ -230,76 +234,6 @@ def test_record_with_non_string_path_is_ignored(env):
     assert node.ensure_node("default").source == "private"
 
 
-@pytest.mark.parametrize(
-    "exc",
-    [http.client.IncompleteRead(b""), http.client.BadStatusLine("garbled")],
-)
-def test_http_client_errors_become_download_failed(tmp_path, monkeypatch, exc):
-    from EvoScientist.setup import download as dl
-
-    def boom(*_a, **_k):
-        raise exc
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", boom)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "x")
-    assert ei.value.code == "download_failed"
-    with pytest.raises(StageError) as ei:
-        dl.fetch_text("https://example.invalid/x")
-    assert ei.value.code == "download_failed"
-
-
-def test_download_that_ends_early_is_download_failed(tmp_path, monkeypatch):
-    from EvoScientist.setup import download as dl
-
-    def urlopen(url, timeout):
-        response = io.BytesIO(b"half")
-        response.headers = {"Content-Length": "8"}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "x")
-    assert ei.value.code == "download_failed"
-
-
-def test_checksum_file_uses_the_short_timeout_and_the_archive_the_long_one(
-    tmp_path, monkeypatch
-):
-    from EvoScientist.setup import download as dl
-
-    timeouts: dict[str, float] = {}
-
-    def urlopen(url, timeout):
-        timeouts[url] = timeout
-        response = io.BytesIO(b"data")
-        response.headers = {}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    dl.fetch_text("https://example.invalid/SHASUMS256.txt")
-    dl.download("https://example.invalid/node.tar.xz", tmp_path / "x")
-    assert timeouts == {
-        "https://example.invalid/SHASUMS256.txt": dl._TEXT_TIMEOUT,
-        "https://example.invalid/node.tar.xz": dl._ARCHIVE_TIMEOUT,
-    }
-    assert dl._TEXT_TIMEOUT < dl._ARCHIVE_TIMEOUT
-
-
-def test_disk_error_while_downloading_is_install_failed(tmp_path, monkeypatch):
-    from EvoScientist.setup import download as dl
-
-    def urlopen(url, timeout):
-        response = io.BytesIO(b"data")
-        response.headers = {}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "missing-dir" / "x")
-    assert ei.value.code == "install_failed"
-
-
 def test_stage_reports_download_progress_lines(env, monkeypatch):
     from EvoScientist.setup import download as dl
 
@@ -311,7 +245,7 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
         return response
 
     monkeypatch.setattr(dl, "_CHUNK", len(data) // 4)
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(dl, "open_url", urlopen)
     monkeypatch.setattr(node, "download", dl.download)
     events: list[dict] = []
     detail = node.run_stage(events.append, "default").detail
@@ -337,8 +271,8 @@ def test_system_node_20_9_or_newer_wins_without_download(env, monkeypatch):
 def test_no_node_downloads_and_records(env):
     info = node.ensure_node("default")
     assert info.source == "private"
-    assert env["net"].urls[0] == f"https://nodejs.org/dist/v{V}/SHASUMS256.txt"
-    assert env["net"].urls[1] == f"https://nodejs.org/dist/v{V}/{FILENAME}"
+    # The pinned hash replaces SHASUMS256.txt: the archive is the only request.
+    assert env["net"].urls == [f"https://nodejs.org/dist/v{V}/{FILENAME}"]
     record = _record(env["data"])
     assert record["version"] == V
     assert Path(record["path"]) == env["data"] / "tools" / f"node-v{V}"
@@ -371,24 +305,44 @@ def test_cn_mirror_urls(env):
     )
 
 
+@pytest.mark.parametrize(("mirror", "hint"), [("default", True), ("cn", False)])
+def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
+    node.ensure_node(mirror)
+    assert env["net"].hints == [hint]
+
+
+def test_pinned_hashes_are_sha256_for_the_supported_platforms():
+    assert set(node.NODE_SHA256) == {
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-x64",
+        "linux-arm64",
+        "win-x64",
+    }
+    assert all(len(h) == 64 and int(h, 16) >= 0 for h in node.NODE_SHA256.values())
+
+
 def test_checksum_mismatch_keeps_current_node(env):
     node.ensure_node("default")
     before = _record(env["data"])
     # Break the current install's probe so a new download is attempted.
     env["probes"][str(node._node_exe(Path(before["path"])))] = None
-    env["net"].sums = f"{'0' * 64}  {FILENAME}\n"
+    node.NODE_SHA256[PLAT] = "0" * 64
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "checksum_mismatch"
     assert _record(env["data"]) == before
 
 
-def test_file_missing_from_sums_fails(env):
-    env["net"].sums = f"{'0' * 64}  some-other-file.zip\n"
+def test_checksum_mismatch_leaves_no_partial_files(env):
+    node.NODE_SHA256[PLAT] = "0" * 64
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "checksum_mismatch"
+    assert "pinned" in ei.value.message
     assert _record(env["data"]) is None
+    # filelock deletes its lock file on release on Windows only.
+    assert {p.name for p in (env["data"] / "tools").iterdir()} <= {"node.lock"}
 
 
 def test_probe_failure_records_nothing(env):
@@ -415,10 +369,10 @@ def test_record_is_written_only_after_the_probe(env, monkeypatch):
 
 
 def test_download_failure_keeps_current_node(env, monkeypatch):
-    def offline(url):
+    def offline(url, *_a, **_k):
         raise StageError("download_failed", "offline")
 
-    monkeypatch.setattr(node, "fetch_text", offline)
+    monkeypatch.setattr(node, "download", offline)
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "download_failed"
@@ -430,11 +384,11 @@ def test_failed_install_is_not_retried_in_the_same_process(env, monkeypatch):
     process; after a failure they must not wait out the network again."""
     attempts: list[str] = []
 
-    def offline(url):
+    def offline(url, *_a, **_k):
         attempts.append(url)
         raise StageError("download_failed", "offline")
 
-    monkeypatch.setattr(node, "fetch_text", offline)
+    monkeypatch.setattr(node, "download", offline)
     for _ in range(3):
         with pytest.raises(StageError) as ei:
             node.ensure_node("default")
@@ -448,7 +402,7 @@ def test_failed_install_is_not_retried_in_the_same_process(env, monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="tar.xz archives are not used on Windows")
 def test_tar_member_escaping_dest_is_rejected(env):
     env["net"].data = _archive_bytes(extra_member="../../evil")
-    env["net"].sums = f"{hashlib.sha256(env['net'].data).hexdigest()}  {FILENAME}\n"
+    node.NODE_SHA256[PLAT] = hashlib.sha256(env["net"].data).hexdigest()
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "download_failed"
@@ -466,6 +420,14 @@ def test_zip_extracts_into_path_with_space_and_non_ascii(tmp_path):
     assert (dest / "node-v1-win-x64" / "node.exe").read_bytes() == b"x"
 
 
+@pytest.fixture
+def glibc(monkeypatch):
+    """The glibc version platform_id() sees; (2, 28) unless a test sets it."""
+    version = {"value": (2, 28)}
+    monkeypatch.setattr(node, "_glibc_version", lambda: version["value"])
+    return version
+
+
 @pytest.mark.parametrize(
     ("sys_platform", "machine", "expected"),
     [
@@ -474,60 +436,92 @@ def test_zip_extracts_into_path_with_space_and_non_ascii(tmp_path):
         ("linux", "x86_64", "linux-x64"),
         ("linux", "aarch64", "linux-arm64"),
         ("win32", "AMD64", "win-x64"),
-        ("win32", "ARM64", "win-arm64"),
     ],
 )
-def test_platform_id(monkeypatch, sys_platform, machine, expected):
+def test_platform_id(monkeypatch, glibc, sys_platform, machine, expected):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
-    monkeypatch.setattr(node, "_is_musl", lambda: False)
     assert node.platform_id() == expected
     assert node.archive_name(expected).endswith(
         ".zip" if expected.startswith("win") else ".tar.xz"
     )
 
 
-def test_platform_id_musl_x64_uses_the_musl_build(monkeypatch):
-    monkeypatch.setattr(node.sys, "platform", "linux")
-    monkeypatch.setattr(node.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(node, "_is_musl", lambda: True)
-    assert node.platform_id() == "linux-x64-musl"
-    assert node.archive_name("linux-x64-musl") == f"node-v{V}-linux-x64-musl.tar.xz"
-
-
 @pytest.mark.parametrize(
-    ("sys_platform", "machine", "musl"),
+    ("sys_platform", "machine", "libc", "words"),
     [
-        ("linux", "riscv64", False),
-        ("freebsd14", "amd64", False),
-        # nodejs.org publishes no musl build for arm64.
-        ("linux", "aarch64", True),
+        ("win32", "ARM64", None, "Windows on arm64"),
+        # musl (Alpine): no glibc at all.
+        ("linux", "x86_64", None, "apk add nodejs npm"),
+        # CentOS 7 / RHEL 7.
+        ("linux", "x86_64", (2, 17), "glibc 2.17"),
+        ("linux", "aarch64", (2, 27), "glibc 2.27"),
+        ("linux", "riscv64", (2, 39), "No Node.js build"),
+        ("freebsd14", "amd64", None, "No Node.js build"),
     ],
 )
-def test_platform_id_unsupported(monkeypatch, sys_platform, machine, musl):
+def test_platform_id_unsupported(
+    monkeypatch, glibc, sys_platform, machine, libc, words
+):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
-    monkeypatch.setattr(node, "_is_musl", lambda: musl)
+    glibc["value"] = libc
     with pytest.raises(StageError) as ei:
         node.platform_id()
     assert ei.value.code == "unsupported_platform"
+    assert words in ei.value.message
+    assert "EvoSci setup" in ei.value.message
 
 
-def test_is_musl_detects_the_musl_loader(monkeypatch, tmp_path):
-    lib = tmp_path / "lib"
-    lib.mkdir()
-    real_path = node.Path
-    monkeypatch.setattr(node.sys, "platform", "linux")
-    monkeypatch.setattr(node, "Path", lambda p: lib if p == "/lib" else real_path(p))
-    # On musl, libc_ver() reports nothing (checked on Alpine 3.22).
-    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("", ""))
-    assert node._is_musl() is False
-    (lib / "ld-musl-x86_64.so.1").write_text("")
-    assert node._is_musl() is True
-    # Debian / Ubuntu with the `musl` package: the loader exists, but the
-    # interpreter runs on glibc, so the glibc build is the right one.
-    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("glibc", "2.41"))
-    assert node._is_musl() is False
+@pytest.mark.parametrize(
+    ("confstr", "expected"),
+    [
+        (lambda _n: "glibc 2.28", (2, 28)),
+        (lambda _n: "glibc 2.17", (2, 17)),
+        (lambda _n: None, None),
+        (lambda _n: "musl 1.2", None),
+    ],
+)
+def test_glibc_version_reads_confstr(monkeypatch, confstr, expected):
+    monkeypatch.setattr(node.os, "confstr", confstr, raising=False)
+    assert node._glibc_version() == expected
+
+
+def test_glibc_version_is_none_without_confstr_support(monkeypatch):
+    def unsupported(_name):
+        raise ValueError("unrecognized configuration name")
+
+    monkeypatch.setattr(node.os, "confstr", unsupported, raising=False)
+    assert node._glibc_version() is None
+
+
+def _unsupported_here(monkeypatch):
+    def refuse():
+        raise StageError("unsupported_platform", "This Linux has no glibc.")
+
+    monkeypatch.setattr(node, "platform_id", refuse)
+
+
+def test_unsupported_platform_is_refused_before_any_download(env, monkeypatch):
+    _unsupported_here(monkeypatch)
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "unsupported_platform"
+    assert env["net"].urls == []
+
+
+def test_unsupported_platform_still_uses_a_system_node(env, monkeypatch):
+    _unsupported_here(monkeypatch)
+    _system_node(env, monkeypatch, (22, 0, 0))
+    assert node.ensure_node("default").source == "system"
+
+
+def test_unsupported_platform_keeps_a_recorded_private_node(env, monkeypatch):
+    node.ensure_node("default")
+    _unsupported_here(monkeypatch)
+    env["net"].urls.clear()
+    assert node.ensure_node("default").source == "private"
+    assert env["net"].urls == []
 
 
 def test_activate_runtime_prepends_once(env):
@@ -554,6 +548,38 @@ def test_private_node_on_path_is_not_taken_for_system(env):
     node.activate_runtime()
     env["net"].urls.clear()
     # The private Node is first on PATH, yet it is reported as private.
+    assert node.ensure_node("default").source == "private"
+
+
+def test_node_in_the_current_directory_is_not_taken_for_system(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (22, 0, 0))
+    monkeypatch.chdir(exe.parent)
+    # "." is how PATH reaches the current directory on POSIX; Windows
+    # searches it without one.
+    monkeypatch.setenv("PATH", os.pathsep.join([str(env["tmp"] / "empty-bin"), "."]))
+    assert node.ensure_node("default").source == "private"
+
+
+def test_npx_only_in_the_current_directory_does_not_count(env, monkeypatch):
+    _system_node(env, monkeypatch, (22, 0, 0), with_npx=False)
+    cwd = env["tmp"] / "project"
+    cwd.mkdir()
+    npx = cwd / ("npx.cmd" if os.name == "nt" else "npx")
+    npx.write_text("")
+    npx.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join([os.environ["PATH"], "."]))
+    assert node.ensure_node("default").source == "private"
+
+
+def test_npx_only_elsewhere_on_path_does_not_count(env, monkeypatch):
+    _system_node(env, monkeypatch, (22, 0, 0), with_npx=False)
+    other = env["tmp"] / "other-bin"
+    other.mkdir()
+    npx = other / ("npx.cmd" if os.name == "nt" else "npx")
+    npx.write_text("")
+    npx.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([os.environ["PATH"], str(other)]))
     assert node.ensure_node("default").source == "private"
 
 
@@ -602,15 +628,135 @@ def test_is_private_tells_the_private_npx_from_a_system_one(env):
     assert not node.is_private(None)
 
 
-def test_node_child_env_strips_npm_config_and_node_options():
+def test_node_child_env_keeps_only_the_npm_network_settings():
+    kept = {
+        "npm_config_registry": "r",
+        "NPM_CONFIG_PROXY": "http://proxy:3128",
+        "npm_config_https_proxy": "http://proxy:3128",
+        "npm_config_noproxy": "corp.example",
+        "npm_config_cafile": "/ca.pem",
+        "npm_config_ca": "-----BEGIN",
+        "npm_config_strict_ssl": "false",
+    }
     env = {
         "PATH": "p",
-        "npm_config_registry": "r",
+        **kept,
         "NPM_CONFIG_PREFIX": "x",
+        "npm_config_globalconfig": "/etc/npmrc",
         "NODE_OPTIONS": "--foo",
     }
-    assert node.node_child_env(env, private=True) == {"PATH": "p"}
+    assert node.node_child_env(env, private=True) == {"PATH": "p", **kept}
     assert node.node_child_env(env, private=False) == env
+    assert node.npm_network_env(env) == kept
+
+
+HTTP = "http://proxy.example:3128"
+
+
+@pytest.mark.parametrize(
+    ("env", "flag"),
+    [
+        ({"HTTPS_PROXY": HTTP}, True),
+        ({"https_proxy": "https://proxy.example:3128", "HTTP_PROXY": HTTP}, True),
+        ({"HTTPS_PROXY": "HTTP://user:p%40ss@[::1]:3128/"}, True),
+        ({"HTTPS_PROXY": HTTP, "https_proxy": ""}, True),
+        ({"HTTPS_PROXY": f" {HTTP} "}, True),
+        ({"HTTPS_PROXY": "http://user:p ss@proxy.example:3128"}, True),
+        ({}, False),
+        ({"HTTPS_PROXY": "socks4://127.0.0.1:1080"}, False),
+        ({"HTTPS_PROXY": "socks5://127.0.0.1:1080"}, False),
+        ({"HTTPS_PROXY": "ftp://proxy.example"}, False),
+        ({"HTTPS_PROXY": "not a url"}, False),
+        ({"HTTPS_PROXY": "http://"}, False),
+        ({"HTTPS_PROXY": "http://127.0.0.1:bad"}, False),
+        ({"HTTPS_PROXY": "http://127.0.0.1:99999"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example:80800"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example:3128/path"}, False),
+        ({"HTTPS_PROXY": "http://us?er@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://us#er@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://user:50%off@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://user:caf%e9@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy example:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example: 3128"}, False),
+        ({"HTTPS_PROXY": "http://pro\u00a0xy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://DOMAIN\\user:pass@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://%00:3128"}, False),
+        ({"HTTPS_PROXY": "http://256.256.256.256:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy.123:3128"}, False),
+        ({"HTTPS_PROXY": "http://[fe80::1%25en0]:3128"}, False),
+        ({"HTTPS_PROXY": "http://[v1.fe]:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy%E3%80%82123:3128"}, False),
+        ({"HTTPS_PROXY": HTTP + "\r"}, False),
+        ({"HTTPS_PROXY": HTTP, "https_proxy": " "}, False),
+        # One refused value among good ones still leaves the flag off.
+        ({"HTTPS_PROXY": HTTP, "http_proxy": "socks4://127.0.0.1:1080"}, False),
+    ],
+)
+def test_node_network_env_sets_the_flag_only_for_http_proxies(env, flag):
+    extra = node.node_network_env(env, private=True)
+    assert (extra.get("NODE_USE_ENV_PROXY") == "1") is flag
+
+
+def test_node_network_env_is_empty_for_a_system_node():
+    assert node.node_network_env({"HTTPS_PROXY": HTTP}, private=False) == {}
+
+
+def test_node_network_env_trusts_the_system_certificates_without_a_proxy():
+    """A TLS-inspecting network re-signs sites with a company certificate
+    that only the system store holds, with or without a proxy variable."""
+    assert node.node_network_env({}, private=True) == {"NODE_USE_SYSTEM_CA": "1"}
+
+
+@pytest.mark.parametrize("name", ["NODE_USE_SYSTEM_CA", "node_use_system_ca"])
+def test_node_network_env_keeps_the_users_system_ca_choice(name):
+    assert "NODE_USE_SYSTEM_CA" not in node.node_network_env({name: "0"}, private=True)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "loopback"),
+    [
+        ("NODE_USE_ENV_PROXY", "0", False),
+        ("node_use_env_proxy", "0", False),
+        ("NODE_USE_ENV_PROXY", "1", True),
+    ],
+)
+def test_node_network_env_keeps_the_users_proxy_switch(name, value, loopback):
+    extra = node.node_network_env({"HTTPS_PROXY": HTTP, name: value}, private=True)
+    assert "NODE_USE_ENV_PROXY" not in extra
+    assert ("NO_PROXY" in extra) is loopback
+
+
+def test_node_network_env_adds_loopback_to_each_no_proxy_it_finds():
+    extra = node.node_network_env(
+        {"HTTPS_PROXY": HTTP, "no_proxy": "corp.example, localhost", "NO_PROXY": "a"},
+        private=True,
+    )
+    assert extra["no_proxy"] == "corp.example,localhost,127.0.0.1,::1,[::1]"
+    assert extra["NO_PROXY"] == "a,localhost,127.0.0.1,::1,[::1]"
+
+
+def test_node_network_env_sets_only_no_proxy_when_none_is_set():
+    """Two names that differ only in case would share one Windows env block."""
+    extra = node.node_network_env({"HTTPS_PROXY": HTTP}, private=True)
+    assert extra == {
+        "NODE_USE_SYSTEM_CA": "1",
+        "NODE_USE_ENV_PROXY": "1",
+        "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mirror", "configured", "expected"),
+    [
+        ("cn", None, "https://registry.npmmirror.com/"),
+        ("cn", "https://registry.yarnpkg.com/", None),
+        ("default", None, None),
+    ],
+)
+def test_npm_registry_override(monkeypatch, mirror, configured, expected):
+    monkeypatch.setattr(node, "configured_mirror", lambda: mirror)
+    monkeypatch.setattr(node, "configured_npm_registry", lambda _env, _exe: configured)
+    assert node.npm_registry_override({}, Path("node")) == expected
 
 
 class FakeNpmConfig:
@@ -679,6 +825,30 @@ def test_configured_registry_asks_npm_once_per_process(npm_env, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "other",
+    [
+        {"npm_config_userconfig": "/srv/mcp/.npmrc"},
+        {"HOME": "/srv/mcp"},
+        {"NPM_CONFIG_GLOBALCONFIG": "/srv/npmrc"},
+    ],
+)
+def test_configured_registry_asks_again_for_another_npm_config(
+    npm_env, monkeypatch, other
+):
+    """A server whose env points npm at another ``.npmrc`` gets its own answer,
+    not the parent's cached one."""
+    answers = iter(["https://registry.npmjs.org/", "https://private.example/"])
+
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, next(answers), "")
+
+    monkeypatch.setattr(node.subprocess, "run", run)
+    assert node.configured_npm_registry({"HOME": "/home/me"}, npm_env) is None
+    env = {"HOME": "/home/me", **other}
+    assert node.configured_npm_registry(env, npm_env) == "https://private.example/"
+
+
+@pytest.mark.parametrize(
     "fake",
     [
         FakeNpmConfig(exc=OSError("blocked")),
@@ -692,6 +862,21 @@ def test_configured_registry_is_none_when_npm_fails(npm_env, monkeypatch, fake):
 
 
 def test_configured_registry_is_none_without_npm(env, monkeypatch):
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    monkeypatch.setattr(node, "_npm_config_registry", {})
+    assert node.configured_npm_registry({}, env["tmp"] / "nowhere" / "node") is None
+    assert fake.calls == []
+
+
+def test_configured_registry_ignores_npm_in_the_current_directory(env, monkeypatch):
+    """On Windows ``shutil.which`` would take an ``npm.cmd`` from there."""
+    cwd = env["tmp"] / "project"
+    cwd.mkdir()
+    for name in ("npm", "npm.cmd"):
+        (cwd / name).write_text("")
+        (cwd / name).chmod(0o755)
+    monkeypatch.chdir(cwd)
     fake = FakeNpmConfig("https://npmrc.example/")
     monkeypatch.setattr(node.subprocess, "run", fake)
     monkeypatch.setattr(node, "_npm_config_registry", {})
@@ -724,3 +909,125 @@ def test_run_stage_returns_done_with_the_node_detail(monkeypatch):
     result = node.run_stage(lambda event: None, "default")
     assert result.status == "done"
     assert result.detail == info.detail()
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeats, lock waits, Windows policy
+# --------------------------------------------------------------------------- #
+def test_unpacking_repeats_its_line_between_members(env, monkeypatch):
+    from EvoScientist.setup import protocol
+
+    monkeypatch.setattr(protocol, "HEARTBEAT_INTERVAL", 0)
+    lines: list[str] = []
+    node.ensure_node("default", lambda _f, message: lines.append(message))
+    assert lines.count("Unpacking") > 1
+
+
+def test_second_install_waits_for_the_first_and_says_so(env, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    from EvoScientist.setup import _install
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    tools = env["data"] / "tools"
+    tools.mkdir(parents=True)
+    holder = FileLock(str(tools / "node.lock"))
+    holder.acquire()
+    lines: list[str] = []
+    result = {}
+    waiter = threading.Thread(
+        target=lambda: result.update(
+            info=node.ensure_node("default", lambda _f, m: lines.append(m))
+        )
+    )
+    waiter.start()
+    try:
+        deadline = 50
+        while not lines and deadline:
+            waiter.join(0.05)
+            deadline -= 1
+        # Meanwhile the first install finishes.
+        node._write_record(V, tools / f"node-v{V}")
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert (
+        lines[0]
+        == "Waiting for another EvoScientist process to finish installing Node.js"
+    )
+    assert result["info"].source == "private"
+    assert env["net"].urls == []
+
+
+def test_policy_block_right_after_install_is_probe_failed_and_keeps_the_files(env):
+    final = env["data"] / "tools" / f"node-v{V}"
+    env["probes"][str(node._node_exe(final))] = BLOCKED
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert "Windows policy" in ei.value.message
+    assert str(node._node_exe(final)) in ei.value.message
+    assert _record(env["data"]) is None
+    assert node._node_exe(final).exists()
+
+
+def test_blocked_install_is_reported_again_without_a_new_download(env, monkeypatch):
+    final = env["data"] / "tools" / f"node-v{V}"
+    env["probes"][str(node._node_exe(final))] = BLOCKED
+    with pytest.raises(StageError):
+        node.ensure_node("default")
+    monkeypatch.setattr(node, "_failed_install", None)  # a new process
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+
+
+def test_blocked_recorded_node_is_probe_failed_without_a_download(env):
+    info = node.ensure_node("default")
+    env["probes"][str(info.path)] = BLOCKED
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+
+
+def test_blocked_system_node_falls_back_to_the_private_node(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (22, 0, 0))
+    env["probes"][str(exe)] = BLOCKED
+    assert node.ensure_node("default").source == "private"
+
+
+def test_probe_turns_a_policy_error_into_policy_blocked(monkeypatch):
+    def blocked(*_a, **_k):
+        exc = OSError(13, "This program is blocked by group policy")
+        exc.winerror = 1260
+        raise exc
+
+    monkeypatch.setattr(node.subprocess, "run", blocked)
+    with pytest.raises(node.PolicyBlocked):
+        node._probe(Path("node.exe"))
+
+
+def test_probe_returns_none_for_other_start_errors(monkeypatch):
+    def missing(*_a, **_k):
+        raise FileNotFoundError(2, "not found")
+
+    monkeypatch.setattr(node.subprocess, "run", missing)
+    assert node._probe(Path("node.exe")) is None
+
+
+def test_record_is_written_atomically(env, monkeypatch):
+    written: list[Path] = []
+
+    def atomic_write_text(path, text):
+        written.append(path)
+        _install.atomic_write_text(path, text)
+
+    monkeypatch.setattr(node, "atomic_write_text", atomic_write_text)
+    node.ensure_node("default")
+    assert written == [env["data"] / "tools" / "node.json"]

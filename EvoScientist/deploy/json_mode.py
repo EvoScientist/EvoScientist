@@ -12,10 +12,12 @@ Events:
   ``config_dir``, ``log_file``, ``warnings`` (a list of strings), and with
   ``--tunnel`` also ``public_url`` (null when no URL was reported in time).
   ``owned`` is true when this command started the backend and stops it on
-  exit, false when it attached to a running one for the same workspace and
-  leaves it running. When attached, ``workspace``, ``data_dir`` and
-  ``config_dir`` are the running backend's, from its ownership record (or
-  this command's own when an older release wrote the record without them).
+  exit, false when it attached to a running one started from the same
+  project and leaves it running. ``workspace`` is that project, which this
+  command registered, and ``assistant_id`` its chat assistant. When
+  attached, ``data_dir`` and ``config_dir`` are the running backend's, from
+  its ownership record (or this command's own when an older release wrote the
+  record without them).
   ``data_dir`` and ``config_dir`` are paths to open files at, never to
   compare as strings: one folder can have more than one spelling (an 8.3
   short name on Windows, a symlink).
@@ -24,12 +26,13 @@ Events:
 
   - ``invalid_port``: ``port``.
   - ``port_conflict``: ``reason``, always: ``foreign`` (another program holds
-    the port), ``no_record`` (a langgraph dev without an ownership record, so
-    its workspace is unknown) or ``record_mismatch`` (the ownership record
+    the port), ``no_record`` (a langgraph dev without an ownership record)
+    or ``record_mismatch`` (the ownership record
     names a process that does not serve this port, or one bound to another
     interface).
-  - ``workspace_conflict``: ``workspace``, the running backend's, and
-    ``run_dir`` when it serves a run folder of this workspace.
+  - ``workspace_conflict``: ``workspace``, the project of the client that
+    started the running backend: the app gets that project from calls that
+    name none (``GET /api/workspace``), so it does not attach.
   - ``ccproxy_failed``: empty.
   - ``backend_start_failed``: ``log_file`` when the start failed, or
     ``lock_file`` when another EvoScientist process held the start lock too
@@ -38,6 +41,12 @@ Events:
   - ``backend_exited``: ``exit_code`` and ``log_file`` when the owned process
     ended; ``url`` when an owned backend stopped listening or an attached one
     stopped answering.
+  - ``folder_missing``: ``workspace``, a folder EvoScientist knows as a
+    project whose folder is gone (it is not recreated).
+  - ``server_outdated``: empty; the running backend predates the project
+    registry, so it has to be stopped first.
+  - ``registration_failed``: empty; the backend did not register the
+    workspace.
   - ``internal_error``: ``type``, the exception's class; or ``launcher_code``
     for a backend-decision error this mode has no code for.
 
@@ -75,6 +84,7 @@ How a program runs the command:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -83,13 +93,15 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Iterator
 from typing import Any
 
+from ..langgraph_dev.assistants import chat_assistant_id
+from ..langgraph_dev.registration import ServerExposure, exposure_messages
+from ..paths import Workspace
 from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe
 
 logger = logging.getLogger(__name__)
-
-ASSISTANT_ID = "EvoScientist"
 
 # The ``detail`` of each is in the module docstring. ``internal_error``:
 # anything else, with the traceback on stderr.
@@ -102,6 +114,9 @@ ERROR_CODES = frozenset(
         "backend_start_failed",
         "sign_in_required",
         "backend_exited",
+        "folder_missing",
+        "server_outdated",
+        "registration_failed",
         "internal_error",
     }
 )
@@ -110,6 +125,9 @@ _LAUNCHER_CODES = {
     "port_conflict": "port_conflict",
     "sidecar_port_mismatch": "port_conflict",
     "workspace_mismatch": "workspace_conflict",
+    "folder_missing": "folder_missing",
+    "server_outdated": "server_outdated",
+    "registration_failed": "registration_failed",
 }
 
 # The health check runs this often; this many failures in a row mean the
@@ -145,6 +163,25 @@ class _Failure(Exception):
             "message": self.message,
             "detail": self.detail,
         }
+
+
+@contextlib.contextmanager
+def _launcher_failures() -> Iterator[None]:
+    """Raise a :class:`~EvoScientist.deploy.launcher.LauncherError` as the
+    matching :class:`_Failure`; a code without one is ``internal_error``."""
+    from .launcher import LauncherError
+
+    try:
+        yield
+    except LauncherError as exc:
+        detail = dict(exc.fields)
+        if exc.detail:
+            detail["hint"] = exc.detail
+        code = _LAUNCHER_CODES.get(exc.code)
+        if code is None:
+            detail["launcher_code"] = exc.code
+            code = "internal_error"
+        raise _Failure(code, exc.message, detail) from exc
 
 
 class _Events:
@@ -258,13 +295,14 @@ class _Run:
         from ..agent_shell import server_setup_hint, setup_hint
         from ..langgraph_dev import manager as lgm
         from . import server
-        from .launcher import BackendTarget
+        from .launcher import BackendTarget, prepare_launch_folder
 
         config = server._load_config(debug, host, port)
         _check_sign_in(config)
 
         ws = str(paths.start_workspace_path(workdir, config.default_workdir))
-        os.makedirs(ws, exist_ok=True)
+        with _launcher_failures():
+            prepare_launch_folder(ws)
         self.port = server._resolve_port(port, config)
         if not server._port_in_range(self.port):
             raise _Failure(
@@ -283,18 +321,15 @@ class _Run:
         # during the start: stop now, without the tunnel wait or ready.
         if decision is None or self.stop.is_set():
             return
+        exposure = self._register(ws)
+        # The backend's bind and tunnel, as it answered the registration: for
+        # a reused one, --host and --tunnel here say nothing about it.
         warnings = list(decision.warnings)
+        warnings.extend(exposure_messages(exposure))
         public_url: str | None = None
         if decision.action == "reuse":
             record = decision.sidecar or {}
-            # The running backend's bind, from its record; a record written
-            # before it carried one gives no warning, since --host here says
-            # nothing about that backend.
-            bound = record.get("host")
-            if isinstance(bound, str) and not lgm._is_loopback_host(bound):
-                warnings.append(_public_bind_warning(bound))
             owned = False
-            workspace = record.get("workspace", ws)
             data_dir = record.get("data_dir") or str(paths.DATA_DIR)
             config_dir = record.get("config_dir") or str(paths.CONFIG_DIR)
             hint = server_setup_hint(record)
@@ -305,10 +340,7 @@ class _Run:
                 )
         else:
             owned = True
-            workspace = ws
             # The human mode's banners, for the app to show.
-            if not lgm._is_loopback_host(self.host):
-                warnings.append(_public_bind_warning(self.host))
             if getattr(config, "dangerous_mode", False):
                 from ..cli._constants import (
                     DANGEROUS_BANNER_LABEL,
@@ -316,10 +348,6 @@ class _Run:
                 )
 
                 warnings.append(f"{DANGEROUS_BANNER_LABEL}: {DANGEROUS_BANNER_MESSAGE}")
-            if tunnel:
-                warnings.append(
-                    "Public tunnel: no auth, share the URL only with people you trust."
-                )
             data_dir = str(paths.DATA_DIR)
             config_dir = str(paths.CONFIG_DIR)
             if self.job is not None and self.job.warning:
@@ -335,8 +363,8 @@ class _Run:
         fields: dict[str, Any] = {
             "url": lgm._base_url(self.port, self.host),
             "owned": owned,
-            "workspace": workspace,
-            "assistant_id": ASSISTANT_ID,
+            "workspace": ws,
+            "assistant_id": chat_assistant_id(Workspace(ws)),
             "data_dir": data_dir,
             "config_dir": config_dir,
             "log_file": str(lgm.RUNTIME.log_file),
@@ -345,6 +373,15 @@ class _Run:
         if tunnel:
             fields["public_url"] = public_url
         self.events("ready", **fields)
+
+    def _register(self, ws: str) -> ServerExposure:
+        """Register the workspace with the backend this command uses; how
+        that backend can be reached from other machines."""
+        from ..langgraph_dev import manager as lgm
+        from .launcher import register_launch_folder
+
+        with _launcher_failures():
+            return register_launch_folder(ws, url=lgm._base_url(self.port, self.host))
 
     def _decide_and_start(self, target: Any, config: Any, ws: str, tunnel: bool) -> Any:
         """The backend decision, and the start it calls for, under the lock
@@ -358,24 +395,15 @@ class _Run:
         from filelock import FileLock
 
         from ..langgraph_dev import manager as lgm
-        from .launcher import LauncherError, _resolve_backend
+        from .launcher import _resolve_backend
 
         lgm.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(lgm.RUNTIME.lock_file))
         if not self._acquire(lock, lgm._FILE_LOCK_TIMEOUT):
             return None
         try:
-            try:
+            with _launcher_failures():
                 decision = _resolve_backend(target, config, require_record=True)
-            except LauncherError as exc:
-                detail = dict(exc.fields)
-                if exc.detail:
-                    detail["hint"] = exc.detail
-                code = _LAUNCHER_CODES.get(exc.code)
-                if code is None:
-                    detail["launcher_code"] = exc.code
-                    code = "internal_error"
-                raise _Failure(code, exc.message, detail) from exc
             if decision.action == "start" and not self.stop.is_set():
                 self._start_backend(config, ws, tunnel)
             return decision
@@ -443,6 +471,8 @@ class _Run:
                 tunnel=tunnel,
                 config_fingerprint=lgm._server_config_fingerprint(config),
                 allowed_origins=getattr(config, "backend_allowed_origins", ""),
+                # The app owns the backend it started: it stops it.
+                lasting=False,
                 job=self.job,
             )
         except Exception as exc:
@@ -532,13 +562,6 @@ class _Run:
             finally:
                 if self.job is not None:
                     self.job.close()
-
-
-def _public_bind_warning(host: str) -> str:
-    return (
-        f"Listening on {host}: no auth, and the agent can run shell. "
-        "Trusted networks only."
-    )
 
 
 def _check_sign_in(config: Any) -> None:

@@ -377,7 +377,7 @@ class ActionVerdict:
 # gate to the backend. Set client-side by ``resolve_per_run_config`` from
 # ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
 # every gateway run; read by the HITL ``when`` predicate and the backend/background
-# guards. A per-run channel (not a construction flag) so a keepalive server can
+# guards. A per-run channel (not a construction flag) so a shared server can
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
@@ -649,12 +649,14 @@ def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
         return None
 
     def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
+        # ``convert_to_messages`` leaves a dict's ``invalid_tool_calls`` in
+        # ``additional_kwargs`` (server state messages arrive as dicts).
+        invalid = message.invalid_tool_calls or message.additional_kwargs.get(
+            "invalid_tool_calls"
+        )
         return [
             *((call, False) for call in message.tool_calls),
-            *(
-                (call, True)
-                for call in (getattr(message, "invalid_tool_calls", None) or ())
-            ),
+            *((call, True) for call in invalid or ()),
         ]
 
     last_calls: list[tuple[dict, bool]] = []
@@ -1615,7 +1617,7 @@ def build_autoskill_agent_backend(
     """
     from deepagents.backends import CompositeBackend
 
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     return CompositeBackend(
         default=AutoskillProposalSandboxBackend(
@@ -1623,7 +1625,7 @@ def build_autoskill_agent_backend(
             timeout=sandbox_timeout,
             # Its prompt validates proposals with `execute`; same python as
             # the other agents.
-            env=research_env_overrides(),
+            env=agent_shell_overrides(),
             skills_dir=skills_dir,
         ),
         routes={

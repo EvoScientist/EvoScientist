@@ -12,9 +12,11 @@ the routes run them in a thread.
 - :func:`check_key_request` runs one key check without saving anything. A
   stored key is only sent to its stored base URL, and :func:`patch_settings`
   changes a base URL only together with its stored key.
-- :func:`capture_restart_baseline` records the file as the server read it
-  when it built its graphs; :func:`pending_restart` names the fields that
-  changed since then.
+- :func:`capture_restart_baseline` records the file when the server starts,
+  before it builds any graph; :func:`pending_restart` names the fields that
+  changed since then. Graphs are also built later (another project, a new
+  run folder, one the cache dropped), and those can already use part of a
+  saved change; a restart applies it to every graph.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from EvoScientist.config.settings import (
     env_origin,
     get_config_dir,
     get_effective_config,
+    is_client_only,
     load_config,
     secret_hint,
     set_config_values,
@@ -106,23 +109,8 @@ def _digest(data: Any) -> str:
 
 
 def _reaches_server(name: str) -> bool:
-    """Whether the server reads ``name`` when it builds its graphs.
-
-    The launcher's drift fingerprint keeps the list of fields that never
-    reach the server; ``default_workdir`` is on it, but the server serves
-    the workspace it was started with, so a change needs a restart too.
-    """
-    from EvoScientist.langgraph_dev.manager import (
-        _FINGERPRINT_EXCLUDED_FIELDS,
-        _FINGERPRINT_EXCLUDED_PREFIXES,
-    )
-
-    if name == "default_workdir":
-        return True
-    return not (
-        name in _FINGERPRINT_EXCLUDED_FIELDS
-        or name.startswith(_FINGERPRINT_EXCLUDED_PREFIXES)
-    )
+    """Whether the server reads ``name`` when it builds its graphs."""
+    return not is_client_only(name)
 
 
 def _file_digests(mapping: dict[str, Any]) -> dict[str, str]:
@@ -157,11 +145,16 @@ def _file_digests(mapping: dict[str, Any]) -> dict[str, str]:
 
 
 def capture_restart_baseline() -> None:
-    """Record the file as the server reads it to build its graphs.
+    """Record the file when the server starts, before it builds any graph.
 
-    Called before the graphs are built; the first call wins. A file that
-    does not parse or cannot be read is recorded as the defaults the server
-    then runs with.
+    Called when langgraph-api opens the checkpointer, before its cron
+    scheduler and run workers start; the first call wins. The launcher copies
+    saved keys into the server's environment when it starts the server,
+    earlier than this: a key saved in between runs with its old value, yet
+    is not reported as needing a restart.
+
+    A file that does not parse or cannot be read is recorded as the defaults
+    the server then runs with.
     """
     global _baseline
     if _baseline is not None:
@@ -177,7 +170,8 @@ def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     """Fields whose saved value changed since the server started.
 
     ``shadowed`` fields are left out: the environment overrides them, so a
-    restart would not apply the saved value either.
+    restart would not apply the saved value either. Outside a server (no
+    baseline taken), the first call takes it.
     """
     capture_restart_baseline()
     assert _baseline is not None
@@ -200,8 +194,9 @@ def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
     A mapped environment variable wins over the file. When our own code set
     it (see :func:`~EvoScientist.config.settings.record_env_origin`), its
     recorded source is reported: ``file`` and ``default`` are copies, not
-    overrides; ``cli``, ``ccproxy`` and ``dotenv`` (with the ``.env`` path)
-    override the saved value, so ``shadowed`` is true. A variable our code
+    overrides; ``cli`` and ``ccproxy`` override the saved value, so
+    ``shadowed`` is true (``dotenv``, with the ``.env`` path, only outside
+    the server: it reads no ``.env``). A variable our code
     did not set is the user's: ``env``, shadowed. Without a variable, the
     source is ``file`` when the file holds the field, else ``default``.
     """
@@ -273,7 +268,7 @@ def _masked(name: str, value: Any) -> Any:
 def setup_needed(config: EvoScientistConfig) -> bool:
     """Whether the selected provider cannot run with this configuration.
 
-    Follows the runtime: a key from the environment or a ``.env`` counts,
+    Follows the runtime: a key from the environment counts,
     Ollama needs no key, OAuth mode needs none, and only the custom
     endpoints need a base URL (the others have a default address).
     """
@@ -310,8 +305,7 @@ def read_settings() -> dict[str, Any]:
     not settings: ``mcp.yaml`` (the MCP server file), ``subagents`` (the
     bundled sub-agent definitions) and ``version`` (the installed package).
     """
-    # First: it merges a workspace ``.env`` into the environment, as the
-    # graphs' own config reads do, so ``sources`` sees what they see.
+    # The same config reads the graphs do, so ``sources`` sees what they see.
     effective = get_effective_config()
     raw = store.read_config_bytes()
     config_error = None
@@ -634,8 +628,8 @@ def _stored_config() -> EvoScientistConfig:
 def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
     """Run one key check without saving; return ``(status, payload)``.
 
-    Without ``key``, the stored effective key (``config.yaml``, the
-    environment or a ``.env``) is tested, and only against the stored base
+    Without ``key``, the stored effective key (``config.yaml`` or the
+    environment) is tested, and only against the stored base
     URL. A variable the server copied from the file at start reads as the
     file's current value, so a key saved since then is the one tested.
     Without ``base_url``, the stored base URL or the provider's default is

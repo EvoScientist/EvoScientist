@@ -117,17 +117,36 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _agent_shell_notices() -> list[str]:
-    """The agent shell's setup hint and the server drift warning, when they apply.
+def _agent_shell_notices(backend: str | None = None) -> list[str]:
+    """The agent shell's setup hint, the server's drift warnings, a server
+    unavailable for this project, one reachable from other machines and where
+    a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
-    Both also go to the terminal or the log, which Textual hides while the
+    They also go to the terminal or the log, which Textual hides while the
     app runs, so the TUI shows them as notifications.
     """
     from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
+    from ..langgraph_dev.registration import exposure_messages
+    from .commands import dangerous_flag_note
 
-    notices = [setup_hint(), lg_manager.AGENT_SHELL_DRIFT]
-    return [n for n in notices if n is not None]
+    unavailable = (
+        lg_manager.SERVER_UNAVAILABLE_MESSAGE if lg_manager.SERVER_UNAVAILABLE else None
+    )
+    drift = (
+        lg_manager.CONFIG_DRIFT_MESSAGE
+        if lg_manager.CONFIG_DRIFT_SINCE_LAUNCH
+        else None
+    )
+    notices = [
+        setup_hint(),
+        drift,
+        lg_manager.AGENT_SHELL_DRIFT,
+        unavailable,
+        dangerous_flag_note(backend),
+    ]
+    exposure = exposure_messages(lg_manager.SERVER_EXPOSURE)
+    return [n for n in notices if n is not None] + exposure
 
 
 async def _auto_start_channel_in_worker(
@@ -953,37 +972,36 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        async def _sync_server_to(
-            self, dirs: SessionDirs, *, message: str, new_run_dir: bool = False
-        ) -> bool:
-            """Move the background agent server to *dirs* before switching.
+        async def _sync_server_to(self, dirs: SessionDirs, *, message: str) -> bool:
+            """Register *dirs*' project with the background agent server
+            before switching.
 
-            Runs ``_move_server_or_keep_session`` behind a live timer widget
+            Runs ``_register_or_keep_session`` behind a live timer widget
             (like /compact) showing *message*, so the Textual event loop keeps
-            refreshing the UI during the up-to-60s wait.
+            refreshing the UI during the wait (a start, then the project's
+            registration).
 
-            Raises ``WorkspaceMismatchError`` when another EvoSci process owns
-            the server for other folders, so the caller leaves the session as
+            Raises ``ServerUnusableError`` when the server cannot be used for
+            *dirs*, so the caller leaves the session as
             it is and command UIs (including channels) report the failure.
-            Returns False when the sync failed otherwise: the session can
+            Returns False when the server does not serve the project: the session can
             continue locally, but background work may be unavailable.
             """
-            from .commands import _move_server_or_keep_session
+            from .commands import _register_or_keep_session
             from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
-            if dirs == self._dirs:
+            if dirs.workspace == self._dirs.workspace:
                 return True
             sync_widget = WorkspaceSyncWidget(message)
             container = self.query_one("#chat", VerticalScroll)
             await container.mount(sync_widget)
             container.scroll_end(animate=False)
             try:
-                return await _move_server_or_keep_session(
+                return await _register_or_keep_session(
                     config,
                     target=dirs,
                     current=self._dirs,
                     backend=gateway_backend,
-                    new_run_dir=new_run_dir,
                 )
             finally:
                 await sync_widget.cleanup()
@@ -995,21 +1013,9 @@ def run_textual_interactive(
             new_dirs = SessionDirs(
                 ws, create_run_dir(ws, run_name) if mode == "run" else None
             )
-            synced = await self._sync_server_to(
-                new_dirs,
-                message="Moving background agent server to the new session",
-                new_run_dir=True,
-            )
 
             # Clear all widgets except #welcome
             self.clear_chat()
-            if not synced:
-                self.append_system(
-                    "Background agent server sync failed; started the new "
-                    "session, but async subagents and EvoMemory workers may "
-                    "be unavailable.",
-                    style="yellow",
-                )
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
             self._dirs = new_dirs
@@ -1040,11 +1046,12 @@ def run_textual_interactive(
                 # ``self._dirs`` changes only after the sync succeeds, so a
                 # refused sync leaves the session in its current folders.
                 if not await self._sync_server_to(
-                    dirs, message="Syncing background agent server to resumed workspace"
+                    dirs,
+                    message="Registering the resumed project with the background agent server",
                 ):
                     self.append_system(
-                        "Background agent server sync failed; resumed local "
-                        "session, but async subagents and EvoMemory workers "
+                        "The background agent server is unavailable for this "
+                        "project; resumed the session, but async subagents and EvoMemory workers "
                         "may be unavailable.",
                         style="yellow",
                     )
@@ -1196,7 +1203,7 @@ def run_textual_interactive(
         async def _check_agent_shell(self) -> None:
             """Notify the notices from :func:`_agent_shell_notices`."""
             try:
-                notices = await asyncio.to_thread(_agent_shell_notices)
+                notices = await asyncio.to_thread(_agent_shell_notices, gateway_backend)
                 for message in notices:
                     # Paths may contain "[", which markup would eat.
                     self.notify(message, severity="warning", timeout=20, markup=False)
@@ -4496,48 +4503,41 @@ def run_textual_interactive(
                     stored = SessionDirs.from_stored(
                         meta.get("workspace_dir"), meta.get("run_dir")
                     )
-                    mismatch_aborted = False
+                    refusal: str | None = None
                     if stored is not None:
                         effective_dirs = stored
-                        # Move the background agent server to the resumed
-                        # folders BEFORE the Textual app takes over the
+                        # Register the resumed project with the background
+                        # agent server BEFORE the Textual app takes over the
                         # terminal, so background workers and deployed
-                        # sub-agents don't work in the launch folders.
-                        from ..langgraph_dev.manager import WorkspaceMismatchError
-                        from ..stream.console import console as _resume_console
-                        from .commands import _move_server_or_keep_session
+                        # sub-agents work there.
+                        from ..langgraph_dev.registration import (
+                            ServerUnusableError,
+                        )
+                        from .commands import _register_or_keep_session
 
                         try:
-                            if not await _move_server_or_keep_session(
+                            if not await _register_or_keep_session(
                                 config,
                                 target=stored,
                                 current=dirs,
                                 backend=gateway_backend,
                             ):
                                 resume_warning = (
-                                    "Background agent server sync failed; "
-                                    "resumed the session, but async subagents "
+                                    "The background agent server is unavailable "
+                                    "for this project; resumed the session, but async subagents "
                                     "and EvoMemory workers may be unavailable."
                                 )
-                        except WorkspaceMismatchError as _ws_mismatch_exc:
-                            # Surface the user-actionable message via the
-                            # Rich console (TUI hasn't taken over the terminal
-                            # yet) and abort the resume so the TUI doesn't
-                            # start up pointing at the conflicting workspace
-                            # with background work routed at a server pinned to
-                            # a different workspace.
-                            _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
-                            mismatch_aborted = True
-                    if mismatch_aborted:
-                        # Revert the workspace mutation and fall through to the
-                        # ``effective_thread_id is None`` branch below, which
-                        # generates a fresh thread in the original launch
-                        # workspace. User keeps the TUI session; the requested
+                        except (ServerUnusableError, OSError) as exc:
+                            refusal = str(exc)
+                    if refusal is not None:
+                        # Fall through to the ``effective_thread_id is None``
+                        # branch below, which generates a fresh thread in the
+                        # original launch workspace: the requested
                         # ``--thread-id`` resume is what we refuse.
                         effective_dirs = dirs
                         resume_warning = (
-                            f"Resume of thread '{thread_id}' aborted due to "
-                            "workspace conflict. Starting new session."
+                            f"Resume of thread '{thread_id}' refused: {refusal} "
+                            "Starting a new session."
                         )
                     else:
                         effective_thread_id = resolution.thread_id

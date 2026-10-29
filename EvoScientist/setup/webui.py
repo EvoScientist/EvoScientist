@@ -33,16 +33,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._install import move_into_place, remove_stale_temp_dirs, tools_dir
-from .download import _NETWORK_ERRORS, download
-from .protocol import Emitter, StageError, StageResult, make_event
+from ._install import move_into_place, remove_stale_temp_dirs, stage_lock, tools_dir
+from .download import (
+    _NETWORK_ERRORS,
+    NotConnected,
+    download,
+    open_url,
+    with_hint,
+    with_retries,
+)
+from .protocol import Emitter, Heartbeat, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
 
 PACKAGE = "@evoscientist/webui"
 # The WebUI releases this core supports. A WebUI patch release reaches users
 # without a core release; a breaking WebUI release needs a core change here.
-WEBUI_COMPAT = ">=0.3,<0.5"
+WEBUI_COMPAT = ">=0.4,<0.5"
 # Test-only override of the range (e.g. to install an older release and
 # exercise the update path). Never saved to the config.
 COMPAT_ENV = "EVOSCIENTIST_WEBUI_COMPAT"
@@ -168,12 +175,30 @@ def registry_url(mirror: str, node_exe: Path) -> str:
     return chosen.rstrip("/")
 
 
-def fetch_metadata(registry: str) -> dict[str, Any]:
-    url = f"{registry}/{PACKAGE.replace('/', '%2F')}"
+def wants_cn_hint(mirror: str, node_exe: Path | None) -> bool:
+    """Whether a download error should name ``--cn``: the mirror is off and
+    the registry is not one the user configured."""
+    from .node import configured_npm_registry
+
+    if mirror == "cn":
+        return False
+    return node_exe is None or configured_npm_registry(os.environ, node_exe) is None
+
+
+def _read_metadata(url: str) -> Any:
     request = urllib.request.Request(url, headers={"Accept": _METADATA_ACCEPT})
+    with open_url(request, _METADATA_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_metadata(registry: str, *, cn_hint: bool = False) -> dict[str, Any]:
+    url = f"{registry}/{PACKAGE.replace('/', '%2F')}"
     try:
-        with urllib.request.urlopen(request, timeout=_METADATA_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = with_retries(lambda: _read_metadata(url), f"Reading {PACKAGE}")
+    except NotConnected as exc:
+        raise StageError(
+            "download_failed", with_hint(f"{exc}.", cn_hint and not exc.proxy)
+        ) from exc
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             hint = (
@@ -186,11 +211,14 @@ def fetch_metadata(registry: str) -> dict[str, Any]:
             hint = ""
         raise StageError(
             "download_failed",
-            f"{registry} answered HTTP {exc.code} for {PACKAGE}.{hint}",
+            with_hint(
+                f"{registry} answered HTTP {exc.code} for {PACKAGE}.{hint}", cn_hint
+            ),
         ) from exc
     except _NETWORK_ERRORS as exc:
         raise StageError(
-            "download_failed", f"Could not read {PACKAGE} from {registry}: {exc}"
+            "download_failed",
+            with_hint(f"Could not read {PACKAGE} from {registry}: {exc}.", cn_hint),
         ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("versions"), dict):
         raise StageError(
@@ -241,16 +269,19 @@ def verify_integrity(path: Path, dist: Mapping[str, Any], name: str) -> None:
 # --------------------------------------------------------------------------- #
 # Unpack and probe
 # --------------------------------------------------------------------------- #
-def extract_package(archive: Path, dest: Path) -> None:
+def extract_package(
+    archive: Path, dest: Path, tick: Callable[[], None] = lambda: None
+) -> None:
     """Unpack the ``package/`` tree of an npm tarball into ``dest``.
 
     Regular files and directories only: links are skipped (the standalone
     server resolves modules by path), and a member that would land outside
-    ``dest`` fails the install.
+    ``dest`` fails the install. ``tick`` runs before each member.
     """
     dest = dest.resolve()
     with tarfile.open(archive, "r:gz") as tf:
         for member in tf:
+            tick()
             name = member.name.replace("\\", "/")
             if not name.startswith("package/"):
                 continue
@@ -313,13 +344,18 @@ def _get_status(url: str, timeout: float) -> int | None:
 
 def server_env(node_exe: Path, port: int) -> dict[str, str]:
     """Environment for ``node dist/server.js``: the parent's, without secrets,
-    and without npm / Node options when the Node is our private one."""
+    and without npm / Node options when the Node is our private one; with the
+    certificate and proxy variables the launcher gives the server, so the
+    probe checks the environment the WebUI runs with."""
     from ..deploy.launcher import _scrubbed_env
-    from .node import is_private, node_child_env
+    from .node import is_private, node_child_env, node_network_env
 
     env = _scrubbed_env({"PORT": str(port), "HOSTNAME": "127.0.0.1"})
     env["NODE_ENV"] = "production"
-    return node_child_env(env, private=is_private(node_exe))
+    private = is_private(node_exe)
+    env = node_child_env(env, private=private)
+    env.update(node_network_env(env, private=private))
+    return env
 
 
 def probe(root: Path, node_exe: Path, timeout: float = _PROBE_TIMEOUT) -> None:
@@ -483,8 +519,10 @@ def _set_aside(path: Path) -> bool:
 def _download_into_place(
     version: str,
     dist: Mapping[str, Any],
-    report: ProgressFn,
+    report: Heartbeat,
     node_exe: Path | None,
+    *,
+    cn_hint: bool = False,
 ) -> Path:
     """Download, verify and unpack ``version`` into ``tools/webui/<version>/``.
 
@@ -510,6 +548,7 @@ def _download_into_place(
             tarball,
             archive,
             lambda f: report(0.1 + 0.6 * f, f"Downloading WebUI {version}"),
+            cn_hint=cn_hint,
         )
         report(0.72, "Verifying checksum")
         verify_integrity(archive, dist, name)
@@ -517,7 +556,7 @@ def _download_into_place(
         report(0.75, "Unpacking")
         unpacked = tmp / "package"
         try:
-            extract_package(archive, unpacked)
+            extract_package(archive, unpacked, report.tick)
         except (tarfile.TarError, EOFError) as exc:
             raise StageError(
                 "download_failed", f"Could not unpack {name}: {exc}"
@@ -600,7 +639,7 @@ def ensure_webui(
     """
     from .node import configured_mirror
 
-    report = progress or (lambda _f, _m: None)
+    report = Heartbeat(progress or (lambda _f, _m: None))
     compat = compat_range()
     recorded = recorded_webui(compat)
     if recorded is not None and not refresh and _staged(_read_record()) is None:
@@ -610,21 +649,21 @@ def ensure_webui(
     if _failed_install is not None:
         raise _failed_install
 
-    from filelock import FileLock
-
     root = webui_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(_lock_path())):
+        with stage_lock(_lock_path(), "the WebUI", progress):
             remove_stale_temp_dirs(root, _TEMP_PREFIX)
             _promote_staged(compat, node_exe, report)
             recorded = recorded_webui(compat)
             if recorded is not None and not refresh:
                 return recorded
-            registry = registry_url(mirror or configured_mirror(), node_exe)
+            mirror = mirror or configured_mirror()
+            registry = registry_url(mirror, node_exe)
+            hint = wants_cn_hint(mirror, node_exe)
             report(0.02, f"Checking {registry} for WebUI releases in {compat}")
             try:
-                metadata = fetch_metadata(registry)
+                metadata = fetch_metadata(registry, cn_hint=hint)
                 version = pick_version(metadata["versions"], compat)
             except StageError as exc:
                 # The registry cannot offer a release in range (offline, an
@@ -638,7 +677,8 @@ def ensure_webui(
                 return recorded
             dist = dist_of(metadata, version)
             info = WebUIInfo(
-                version, _download_into_place(version, dist, report, node_exe)
+                version,
+                _download_into_place(version, dist, report, node_exe, cn_hint=hint),
             )
             _write_record(_set_current(_read_record(), info))
             return info
@@ -707,7 +747,9 @@ def stage_update(node_exe: Path, mirror: str | None = None) -> str | None:
             ):
                 return None
             dist = dist_of(metadata, version)
-            path = _download_into_place(version, dist, lambda _f, _m: None, None)
+            path = _download_into_place(
+                version, dist, Heartbeat(lambda _f, _m: None), None
+            )
             record = _read_record() or record
             if staged is not None and staged.path != path:
                 _set_aside(staged.path)

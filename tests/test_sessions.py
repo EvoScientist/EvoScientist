@@ -2213,16 +2213,22 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
                 "docstring in create_checkpointer_for_langgraph_api"
             )
 
-    async def test_aput_stamps_workspace_metadata_for_graph_rows(self):
-        """Graph rows get workspace metadata; only main rows get agent_name."""
+    async def test_aput_stamps_factory_folders_on_every_row(self):
+        """Rows get the folders the graph factory decided, whatever folders the
+        request carried; only main rows get agent_name; a copied row keeps its
+        stamp."""
+        import contextvars
         import json
 
         import aiosqlite
 
         from EvoScientist.sessions import (
             AGENT_NAME,
+            RESOLVED_FOLDERS,
             create_checkpointer_for_langgraph_api,
         )
+
+        project = SessionDirs(Workspace("/tmp/test-workspace"))
 
         def _checkpoint(cid: str) -> dict:
             return {
@@ -2235,65 +2241,136 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
                 "pending_sends": [],
             }
 
-        async def _run_inner(db: str):
+        elsewhere = {"workspace_dir": "/tmp/elsewhere", "run_dir": "/tmp/x"}
+
+        async def _put(cp, thread_id, cid, metadata, folders=...):
+            """``aput`` in a task whose factory set *folders* (``...``: none ran)."""
+
+            async def _in_task():
+                if folders is not ...:
+                    RESOLVED_FOLDERS.set(folders)
+                # The request's folders also reach the config, which the saver
+                # copies into metadata the stamp leaves without them.
+                configurable = {"thread_id": thread_id, "checkpoint_ns": ""}
+                await cp.aput(
+                    {
+                        "configurable": {**configurable, **elsewhere},
+                        "metadata": elsewhere,
+                    },
+                    _checkpoint(cid),
+                    metadata,
+                    {},
+                )
+
+            await contextvars.copy_context().run(asyncio.create_task, _in_task())
+
+        async def _run_inner(db: str) -> dict:
             async with create_checkpointer_for_langgraph_api() as cp:
-                # Simulates a WebUI main-graph run (langgraph-api metadata).
-                await cp.aput(
-                    {
-                        "configurable": {
-                            "thread_id": "11111111-1111-1111-1111-111111111111",
-                            "checkpoint_ns": "",
-                        }
-                    },
-                    _checkpoint("ckpt-main"),
-                    {"source": "loop", "step": 1, "graph_id": AGENT_NAME},
-                    {},
-                )
-                # Simulates a memory-worker run: must stay unstamped.
-                await cp.aput(
-                    {
-                        "configurable": {
-                            "thread_id": "22222222-2222-2222-2222-222222222222",
-                            "checkpoint_ns": "",
-                        }
-                    },
-                    _checkpoint("ckpt-worker"),
-                    {"source": "loop", "step": 1, "graph_id": "evomemory-turn-worker"},
-                    {},
-                )
+                main_meta = {"source": "loop", "step": 1, "graph_id": AGENT_NAME}
+                await _put(cp, "t-main", "c1", {**main_meta, **elsewhere}, project)
+                worker_meta = {"source": "loop", "step": 1, "graph_id": "scheduler"}
+                await _put(cp, "t-worker", "c2", worker_meta, project)
+                read_meta = {"source": "update", "step": 2, **elsewhere}
+                await _put(cp, "t-update", "c3", read_meta, None)
+                await _put(cp, "t-copy", "c4", {"source": "loop", **elsewhere})
             async with aiosqlite.connect(db) as conn:
-                rows = {}
                 async with conn.execute(
                     "SELECT thread_id, metadata FROM checkpoints"
                 ) as cur:
-                    async for tid, meta in cur:
-                        rows[tid] = json.loads(meta)
-            main = rows["11111111-1111-1111-1111-111111111111"]
-            worker = rows["22222222-2222-2222-2222-222222222222"]
-            assert main.get("agent_name") == AGENT_NAME
-            assert main.get("workspace_dir") == Workspace("/tmp/test-workspace").key
-            assert main.get("updated_at"), "updated_at drives /threads ordering"
-            assert "agent_name" not in worker
-            assert worker.get("workspace_dir") == Workspace("/tmp/test-workspace").key
-            assert worker.get("updated_at")
+                    return {tid: json.loads(meta) async for tid, meta in cur}
 
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "sessions.db")
-            with (
-                patch(
-                    "EvoScientist.sessions.get_db_path",
-                    return_value=_mock_path(db),
-                ),
-                patch.dict(
-                    os.environ,
-                    {"EVOSCIENTIST_WORKSPACE_DIR": "/tmp/test-workspace"},
-                ),
-                patch(
-                    "EvoScientist.sessions._api_session_dirs",
-                    return_value=SessionDirs(Workspace("/tmp/test-workspace")),
-                ),
+            with patch(
+                "EvoScientist.sessions.get_db_path",
+                return_value=_mock_path(db),
             ):
-                await _run_inner(db)
+                rows = await _run_inner(db)
+
+        main, worker = rows["t-main"], rows["t-worker"]
+        assert main["workspace_dir"] == project.workspace.key
+        assert "run_dir" not in main
+        assert main.get("agent_name") == AGENT_NAME
+        assert main.get("updated_at"), "updated_at drives /threads ordering"
+        assert worker["workspace_dir"] == project.workspace.key
+        assert "agent_name" not in worker
+        assert "workspace_dir" not in rows["t-update"]
+        assert "run_dir" not in rows["t-update"]
+        assert "run_dir" not in worker
+        assert rows["t-copy"]["workspace_dir"] == "/tmp/elsewhere"
+
+    async def test_thread_binding_reads_newest_stamped_root_row(self):
+        """Unstamped rows and subgraph rows don't change a thread's binding."""
+        import json
+
+        import aiosqlite
+
+        from EvoScientist.sessions import thread_binding
+
+        first = SessionDirs(Workspace("/tmp/ws-a"))
+        second = SessionDirs(Workspace("/tmp/ws-b"))
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            async with aiosqlite.connect(db) as conn:
+                await conn.execute(
+                    "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+                    "checkpoint_id TEXT, metadata BLOB)"
+                )
+                for cid, ns, meta in (
+                    ("1", "", first.metadata()),
+                    ("2", "", second.metadata()),
+                    ("3", "", {"source": "update"}),
+                    ("4", "sub", first.metadata()),
+                ):
+                    await conn.execute(
+                        "INSERT INTO checkpoints VALUES ('t', ?, ?, ?)",
+                        (ns, cid, json.dumps(meta)),
+                    )
+                await conn.commit()
+            with patch(
+                "EvoScientist.sessions.get_db_path", return_value=_mock_path(db)
+            ):
+                assert thread_binding("t") == second
+                assert thread_binding("unknown") is None
+
+    def test_thread_binding_refuses_unreadable_folders(self):
+        """An unread binding must not pass for an unbound thread."""
+        import json
+        import sqlite3
+
+        from EvoScientist.sessions import ThreadBindingError, thread_binding
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+                "checkpoint_id TEXT, metadata BLOB)"
+            )
+            conn.execute(
+                "INSERT INTO checkpoints VALUES ('t', '', '1', ?)",
+                (json.dumps({"workspace_dir": "/tmp/evil\x00x"}),),
+            )
+            conn.commit()
+            conn.close()
+            with patch(
+                "EvoScientist.sessions.get_db_path", return_value=_mock_path(db)
+            ):
+                with pytest.raises(ThreadBindingError, match="cannot be read"):
+                    thread_binding("t")
+
+    def test_thread_binding_refuses_corrupt_database(self):
+        from EvoScientist.sessions import ThreadBindingError, thread_binding
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with open(db, "wb") as f:
+                f.write(b"not a database" * 100)
+            with patch(
+                "EvoScientist.sessions.get_db_path", return_value=_mock_path(db)
+            ):
+                with pytest.raises(ThreadBindingError, match="conversation t"):
+                    thread_binding("t")
 
 
 class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
@@ -2351,9 +2428,36 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         return patch(
-            "EvoScientist.sessions._api_session_dirs",
-            return_value=SessionDirs(Workspace(self._WS)),
+            "EvoScientist.sessions._known_workspace_keys",
+            return_value={Workspace(self._WS).key},
         )
+
+    async def test_restore_scopes_threads_by_binding(self):
+        """A thread whose newest stamped row names another workspace is not
+        restored, whatever its older rows say."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        moved = "44444444-4444-4444-4444-444444444444"
+        store: dict = {"threads": []}
+        fake = MagicMock()
+        fake.GLOBAL_STORE = store
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(db, [moved], ckpt_prefix="a")
+            self._make_db_with_threads(
+                db, [moved], workspace_dir="/elsewhere", ckpt_prefix="b"
+            )
+            with (
+                patch("EvoScientist.sessions.get_db_path", return_value=_mock_path(db)),
+                patch.dict(sys.modules, {"langgraph_runtime_inmem.database": fake}),
+                self._patch_workspace(),
+            ):
+                await _restore_webui_threads_to_global_store()
+
+        assert store["threads"] == []
 
     async def test_restores_uuid_threads_into_global_store(self):
         """UUID-format thread IDs from SQLite are injected into GlobalStore."""
@@ -2726,79 +2830,13 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
 
-    async def test_restored_stub_gets_title_from_first_human_message(self):
-        """Stubs carry metadata.title derived from the thread's first human
-        message, so the WebUI sidebar doesn't show "Untitled Thread"."""
-        import sys
-        from unittest.mock import MagicMock, patch
+    async def test_removes_preloaded_uuid_entries_without_checkpoints(self):
+        """Only .pckl UUID entries with no checkpoints are dropped.
 
-        from langchain_core.messages import HumanMessage
-
-        from EvoScientist.sessions import (
-            AGENT_NAME,
-            _restore_webui_threads_to_global_store,
-            create_checkpointer_for_langgraph_api,
-        )
-
-        thread_id = "33333333-3333-3333-3333-333333333333"
-
-        mock_store: dict = {"threads": []}
-        mock_global_store = MagicMock()
-        mock_global_store.get.side_effect = mock_store.get
-        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
-        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
-
-        fake_module = MagicMock()
-        fake_module.GLOBAL_STORE = mock_global_store
-
-        async def _write_then_restore():
-            async with create_checkpointer_for_langgraph_api() as cp:
-                await cp.aput(
-                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-                    {
-                        "v": 1,
-                        "id": "ckpt-title",
-                        "ts": "2024-01-01T00:00:00+00:00",
-                        "channel_values": {
-                            "messages": [HumanMessage(content="hello title test")]
-                        },
-                        "channel_versions": {},
-                        "versions_seen": {},
-                        "pending_sends": [],
-                    },
-                    {"source": "loop", "step": 1, "graph_id": AGENT_NAME},
-                    {},
-                )
-            await _restore_webui_threads_to_global_store()
-
-        with tempfile.TemporaryDirectory() as td:
-            db = os.path.join(td, "sessions.db")
-            with (
-                patch(
-                    "EvoScientist.sessions.get_db_path",
-                    return_value=_mock_path(db),
-                ),
-                patch.dict(
-                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
-                ),
-                patch(
-                    "EvoScientist.sessions._api_session_dirs",
-                    return_value=SessionDirs(Workspace(self._WS)),
-                ),
-            ):
-                await _write_then_restore()
-
-        added = mock_store["threads"]
-        assert len(added) == 1, f"expected 1 restored thread, got {added}"
-        assert added[0]["metadata"].get("title") == "hello title test"
-
-    async def test_removes_preloaded_uuid_entries_outside_restore_scope(self):
-        """Stale and out-of-scope .pckl UUID entries are dropped.
-
-        Stale UUID entries point at deleted/lost state and render as empty
-        sessions (the #277 symptom). Out-of-scope UUID entries point at another
-        workspace's state and must not remain in this server's unauthenticated
-        thread registry. CLI-style non-UUID entries are never touched.
+        They point at deleted or lost state and render as empty sessions.
+        An entry with checkpoints stays, whichever project it is bound to:
+        the server's store holds only threads it served. CLI-style non-UUID
+        entries are never touched.
         """
         import sys
         import uuid as _uuid_mod
@@ -2846,8 +2884,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert _uuid_mod.UUID(ghost) not in ids, f"ghost must be removed, got {ids}"
         assert ghost not in ids, f"ghost must be removed (str form), got {ids}"
         assert "notauuid" in ids, "CLI-style entries must never be touched"
-        assert _uuid_mod.UUID(out_of_scope) not in ids
-        assert out_of_scope not in ids
+        assert _uuid_mod.UUID(out_of_scope) in ids
         # In-scope thread restored as usual.
         assert _uuid_mod.UUID(in_scope) in ids
 

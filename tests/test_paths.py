@@ -185,6 +185,21 @@ class TestSessionDirs:
         assert "run_dir" not in dirs.metadata()
 
 
+class TestWorkspaceIsRunFolder:
+    def test_folder_under_runs_is_run_folder(self, tmp_path):
+        assert Workspace(tmp_path).is_run_folder(tmp_path / "runs" / "a")
+
+    def test_other_spellings_are_not_run_folders(self, tmp_path):
+        workspace = Workspace(tmp_path)
+        for path in (
+            tmp_path / "runs",
+            tmp_path / "runs" / "a" / "..",
+            tmp_path / "runs" / "a" / "b",
+            tmp_path / "other" / "runs" / "a",
+        ):
+            assert not workspace.is_run_folder(path)
+
+
 class TestSessionDirsFromStored:
     def test_nothing_stored(self):
         assert SessionDirs.from_stored(None) is None
@@ -207,6 +222,26 @@ class TestSessionDirsFromStored:
             str(tmp_path / "a"), str(tmp_path / "b" / "runs" / "20260930_120000")
         )
         assert dirs == SessionDirs(Workspace(tmp_path / "a"))
+
+    def test_other_folder_inside_workspace_is_dropped(self, tmp_path):
+        workspace = Workspace(tmp_path)
+        for run_dir in (tmp_path / "memories", tmp_path / "runs" / "a" / "b"):
+            assert SessionDirs.from_stored(str(tmp_path), str(run_dir)) == (
+                SessionDirs(workspace)
+            )
+        run = tmp_path / "runs" / "a"
+        assert SessionDirs.from_stored(str(tmp_path), str(run)) == SessionDirs(
+            workspace, run
+        )
+
+    def test_runs_folder_linked_outside_workspace_is_dropped(self, tmp_path):
+        """Not supported: the run folder resolves outside the workspace."""
+        root, disk = tmp_path / "ws", tmp_path / "disk"
+        root.mkdir()
+        disk.mkdir()
+        (root / "runs").symlink_to(disk, target_is_directory=True)
+        dirs = SessionDirs.from_stored(str(root), str(root / "runs" / "a"))
+        assert dirs == SessionDirs(Workspace(root))
 
     def test_unreadable_value_reads_as_nothing_stored(self):
         assert SessionDirs.from_stored("/tmp/evil\x00x") is None
@@ -258,22 +293,6 @@ class TestProcessSessionDirs:
         monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
         monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run))
         assert process_session_dirs() == SessionDirs(Workspace(tmp_path), run)
-
-
-class TestReloadEnvDirs:
-    """An override merged into the environment after import (project .env)."""
-
-    def test_picks_up_a_late_memories_override(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
-        monkeypatch.setenv("EVOSCIENTIST_MEMORIES_DIR", str(tmp_path / "mem"))
-        paths.reload_env_dirs()
-        assert paths.MEMORIES_DIR == tmp_path / "mem"
-
-    def test_falls_back_to_global_memories(self, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)
-        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
-        paths.reload_env_dirs()
-        assert paths.MEMORIES_DIR == paths.GLOBAL_MEMORIES_DIR
 
 
 class TestResolveVirtualPath:
@@ -482,3 +501,75 @@ class TestSharedDirFromEnv:
         if xdg_set:
             expected["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
         assert env == expected
+
+    def test_dir_env_gives_children_memories_override_as_absolute(
+        self, tmp_path, monkeypatch
+    ):
+        """The server works in the server home, so a relative override would
+        name another folder there."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", Path("memories"))
+        env = paths.dir_env(
+            {"EVOSCIENTIST_MEMORIES_DIR": "memories", "EVOSCIENTIST_MEMORY_DIR": "old"}
+        )
+        assert env["EVOSCIENTIST_MEMORIES_DIR"] == str(tmp_path / "memories")
+        assert "EVOSCIENTIST_MEMORY_DIR" not in env
+
+    def test_launcher_workspace_unreadable_is_none(self, monkeypatch):
+        def unreadable(_path):
+            raise OSError("loop")
+
+        monkeypatch.setenv(paths.LAUNCHER_WORKSPACE_ENV, "/proj")
+        monkeypatch.setattr(paths, "Workspace", unreadable)
+        paths.launcher_workspace.cache_clear()
+        assert paths.launcher_workspace() is None
+
+
+def test_server_marker_read_once_and_removed(tmp_path):
+    """The agent's commands and MCP servers must not take themselves for the
+    server."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import os, EvoScientist.paths as p; "
+        "print(p.SERVER_PROCESS, 'EVOSCIENTIST_SERVER_PROCESS' in os.environ)"
+    )
+    env = {**os.environ, "HOME": str(tmp_path), "EVOSCIENTIST_SERVER_PROCESS": "1"}
+    env.pop("EVOSCIENTIST_DATA_DIR", None)
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert out.stdout.split() == ["True", "False"], out.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell quoting")
+@pytest.mark.parametrize(
+    ("path", "shown"),
+    [
+        ("/home/me/proj", "/home/me/proj"),
+        ("/home/me/My Projects/app", "'/home/me/My Projects/app'"),
+        ("/home/me/R&D", "'/home/me/R&D'"),
+        ("/home/me/it's", """'/home/me/it'"'"'s'"""),
+    ],
+)
+def test_command_arg_quotes_path_for_posix_shell(path, shown):
+    """A printed command the user copies must keep the path one argument."""
+    from EvoScientist.paths import command_arg
+
+    assert command_arg(path) == shown
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows quoting")
+@pytest.mark.parametrize(
+    ("path", "shown"),
+    [
+        (r"C:\Users\me\proj", r"C:\Users\me\proj"),
+        (r"C:\Users\me\My Projects", r'"C:\Users\me\My Projects"'),
+    ],
+)
+def test_command_arg_quotes_path_with_whitespace_on_windows(path, shown):
+    from EvoScientist.paths import command_arg
+
+    assert command_arg(path) == shown
