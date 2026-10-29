@@ -804,9 +804,11 @@ def _request_clean_stop(pid: int) -> bool:
     A helper process sends it (``console_break``): only a process attached to
     the server's console can, and attaching would cut this one off its own
     terminal. ``CREATE_NO_WINDOW`` keeps a windowless caller (the desktop app)
-    from flashing a console window. ``-I`` keeps a module in the caller's
-    working directory (a project's ``signal.py``) from shadowing the
-    standard library the helper imports.
+    from flashing a console window. The helper needs only the standard
+    library, so it runs by its file path under ``-I``: found in any install
+    (a user-site one included), and nothing in the caller's working directory
+    or on ``PYTHONPATH`` (a project's ``signal.py``) shadows the standard
+    library.
     """
     if os.name != "nt":
         return False
@@ -815,8 +817,7 @@ def _request_clean_stop(pid: int) -> bool:
             [
                 sys.executable,
                 "-I",
-                "-m",
-                "EvoScientist.langgraph_dev.console_break",
+                os.path.join(os.path.dirname(__file__), "console_break.py"),
                 str(pid),
             ],
             stdin=subprocess.DEVNULL,

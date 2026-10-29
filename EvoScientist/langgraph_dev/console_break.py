@@ -11,13 +11,13 @@ A lasting server has a hidden console of its own, and attaching to it means
 leaving the caller's console first, which would cut the CLI or TUI off its
 terminal; so a short helper process does it::
 
-    python -m EvoScientist.langgraph_dev.console_break <server pid>
+    python -I <path of this file> <server pid>
 
 The target must lead a process group (spawned with
 ``CREATE_NEW_PROCESS_GROUP``): for any other PID Windows sends the event to
 every process on that console, the caller and this helper included. The
 caller checks this before running the helper. Sent to a group leader, the
-event does not reach the helper: it is in a group of its own.
+event does not reach the helper: it stays in the caller's group.
 
 Exit codes: 0 sent, 2 bad arguments, 3 attach failed, 4 send failed, with
 the Windows error code on stderr; 1 when Python itself fails (an import

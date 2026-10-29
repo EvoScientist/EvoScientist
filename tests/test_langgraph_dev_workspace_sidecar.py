@@ -920,6 +920,7 @@ def test_request_clean_stop_runs_no_helper_on_posix(monkeypatch):
 
 
 def test_request_clean_stop_runs_the_helper_without_a_window(monkeypatch):
+    run = subprocess.run
     seen: dict = {}
 
     def _run(args, **kwargs):
@@ -929,15 +930,12 @@ def test_request_clean_stop_runs_the_helper_without_a_window(monkeypatch):
     monkeypatch.setattr(manager.os, "name", "nt")
     monkeypatch.setattr(manager.subprocess, "run", _run)
     assert manager._request_clean_stop(4242) is True
-    assert seen["args"] == [
-        sys.executable,
-        "-I",  # a project's signal.py in the cwd must not shadow the stdlib
-        "-m",
-        "EvoScientist.langgraph_dev.console_break",
-        "4242",
-    ]
+    helper = os.path.join(os.path.dirname(manager.__file__), "console_break.py")
+    assert seen["args"] == [sys.executable, "-I", helper, "4242"]
     assert seen["kwargs"]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
     assert seen["kwargs"]["timeout"] == manager._CLEAN_STOP_HELPER_TIMEOUT
+    usage = run([*seen["args"][:-1], "0"], capture_output=True, text=True)
+    assert "usage: console_break <pid>" in usage.stderr
 
 
 @pytest.mark.parametrize(
