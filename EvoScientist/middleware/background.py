@@ -23,6 +23,7 @@ signature to wire the injected runtime — PEP 563 stringized annotations break 
 detection (same reason as ``middleware/expert_async_subagent.py``).
 """
 
+import os
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, TypedDict
 
@@ -200,9 +201,8 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
     Args:
         process_id: The id returned by run_in_background.
     """
-    text = background.status(process_id, thread_id=_origin_thread_id(runtime))
-    record = background.state_record(process_id)
-    if record is not None:
+    text, record = background.check(process_id, thread_id=_origin_thread_id(runtime))
+    if record is not None or os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return _bg_command(text, [record], runtime)
 
     from ..EvoScientist import _ensure_config
@@ -211,9 +211,13 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
         configured_langgraph_dev_url,
         langgraph_dev_headers,
     )
-    from ..local_secret import HEADER, ensure_local_secret
+    from ..local_secret import HEADER, read_local_secret
 
     if not needs_langgraph_dev(_ensure_config(), backend="local"):
+        return text
+
+    secret = read_local_secret()
+    if secret is None:
         return text
 
     import httpx
@@ -225,13 +229,18 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
                 "process_id": process_id,
                 "thread_id": _origin_thread_id(runtime) or "",
             },
-            headers={**langgraph_dev_headers(), HEADER: ensure_local_secret()},
+            headers={**langgraph_dev_headers(), HEADER: secret},
             timeout=10.0,
+            trust_env=False,
         )
     except httpx.ConnectError:
         return text
+    if response.status_code in (403, 404):
+        return text
     response.raise_for_status()
     data = response.json()
+    if data["record"] is not None and data["record"].get("status") == "running":
+        data["text"] += "\nThis process is owned by the dev server; stop it from there."
     return _bg_command(data["text"], [data["record"]], runtime)
 
 
