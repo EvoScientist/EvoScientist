@@ -1,7 +1,6 @@
 """The local check_process tool can observe processes owned by the dev server."""
 
 import signal
-import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -216,6 +215,8 @@ def test_check_route_returns_null_record_for_missing_process():
 def held_process(tmp_path, monkeypatch):
     """Control the poll boundary without a watcher, child interpreter or sleep."""
     log_path = tmp_path / "process.log"
+    clock = [1_000.0]
+    monkeypatch.setattr(background, "time", SimpleNamespace(time=lambda: clock[0]))
 
     class HeldPopen:
         returncode = None
@@ -224,6 +225,7 @@ def held_process(tmp_path, monkeypatch):
             return self.returncode
 
         def exit(self, returncode):
+            clock[0] += 1.0
             self.returncode = returncode
             log_path.write_text("process-finished\n")
 
@@ -235,7 +237,7 @@ def held_process(tmp_path, monkeypatch):
         pid=12345,
         log_path=log_path,
         started_at="2026-10-25T00:00:00Z",
-        started_ts=time.time(),
+        started_ts=clock[0],
         origin_thread_id="thread-1",
     )
     monkeypatch.setattr(background, "_PROCESSES", {process.process_id: process})
