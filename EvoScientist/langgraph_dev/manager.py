@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -280,6 +281,7 @@ def _write_workspace_sidecar(
     agent_bash: str | object | None = _NOT_RECORDED,
     host: str | None = None,
     lasting: bool | None = None,
+    break_group: bool = False,
 ) -> None:
     """Record the pid of the langgraph dev we just started, and the project
     of the client that started it.
@@ -295,7 +297,9 @@ def _write_workspace_sidecar(
     client attaching from another environment reads the server's own.
     ``host`` is the interface the server binds, so a client can tell
     whether its probe reaches this server. ``lasting`` says
-    whether it outlives the process that started it.
+    whether it outlives the process that started it. ``break_group`` says
+    it leads its own process group on Windows, so a stop may send it
+    Ctrl+Break.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -319,6 +323,8 @@ def _write_workspace_sidecar(
             payload["host"] = host
         if lasting is not None:
             payload["lasting"] = lasting
+        if break_group:
+            payload[_BREAK_GROUP_KEY] = True
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
         if agent_python is not _NOT_RECORDED:
@@ -388,6 +394,21 @@ _FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 # Module-level handle to the langgraph dev subprocess we started, if any.
 # Stays None when we reused an existing process (managed by the user).
 _PROCESS: subprocess.Popen | None = None
+
+# Windows: servers this process spawned as the leader of their own process
+# group, the only PIDs a Ctrl+Break may be sent to (for any other PID Windows
+# sends it to every process on the console). The sidecar records the same for
+# a server another process started (``_BREAK_GROUP_KEY``).
+_BREAK_GROUP_PIDS: set[int] = set()
+_BREAK_GROUP_KEY = "ctrl_break_group"
+
+# How long a stop on Windows waits for the server to exit after Ctrl+Break
+# before it ends the process tree hard, and how long the helper that sends it
+# may take.
+CLEAN_STOP_TIMEOUT = 10.0
+_CLEAN_STOP_HELPER_TIMEOUT = 5.0
+# How long a stop waits after terminate() before it kills.
+_TERMINATE_TIMEOUT = 5.0
 
 # Byte offset into ``RUNTIME.log_file`` captured the instant before the current
 # subprocess was spawned. ``read_tunnel_url`` scans only bytes written after
@@ -769,6 +790,129 @@ def owned_by_its_starter() -> bool:
     )
 
 
+def _request_clean_stop(pid: int) -> bool:
+    """Windows: send Ctrl+Break to the server ``pid``, which must lead its own
+    process group. True when it was sent.
+
+    A helper process sends it (``console_break``): only a process attached to
+    the server's console can, and attaching would cut this one off its own
+    terminal. ``CREATE_NO_WINDOW`` keeps a windowless caller (the desktop app)
+    from flashing a console window.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "EvoScientist.langgraph_dev.console_break",
+                str(pid),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_CLEAN_STOP_HELPER_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            f"Could not ask langgraph dev (pid {pid}) to shut down cleanly "
+            f"({exc}); ending it hard, so a run it was running stays unfinished."
+        )
+        return False
+    if result.returncode != 0:
+        logger.warning(
+            f"Could not ask langgraph dev (pid {pid}) to shut down cleanly: the "
+            f"Ctrl+Break helper exited with {result.returncode} "
+            f"({result.stderr.strip()}); ending it hard, so a run it was "
+            "running stays unfinished."
+        )
+        return False
+    return True
+
+
+def _wait_exit(
+    process: psutil.Process, popen: subprocess.Popen | None, timeout: float
+) -> bool:
+    """Wait up to ``timeout`` for ``process`` to exit; through ``popen`` when we
+    spawned it, so the handle is reaped. True when it exited."""
+    try:
+        if popen is not None:
+            popen.wait(timeout=timeout)
+        else:
+            process.wait(timeout=timeout)
+    except (subprocess.TimeoutExpired, psutil.TimeoutExpired):
+        return False
+    return True
+
+
+def _end_server_tree(
+    pid: int,
+    popen: subprocess.Popen | None = None,
+    *,
+    break_group: bool = False,
+) -> None:
+    """End the langgraph dev ``pid`` and every process it started.
+
+    With ``break_group`` (Windows, ``pid`` known to lead its own process
+    group) it first asks the server to shut down cleanly with Ctrl+Break and
+    waits up to :data:`CLEAN_STOP_TIMEOUT`: only a clean shutdown puts a run
+    the server was running back in the queue for the next server. Then, and
+    everywhere else, terminate, wait :data:`_TERMINATE_TIMEOUT`, kill: SIGTERM
+    then SIGKILL on POSIX,
+    where SIGTERM already shuts the server down cleanly.
+
+    The children are listed first: once the server has exited they can no
+    longer be found from it. Lets ``psutil.AccessDenied`` on ``pid`` through.
+    """
+    try:
+        server = psutil.Process(pid)
+        children = server.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return
+    if break_group and _request_clean_stop(pid):
+        if _wait_exit(server, popen, CLEAN_STOP_TIMEOUT):
+            _kill_survivors(children)
+            return
+        logger.warning(
+            f"langgraph dev (pid {pid}) did not exit within "
+            f"{CLEAN_STOP_TIMEOUT:g} s of Ctrl+Break; ending it hard, so a run "
+            "it was running stays unfinished."
+        )
+    try:
+        for child in children:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        server.terminate()
+        if not _wait_exit(server, popen, _TERMINATE_TIMEOUT):
+            for child in {*children, *server.children(recursive=True)}:
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            server.kill()
+            # Reap our handle; the kill above was SIGKILL / TerminateProcess.
+            _wait_exit(server, popen, 2)
+    except psutil.NoSuchProcess:
+        pass
+    _kill_survivors(children)
+
+
+def _kill_survivors(children: list[psutil.Process]) -> None:
+    """The server exiting does not prove its children did: kill what is left."""
+    for child in children:
+        try:
+            if child.is_running():
+                child.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
 def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     """Explicitly stop the langgraph dev recorded in our PID file.
 
@@ -826,7 +970,8 @@ def stop_inflight_owned_server() -> int | None:
     with _LOCK:
         if _PROCESS is not None and _PROCESS.poll() is None:
             pid = _PROCESS.pid
-            stop_langgraph_dev()
+            # Still starting: no run to put back in the queue.
+            stop_langgraph_dev(clean=False)
             return pid
     return None
 
@@ -855,31 +1000,16 @@ def _stop_recorded_server_locked() -> int | None:
     if not any("langgraph" in arg for arg in cmdline):
         stop_langgraph_dev()  # pid recycled by a foreign process — files only
         return None
+    # A record from before the server led its own process group, or from
+    # another release, does not say so: no Ctrl+Break, the stop ends it hard.
+    sidecar = _read_workspace_sidecar()
+    break_group = (
+        sidecar is not None
+        and sidecar.get("pid") == owned_pid
+        and sidecar.get(_BREAK_GROUP_KEY) is True
+    )
     try:
-        children = proc.children(recursive=True)
-        for child in children:
-            try:
-                child.terminate()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except psutil.TimeoutExpired:
-            for child in children:
-                try:
-                    child.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            proc.kill()
-        # The parent exiting promptly doesn't prove its workers did — sweep
-        # the pre-kill snapshot for survivors.
-        for child in children:
-            try:
-                if child.is_running():
-                    child.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        _end_server_tree(owned_pid, break_group=break_group)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     stop_langgraph_dev()
@@ -1305,6 +1435,8 @@ def start_langgraph_dev(
     # Recorded before anything else can fail or be interrupted, so every
     # later failure path, and a caller's stop_langgraph_dev(), reaches it.
     _PROCESS = proc
+    if os.name == "nt":
+        _BREAK_GROUP_PIDS.add(proc.pid)
     if job is not None:
         job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
@@ -1321,6 +1453,7 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         host=host,
         lasting=lasting,
+        break_group=os.name == "nt",
     )
 
     # langgraph dev cold-starts in ~10-15s normally, so the budget is
@@ -1354,7 +1487,7 @@ def start_langgraph_dev(
             return proc
         time.sleep(0.5)
 
-    stop_langgraph_dev(proc)
+    stop_langgraph_dev(proc, clean=False)
     raise RuntimeError(
         f"langgraph dev did not become healthy within 60 seconds. Check {RUNTIME.log_file}"
     )
@@ -1394,11 +1527,17 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
     return None
 
 
-def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
+def stop_langgraph_dev(
+    proc: subprocess.Popen | None = None, *, clean: bool = True
+) -> None:
     """Gracefully stop a langgraph dev process.
 
-    Sends SIGTERM to the process group (langgraph dev spawns worker children),
-    falling back to SIGKILL after 5 seconds. Safe to call with ``None``.
+    Sends SIGTERM to the process tree (langgraph dev spawns worker children),
+    falling back to SIGKILL after 5 seconds. On Windows a server this process
+    spawned first gets Ctrl+Break (:func:`_end_server_tree`); ``clean=False``
+    skips that for a server that never became ready, which has no run to put
+    back in the queue and would only finish loading first. Safe to call with
+    ``None``.
 
     Acquires ``_LOCK`` (reentrant) before mutating ``_PROCESS`` so
     concurrent ``ensure_langgraph_dev`` callers (which also hold ``_LOCK``)
@@ -1415,40 +1554,14 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
             pass
         else:
             if proc.poll() is None:
-                # Cross-platform process-tree shutdown: walk children explicitly
-                # because POSIX process groups (``os.killpg``) don't exist on
-                # Windows. ``psutil.Process.children(recursive=True)`` works on
-                # both — we mirror the previous SIGTERM-then-SIGKILL escalation.
-                try:
-                    parent = psutil.Process(proc.pid)
-                    descendants = parent.children(recursive=True)
-                    for child in descendants:
-                        try:
-                            child.terminate()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    parent.terminate()
-                    proc.wait(timeout=5)
-                except psutil.NoSuchProcess:
-                    pass
-                except subprocess.TimeoutExpired:
-                    try:
-                        parent = psutil.Process(proc.pid)
-                        for child in parent.children(recursive=True):
-                            try:
-                                child.kill()
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-                        parent.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                    # Reap the Popen handle so we don't leave a zombie until
-                    # the CLI itself exits. Short timeout because parent.kill()
-                    # above already issued SIGKILL to the process tree.
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        pass
+                # Walk the tree explicitly: POSIX process groups
+                # (``os.killpg``) don't exist on Windows.
+                _end_server_tree(
+                    proc.pid,
+                    proc,
+                    break_group=clean and proc.pid in _BREAK_GROUP_PIDS,
+                )
+            _BREAK_GROUP_PIDS.discard(proc.pid)
 
             if proc is _PROCESS:
                 _PROCESS = None

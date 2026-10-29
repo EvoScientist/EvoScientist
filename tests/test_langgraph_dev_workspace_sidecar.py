@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import subprocess
+import sys
 import time
 
 import psutil
@@ -678,6 +681,316 @@ def test_stop_recorded_server_cleans_corrupt_pid_file(
     monkeypatch.setattr(manager, "_PROCESS", None)
     assert manager.stop_recorded_server() is None
     assert not pid_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Windows: Ctrl+Break before the hard kill, so a cut run is run again
+# ---------------------------------------------------------------------------
+
+
+def _sleeper(*extra: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", *extra]
+    )
+
+
+@pytest.fixture
+def stop_steps(monkeypatch):
+    """Records, in order, the clean-stop requests and ``terminate()`` calls.
+    The clean stop is faked by the test (``clean_stop``); terminate is real."""
+    steps: list[tuple] = []
+    real_terminate = psutil.Process.terminate
+
+    def _terminate(self):
+        steps.append(("terminate", self.pid))
+        return real_terminate(self)
+
+    monkeypatch.setattr(psutil.Process, "terminate", _terminate)
+    return steps
+
+
+def _clean_stop(monkeypatch, steps, *, sent: bool = True, then=None):
+    def _request(pid):
+        steps.append(("clean", pid))
+        if then is not None:
+            then()
+        return sent
+
+    monkeypatch.setattr(manager, "_request_clean_stop", _request)
+
+
+def test_clean_stop_that_exits_in_time_is_never_terminated(monkeypatch, stop_steps):
+    proc = _sleeper()
+    try:
+        # The server shuts down on the Ctrl+Break.
+        _clean_stop(monkeypatch, stop_steps, then=proc.kill)
+        manager._end_server_tree(proc.pid, proc, break_group=True)
+        assert stop_steps == [("clean", proc.pid)]
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_clean_stop_that_does_not_exit_ends_hard_with_a_warning(
+    monkeypatch, stop_steps, caplog
+):
+    proc = _sleeper()
+    try:
+        monkeypatch.setattr(manager, "CLEAN_STOP_TIMEOUT", 0.2)
+        _clean_stop(monkeypatch, stop_steps)  # sent, but ignored
+        with caplog.at_level("WARNING", logger=manager.__name__):
+            manager._end_server_tree(proc.pid, proc, break_group=True)
+        assert stop_steps == [("clean", proc.pid), ("terminate", proc.pid)]
+        assert proc.poll() is not None
+        assert "did not exit within 0.2 s of Ctrl+Break" in caplog.text
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_failed_clean_stop_ends_hard_at_once(monkeypatch, stop_steps):
+    proc = _sleeper()
+    try:
+        monkeypatch.setattr(manager, "CLEAN_STOP_TIMEOUT", 30)
+        _clean_stop(monkeypatch, stop_steps, sent=False)
+        started = time.monotonic()
+        manager._end_server_tree(proc.pid, proc, break_group=True)
+        assert time.monotonic() - started < 10, "waited for a Ctrl+Break never sent"
+        assert stop_steps == [("clean", proc.pid), ("terminate", proc.pid)]
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_no_clean_stop_without_a_known_process_group(monkeypatch, stop_steps):
+    proc = _sleeper()
+    try:
+        _clean_stop(monkeypatch, stop_steps)
+        manager._end_server_tree(proc.pid, proc)
+        assert stop_steps == [("terminate", proc.pid)]
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_clean_stop_kills_children_left_after_the_server_exits(monkeypatch, stop_steps):
+    """The children are listed before the Ctrl+Break: after the server exits
+    they can no longer be found from it."""
+    code = (
+        "import subprocess, sys, time\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print(c.pid, flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+    grandchild = None
+    try:
+        grandchild = psutil.Process(int(proc.stdout.readline()))
+        _clean_stop(monkeypatch, stop_steps, then=proc.kill)  # only the server
+        manager._end_server_tree(proc.pid, proc, break_group=True)
+        _, alive = psutil.wait_procs([grandchild], timeout=5)
+        assert alive == []
+    finally:
+        for p in (proc, grandchild):
+            try:
+                if p is not None:
+                    p.kill()
+            except psutil.NoSuchProcess:
+                pass
+        proc.wait()
+        proc.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM can be ignored on POSIX only")
+def test_server_that_ignores_terminate_is_killed(monkeypatch):
+    """The escalation both stop paths had before sharing one helper."""
+    code = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+    try:
+        assert proc.stdout.readline().strip() == b"ready"
+        monkeypatch.setattr(manager, "_TERMINATE_TIMEOUT", 0.2)
+        manager._end_server_tree(proc.pid, proc)
+        assert proc.returncode == -9
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX stop")
+def test_request_clean_stop_runs_no_helper_on_posix(monkeypatch):
+    monkeypatch.setattr(
+        manager.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("the Ctrl+Break helper ran on POSIX"),
+    )
+    assert manager._request_clean_stop(4242) is False
+
+
+def test_request_clean_stop_runs_the_helper_without_a_window(monkeypatch):
+    seen: dict = {}
+
+    def _run(args, **kwargs):
+        seen["args"], seen["kwargs"] = args, kwargs
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(manager.os, "name", "nt")
+    monkeypatch.setattr(manager.subprocess, "run", _run)
+    assert manager._request_clean_stop(4242) is True
+    assert seen["args"] == [
+        sys.executable,
+        "-m",
+        "EvoScientist.langgraph_dev.console_break",
+        "4242",
+    ]
+    assert seen["kwargs"]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    assert seen["kwargs"]["timeout"] == manager._CLEAN_STOP_HELPER_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("outcome", "logged"),
+    [
+        (
+            subprocess.CompletedProcess(
+                [], 3, "", "AttachConsole(4242) failed: error 6\n"
+            ),
+            "exited with 3 (AttachConsole(4242) failed: error 6)",
+        ),
+        (OSError("no python"), "(no python)"),
+        (subprocess.TimeoutExpired("python", 5), "timed out"),
+    ],
+)
+def test_request_clean_stop_warns_when_the_helper_fails(
+    monkeypatch, caplog, outcome, logged
+):
+    def _run(*_a, **_k):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(manager.os, "name", "nt")
+    monkeypatch.setattr(manager.subprocess, "run", _run)
+    with caplog.at_level("WARNING", logger=manager.__name__):
+        assert manager._request_clean_stop(4242) is False
+    assert logged in caplog.text
+    assert "ending it hard" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("spawned_here", "clean", "expected"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_stop_langgraph_dev_sends_ctrl_break_only_to_its_own_group(
+    monkeypatch, runtime_paths, spawned_here, clean, expected
+):
+    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    proc = _sleeper()
+    seen: list = []
+
+    def _end(pid, popen=None, *, break_group=False):
+        seen.append(break_group)
+        popen.kill()
+        popen.wait()
+
+    monkeypatch.setattr(manager, "_end_server_tree", _end)
+    if spawned_here:
+        monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {proc.pid})
+    try:
+        manager.stop_langgraph_dev(proc, clean=clean)
+        assert seen == [expected]
+        assert proc.pid not in manager._BREAK_GROUP_PIDS
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_stop_inflight_owned_server_skips_the_clean_stop(
+    monkeypatch, runtime_paths, stop_steps
+):
+    """A server still starting has no run to put back in the queue."""
+    owned = _sleeper()
+    try:
+        monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+        monkeypatch.setattr(manager, "_PROCESS", owned)
+        monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {owned.pid})
+        _clean_stop(monkeypatch, stop_steps)
+        assert manager.stop_inflight_owned_server() == owned.pid
+        assert ("clean", owned.pid) not in stop_steps
+        assert owned.poll() is not None
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait()
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"ctrl_break_group": True}, True),
+        ({}, False),  # a record from before this release
+        ({"ctrl_break_group": True, "pid": 1}, False),  # names another server
+    ],
+)
+def test_stop_recorded_server_trusts_the_record_for_the_process_group(
+    tmp_path, monkeypatch, runtime_paths, record, expected
+):
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        pid_file, sidecar = tmp_path / "pid.txt", tmp_path / "ws.json"
+        pid_file.write_text(str(victim.pid))
+        sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid, **record}))
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+            ),
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)
+        seen: list = []
+
+        def _end(pid, popen=None, *, break_group=False):
+            seen.append((pid, break_group))
+            victim.kill()
+            victim.wait()
+
+        monkeypatch.setattr(manager, "_end_server_tree", _end)
+        assert manager.stop_recorded_server() == victim.pid
+        assert seen == [(victim.pid, expected)]
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait()
+
+
+def test_sidecar_records_the_process_group_only_when_asked(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    assert "ctrl_break_group" not in manager._read_workspace_sidecar()
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, break_group=True)
+    assert manager._read_workspace_sidecar()["ctrl_break_group"] is True
 
 
 def test_server_config_fingerprint_tracks_dangerous_mode():
