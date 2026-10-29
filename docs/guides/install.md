@@ -32,7 +32,7 @@ When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`
 
 | bash | PowerShell | What it does |
 |---|---|---|
-| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. Packages that `npx` fetches (MCP servers, the `find-skills` skill) still come from `registry.npmjs.org`; add `registry=https://registry.npmmirror.com/` to `~/.npmrc` to send them to the mirror, which the agent's shell and `npx` MCP servers both read. |
+| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. With `mirror: cn`, packages that `npx` fetches (MCP servers, the `find-skills` skill in the agent's shell) come from npmmirror too, unless you set a registry other than npm's default yourself (`npm_config_registry`, or `registry=` in `~/.npmrc`); to keep `https://registry.npmjs.org/`, set `npm_config_registry` to it. |
 | `--version <ver>` | `-Version <ver>` | Install this release instead of the newest one. 0.3.5 and older cannot be installed this way: they have no `constraints.txt`. |
 | `--no-modify-path` | `-NoModifyPath` | Do not put uv's tool bin directory on PATH. |
 | `--no-setup` | `-NoSetup` | Install the package and stop before `EvoSci setup`. |
@@ -80,28 +80,41 @@ Running the command again repairs the install or moves it to the newest release
 tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
 A package that went into the environment another way (on Windows, or with an
 older release, when you added a channel or an MCP server) is not in the
-receipt and is removed; add it again afterwards. Close EvoScientist first; on Windows the script stops and names the EvoScientist
+receipt and is removed; add it again afterwards. Close EvoScientist and stop
+the background agent service (`EvoSci service stop`) first: it keeps running
+after your sessions end. On Windows the script stops and names the EvoScientist
 processes that still run, because a running process keeps the files locked.
 
-A dropped connection while Node.js, Git for Windows or the WebUI downloads fails
-that stage: `EvoSci setup` finishes the other stages, and the script then ends
-with an error although EvoScientist itself is installed. Run `EvoSci setup` or
-the command again; that download starts from the beginning.
+A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
+server error, no data for two minutes) is retried up to three times; a retry
+asks only for the part still missing, when the server allows it. One that
+cannot connect at all (no route, a proxy that cannot reach the server, a
+certificate error) fails at once, within 15 seconds after the server's name
+is looked up. When the retries run out too, the stage fails: `EvoSci setup`
+finishes the other stages, and the script then ends with an error although
+EvoScientist itself is installed. Run `EvoSci setup` or the command again;
+that download starts from the beginning.
 
-When `EvoSci setup` installed its own Node.js because none was found, the
-agent's shell keeps finding that one first, also after you install a Node.js
-of your own later (for example with nvm). Run `EvoSci setup` again from a
-terminal where your Node.js 20.9 or newer is on PATH, and it switches to yours.
+When `EvoSci setup` installed its own Node.js because none was found, and you
+later install a Node.js 20.9 or newer of your own (for example with nvm),
+EvoScientist moves to yours when it starts from a terminal where yours is on
+PATH: the agent's shell at once and the WebUI when it starts. MCP servers move
+from the next start after the WebUI started or `EvoSci setup` ran from such a
+terminal. EvoScientist's own Node.js stays in `~/.evoscientist/tools` but is
+no longer used.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
-same packages, or by running the command again. `EvoSci update` waits until
-other EvoScientist sessions, servers and MCP servers started from the install
-have closed, and names them; Ctrl+C cancels and changes nothing.
+same packages, or by running the command again. `EvoSci update` asks before it
+stops the background agent service, starts it again after the update, and
+waits until other EvoScientist sessions and MCP servers started from the
+install have closed, naming them; Ctrl+C cancels and changes nothing.
 
 ## Uninstalling
 
-There is no `--uninstall` option. On macOS and Linux:
+There is no `--uninstall` option. First stop the background agent service,
+which keeps running after your sessions end: `EvoSci service stop`. Then, on
+macOS and Linux:
 
 1. Remove the package with the uv the script installed, which
    `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or
@@ -173,11 +186,15 @@ it pointed out to them:
 | `SSL_CERT_FILE` | Python, including EvoScientist's own downloads (`EvoSci setup` on macOS and Linux) |
 | `UV_SYSTEM_CERTS=1` | uv calls that EvoScientist makes later, such as the MCP installer's |
 | `PIP_CERT` | pip |
-| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) |
-| `npm_config_cafile` | npm and `npx` in the agent's shell |
+| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) on a Node.js of your own |
+| `npm_config_cafile` | npm and `npx`, in the agent's shell and for MCP servers |
 
 Point the file variables at a PEM file that contains your company's
-certificate. MCP servers started with `npx` do not see `npm_config_cafile`:
-put `cafile=` (and `registry`, `proxy` or `strict-ssl` if you need them) in
-`~/.npmrc` or in the server's `env` in `mcp.yaml`, or rely on
-`NODE_EXTRA_CA_CERTS`, which reaches them.
+certificate. The Node.js that `EvoSci setup` installs already trusts the
+operating system's certificates (it runs with `NODE_USE_SYSTEM_CA=1` unless you
+set that variable yourself), so it needs `NODE_EXTRA_CA_CERTS` only for a
+certificate that is not in the system store. MCP servers started with `npx` get
+your `npm_config_cafile`, `npm_config_ca`, `npm_config_strict_ssl`,
+`npm_config_registry`, `npm_config_proxy`, `npm_config_https_proxy` and
+`npm_config_noproxy`; put other npm settings in `~/.npmrc` or in the server's
+`env` in `mcp.yaml`.

@@ -18,6 +18,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from ..ccproxy_manager import uses_oauth
 from ..commands.base import (
     ChannelRuntime,
     Command,
@@ -33,8 +34,8 @@ from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_contex
 from ..paths import (
     SessionDirs,
     Workspace,
+    command_arg,
     ensure_dirs,
-    reload_env_dirs,
     start_workspace_path,
 )
 from ..runtime import AsyncRuntime
@@ -42,6 +43,7 @@ from ..stream.console import console
 from . import (
     async_notifier,
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
+    service_cmd,  # noqa: F401 — registers `EvoSci service` / `EvoSci ccproxy`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
@@ -298,11 +300,79 @@ def onboard(
             strict=non_interactive,
         )
 
-    _run_onboard_cli(
+    saved = _run_onboard_cli(
         skip_validation=skip_validation,
         prompter=prompter,
         runtime=_get_cli_async_runtime(ctx),
     )
+    if saved is True and prompter is None and sys.stdin.isatty():
+        _offer_server_start()
+
+
+def _offer_server_start() -> None:
+    """After onboarding: offer to start the background agent service from
+    ``default_workdir``. A running one keeps the settings it started with;
+    say how to apply the new ones."""
+    import questionary
+
+    from ..config import get_effective_config
+    from ..config.onboard.style import CONFIRM_STYLE, QMARK
+    from ..langgraph_dev import manager
+    from .server_cmd import start_background
+
+    config = get_effective_config()
+    port, host = manager.configured_address(config)
+    if manager.is_langgraph_dev_running(port=port, host=host):
+        sidecar = manager._read_workspace_sidecar()
+        if manager.is_lasting(sidecar):
+            # From the project it was started from, which the WebUI opens.
+            recorded = sidecar.get("workspace")
+            workspace = escape(command_arg(recorded) if recorded else "<project>")
+            console.print(
+                "[dim]The background agent service runs with your previous "
+                "settings; to apply the new ones, restart it: [bold]EvoSci "
+                "service stop[/bold], then [bold]EvoSci service start "
+                f"--workdir {workspace}[/bold] (this ends its running "
+                "background work).[/dim]"
+            )
+        else:
+            console.print(
+                "[dim]A server that is not the background service runs on the "
+                "port (an EvoSci deploy, the desktop app or an older release); "
+                "the new settings apply once it restarts.[/dim]"
+            )
+        return
+    if not config.default_workdir:
+        # Started from the folder onboarding ran in (often the home folder),
+        # it would pin the WebUI and the desktop app to that folder's project;
+        # the first session in a project starts it instead.
+        console.print(
+            "[dim]The background agent service starts with your next EvoSci "
+            "session in a project, and keeps running for every session until "
+            "[bold]EvoSci service stop[/bold].[/dim]"
+        )
+        return
+    project = start_workspace_path(None, config.default_workdir)
+    answer = questionary.confirm(
+        f"Start the background agent service for {project} now? It keeps "
+        "running for every EvoSci session until `EvoSci service stop`.",
+        default=True,
+        style=CONFIRM_STYLE,
+        qmark=QMARK,
+    ).ask()
+    if not answer:
+        return
+    try:
+        start_background(None, with_ccproxy=True)
+    except typer.Exit:
+        console.print("[dim]It starts with your next EvoSci session.[/dim]")
+    except Exception as exc:
+        # The configuration is saved; the service starts with the next session.
+        console.print(
+            f"[yellow]Could not start the background agent service "
+            f"({escape(str(exc))}); it starts with your next EvoSci "
+            "session.[/yellow]"
+        )
 
 
 # =============================================================================
@@ -484,9 +554,10 @@ _CONFIGURE_SECTIONS = {
 }
 
 
-def _run_onboard_cli(**kwargs: Any) -> None:
+def _run_onboard_cli(**kwargs: Any) -> bool:
     """Invoke the wizard, presenting non-interactive errors as a clean
-    message + exit code 1 instead of a raw Python traceback.
+    message + exit code 1 instead of a raw Python traceback. Returns whether
+    the configuration was saved.
 
     The wizard raises ``RuntimeError`` for *expected* non-interactive
     failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
@@ -499,7 +570,7 @@ def _run_onboard_cli(**kwargs: Any) -> None:
     from ..config import run_onboard
 
     try:
-        run_onboard(**kwargs)
+        return run_onboard(**kwargs)
     except RuntimeError as exc:
         console.print(f"[red]✗ {escape(str(exc))}[/red]")
         raise typer.Exit(code=1) from exc
@@ -722,80 +793,90 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _prepare_workdir_or_exit(path: str | os.PathLike[str]) -> Path:
+    """:func:`~EvoScientist.langgraph_dev.registration.prepare_workdir`, or
+    ``typer.Exit(1)`` with its message for a known project's missing folder."""
+    from ..langgraph_dev.registration import ServerUnusableError, prepare_workdir
+
+    try:
+        return prepare_workdir(path)
+    except ServerUnusableError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+
 def _ensure_async_subagent_server(
     config: Any, *, dirs: SessionDirs, backend: str | None = None
 ) -> None:
     """Start the langgraph dev subprocess for background agent work.
 
     Shared by both the interactive entry and the serve entry so the
-    user-visible status message and workspace-mismatch handling stay in one
-    place.
+    user-visible status message and the refusal handling stay in one place.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded to
     ``ensure_langgraph_dev`` so whether a server is needed follows the
     surface's choice rather than re-reading the global flag. ``None`` keeps the
     global-read behavior.
 
-    Raises ``typer.Exit(1)`` (after surfacing a red error) when an
-    externally-managed langgraph dev is already running for a different
-    workspace — e.g., ``EvoSci deploy --workdir /A`` is up and the user
-    is starting ``EvoSci`` / ``EvoSci serve`` in /B. Continuing in that
-    state would route async sub-agent calls to a process pinned to /A
-    while the main agent runs in /B.
+    Raises ``typer.Exit(1)`` (after surfacing a red error) when the server
+    cannot be used for *dirs* (``ServerUnusableError``): the server is from
+    an older EvoScientist, or the project's folder is gone.
     """
-    from ..langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        WorkspaceMismatchError,
-        _is_loopback_host,
-        ensure_langgraph_dev,
-        is_async_subagents_available,
-    )
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+    from ..langgraph_dev.registration import ServerUnusableError
 
     try:
         with console.status(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            ensure_langgraph_dev(
+            served = ensure_langgraph_dev(
                 config,
                 workspace_dir=dirs.workspace.root,
-                run_dir=dirs.run_dir,
                 backend=backend,
             )
-            _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
-            _adopt_stale_scheduled_tasks(workspace=dirs.workspace)
-    except WorkspaceMismatchError as exc:
-        console.print(f"[red]{exc}[/red]")
+    except ServerUnusableError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
         _remove_unused_run_dir(dirs.run_dir)
         raise typer.Exit(1) from exc
 
     from ..langgraph_dev import manager as _lg_manager
 
-    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+    if not served:
         console.print(
-            "[yellow]⚠ Configuration or version changed since the background "
-            "agent server was launched — it still runs the old settings or "
-            "version. Apply them with [bold]EvoSci server stop[/bold], then "
-            "restart EvoSci.[/yellow]"
+            f"[yellow]{escape(_lg_manager.SERVER_UNAVAILABLE_MESSAGE)}[/yellow]"
         )
+    _print_server_notices()
+
+
+def print_exposure_warnings(exposure: Any, *, to: Any = None) -> None:
+    """Print the warnings for a server with *exposure* (a
+    :class:`~EvoScientist.langgraph_dev.registration.ServerExposure`, or
+    ``None``) on the console *to* (this module's by default), as every
+    terminal surface shows them."""
+    from ..langgraph_dev.registration import exposure_warnings
+
+    for label, message in exposure_warnings(exposure):
+        (to or console).print(
+            f"[bold white on red] ⚠ {label} [/bold white on red] "
+            f"[bold red]{escape(message)}[/bold red]"
+        )
+
+
+def _print_server_notices() -> None:
+    """What the user should know about the server a start found or started:
+    drift since its launch, and a public bind or tunnel."""
+    from ..langgraph_dev import manager as _lg_manager
+
+    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.CONFIG_DRIFT_MESSAGE)}[/yellow]")
     if _lg_manager.AGENT_SHELL_DRIFT is not None:
         console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_SHELL_DRIFT)}[/yellow]")
 
-    # The backend is shared by every UI mode, so the exposure warning lives
-    # here, not just in deploy/WebUI. Gated on the server being up: warning
-    # about a bind that never happened would be worse than saying nothing.
-    bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
-    if (
-        bind_host
-        and not _is_loopback_host(bind_host)
-        and is_async_subagents_available()
-    ):
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]Agent server listening on {bind_host} — no auth, and "
-            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
-            f"networks.[/bold red]"
-        )
+    # The server serves every project, so a public bind or tunnel, whichever
+    # session started it, exposes this one too; the server said so when it
+    # registered the project.
+    print_exposure_warnings(_lg_manager.SERVER_EXPOSURE)
 
 
 def warn_server_backend_hitl_caveats(
@@ -822,49 +903,39 @@ def warn_server_backend_hitl_caveats(
     )
 
 
-def _reconcile_autoskill_schedule(config: Any, *, workspace: Workspace) -> None:
-    """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron.
+def dangerous_flag_note(backend: str | None, *, webui: bool = False) -> str | None:
+    """Where this session's ``--dangerous`` applies, for a session whose turns
+    run on *backend*, or for the WebUI's: the background server serves later
+    sessions too, so it does not get the flag. ``None`` without the flag."""
+    from ..langgraph_dev.manager import _set_by_flag
 
-    The cron belongs to the workspace, whichever run folder the session
-    works in. Only for a server known to serve *workspace*, as for
-    ``_adopt_stale_scheduled_tasks``: the reconcile replaces crons it counts as
-    the workspace's, and in another workspace's store those are not.
-    """
-    try:
-        from ..langgraph_dev import manager
-        from ..memory.autoskills.schedule import reconcile_autoskill_schedule
-
-        if manager.SERVED_WORKSPACE != workspace.root:
-            return
-        reconcile_autoskill_schedule(config, workspace_dir=workspace.root)
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
+    if not _set_by_flag("EVOSCIENTIST_DANGEROUS_MODE"):
+        return None
+    if webui:
+        return (
+            "--dangerous has no effect here: the WebUI's turns run in the "
+            "background server, which follows dangerous_mode in config.yaml."
         )
-
-
-def _adopt_stale_scheduled_tasks(*, workspace: Workspace) -> None:
-    """Best-effort re-tagging of the served store's untagged and moved tasks.
-
-    Their runs then work in *workspace* and pass the server's folder check.
-    Only for a server known to serve *workspace*: a reused server without a
-    workspace record, or one another session has since moved, may hold another
-    workspace's store, whose crons this must not take over.
-    """
-    try:
-        from ..cron import schedule as crons
-        from ..langgraph_dev import manager
-
-        if manager.SERVED_WORKSPACE != workspace.root:
-            return
-        if crons.is_available():
-            crons.adopt_stale_tasks(
-                crons._client(), workspace, run_kind=crons.SCHEDULED_RUN_KIND
-            )
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "Failed to re-tag stale scheduled tasks", exc_info=True
+    if backend == "langgraph_server":
+        # The flag implies auto_approve, which this session's runs carry.
+        return (
+            "--dangerous does not reach the background server, which runs this "
+            "session's turns and keeps its own dangerous_mode. There the flag "
+            "only turns approvals off, as --auto-approve does, so while that "
+            "server's dangerous_mode is off a command EvoSci flags as dangerous "
+            "is refused instead of asked about."
         )
+    return (
+        "--dangerous applies to this session's own agent. The background "
+        "server's agents (async sub-agents, memory workers, the WebUI) follow "
+        "dangerous_mode in config.yaml."
+    )
+
+
+def _print_dangerous_flag_note(backend: str | None, *, webui: bool = False) -> None:
+    note = dangerous_flag_note(backend, webui=webui)
+    if note is not None:
+        console.print(f"[yellow]⚠ {escape(note)}[/yellow]")
 
 
 def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
@@ -887,19 +958,16 @@ def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
     )
 
 
-# How long a CLI waits for EvoMemory work before it exits or moves the server.
+# How long a one-shot CLI run waits for EvoMemory work before it exits.
 _MEMORY_WAIT_SECONDS = 120.0
 _MEMORY_WAIT_POLL_SECONDS = 0.5
 _MEMORY_WAIT_OUTPUT_GRACE_SECONDS = 3.0
 
 
-def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
-    """Wait, bounded, for queued EvoMemory work to finish.
-
-    One-shot runs wait so post-run memory persists before atexit cleanup;
-    moving the server waits because a move stops runs in flight.
-    ``timeout_action`` says what happens when the wait runs out. Returns at
-    once when nothing runs.
+def _wait_for_memory_workers() -> None:
+    """Wait, bounded, for queued EvoMemory work to finish, so post-run memory
+    persists before a one-shot run's atexit cleanup. Returns at once when
+    nothing runs.
     """
     try:
         from ..memory.worker_activity import (
@@ -928,9 +996,7 @@ def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
             announced = True
 
     def print_timeout(phase: MemoryActivityPhase) -> None:
-        console.print(
-            f"[dim]EvoMemory {phase} is still running; {timeout_action}.[/dim]"
-        )
+        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
 
     wait_for_memory_pipeline_idle(
         timeout_seconds=_MEMORY_WAIT_SECONDS,
@@ -943,22 +1009,24 @@ def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
 
 
 _RESUME_SYNC_STATUS = (
-    "[dim]Syncing background agent server to resumed workspace...[/dim]"
+    "[dim]Registering the resumed project with the background agent server...[/dim]"
 )
 
 
-async def _sync_background_agent_server_workspace(
+async def _register_project(
     config: Any,
     *,
     dirs: SessionDirs,
     backend: str | None = None,
-    status_message: str = _RESUME_SYNC_STATUS,
-) -> None:
-    """Sync langgraph dev to a resumed workspace for background agent work.
+) -> bool:
+    """Register *dirs*' project with the background agent server, starting
+    the server when it is not running. False when the server needed for
+    background work does not serve the project (it did not start, or the
+    registration failed).
 
     ``ensure_langgraph_dev`` is intentionally always called: EvoMemory
     background workers require the server even when async subagents are disabled.
-    WorkspaceMismatchError is left for callers to handle according to their UI
+    ServerUnusableError is left for callers to handle according to their UI
     flow.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded so
@@ -967,79 +1035,62 @@ async def _sync_background_agent_server_workspace(
     """
     import asyncio
 
-    from ..langgraph_dev.manager import (
-        ensure_langgraph_dev,
-        owned_server_pinned_elsewhere,
-    )
+    from ..langgraph_dev.manager import ensure_langgraph_dev
 
-    with console.status(status_message, spinner="dots"):
-        # Only a move stops runs in flight; a sync to the served folders is a
-        # health check and must not wait on memory work.
-        if await asyncio.to_thread(
-            owned_server_pinned_elsewhere, dirs.workspace.root, dirs.run_dir
-        ):
-            await asyncio.to_thread(
-                _wait_for_memory_workers, timeout_action="moving the server anyway"
-            )
-        await asyncio.to_thread(
+    with console.status(_RESUME_SYNC_STATUS, spinner="dots"):
+        served = await asyncio.to_thread(
             ensure_langgraph_dev,
             config,
             workspace_dir=dirs.workspace.root,
-            run_dir=dirs.run_dir,
             backend=backend,
         )
-        await asyncio.to_thread(
-            _reconcile_autoskill_schedule,
-            config,
-            workspace=dirs.workspace,
-        )
-        await asyncio.to_thread(_adopt_stale_scheduled_tasks, workspace=dirs.workspace)
+    return served
 
 
-async def _move_server_or_keep_session(
+async def _register_or_keep_session(
     config: Any,
     *,
     target: SessionDirs,
     current: SessionDirs | None,
     backend: str | None = None,
-    new_run_dir: bool = False,
-    status_message: str = _RESUME_SYNC_STATUS,
 ) -> bool:
-    """Move the background agent server to *target* before a session goes there.
+    """Register *target*'s project with the server before a session goes there.
 
-    Until the server serves several workspaces it is pinned to one workspace
-    and run folder, so background workers and deployed sub-agents would
-    otherwise keep working in *current*, the folders the server was last
-    synced to (``None`` when it was not started yet). Nothing happens when
-    the two are the same.
+    The server serves every registered project, so background workers and
+    deployed sub-agents work in *target* once its project is registered.
+    Nothing happens when *target* is in *current*'s project (``None`` when the
+    server was not started yet), whichever run folder it works in.
 
-    Raises ``WorkspaceMismatchError`` when another EvoSci session holds the
-    server for other folders: the caller keeps its session as it is, and the
-    run folder made for *target* (``new_run_dir``) is removed. Returns False
-    when the move failed otherwise: the session can go to *target*, but
-    async sub-agents and EvoMemory workers may be unavailable.
+    Raises ``ServerUnusableError`` when the server cannot be used for
+    *target*'s project (a server from an older EvoScientist, or a known
+    project whose folder is gone): the caller keeps its session as it is.
+    Returns False when the registration failed otherwise: the session can go
+    to *target*, but async sub-agents and EvoMemory workers may be
+    unavailable. An ``OSError`` creating *target*'s folder is raised: the
+    session cannot work there.
     """
-    if target == current:
+    if current is not None and target.workspace == current.workspace:
         return True
 
-    from ..langgraph_dev.manager import WorkspaceMismatchError
+    import asyncio
 
+    from ..langgraph_dev.registration import ServerUnusableError, prepare_workdir
+
+    # Whatever the backend: a known project whose folder is gone is refused
+    # rather than recreated empty.
+    await asyncio.to_thread(prepare_workdir, target.workspace.root)
     try:
-        await _sync_background_agent_server_workspace(
-            config, dirs=target, backend=backend, status_message=status_message
-        )
-    except WorkspaceMismatchError:
-        if new_run_dir:
-            _remove_unused_run_dir(target.run_dir)
+        return await _register_project(config, dirs=target, backend=backend)
+    except ServerUnusableError:
         raise
     except Exception:
         logging.getLogger(__name__).warning(
-            "Failed to sync background agent server to %s; continuing in degraded mode",
-            target.work_dir,
+            "Failed to register %s with the background agent server; "
+            "continuing in degraded mode",
+            target.workspace.root,
             exc_info=True,
         )
         return False
-    return True
 
 
 async def _restore_thread_dirs(
@@ -1051,16 +1102,19 @@ async def _restore_thread_dirs(
     config: Any,
     backend: str | None = None,
 ) -> SessionDirs:
-    """Return the folders to resume *thread_id* in, with the server moved there.
+    """Return the folders to resume *thread_id* in, with their project
+    registered with the server.
 
     A thread resumes in the workspace and run folder it was stored with,
     wherever the CLI was started; a thread stored without folders resumes in
-    *dirs*, the folders the session started in. *served* are the folders the
-    server was started for, ``None`` when it was not started yet. A run
+    *dirs*, the folders the session started in. *served* are the folders of
+    the project the server already serves for this session, ``None`` when it
+    was not started yet. A run
     folder made for *dirs* that the thread does not use is removed. Raises
-    ``typer.Exit(1)`` when another session holds the server.
+    ``typer.Exit(1)`` when the server cannot be used there, or the thread's
+    folder cannot be created.
     """
-    from ..langgraph_dev.manager import WorkspaceMismatchError
+    from ..langgraph_dev.registration import ServerUnusableError
 
     metadata = await graph_gateway.get_thread_metadata(thread_id) or {}
     restored = (
@@ -1068,17 +1122,17 @@ async def _restore_thread_dirs(
         or dirs
     )
     try:
-        synced = await _move_server_or_keep_session(
+        synced = await _register_or_keep_session(
             config, target=restored, current=served, backend=backend
         )
-    except WorkspaceMismatchError as exc:
+    except (ServerUnusableError, OSError) as exc:
         _remove_unused_run_dir(dirs.run_dir)
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
     if not synced:
         console.print(
-            "[yellow]Background agent server sync failed; async subagents and "
-            "EvoMemory workers may be unavailable.[/yellow]"
+            "[yellow]The background agent server is unavailable for this project; "
+            "async subagents and EvoMemory workers may be unavailable.[/yellow]"
         )
     if restored != dirs:
         _remove_unused_run_dir(dirs.run_dir)
@@ -1494,11 +1548,10 @@ async def _apply_serve_resume_state(
 ) -> None:
     """Adopt a resumed thread/workspace into serve-mode runtime state.
 
-    Workspace-bound resources are rebuilt and synced before mutating the shared
-    state. The agent is loaded before syncing the external server so a load
-    failure cannot move the server away from the currently active session.
-    When another session holds the server nothing changes; when the move fails
-    otherwise, serve switches and continues without background work.
+    Workspace-bound resources are rebuilt and the new project registered
+    before mutating the shared state. When the server cannot be used for the
+    new project nothing changes; when the registration fails otherwise, serve
+    switches and continues without background work.
     """
     import asyncio
 
@@ -1527,6 +1580,13 @@ async def _apply_serve_resume_state(
                 "Cannot resume into a different workspace in serve mode without "
                 "the effective configuration."
             )
+        from ..langgraph_dev.registration import (
+            ServerUnusableError,
+            refuse_missing_project,
+        )
+
+        # Before the agent load, which recreates the folder.
+        await asyncio.to_thread(refuse_missing_project, new_dirs.workspace.root)
         new_agent = await asyncio.to_thread(
             _load_agent,
             work_dir=str(new_dirs.work_dir),
@@ -1537,22 +1597,19 @@ async def _apply_serve_resume_state(
         proactive = getattr(channel_runtime, "proactive", None)
         moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
         if proactive is not None and moves_workspace:
-            # Until C17 each workspace has its own cron store: pause the thread
-            # serve leaves and delete this workspace's proactive cron while its
-            # store is still the served one.
+            # Serve follows one workspace at a time: pause the thread it leaves
+            # and delete the proactive cron of the workspace it leaves.
             if thread_changed:
                 await leave_thread(proactive)
             await asyncio.to_thread(_serve_proactive_call, proactive.stop)
-        from ..langgraph_dev.manager import WorkspaceMismatchError
-
         try:
-            moved = await _move_server_or_keep_session(
+            moved = await _register_or_keep_session(
                 effective_config,
                 target=new_dirs,
                 current=runtime_state.dirs,
                 backend=runtime_state.gateway_backend,
             )
-        except WorkspaceMismatchError:
+        except (ServerUnusableError, OSError):
             if proactive is not None and moves_workspace:
                 if left is not None:
                     # The session stays where it was: arm again what serve paused.
@@ -1566,8 +1623,9 @@ async def _apply_serve_resume_state(
             raise
         if not moved:
             console.print(
-                "[yellow]Background agent server sync failed; async "
-                "subagents and EvoMemory workers may be unavailable.[/yellow]"
+                "[yellow]The background agent server is unavailable for this "
+                "project; async subagents and EvoMemory workers may be "
+                "unavailable.[/yellow]"
             )
             if proactive is not None and moves_workspace:
                 from ..proactive.serve import MOVE_FAILED_REASON
@@ -2212,18 +2270,15 @@ def serve(
     _require_chatgpt_sign_in(config, interactive=False)
 
     # Auto-start ccproxy when Anthropic uses OAuth mode
-    _ccproxy_proc_serve = None
-    if config.anthropic_auth_mode == "oauth":
+    if uses_oauth(config):
         try:
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            from ..ccproxy_manager import maybe_start_ccproxy
 
-            _ccproxy_proc_serve = maybe_start_ccproxy(config)
-            if _ccproxy_proc_serve:
-                import atexit
-
-                atexit.register(stop_ccproxy, _ccproxy_proc_serve)
+            # It outlives this session, for every session and the background
+            # server to share (EvoSci ccproxy stop / service stop).
+            maybe_start_ccproxy(config, lasting=True)
         except RuntimeError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(1) from exc
 
     if not config.channel_enabled:
@@ -2232,18 +2287,19 @@ def serve(
         raise typer.Exit(1)
 
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
-    ws_path = start_workspace_path(workdir, config.default_workdir)
-    os.makedirs(ws_path, exist_ok=True)
+    ws_path = _prepare_workdir_or_exit(
+        start_workspace_path(workdir, config.default_workdir)
+    )
     dirs = SessionDirs(Workspace(ws_path))
-    reload_env_dirs()
     ensure_dirs()
 
     from ..config import GatewaySurface, resolve_gateway_backend
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.SERVE)
+    _print_dangerous_flag_note(gateway_backend)
 
-    # Auto-start langgraph dev (after workspace resolution, so deployed
-    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Auto-start langgraph dev and register the CLI's project (after the
+    # workspace is resolved).
     _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if config.dangerous_mode:
@@ -2463,8 +2519,8 @@ def serve(
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
-        # Before the atexit hook stops the dev server serve started: without
-        # serve nothing can be delivered, so the cron would only cost calls.
+        # The server outlives serve: without serve nothing can be delivered,
+        # so the cron would only cost calls.
         _serve_proactive_call(proactive.stop)
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
@@ -2547,6 +2603,21 @@ def config_set(
     console.print(f"[green]Set {escape(key)}[/green]")
     if key in warnings:
         console.print(f"[yellow]Note: {escape(warnings[key])}[/yellow]")
+    from ..memory.autoskills.schedule import AUTOSKILL_SETTINGS
+
+    if key in AUTOSKILL_SETTINGS:
+        _apply_autoskills_settings()
+
+
+def _apply_autoskills_settings(config: Any = None) -> None:
+    """Have a running server reschedule every project's AutoSkills cron,
+    reached at *config*'s address (by default the current configuration's)."""
+    from ..config import get_effective_config
+    from ..langgraph_dev.registration import apply_autoskills_settings
+
+    note = apply_autoskills_settings(config or get_effective_config())
+    if note is not None:
+        console.print(f"[yellow]{escape(note)}[/yellow]")
 
 
 @config_app.command("reset")
@@ -2568,14 +2639,18 @@ def config_reset(
             console.print("[dim]Cancelled.[/dim]")
             return
 
+    from ..config import get_effective_config
     from ..config.store import ConfigError
 
+    # The server keeps the address it started on, which a reset may drop.
+    before = get_effective_config()
     try:
         reset_config()
     except ConfigError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         raise typer.Exit(1) from None
     console.print("[green]Configuration reset to defaults.[/green]")
+    _apply_autoskills_settings(before)
 
 
 @config_app.command("path")
@@ -3195,18 +3270,15 @@ def _main_callback(
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
 
     # Auto-start ccproxy when Anthropic uses OAuth mode
-    _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth":
+    if uses_oauth(config):
         try:
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            from ..ccproxy_manager import maybe_start_ccproxy
 
-            _ccproxy_proc = maybe_start_ccproxy(config)
-            if _ccproxy_proc:
-                import atexit
-
-                atexit.register(stop_ccproxy, _ccproxy_proc)
+            # It outlives this session, for every session and the background
+            # server to share (EvoSci ccproxy stop / service stop).
+            maybe_start_ccproxy(config, lasting=True)
         except RuntimeError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(1) from exc
 
     show_thinking = config.show_thinking if not no_thinking else False
@@ -3249,14 +3321,12 @@ def _main_callback(
         workspace_root = start_workspace_path()
     elif workdir:
         workspace_root = start_workspace_path(workdir)
-        os.makedirs(workspace_root, exist_ok=True)
     else:
         workspace_root = start_workspace_path(default_workdir=config.default_workdir)
         effective_mode = mode or config.default_mode
-    workspace = Workspace(workspace_root)
+    # Before run mode's ``runs/`` folder, which would recreate a missing root.
+    workspace = Workspace(_prepare_workdir_or_exit(workspace_root))
 
-    # The project .env was merged into os.environ by get_effective_config().
-    reload_env_dirs()
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 
@@ -3282,6 +3352,8 @@ def _main_callback(
                     "[dim]The WebUI works in the workspace root; --mode run "
                     "applies to the CLI and TUI.[/dim]"
                 )
+            # The WebUI's turns run in the background server.
+            _print_dangerous_flag_note("langgraph_server", webui=True)
             run_webui(config, workspace_dir=str(workspace.root))
             return
         config.ui_backend = "cli"
@@ -3304,9 +3376,10 @@ def _main_callback(
     else:
         _gateway_surface = GatewaySurface.INTERACTIVE
     gateway_backend = resolve_gateway_backend(config, _gateway_surface)
+    _print_dangerous_flag_note(gateway_backend)
 
-    # Auto-start langgraph dev (after workspace resolution, so deployed
-    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Auto-start langgraph dev and register the CLI's project (after the
+    # workspace is resolved).
     # A one-shot resume starts it for the thread's own folders instead, unless
     # the server gateway backend needs a running server to be built.
     prespawn = not (prompt and thread_id) or gateway_backend == "langgraph_server"

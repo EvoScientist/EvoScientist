@@ -239,7 +239,7 @@ jobs:
       - name: Online checks
         if: runner.os != 'Windows'
         run: |
-          "$RUNNER_TEMP/clean" EXPECTED_VERSION="$EXPECTED_VERSION" INDEX_URL="$INDEX_URL" \
+          "$RUNNER_TEMP/clean" MODE="$MODE" EXPECTED_VERSION="$EXPECTED_VERSION" INDEX_URL="$INDEX_URL" \
             ${EVOSCI_INSTALL_CONSTRAINTS:+EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS"} \
             bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" online
 
@@ -250,8 +250,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           offline() {
-            sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- "$3" bash "$4" "$5"' \
-              sh "$(id -u)" "$(id -g)" "$RUNNER_TEMP/clean" "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$1"
+            sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- "$3" MODE="$6" bash "$4" "$5"' \
+              sh "$(id -u)" "$(id -g)" "$RUNNER_TEMP/clean" "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$1" "$MODE"
           }
           offline blocked
           offline offline
@@ -261,7 +261,7 @@ jobs:
         run: |
           profile='(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))'
           for mode in blocked offline; do
-            sandbox-exec -p "$profile" "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$mode"
+            sandbox-exec -p "$profile" "$RUNNER_TEMP/clean" MODE="$MODE" bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$mode"
           done
 
       # Windows (Windows PowerShell 5.1): each step starts from a PATH with

@@ -37,8 +37,10 @@ def config_file() -> Path:
 
 
 @pytest.fixture
-def server(monkeypatch):
+def server(monkeypatch, no_workspace_setup):
     monkeypatch.setattr(local_secret, "_value", None)
+    # As the server's start does (langgraph_dev.checkpointer).
+    settings_api.capture_restart_baseline()
     with TestClient(
         app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)
     ) as client:
@@ -292,7 +294,6 @@ class TestPatch:
         assert "read-only" in response.json()["errors"][field]
 
     def test_display_only_field_needs_no_restart(self, server, secret, config_file):
-        server.get("/api/settings")  # the baseline, as the server started
         response = server.patch(
             "/api/settings", json={"show_thinking": False}, headers=secret
         )
@@ -307,20 +308,28 @@ class TestPatch:
         [
             ({"tavily_api_key": "tvly-new-key-123"}, "tavily_api_key"),
             ({"langgraph_dev_port": 8124}, "langgraph_dev_port"),
-            # The root of the current drive: "/" has no drive on Windows.
-            ({"default_workdir": os.path.abspath(os.sep)}, "default_workdir"),
         ],
     )
     def test_server_fields_need_a_restart(self, server, secret, change, field):
-        server.get("/api/settings")
         with _no_checks():
             response = server.patch("/api/settings", json=change, headers=secret)
         assert response.status_code == 200
         assert response.json()["restart_required"] is True
         assert field in response.json()["restart_fields"]
 
+    def test_default_workdir_needs_no_restart(self, server, secret):
+        """The server serves every registered project; only clients read it."""
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                # The root of the current drive: "/" has no drive on Windows.
+                json={"default_workdir": os.path.abspath(os.sep)},
+                headers=secret,
+            )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] is False
+
     def test_pending_restart_survives_a_reload(self, server, secret):
-        server.get("/api/settings")
         server.patch("/api/settings", json={"langgraph_dev_port": 8124}, headers=secret)
         body = server.get("/api/settings").json()
         assert body["restart_fields"] == ["langgraph_dev_port"]
@@ -822,12 +831,109 @@ class TestPatchValues:
         assert _mapping(config_file)["telegram_proxy"] == saved
 
 
+class TestServerCheckpointer:
+    async def test_server_checkpointer_reads_baseline_off_event_loop(self, monkeypatch):
+        """blockbuster refuses the baseline's file reads on the loop."""
+        import threading
+        from contextlib import asynccontextmanager
+
+        from EvoScientist.langgraph_dev import checkpointer
+
+        threads = []
+
+        @asynccontextmanager
+        async def saver():
+            yield "saver"
+
+        monkeypatch.setattr(
+            checkpointer, "create_checkpointer_for_langgraph_api", saver
+        )
+        monkeypatch.setattr(
+            checkpointer,
+            "capture_restart_baseline",
+            lambda: threads.append(threading.current_thread()),
+        )
+        async with checkpointer.server_checkpointer():
+            pass
+        assert threads
+        assert threads[0] is not threading.current_thread()
+
+    async def test_server_start_opens_server_checkpointer_after_baseline(
+        self, langgraph_api_env, monkeypatch
+    ):
+        """langgraph-api's own start, from the path in langgraph.json."""
+        import json
+        import threading
+        from contextlib import asynccontextmanager
+
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph_api import _checkpointer, config
+        from langgraph_api._checkpointer import _adapter
+        from langgraph_api.config import _parse
+
+        from EvoScientist.langgraph_dev import checkpointer
+
+        seen = []
+
+        @asynccontextmanager
+        async def saver():
+            seen.append(settings_api._baseline)
+            yield InMemorySaver()
+
+        served = json.loads(
+            Path(checkpointer.__file__).with_name("langgraph.json").read_text()
+        )["checkpointer"]
+        monkeypatch.setattr(
+            checkpointer, "create_checkpointer_for_langgraph_api", saver
+        )
+        # As the server reads it (the CLI passes it in LANGGRAPH_CHECKPOINTER).
+        monkeypatch.setattr(
+            config, "CHECKPOINTER_CONFIG", _parse.parse_checkpointer(json.dumps(served))
+        )
+        monkeypatch.setattr(_adapter, "CUSTOM_CHECKPOINTER", None)
+        monkeypatch.setattr(_adapter, "CHECKPOINTER_STACK", threading.local())
+        monkeypatch.setattr(_adapter, "_CHECKPOINTER_CAPABILITIES", None)
+
+        try:
+            await _checkpointer.start_checkpointer()
+        finally:
+            await _checkpointer.exit_checkpointer()
+
+        (baseline,) = seen
+        assert baseline is not None
+
+
 class TestRestartRules:
+    def test_restart_baseline_first_capture_wins(self, config_file):
+        settings_api.capture_restart_baseline()
+        config_file.write_text("tavily_api_key: tvly-saved\n", encoding="utf-8")
+        settings_api.capture_restart_baseline()
+        mapping = store.read_config_mapping()
+        assert settings_api.pending_restart(mapping, set()) == ["tavily_api_key"]
+
+    def test_restart_baseline_of_unparseable_file_is_defaults(self, config_file):
+        config_file.write_bytes(b"bad: [")
+        settings_api.capture_restart_baseline()
+        assert settings_api._baseline == settings_api._file_digests({})
+
+    def test_restart_baseline_of_unreadable_file_is_defaults(self, config_file):
+        config_file.mkdir()
+        settings_api.capture_restart_baseline()
+        assert settings_api._baseline == settings_api._file_digests({})
+
+    def test_setting_saved_after_server_start_is_pending(self, server):
+        """A request does not move the baseline taken at the server's start."""
+        from EvoScientist.config.settings import set_config_values
+
+        set_config_values({"tavily_api_key": "tvly-saved-123456"})
+        assert server.get("/api/settings").json()["restart_fields"] == [
+            "tavily_api_key"
+        ]
+
     def test_field_the_environment_overrides_is_not_pending(
         self, server, secret, monkeypatch
     ):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-from-the-shell")
-        server.get("/api/settings")
         with _no_checks():
             response = server.patch(
                 "/api/settings",
@@ -844,7 +950,6 @@ class TestRestartRules:
 
         from EvoScientist.config.settings import get_config_dir
 
-        server.get("/api/settings")
         get_config_dir().mkdir(parents=True, exist_ok=True)
         (get_config_dir() / "mcp.yaml").write_text("servers: {}\n", encoding="utf-8")
         (tmp_path / "research.yaml").write_text("name: research\n", encoding="utf-8")
@@ -852,55 +957,6 @@ class TestRestartRules:
         monkeypatch.setattr(importlib.metadata, "version", lambda _name: "999.0")
         body = server.get("/api/settings").json()
         assert body["restart_fields"] == ["mcp.yaml", "subagents", "version"]
-
-    @pytest.mark.parametrize("module", ["main_graph", "graphs"])
-    def test_graph_modules_take_the_baseline_first(self, module):
-        import ast
-
-        source = Path(settings_api.__file__).with_name(f"{module}.py")
-        imports = [
-            node
-            for node in ast.parse(source.read_text(encoding="utf-8")).body
-            if isinstance(node, ast.Import | ast.ImportFrom)
-            and getattr(node, "module", None) != "__future__"
-        ]
-        assert imports[0].names[0].name == "EvoScientist.langgraph_dev.config_baseline"
-
-    def test_importing_the_baseline_module_takes_the_baseline(self, tmp_path):
-        """A key saved after the graphs were imported is pending, although the
-        first GET comes later."""
-        import subprocess
-        import sys
-
-        config_dir = tmp_path / "xdg" / "evoscientist"
-        config_dir.mkdir(parents=True)
-        (config_dir / "config.yaml").write_text(
-            "tavily_api_key: tvly-started\n", encoding="utf-8"
-        )
-        code = (
-            "import EvoScientist.langgraph_dev.config_baseline\n"
-            "from EvoScientist.config.settings import set_config_values\n"
-            "from EvoScientist.langgraph_dev import settings_api\n"
-            "set_config_values({'tavily_api_key': 'tvly-saved'})\n"
-            "print(settings_api.read_settings()['restart_fields'])\n"
-        )
-        mapped = set(_ENV_MAPPINGS.values())
-        env = {k: v for k, v in os.environ.items() if k not in mapped}
-        env.update(
-            HOME=str(tmp_path),
-            XDG_CONFIG_HOME=str(tmp_path / "xdg"),
-            EVOSCIENTIST_DATA_DIR=str(tmp_path / "data"),
-        )
-        out = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        ).stdout
-        assert out.strip().splitlines()[-1] == "['tavily_api_key']"
 
 
 class TestTestKeyStoredValues:

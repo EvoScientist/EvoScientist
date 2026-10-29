@@ -10,6 +10,7 @@ import dataclasses
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,11 +34,119 @@ def test_start_sets_server_process_env(monkeypatch, tmp_path, runtime_paths, inh
     assert captured["env"]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
 
 
-def test_start_sets_workspace_dir_env(monkeypatch, tmp_path, runtime_paths):
+def test_start_runs_server_in_server_home_for_launcher_project(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """The server serves every registered project, so it gets no workspace of
+    its own, only the project of the client starting it, as an absolute path.
+    The user's ``EVOSCIENTIST_WORKSPACE_DIR`` (Docker sets it) passes as is."""
+    from EvoScientist import paths
+
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", "/inherited")
+    monkeypatch.chdir(tmp_path)
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=Path("proj"), port=16178)
+
+    env = captured["env"]
+    assert env["EVOSCIENTIST_WORKSPACE_DIR"] == "/inherited"
+    assert env[paths.LAUNCHER_WORKSPACE_ENV] == str(tmp_path / "proj")
+    assert captured["cwd"] == str(paths.SERVER_HOME)
+    if os.name == "posix":
+        assert paths.SERVER_HOME.stat().st_mode & 0o777 == 0o700
+
+
+def test_start_refuses_when_another_server_holds_data_folder(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.langgraph_dev import server_home
+
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(server_home, "server_running", lambda wait=0: True)
+    with pytest.raises(RuntimeError, match="EvoSci server stop"):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+
+
+def test_start_gives_server_no_dotenv_keys(monkeypatch, tmp_path, runtime_paths):
+    """Every agent takes its keys from config.yaml and the environment: a
+    project ``.env`` key reaches neither this process nor the server."""
+    from EvoScientist.config import settings
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("TAVILY_API_KEY=tvly-dotenv\nOPENAI_API_KEY=sk-dotenv\n")
+    monkeypatch.setattr(settings, "find_dotenv", lambda *a, **k: str(dotenv))
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-shell")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings.get_effective_config()
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
-    assert captured["env"].get("EVOSCIENTIST_WORKSPACE_DIR") == str(tmp_path)
+
+    env = captured["env"]
+    assert env["TAVILY_API_KEY"] == "tvly-shell"
+    assert "OPENAI_API_KEY" not in env
+
+
+@pytest.mark.parametrize(("lasting", "passed"), [(True, False), (False, True)])
+def test_session_flag_reaches_only_server_it_owns(
+    monkeypatch, tmp_path, runtime_paths, lasting, passed
+):
+    """A lasting server serves later sessions and every project: this
+    session's --dangerous (or --debug) does not reach it; the auth mode does
+    (test_auth_mode_flag_reaches_lasting_server). A server EvoSci deploy or
+    the desktop app owns gets its starter's flags."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setenv("EVOSCIENTIST_DANGEROUS_MODE", "true")
+    settings.record_env_origin("EVOSCIENTIST_DANGEROUS_MODE", "cli")
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16192, lasting=lasting)
+
+    env = captured["env"]
+    origins = json.loads(env[settings.ENV_ORIGINS_VAR])
+    assert ("EVOSCIENTIST_DANGEROUS_MODE" in env) is passed
+    assert ("EVOSCIENTIST_DANGEROUS_MODE" in origins) is passed
+
+
+def test_auth_mode_flag_reaches_lasting_server(monkeypatch, tmp_path, runtime_paths):
+    """One server has one set of credentials: the session that starts it
+    picks them."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+    settings.record_env_origin("EVOSCIENTIST_OPENAI_AUTH_MODE", "cli")
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16194)
+
+    assert captured["env"]["EVOSCIENTIST_OPENAI_AUTH_MODE"] == "oauth"
+
+
+@pytest.mark.parametrize(
+    ("export", "flag", "reaches"),
+    [("1", False, True), ("yes", False, True), (None, True, False)],
+)
+def test_dangerous_mode_reaching_lasting_server(
+    monkeypatch, tmp_path, runtime_paths, export, flag, reaches
+):
+    """Through the session's own config resolution: the user's export
+    reaches the server however it is spelled; a --dangerous flag does not."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "find_dotenv", lambda *a, **k: "")
+    if export is None:
+        monkeypatch.delenv("EVOSCIENTIST_DANGEROUS_MODE", raising=False)
+    else:
+        monkeypatch.setenv("EVOSCIENTIST_DANGEROUS_MODE", export)
+    config = settings.get_effective_config({"dangerous_mode": True} if flag else None)
+    assert config.dangerous_mode
+    settings.apply_config_to_env(config)
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16193)
+
+    assert ("EVOSCIENTIST_DANGEROUS_MODE" in captured["env"]) is reaches
 
 
 def test_start_sets_the_browser_boundary(monkeypatch, tmp_path, runtime_paths):
@@ -90,7 +199,6 @@ def test_ensure_passes_backend_allowed_origins(monkeypatch, tmp_path, runtime_pa
     started: dict = {}
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
     monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
-    monkeypatch.setattr(manager.atexit, "register", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         manager, "start_langgraph_dev", lambda *_a, **kw: started.update(kw)
     )
@@ -157,36 +265,40 @@ def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
 
 
 def test_async_subagents_available_init_true_in_server(monkeypatch):
-    """When ``EVOSCIENTIST_SERVER_PROCESS`` is set in the env at module
-    import time, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to True so the
+    """In the server (``paths.SERVER_PROCESS``, read from
+    ``EVOSCIENTIST_SERVER_PROCESS`` at import), ``_ASYNC_SUBAGENTS_AVAILABLE``
+    initializes to True so the
     deployed main agent's ``_maybe_swap_async_subagents`` swaps eagerly
     without waiting for ``start_langgraph_dev`` to flip the flag (which it
     can't — the server never calls that function on itself)."""
-    monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
     # Re-import the module to re-run the module-level initialization.
     import importlib
 
     import EvoScientist.langgraph_dev.manager as mgr
+    from EvoScientist import paths
 
+    monkeypatch.setattr(paths, "SERVER_PROCESS", True)
     reloaded = importlib.reload(mgr)
     try:
         assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is True
         assert reloaded.is_async_subagents_available() is True
     finally:
-        # Restore: reload again without the env var so subsequent tests
-        # see the normal initialization.
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        # Restore: reload again as a CLI process so subsequent tests see
+        # the normal initialization.
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         importlib.reload(mgr)
 
 
 def test_async_subagents_available_init_false_without_env(monkeypatch):
-    """When the env var is unset, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes
-    to False — the pre-existing safety behavior (fall back to sync if
-    langgraph dev isn't reachable)."""
-    monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+    """In a CLI process, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to False —
+    the pre-existing safety behavior (fall back to sync if langgraph dev
+    isn't reachable)."""
     import importlib
 
     import EvoScientist.langgraph_dev.manager as mgr
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "SERVER_PROCESS", False)
 
     reloaded = importlib.reload(mgr)
     assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
@@ -325,8 +437,8 @@ def test_start_without_a_job_keeps_the_spawn_flags(
     with pytest.raises(PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
     if manager.os.name == "nt":
-        assert (
-            captured["kwargs"]["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert captured["kwargs"]["creationflags"] == (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         )
     else:
         assert captured["kwargs"]["start_new_session"] is True

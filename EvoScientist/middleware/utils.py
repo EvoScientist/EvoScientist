@@ -169,6 +169,14 @@ def request_without_tool(request: Any, name: str) -> Any:
     return request.override(tools=tools)
 
 
+def request_with_only_tool(request: Any, name: str) -> Any:
+    """*request* offering only the tool called *name*; *request* itself when absent."""
+    tools = [tool for tool in request.tools if _tool_name(tool) == name]
+    if not tools:
+        return request
+    return request.override(tools=tools)
+
+
 def _tool_name(candidate: Any) -> Any:
     if isinstance(candidate, Mapping):
         # A provider schema names its tool at the top or under "function".

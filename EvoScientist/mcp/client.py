@@ -39,13 +39,13 @@ logger = logging.getLogger(__name__)
 # issue #283; the other is the Selector-loop subprocess fallback handled by
 # ``EvoScientist._winloop``).
 #
-# ``_resolve_command()`` (below) already resolves bare command names to their
-# absolute paths at connection-build time — a sync context where blocking is
-# fine. So by the time the stdio transport asks for the executable, the command
-# is already absolute and there is nothing left to look up. We short-circuit the
-# SDK's resolver for absolute paths, avoiding the ``os.access()`` entirely; bare
-# commands (which shouldn't reach here, but might via a transport we don't build)
-# still fall through to the original SDK behaviour.
+# ``_resolve_command()`` (below) resolves commands to absolute paths at
+# connection-build time, which runs off the event loop. So by the time the
+# stdio transport asks for the executable, a command it found is absolute and
+# there is nothing left to look up. We short-circuit the SDK's resolver for
+# absolute paths, avoiding the ``os.access()`` entirely. A command found
+# nowhere still falls through to the original SDK behaviour (its own
+# ``.cmd``/``.bat`` search); it fails to start otherwise.
 
 
 def _patch_mcp_windows_command_resolver() -> None:
@@ -397,16 +397,17 @@ _MAX_CONCURRENT_CONNECTIONS = 8
 # Per-server time limit for ``get_tools`` inside ``langgraph dev`` (see
 # :func:`_get_tools_timeout`).  A server that hasn't answered by then is
 # skipped like one that failed, so a single slow server can't hold up the
-# rest.  The server builds its graphs, and so loads MCP tools, before
-# answering ``/ok``, so this is sized for the 60s health budget in
-# ``start_langgraph_dev`` while still leaving room for a first ``npx -y``
-# launch that downloads its package.  Shutting down a stdio server that timed
-# out adds up to ~4s on top (the MCP SDK's termination waits).
+# rest.  The server loads MCP tools when it first builds a project's graph,
+# after it answers ``/ok``, one build at a time: a slow load holds up the
+# builds waiting behind it, so this is bounded while still leaving room for a
+# first ``npx -y`` launch that downloads its package.  Shutting down a stdio
+# server that timed out adds up to ~4s on top (the MCP SDK's termination
+# waits).
 #
 # It is not a hard bound on the whole load: the limit starts once a server
 # gets a slot under ``_MAX_CONCURRENT_CONNECTIONS``, so with more than that
 # many servers hanging, the ones queued behind them can still push the load
-# past 60s.
+# past it.
 _SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 
 # Healthy remote servers usually list tools within a few seconds; 20s leaves
@@ -436,6 +437,9 @@ _STDIO_FORWARDED_ENV_VARS = (
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
+    # Also read by node_network_env(): a user's 0 must not become our 1.
+    "NODE_USE_SYSTEM_CA",
+    "NODE_USE_ENV_PROXY",
 )
 
 
@@ -891,21 +895,52 @@ def load_mcp_config() -> dict[str, Any]:
     return _interpolate_value(data)
 
 
-def _resolve_command(command: str) -> str:
+def _server_path(server: dict[str, Any]) -> str | None:
+    """The ``PATH`` a stdio server sets in its ``mcp.yaml`` env, or None. On
+    POSIX the server's bare command is searched there when it starts."""
+    env = server.get("env")
+    if not isinstance(env, dict):
+        return None
+    for key, value in env.items():
+        if isinstance(key, str) and key.upper() == "PATH" and isinstance(value, str):
+            return value
+    return None
+
+
+def _node_command_on_path(command: str, server_path: str | None) -> str | None:
+    """A bare ``node`` / ``npx`` / ``npm`` on the server's own ``PATH`` (from
+    ``mcp.yaml``), else on ours, or None. Never the current directory: on
+    Windows shutil.which() would return an npx.cmd found there."""
+    from ..setup._install import which_on_path
+
+    found = which_on_path(command, path=server_path) if server_path else None
+    return found or which_on_path(command)
+
+
+def _resolve_command(command: str, server_path: str | None = None) -> str:
     """Resolve a stdio command to its full path.
 
     Checks PATH first, then the current Python environment's bin directory
     (handles conda/venv envs where newly installed binaries may not be on PATH).
-    Returns the original command string if not found (let the OS report the error).
+    A ``node`` / ``npx`` / ``npm`` is looked up on ``server_path`` (the server's
+    own ``PATH``) first, see :func:`_node_command_on_path`. A command found is
+    made absolute (``./srv.sh`` is read against the current directory), so the
+    stdio transport has nothing left to look up. A command found nowhere is
+    returned as given (let the OS report the error).
     """
     if os.path.isabs(command):
         return command
-    found = shutil.which(command)
+    if not os.path.dirname(command) and Path(command).stem.lower() in _NODE_COMMANDS:
+        found = _node_command_on_path(command, server_path)
+    else:
+        found = shutil.which(command)
     if found:
-        return found
+        return os.path.abspath(found)
     candidate = os.path.join(os.path.dirname(sys.executable), command)
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
+    if os.name == "nt" and os.path.isfile(candidate + ".exe"):
+        return candidate + ".exe"
     return command
 
 
@@ -917,26 +952,34 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     ``npm`` and that command is not on PATH.
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
-    the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
+    the server then fails to start as it would without Node. Never installs
+    inside ``langgraph dev`` (``paths.SERVER_PROCESS``): a download there would
     race the server's health deadline with its progress hidden in the server
-    log, so ``start_langgraph_dev`` runs this before spawning instead.
+    log, so ``start_langgraph_dev`` runs this before spawning instead. The
+    server, which outlives sessions, only puts on its PATH a private Node that
+    a session or ``EvoSci setup`` installed since it started, at its first MCP
+    load: the tool cache keeps that load while ``mcp.yaml`` is unchanged.
     """
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
-        return
     missing = [
         name
         for name, server in config.items()
         if server.get("transport") == "stdio"
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
+        # A path with a folder part (node_modules/.bin/npx) is not looked up
+        # on PATH.
+        and not os.path.dirname(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
-        and shutil.which(command) is None
+        and _node_command_on_path(command, _server_path(server)) is None
     ]
     if not missing:
         return
     from ..setup.node import activate_runtime, ensure_node, log_progress
     from ..setup.protocol import StageError
+
+    if paths.SERVER_PROCESS:
+        activate_runtime()
+        return
 
     try:
         ensure_node(progress=log_progress(logger))
@@ -960,6 +1003,56 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     activate_runtime()
 
 
+def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
+    """Stdio servers whose bare ``node`` / ``npx`` / ``npm`` command is not on
+    ``PATH``, theirs (from ``mcp.yaml``) or ours. Started anyway, the OS would take that command from the current
+    directory (Windows, or a ``.`` entry on POSIX), which the lookup never
+    searches, so they are reported as failed instead."""
+    return [
+        name
+        for name, server in config.items()
+        if server.get("transport") == "stdio"
+        and (command := str(server.get("command", "")))
+        # A path with a folder part (node_modules/.bin/npx) is started as written.
+        and not os.path.dirname(command)
+        and Path(command).stem.lower() in _NODE_COMMANDS
+        and _resolve_command(command, _server_path(server)) == command
+    ]
+
+
+def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
+    """What a ``node`` / ``npx`` / ``npm`` server gets on top of the forwarded
+    variables: the user's npm network settings, the npmmirror registry under
+    ``mirror: cn`` (unless the user set a registry) and, for our private Node,
+    the system-certificate and proxy switches for Node's own requests. ``env``
+    is what the server gets so far, its ``mcp.yaml`` env included, which still
+    wins over all of it. Only its string keys and values are read: a key with
+    no value in ``mcp.yaml`` loads as None, and fails that server alone.
+    """
+    from ..setup.node import (
+        is_private,
+        node_network_env,
+        npm_network_env,
+        npm_registry_override,
+    )
+
+    env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
+    extra = npm_network_env(os.environ)
+    # An unresolved command (no npx found) has no folder to read npm from; a
+    # bare name would make the lookup try the current directory. npm reads the
+    # server's environment: a HOME or npm_config_userconfig in mcp.yaml points
+    # it at another .npmrc.
+    registry = (
+        npm_registry_override({**os.environ, **env}, Path(command))
+        if os.path.isabs(command)
+        else None
+    )
+    if registry is not None:
+        extra["npm_config_registry"] = registry
+    extra.update(node_network_env(env, private=is_private(command)))
+    return extra
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -971,15 +1064,18 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         transport = server.get("transport", "")
 
         if transport == "stdio":
+            command = _resolve_command(server.get("command", ""), _server_path(server))
             conn: dict[str, Any] = {
                 "transport": "stdio",
-                "command": _resolve_command(server.get("command", "")),
+                "command": command,
                 "args": server.get("args", []),
             }
             forwarded = {
                 k: os.environ[k] for k in _STDIO_FORWARDED_ENV_VARS if k in os.environ
             }
             user_env = server.get("env") or {}
+            if Path(command).stem.lower() in _NODE_COMMANDS:
+                forwarded.update(_node_server_env(command, {**forwarded, **user_env}))
             merged = {**forwarded, **user_env}
             if merged:
                 conn["env"] = merged
@@ -1091,13 +1187,13 @@ def _get_tools_timeout(transport: str) -> float | None:
     """The default ``get_tools`` limit for this transport and process.
 
     URL transports always have a discovery deadline. Stdio servers have a
-    deadline only inside ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS=1``),
+    deadline only inside ``langgraph dev`` (``paths.SERVER_PROCESS``),
     whose health check gives up after 60s. CLI/TUI stdio discovery may wait
     as long as needed for first-launch package downloads.
     """
     if transport in _URL_TRANSPORTS:
         return _NETWORK_GET_TOOLS_TIMEOUT_SECONDS
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
+    if paths.SERVER_PROCESS:
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
     return None
 
@@ -1132,11 +1228,15 @@ async def _load_tools(
     # May download Node (in the CLI process only); off the event loop so the
     # running session stays responsive.
     await asyncio.to_thread(_ensure_node_for_stdio, config)
-    connections = _build_connections(config)
-    if not connections:
-        return {}
-
-    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
+    # Looking commands up on PATH touches the disk (``os.access``), which
+    # blockbuster refuses on an event loop inside ``langgraph dev``.
+    unresolved = await asyncio.to_thread(_unresolved_node_servers, config)
+    # Off the event loop too: under mirror: cn the first Node server runs
+    # `npm config get registry`.
+    connections = await asyncio.to_thread(
+        _build_connections,
+        {name: server for name, server in config.items() if name not in unresolved},
+    )
 
     def _report(event: str, name: str, detail: str = "") -> None:
         if on_progress is None:
@@ -1147,6 +1247,32 @@ async def _load_tools(
             # Progress callbacks are UI glue — never let their bugs break
             # the actual MCP load.
             logger.debug("MCP progress callback raised", exc_info=True)
+
+    def _fail(name: str, detail: str) -> tuple[str, list]:
+        # When the caller wired up ``on_progress`` they own the
+        # user-facing display; downgrade the logger so we don't
+        # double-print.
+        if on_progress is None:
+            logger.warning("MCP server %r: failed to load tools: %s", name, detail)
+        else:
+            logger.debug("MCP server %r: failed to load tools: %s", name, detail)
+        _report("error", name, detail)
+        return name, []
+
+    hint = "Run 'EvoSci setup' to install Node.js"
+    if paths.SERVER_PROCESS:
+        # The server keeps this load until it restarts.
+        hint += ", then 'EvoSci server stop' (the next session starts it again)"
+    skipped: dict[str, list] = {}
+    for name in unresolved:
+        _report("start", name)
+        command = config[name]["command"]
+        _fail(name, f"{command} was not found on PATH. {hint}")
+        skipped[name] = []
+    if not connections:
+        return skipped
+
+    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
 
     # Cap in-flight connections so a user with many servers doesn't
     # spawn all their stdio subprocesses at once (fd/ulimit pressure,
@@ -1182,24 +1308,12 @@ async def _load_tools(
                     detail = f"timed out after {server_timeout}s"
                 else:
                     detail = str(exc)
-                # When the caller wired up ``on_progress`` they own the
-                # user-facing display; downgrade the logger so we don't
-                # double-print.
-                if on_progress is None:
-                    logger.warning(
-                        "MCP server %r: failed to load tools: %s", name, detail
-                    )
-                else:
-                    logger.debug(
-                        "MCP server %r: failed to load tools: %s", name, detail
-                    )
-                _report("error", name, detail)
-                return name, []
+                return _fail(name, detail)
 
     # ``return_exceptions=False`` is fine because ``_fetch`` already
     # swallows errors per server.
     results = await asyncio.gather(*(_fetch(name) for name in connections))
-    return dict(results)
+    return {**skipped, **dict(results)}
 
 
 async def aload_mcp_tools(
