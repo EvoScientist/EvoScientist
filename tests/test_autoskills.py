@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -903,6 +905,93 @@ def test_create_approval_rejects_frontmatter_name_collision(tmp_path, monkeypatc
     assert "already exists" in second_result["error"]
 
 
+def test_global_create_rejects_workspace_collision_masked_by_folder_name(
+    tmp_path,
+    monkeypatch,
+):
+    """Create checks each tier independently of runtime masking order."""
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    _write_installed_skill_in_dir(
+        workspace_skills,
+        "foo",
+        skill_name="bar",
+        description="A workspace skill hidden by combined-tier lookup.",
+        body="# Workspace bar\n\nKeep workspace.",
+    )
+    _write_installed_skill(
+        global_skills,
+        "foo",
+        "A different global skill in the same virtual folder.",
+        "# Global foo\n\nKeep global.",
+    )
+    _write_skill_folder(
+        memory_dir,
+        "bar",
+        "Use when testing cross-tier create collisions.",
+        "# Proposed bar\n",
+    )
+
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="bar",
+        cluster_hash="cluster-global-create-masked-collision",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="A collision in either tier must reject a create.",
+        skills_dir=workspace_skills,
+    )
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+        scope="global",
+    )
+
+    assert result["approved"] is False
+    assert "already exists" in result["error"]
+    assert not (global_skills / "bar").exists()
+    assert "Keep workspace." in (workspace_skills / "foo" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_create_approval_rejects_broken_destination_symlink(tmp_path, monkeypatch):
+    """A broken link is a collision, not a path to create through."""
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    workspace_skills.mkdir()
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    destination = workspace_skills / "broken-create"
+    destination.symlink_to(tmp_path / "missing", target_is_directory=True)
+    _write_skill_folder(
+        memory_dir,
+        "broken-create",
+        "Use when testing broken install destinations.",
+        "# Broken create\n",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="broken-create",
+        cluster_hash="cluster-broken-create",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="A broken link must not cause an install failure.",
+        skills_dir=workspace_skills,
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert result["approved"] is False
+    assert "already exists" in result["error"]
+    assert destination.is_symlink()
+
+
 def test_approval_rejects_unknown_scope(tmp_path):
     """An unknown approval scope is rejected and leaves the proposal pending."""
     memory_dir = tmp_path / "memories"
@@ -1795,6 +1884,449 @@ def test_auto_mode_keeps_global_update_pending_for_human_approval(
     assert "human approval" in result["auto_approval"]["error"]
     assert pending_skill_proposal_count(memory_dir) == 1
     assert "Original workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+@pytest.mark.parametrize("link_kind", ["directory", "skill-md"])
+def test_auto_mode_holds_global_update_with_external_workspace_symlinks(
+    tmp_path,
+    monkeypatch,
+    link_kind,
+):
+    """Links the runtime cannot read must not relabel a global update."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace = Workspace(tmp_path)
+    installed = _write_installed_skill(
+        global_skills,
+        "auto-global-link",
+        "Use when testing guarded global updates.",
+        "# Global skill\n\nOriginal workflow.\n",
+    )
+    workspace.skills_dir.mkdir(parents=True)
+    local = workspace.skills_dir / "auto-global-link"
+    if link_kind == "directory":
+        local.symlink_to(installed, target_is_directory=True)
+    else:
+        local.mkdir()
+        (local / "SKILL.md").symlink_to(installed / "SKILL.md")
+    _write_skill_folder(
+        memory_dir,
+        "auto-global-link",
+        "Use when testing guarded global updates.",
+        "# Global skill\n\nUpdated workflow.\n",
+    )
+    tool = create_submit_autoskill_proposal_tool(
+        memory_dir=memory_dir,
+        workspace=workspace,
+        project_id="P-1",
+    )
+    with patch("EvoScientist.memory.autoskills.tools.get_effective_config") as config:
+        config.return_value = SimpleNamespace(
+            memory_skill_synthesis_mode=MemorySkillSynthesisMode.AUTO
+        )
+        result = json.loads(
+            tool.invoke(
+                {
+                    "skill_name": "auto-global-link",
+                    "cluster_hash": f"cluster-auto-global-{link_kind}",
+                    "source_observation_ids": ["O-1", "O-2", "O-3"],
+                    "rationale": "An unreadable workspace alias must not bypass review.",
+                    "operation": "update",
+                    "target_skill_name": "auto-global-link",
+                }
+            )
+        )
+
+    assert result["scope"] == "global"
+    assert result["auto_approval"]["approved"] is False
+    assert "human approval" in result["auto_approval"]["error"]
+    assert pending_skill_proposal_count(memory_dir) == 1
+    assert "Original workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+    approved = approve_skill_proposal(
+        memory_dir,
+        result["proposal_id"],
+        skills_dir=workspace.skills_dir,
+    )
+    assert approved["approved"] is True
+    assert approved["workspace_shadow"] is None
+    assert "Updated workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_update_rejects_file_symlink_escaping_install_destination(
+    tmp_path,
+    monkeypatch,
+):
+    """A nested link must not redirect part of an update outside its skill."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    installed = _write_installed_skill(
+        workspace_skills,
+        "nested-link",
+        "Use when testing nested update links.",
+        "# Nested link\n\nOriginal workspace workflow.\n",
+    )
+    protected = global_skills / "protected" / "check.py"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("original global file\n", encoding="utf-8")
+    (installed / "scripts").mkdir()
+    (installed / "scripts" / "check.py").symlink_to(protected)
+    proposal_dir = _write_skill_folder(
+        memory_dir,
+        "nested-link",
+        "Use when testing nested update links.",
+        "# Nested link\n\nUpdated workspace workflow.\n",
+    )
+    (proposal_dir / "scripts").mkdir()
+    (proposal_dir / "scripts" / "check.py").write_text(
+        "updated global file\n", encoding="utf-8"
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="nested-link",
+        cluster_hash="cluster-nested-link",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="No proposal file may write through an external link.",
+        operation="update",
+        target_skill_name="nested-link",
+        skills_dir=workspace_skills,
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert proposal["scope"] == "workspace"
+    assert result["approved"] is False
+    assert "escapes its destination" in result["error"]
+    assert protected.read_text(encoding="utf-8") == "original global file\n"
+    assert "Original workspace workflow." in (installed / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert pending_skill_proposal_count(memory_dir) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_update_allows_symlink_inside_workspace_tier(tmp_path, monkeypatch):
+    """A link that stays inside its tier remains a valid update target."""
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    installed = _write_installed_skill_in_dir(
+        workspace_skills,
+        "a-actual",
+        skill_name="internal-link",
+        description="Use when testing internal update links.",
+        body="# Internal link\n\nOriginal workflow.\n",
+    )
+    (workspace_skills / "z-alias").symlink_to(installed, target_is_directory=True)
+    _write_skill_folder(
+        memory_dir,
+        "internal-link",
+        "Use when testing internal update links.",
+        "# Internal link\n\nUpdated workflow.\n",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="internal-link",
+        cluster_hash="cluster-internal-link",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Internal links follow the runtime's normal visibility rules.",
+        operation="update",
+        target_skill_name="internal-link",
+        skills_dir=workspace_skills,
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert proposal["submitted"] is True
+    assert proposal["scope"] == "workspace"
+    assert result["approved"] is True
+    assert "Updated workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+@pytest.mark.parametrize("target_kind", ["global", "other-workspace"])
+def test_auto_mode_holds_when_workspace_tier_root_is_external(
+    tmp_path,
+    monkeypatch,
+    target_kind,
+):
+    """AUTO must not write through a skills root owned by another tier."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace = Workspace(tmp_path)
+    other_workspace = tmp_path / "other-workspace-skills"
+    target_root = global_skills if target_kind == "global" else other_workspace
+    installed = _write_installed_skill(
+        target_root,
+        "root-link",
+        "Use when testing external tier roots.",
+        "# Root link\n\nOriginal workflow.\n",
+    )
+    workspace.skills_dir.symlink_to(target_root, target_is_directory=True)
+    _write_skill_folder(
+        memory_dir,
+        "root-link",
+        "Use when testing external tier roots.",
+        "# Root link\n\nUpdated workflow.\n",
+    )
+    tool = create_submit_autoskill_proposal_tool(
+        memory_dir=memory_dir,
+        workspace=workspace,
+        project_id="P-1",
+    )
+    with patch("EvoScientist.memory.autoskills.tools.get_effective_config") as config:
+        config.return_value = SimpleNamespace(
+            memory_skill_synthesis_mode=MemorySkillSynthesisMode.AUTO
+        )
+        result = json.loads(
+            tool.invoke(
+                {
+                    "skill_name": "root-link",
+                    "cluster_hash": f"cluster-root-{target_kind}",
+                    "source_observation_ids": ["O-1", "O-2", "O-3"],
+                    "rationale": "A root alias must not bypass human review.",
+                    "operation": "update",
+                    "target_skill_name": "root-link",
+                }
+            )
+        )
+
+    expected_scope = "global" if target_kind == "global" else "workspace"
+    assert result["scope"] == expected_scope
+    assert result["auto_approval"]["approved"] is False
+    assert "human approval" in result["auto_approval"]["error"]
+    assert "Original workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_update_uses_resolved_virtual_path_for_internal_alias(
+    tmp_path,
+    monkeypatch,
+):
+    """An internal alias must not invent a path absent from the runtime."""
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "skills"
+    first = _write_installed_skill_in_dir(
+        workspace_skills,
+        "a",
+        skill_name="alias-order",
+        description="First physical skill.",
+        body="# Alias order\n\nKeep first.\n",
+    )
+    winner = _write_installed_skill_in_dir(
+        workspace_skills,
+        "m",
+        skill_name="alias-order",
+        description="Runtime winner.",
+        body="# Alias order\n\nRuntime winner.\n",
+    )
+    (workspace_skills / "z").symlink_to(first, target_is_directory=True)
+    from EvoScientist.tools.skills_manager import installed_skill_index
+
+    assert (
+        installed_skill_index(Workspace(tmp_path))["alias-order"] == "Runtime winner."
+    )
+    _write_skill_folder(
+        memory_dir,
+        "alias-order",
+        "Use when testing resolved virtual path ordering.",
+        "# Alias order\n\nUpdated winner.\n",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="alias-order",
+        cluster_hash="cluster-alias-order",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="The update must target the resolved runtime winner.",
+        operation="update",
+        target_skill_name="alias-order",
+        skills_dir=workspace_skills,
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert result["approved"] is True
+    assert Path(result["path"]) == winner
+    assert "Updated winner." in (winner / "SKILL.md").read_text(encoding="utf-8")
+    assert "Keep first." in (first / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_update_replaces_hardlinked_target_without_touching_global(
+    tmp_path,
+    monkeypatch,
+):
+    """Replacing a hardlinked workspace file must leave the global inode alone."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    global_skill = _write_installed_skill(
+        global_skills,
+        "hardlink-update",
+        "Use when testing hardlinked updates.",
+        "# Hardlink\n\nOriginal global.\n",
+    )
+    workspace_skill = _write_installed_skill(
+        workspace_skills,
+        "hardlink-update",
+        "Use when testing hardlinked updates.",
+        "# Hardlink\n\nWorkspace copy.\n",
+    )
+    global_file = global_skill / "SKILL.md"
+    workspace_file = workspace_skill / "SKILL.md"
+    workspace_file.unlink()
+    os.link(global_file, workspace_file)
+    _write_skill_folder(
+        memory_dir,
+        "hardlink-update",
+        "Use when testing hardlinked updates.",
+        "# Hardlink\n\nUpdated workspace.\n",
+    )
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="hardlink-update",
+        cluster_hash="cluster-hardlink-update",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="A workspace update must not modify a hardlinked global file.",
+        operation="update",
+        target_skill_name="hardlink-update",
+        skills_dir=workspace_skills,
+    )
+
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert result["approved"] is True
+    assert "Updated workspace." in workspace_file.read_text(encoding="utf-8")
+    assert "Original global." in global_file.read_text(encoding="utf-8")
+    assert not os.path.samefile(global_file, workspace_file)
+
+
+def test_proposal_metadata_writes_do_not_follow_hardlinks(tmp_path, monkeypatch):
+    """Manifest and rationale replacement must not overwrite linked files."""
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    global_skills.mkdir()
+    memory_dir = tmp_path / "memories"
+    workspace_skills = tmp_path / "workspace-skills"
+    proposal_dir = _write_skill_folder(
+        memory_dir,
+        "metadata-links",
+        "Use when testing metadata link safety.",
+        "# Metadata links\n",
+    )
+    protected_manifest = global_skills / "protected-manifest"
+    protected_rationale = global_skills / "protected-rationale"
+    protected_manifest.write_text("original manifest\n", encoding="utf-8")
+    protected_rationale.write_text("original rationale\n", encoding="utf-8")
+    os.link(protected_manifest, proposal_dir / "manifest.json")
+    os.link(protected_rationale, proposal_dir / "RATIONALE.md")
+
+    proposal = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="metadata-links",
+        cluster_hash="cluster-metadata-links",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Metadata writes must not follow hardlinks.",
+        skills_dir=workspace_skills,
+    )
+    result = approve_skill_proposal(
+        memory_dir,
+        proposal["proposal_id"],
+        skills_dir=workspace_skills,
+    )
+
+    assert proposal["submitted"] is True
+    assert result["approved"] is True
+    assert protected_manifest.read_text(encoding="utf-8") == "original manifest\n"
+    assert protected_rationale.read_text(encoding="utf-8") == "original rationale\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_submit_rejects_proposal_directory_outside_root(tmp_path, monkeypatch):
+    """A proposal directory link must not redirect metadata writes."""
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skill_name = "external-proposal"
+    outside = tmp_path / "outside" / skill_name
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text(
+        f"---\nname: {skill_name}\ndescription: Test external proposals\n---\n\n# External\n",
+        encoding="utf-8",
+    )
+    proposal_dir = autoskill_proposals_dir(memory_dir) / skill_name
+    proposal_dir.parent.mkdir(parents=True)
+    proposal_dir.symlink_to(outside, target_is_directory=True)
+
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=skill_name,
+        cluster_hash="cluster-external-proposal",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Proposal metadata must stay inside the proposal root.",
+        skills_dir=tmp_path / "workspace-skills",
+    )
+
+    assert result["submitted"] is False
+    assert "inside /autoskill-proposals" in result["errors"][0]
+    assert not (outside / "manifest.json").exists()
+    assert not (outside / "RATIONALE.md").exists()
+
+
+@pytest.mark.parametrize(
+    "cluster_hash",
+    ["../escape", "/tmp/escape", "folder/name", "folder\\name", "C:\\escape"],
+)
+def test_submit_rejects_cluster_hash_path_traversal(
+    tmp_path,
+    monkeypatch,
+    cluster_hash,
+):
+    """A cluster hash is a filename component, never a path."""
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    _write_skill_folder(
+        memory_dir,
+        "safe-cluster",
+        "Use when testing safe cluster identifiers.",
+        "# Safe cluster\n",
+    )
+
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="safe-cluster",
+        cluster_hash=cluster_hash,
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Cluster identifiers must not escape the processed directory.",
+        skills_dir=tmp_path / "workspace-skills",
+    )
+
+    assert result["submitted"] is False
+    assert "cluster_hash" in result["error"]
+    assert pending_skill_proposal_count(memory_dir) == 0
+    assert not (tmp_path / "escape.json").exists()
 
 
 def test_create_proposal_rejects_target_skill_name(tmp_path):

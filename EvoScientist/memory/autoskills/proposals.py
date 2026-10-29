@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +21,7 @@ AUTOSKILL_PROPOSALS_DIR = "autoskills/proposals"
 AUTOSKILL_PROCESSED_DIR = "autoskills/processed"
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_CLUSTER_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\s*\n", re.DOTALL)
 _ALLOWED_SKILL_FRONTMATTER = {
     "allowed-tools",
@@ -110,10 +113,29 @@ def _read_manifest(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _write_text_atomic(path: Path, content: str) -> None:
+    """Replace one file without following its final symlink or hardlink."""
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(
+    _write_text_atomic(
+        path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
 
@@ -306,6 +328,8 @@ def processed_cluster_hashes(memory_dir: str | Path) -> set[str]:
 
 
 def mark_cluster_processed(memory_dir: str | Path, cluster_hash: str) -> None:
+    if not _CLUSTER_HASH_RE.fullmatch(cluster_hash):
+        raise ValueError("Invalid cluster hash")
     root = _processed_root(memory_dir)
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{cluster_hash}.json"
@@ -358,6 +382,13 @@ def _validate_skill_proposal_dir(
     skill_md = proposal_dir / "SKILL.md"
     if not skill_md.is_file():
         errors.append(f"Missing {proposal_virtual_path(skill_name)}/SKILL.md")
+        return False, errors, None
+
+    proposal_root = _proposal_root(memory_dir).resolve()
+    if not _resolves_within_root(
+        proposal_dir, proposal_root
+    ) or not _resolves_within_root(skill_md, proposal_root):
+        errors.append("Proposal files must resolve inside /autoskill-proposals")
         return False, errors, None
 
     content, error = _read_skill_markdown(skill_md)
@@ -431,26 +462,42 @@ def _installed_skill_name(skill_dir: Path) -> str | None:
     return name
 
 
+def _resolves_within_root(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside an already-resolved root."""
+    try:
+        return path.resolve().is_relative_to(root)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _find_installed_user_skill(
     skill_name: str,
     *,
     roots: list[Path],
 ) -> Path | None:
     """Find an installed skill by name across the given roots."""
-    # The merged runtime first hides lower-tier entries with the same virtual
-    # folder name, then resolves duplicate frontmatter names by virtual path.
+    # The merged runtime first hides lower-tier entries with the same resolved
+    # virtual path, then resolves duplicate frontmatter names in path order.
     visible: dict[str, Path] = {}
     for root in roots:
         if not root.exists():
             continue
+        resolved_root = root.resolve()
         for entry in root.iterdir():
             if not entry.is_dir() or not (entry / "SKILL.md").is_file():
                 continue
-            visible.setdefault(entry.name, entry)
+            # The runtime drops entries and reads that resolve outside their tier.
+            if not _resolves_within_root(entry, resolved_root):
+                continue
+            if not _resolves_within_root(entry / "SKILL.md", resolved_root):
+                continue
+            resolved_entry = entry.resolve()
+            virtual_path = resolved_entry.relative_to(resolved_root).as_posix()
+            visible.setdefault(virtual_path, resolved_entry)
 
     match: Path | None = None
-    for folder_name in sorted(visible, key=lambda name: f"/{name}/"):
-        entry = visible[folder_name]
+    for virtual_path in sorted(visible, key=lambda name: f"/{name}/"):
+        entry = visible[virtual_path]
         # The merged runtime keeps the later metadata entry when multiple
         # visible folders declare the same frontmatter name.
         if _installed_skill_name(entry) == skill_name:
@@ -504,6 +551,8 @@ def _installed_scope(skill_name: str, *, skills_dir: str | Path) -> str | None:
         roots=[workspace_root, global_root],
     )
     if resolved is not None:
+        if workspace_root == global_root:
+            return _SCOPE_GLOBAL
         if resolved.is_relative_to(workspace_root):
             return _SCOPE_WORKSPACE
         if resolved.is_relative_to(global_root):
@@ -511,26 +560,58 @@ def _installed_scope(skill_name: str, *, skills_dir: str | Path) -> str | None:
     return None
 
 
+def _copy_file_atomic(source: Path, target: Path) -> None:
+    """Copy one file without modifying other hardlinks to ``target``."""
+    fd, temporary_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def _copy_proposed_skill(
     proposal_dir: Path,
     destination: Path,
     *,
     base_dir: Path | None = None,
-) -> None:
-    if not destination.exists():
-        if base_dir is not None:
-            shutil.copytree(base_dir, destination)
-        else:
-            destination.mkdir(parents=True, exist_ok=False)
+) -> Path | None:
+    """Copy proposal files, returning a blocked path before any unsafe write."""
+    copies: list[tuple[Path, Path]] = []
     for source_path in proposal_dir.rglob("*"):
         if not source_path.is_file():
             continue
         relative = source_path.relative_to(proposal_dir)
         if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
             continue
-        target = destination / relative
+        copies.append((source_path, destination / relative))
+
+    if not destination.exists():
+        if base_dir is not None:
+            shutil.copytree(base_dir, destination)
+        else:
+            destination.mkdir(parents=True, exist_ok=False)
+
+    resolved_destination = destination.resolve()
+    safe_copies: list[tuple[Path, Path]] = []
+    for source_path, target in copies:
+        if not _resolves_within_root(target.parent, resolved_destination):
+            return target
+        if not _resolves_within_root(target, resolved_destination):
+            return target
+        safe_copies.append((source_path, target.resolve()))
+
+    for source_path, target in safe_copies:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, target)
+        _copy_file_atomic(source_path, target)
+    return None
 
 
 def submit_autoskill_proposal(
@@ -622,8 +703,14 @@ def submit_autoskill_proposal(
             }
         upstream_provenance = _installed_provenance(target_path)
     cluster_text = cluster_hash.strip()
-    if not cluster_text:
-        return {"submitted": False, "error": "cluster_hash must not be empty"}
+    if not _CLUSTER_HASH_RE.fullmatch(cluster_text):
+        return {
+            "submitted": False,
+            "error": (
+                "cluster_hash must contain only letters, numbers, underscores, "
+                "and hyphens"
+            ),
+        }
     source_ids = tuple(
         sorted({item.strip() for item in source_observation_ids if item.strip()})
     )
@@ -684,9 +771,7 @@ def submit_autoskill_proposal(
         }
 
     created_at = _now() if existing_is_approved else _created_at_for_manifest(existing)
-    (proposal_dir / "RATIONALE.md").write_text(
-        rationale.strip() + "\n", encoding="utf-8"
-    )
+    _write_text_atomic(proposal_dir / "RATIONALE.md", rationale.strip() + "\n")
 
     manifest = {
         "proposal_id": skill_name,
@@ -794,6 +879,12 @@ def approve_skill_proposal(
             "status": manifest.get("status"),
             "error": "Only pending proposals can be approved",
         }
+    if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
+        return {
+            "approved": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "error": "Proposal records an invalid cluster hash",
+        }
 
     skill_name = str(manifest.get("skill_name", "")).strip()
     if sanitize_skill_name(skill_name) != skill_name:
@@ -842,19 +933,18 @@ def approve_skill_proposal(
     base_skill_dir: Path | None = None
     workspace_shadow: Path | None = None
     if operation == "create":
-        existing_skill = _find_installed_user_skill(
-            skill_name,
-            roots=[
-                destination_root,
-                _scope_root(
-                    _SCOPE_GLOBAL
-                    if target_scope == _SCOPE_WORKSPACE
-                    else _SCOPE_WORKSPACE,
-                    skills_dir=skills_dir,
-                ),
-            ],
+        other_root = _scope_root(
+            _SCOPE_GLOBAL if target_scope == _SCOPE_WORKSPACE else _SCOPE_WORKSPACE,
+            skills_dir=skills_dir,
         )
-        if destination.exists() or existing_skill is not None:
+        existing_skill = _find_installed_user_skill(
+            skill_name, roots=[destination_root]
+        ) or _find_installed_user_skill(skill_name, roots=[other_root])
+        if (
+            destination.exists()
+            or destination.is_symlink()
+            or existing_skill is not None
+        ):
             collision = existing_skill or destination
             return {
                 "approved": False,
@@ -880,7 +970,11 @@ def approve_skill_proposal(
                 skill_name,
                 roots=[destination_root],
             )
-            if destination.exists() or existing_local is not None:
+            if (
+                destination.exists()
+                or destination.is_symlink()
+                or existing_local is not None
+            ):
                 return {
                     "approved": False,
                     "proposal_id": manifest["proposal_id"],
@@ -928,7 +1022,7 @@ def approve_skill_proposal(
                             f"{skill_name!r} to update"
                         ),
                     }
-                if destination.exists():
+                if destination.exists() or destination.is_symlink():
                     return {
                         "approved": False,
                         "proposal_id": manifest["proposal_id"],
@@ -969,10 +1063,27 @@ def approve_skill_proposal(
                 )
                 if workspace_shadow is None:
                     candidate = workspace_root / destination.name
-                    if candidate.is_dir() and candidate != destination:
+                    resolved_workspace = workspace_root.resolve()
+                    if (
+                        candidate.is_dir()
+                        and candidate != destination
+                        and _resolves_within_root(candidate, resolved_workspace)
+                        and _resolves_within_root(
+                            candidate / "SKILL.md", resolved_workspace
+                        )
+                    ):
                         workspace_shadow = candidate
 
-    _copy_proposed_skill(proposal_dir, destination, base_dir=base_skill_dir)
+    blocked_path = _copy_proposed_skill(
+        proposal_dir, destination, base_dir=base_skill_dir
+    )
+    if blocked_path is not None:
+        return {
+            "approved": False,
+            "proposal_id": manifest["proposal_id"],
+            "error": f"Skill install path escapes its destination: {blocked_path}",
+            "scope": target_scope,
+        }
 
     provenance_path = (
         destination if operation == "update" and base_skill_dir is None else None
@@ -1046,6 +1157,12 @@ def reject_skill_proposal(
             "proposal_id": manifest.get("proposal_id"),
             "status": manifest.get("status"),
             "error": "Only pending proposals can be rejected",
+        }
+    if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
+        return {
+            "rejected": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "error": "Proposal records an invalid cluster hash",
         }
     manifest["status"] = "rejected"
     manifest["updated_at"] = _now()

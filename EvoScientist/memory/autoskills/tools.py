@@ -8,6 +8,7 @@ from pathlib import Path
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
+from ... import paths
 from ...config import MemorySkillSynthesisMode, get_effective_config
 from ...paths import Workspace
 from ...tools.skills_manager import list_skills
@@ -69,6 +70,26 @@ def _installed_skills_for_autoskill_context(
         for skill in list_skills(include_system=False, workspace=workspace)
         if skill.source in {"workspace", "global"}
     ]
+
+
+def _auto_workspace_tier_error(workspace: Workspace) -> str | None:
+    """Reject automatic writes through a tier root owned elsewhere."""
+    try:
+        skills_root = workspace.skills_dir.resolve()
+        workspace_root = workspace.root.resolve()
+        global_root = Path(paths.GLOBAL_SKILLS_DIR).resolve()
+    except (OSError, RuntimeError):
+        return "Workspace skill tier could not be resolved; human approval is required"
+    outside_workspace = not skills_root.is_relative_to(workspace_root)
+    overlaps_global = skills_root.is_relative_to(
+        global_root
+    ) or global_root.is_relative_to(skills_root)
+    if outside_workspace or overlaps_global:
+        return (
+            "Workspace skill tier resolves outside this workspace or overlaps "
+            "the global tier; human approval is required"
+        )
+    return None
 
 
 def create_inspect_autoskill_candidates_tool(
@@ -152,13 +173,21 @@ def create_submit_autoskill_proposal_tool(
                     "scope": "global",
                 }
             else:
-                approved = approve_skill_proposal(
-                    memory_dir,
-                    str(proposal["proposal_id"]),
-                    skills_dir=workspace.skills_dir,
-                    workspace_dir=workspace.root,
-                )
-                proposal["auto_approval"] = approved
+                tier_error = _auto_workspace_tier_error(workspace)
+                if tier_error is not None:
+                    proposal["auto_approval"] = {
+                        "approved": False,
+                        "error": tier_error,
+                        "scope": "workspace",
+                    }
+                else:
+                    approved = approve_skill_proposal(
+                        memory_dir,
+                        str(proposal["proposal_id"]),
+                        skills_dir=workspace.skills_dir,
+                        workspace_dir=workspace.root,
+                    )
+                    proposal["auto_approval"] = approved
         return json.dumps(proposal, ensure_ascii=False, default=str)
 
     return StructuredTool.from_function(
