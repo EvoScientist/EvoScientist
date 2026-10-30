@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -186,7 +186,8 @@ def _register_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        _active_shell_processes.setdefault(event, set()).add(process)
+        for owner in _shell_process_owners(event):
+            _active_shell_processes.setdefault(owner, set()).add(process)
         cancel_now = event.is_set()
     if cancel_now:
         _terminate_process_tree(process)
@@ -199,12 +200,18 @@ def _unregister_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        processes = _active_shell_processes.get(event)
-        if processes is None:
-            return
-        processes.discard(process)
-        if not processes:
-            _active_shell_processes.pop(event, None)
+        for owner in _shell_process_owners(event):
+            processes = _active_shell_processes.get(owner)
+            if processes is not None:
+                processes.discard(process)
+                if not processes:
+                    _active_shell_processes.pop(owner, None)
+
+
+def _shell_process_owners(event: threading.Event | None) -> Iterator[threading.Event]:
+    while event is not None:
+        yield event
+        event = event._parent if isinstance(event, _ExecuteCancelEvent) else None
 
 
 # Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
@@ -2239,6 +2246,8 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
 
 
 class _ExecuteCancelEvent(threading.Event):
+    """A per-call event whose is_set() also checks its parent."""
+
     def __init__(self, parent: threading.Event | None) -> None:
         super().__init__()
         self._parent = parent
@@ -2534,6 +2543,7 @@ class CustomSandboxBackend(LocalShellBackend):
                 return await super().aexecute(command, timeout=timeout)
             except asyncio.CancelledError:
                 event.set()
+                await asyncio.to_thread(cancel_active_shell_processes, event)
                 raise
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:

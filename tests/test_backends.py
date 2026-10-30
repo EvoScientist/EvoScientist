@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from EvoScientist import backends, paths
@@ -32,28 +33,51 @@ def _sleep_cmd(seconds: int) -> str:
     return f"sleep {seconds}"
 
 
-async def test_async_execute_cancellation_stops_child(tmp_path):
+@pytest.mark.parametrize("cancel_parent", [False, True])
+async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
+    from EvoScientist.agent_shell import agent_bash
+    from EvoScientist.cancellation import bind_cancel_event
+
+    bash = agent_bash()
+    if bash is not None and not bash.bash.is_file():
+        pytest.skip("configured Git Bash is unavailable")
     script = tmp_path / "child.py"
     script.write_text(
         "from pathlib import Path\n"
-        "import time\n"
-        "Path('ready').write_text('ready')\n"
-        "time.sleep(3)\n"
-        "Path('late').write_text('late')\n"
+        "import os, time\n"
+        "Path('starting').write_text(str(os.getpid()))\n"
+        "Path('starting').replace('ready')\n"
+        "time.sleep(30)\n"
     )
     backend = CustomSandboxBackend(root_dir=str(tmp_path))
-    task = asyncio.create_task(backend.aexecute("python child.py"))
+    parent = threading.Event()
+    with bind_cancel_event(parent):
+        task = asyncio.create_task(
+            backend.aexecute(f'"{Path(sys.executable).as_posix()}" child.py')
+        )
     try:
         async with asyncio.timeout(15):
             while not (tmp_path / "ready").exists():
                 await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await asyncio.sleep(4)
-        assert not (tmp_path / "late").exists()
+        child = psutil.Process(int((tmp_path / "ready").read_text()))
+        if cancel_parent:
+            await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
+            await asyncio.wait_for(task, 15)
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        async with asyncio.timeout(10):
+            while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                await asyncio.sleep(0.05)
+    except psutil.NoSuchProcess:
+        pass
     finally:
-        task.cancel()
+        parent.set()
+        await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
@@ -72,6 +96,7 @@ async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
         while not event.is_set():
             time.sleep(0.01)
         stopped[command].set()
+        return backends.ExecuteResponse(output=command, exit_code=0, truncated=False)
 
     monkeypatch.setattr(backend, "execute", execute)
     parent = threading.Event()
@@ -90,7 +115,10 @@ async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
                 assert not parent.is_set()
                 assert not stopped["second"].is_set()
                 parent.set()
-                await second
+                response = await second
+                assert response.output == "second"
+                assert response.exit_code == 0
+                assert not response.truncated
                 assert stopped["second"].is_set()
         finally:
             parent.set()
