@@ -69,10 +69,20 @@ class TestBuildErrorMessage:
             msg = _build_error_message(_make_request(), exc)
 
         assert (
-            "RuntimeError: fetch failed\nCaused by: ConnectionError: refused"
-            in msg.content
+            "RuntimeError: fetch failed\nCaused by: ConnectionError: refused\n"
+            "While handling: KeyError: 'lookup'" in msg.content
         )
-        # An exception merely being handled at the time is not a cause.
+
+    def test_from_none_hides_the_exception_being_handled(self):
+        try:
+            try:
+                raise KeyError("lookup")
+            except KeyError:
+                raise ConnectionError("refused") from None
+        except ConnectionError as exc:
+            msg = _build_error_message(_make_request(), exc)
+
+        assert "ConnectionError: refused" in msg.content
         assert "KeyError" not in msg.content
 
     def test_content_lists_the_members_of_a_group(self):
