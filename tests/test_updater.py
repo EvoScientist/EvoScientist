@@ -1127,7 +1127,7 @@ def _helper(root: Path, *, json_mode: bool = True, **config) -> list[str]:
     return cmd + (["-Json"] if json_mode else [])
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+@needs_blocker
 def test_start_blocker_fails_when_the_copy_does_not_keep_running(tmp_path, monkeypatch):
     """A blocker that exits at once, as ubuntu-26.04's multi-call coreutils
     does under another name, fails the test where it starts, with its error."""
