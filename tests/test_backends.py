@@ -2677,6 +2677,10 @@ class TestProcessKillByName:
             "taskkill -F -IM python.exe",
             "kill -- -$PGID",
             "kill -9 -$PGID",
+            'kill -9 "-$PGID"',
+            'kill -- "-$PGID"',
+            'kill -9 "-1"',
+            'kill "0"',
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])

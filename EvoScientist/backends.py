@@ -1205,7 +1205,11 @@ def _kill_by_lookup(
         )
     if "xargs" in found.via and looks_up:
         return True
-    args = list(found.args)
+    # As the shell reads them, so a quoted "-1" or "-$PGID" counts too.
+    args = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
     if args and args[0] in ("-l", "-L"):
         return False
     if args and args[0] in ("-s", "-n"):
@@ -1215,13 +1219,8 @@ def _kill_by_lookup(
     if args and args[0] == "--":
         args = args[1:]
     return any(
-        re.fullmatch(r'-\d+|0+|-"?\$.+', arg)  # -1, a process group, or 0
-        or (
-            by_name
-            and "$" in arg
-            and "$(" not in arg
-            and arg.strip('"') not in ("$!", "${!}")
-        )
+        re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
+        or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
         or (
             ("$(" in arg or "`" in arg)
             and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
