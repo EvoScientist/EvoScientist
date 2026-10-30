@@ -44,22 +44,27 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
     script = tmp_path / "child.py"
     script.write_text(
         "from pathlib import Path\n"
-        "import os, time\n"
-        "Path('starting').write_text(str(os.getpid()))\n"
-        "Path('starting').replace('ready')\n"
+        "import os, sys, time\n"
+        "Path(sys.argv[1] + '.starting').write_text(str(os.getpid()))\n"
+        "Path(sys.argv[1] + '.starting').replace(sys.argv[1])\n"
         "time.sleep(30)\n"
     )
+    ready = tmp_path / "ready"
     backend = CustomSandboxBackend(root_dir=str(tmp_path))
     parent = threading.Event()
     with bind_cancel_event(parent):
         task = asyncio.create_task(
-            backend.aexecute(f'"{Path(sys.executable).as_posix()}" child.py')
+            backend.aexecute(
+                f'"{Path(sys.executable).as_posix()}" '
+                f'"{script.as_posix()}" "{ready.as_posix()}"'
+            )
         )
     try:
         async with asyncio.timeout(15):
-            while not (tmp_path / "ready").exists():
+            while not ready.exists():
                 await asyncio.sleep(0.05)
-        child = psutil.Process(int((tmp_path / "ready").read_text()))
+        child = psutil.Process(int(ready.read_text()))
+        assert child.is_running()
         if cancel_parent:
             await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
             await asyncio.wait_for(task, 15)
@@ -67,11 +72,12 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        async with asyncio.timeout(10):
-            while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-                await asyncio.sleep(0.05)
-    except psutil.NoSuchProcess:
-        pass
+        try:
+            async with asyncio.timeout(10):
+                while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    await asyncio.sleep(0.05)
+        except psutil.NoSuchProcess:
+            pass
     finally:
         parent.set()
         await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
