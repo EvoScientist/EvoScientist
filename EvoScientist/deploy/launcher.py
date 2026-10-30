@@ -806,9 +806,9 @@ def _resolve_backend(
                 fields={"reason": "no_record"},
             )
         return _BackendDecision(action="reuse", warnings=warnings)
-    # A sidecar is present. It is a single global record with no port field, so a
-    # launch on another port can overwrite it. Confirm its PID actually serves
-    # THIS port before trusting it — otherwise a stale record could describe
+    # A sidecar is present. It is a single global record, so a launch on another
+    # port can overwrite it. Confirm its PID actually serves THIS port before
+    # trusting it — otherwise a stale record could describe
     # another server, and teardown could stop the wrong one.
     # Two servers can share a port on different interfaces, so the recorded
     # bind must also be the one the probe reached.
