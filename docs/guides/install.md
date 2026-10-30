@@ -67,11 +67,10 @@ The scripts set `UV_SYSTEM_CERTS=1` for their own uv calls (unless you set it),
 so uv trusts the certificates of your operating system, and give uv a longer
 download timeout (`UV_HTTP_TIMEOUT=300`) for slow mirrors.
 
-Supported: macOS (Apple Silicon; Intel Macs on a best-effort basis), Linux on
-x86_64 or arm64 with glibc 2.28 or newer, Windows 10 and 11 on x64. The scripts
-stop before downloading anything on Windows on arm64 and on Linux with musl
-(such as Alpine) or an older glibc. On an Intel Mac the `stt` extra cannot be
-installed (its `onnxruntime` has no Intel macOS build).
+Supported: macOS on Apple silicon, Linux on x86_64 or arm64 with glibc 2.28 or
+newer, Windows 10 and 11 on x64. The scripts stop before downloading anything on
+Intel Macs, on Windows on arm64 and on Linux with musl (such as Alpine) or an
+older glibc.
 
 ## Running it again
 

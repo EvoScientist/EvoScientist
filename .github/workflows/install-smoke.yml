@@ -102,12 +102,8 @@ jobs:
           - os: ubuntu-latest
             cn: true
           - os: macos-latest
-          # Intel Macs are best-effort.
-          - os: macos-15-intel
-            best-effort: true
           - os: windows-latest
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.best-effort == true }}
     timeout-minutes: 60
     env:
       MODE: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
