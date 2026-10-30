@@ -998,6 +998,49 @@ class TestReadTunnelUrl:
             == "https://fresh-new-url.trycloudflare.com"
         )
 
+    def test_ignores_api_host_in_quick_tunnel_failure(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        """When the quick tunnel cannot be created, cloudflared logs the
+        request it failed to make, which contains ``api.trycloudflare.com``.
+        That host is the API endpoint it posts to, not a tunnel, so no URL
+        is reported and the caller can tell the tunnel failed."""
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(
+            "[cloudflared] INF Requesting new quick Tunnel on trycloudflare.com...\n"
+            "[cloudflared] failed to request quick Tunnel: "
+            'Post "https://api.trycloudflare.com/tunnel": '
+            "dial tcp 104.16.231.132:443: i/o timeout "
+            "(Client.Timeout exceeded while awaiting headers)\n"
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    def test_returns_url_whose_subdomain_starts_with_api(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        """Only the exact ``api.trycloudflare.com`` host is excluded; a
+        generated name that merely begins with ``api`` is a real tunnel and
+        must still be returned."""
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(
+            "[cloudflared] Your quick Tunnel has been created! Visit it at:\n"
+            "[cloudflared] https://api-gateway-test.trycloudflare.com\n"
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert (
+            manager.read_tunnel_url(timeout=1.0)
+            == "https://api-gateway-test.trycloudflare.com"
+        )
+
 
 class TestStartLanggraphDevSpawnFlags:
     """On Windows the langgraph dev child gets its own process group (Ctrl+C
