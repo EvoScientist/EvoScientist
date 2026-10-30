@@ -143,6 +143,18 @@ def test_write_workspace_sidecar_records_the_bind_host(
     assert manager._read_workspace_sidecar()["host"] == "0.0.0.0"
 
 
+def test_write_workspace_sidecar_records_the_port(tmp_path, monkeypatch, runtime_paths):
+    """A WebUI started apart from the server reads the port it listens on
+    from the record, not only the configured one."""
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=7, port=16409)
+    assert manager._read_workspace_sidecar()["port"] == 16409
+
+
 def test_write_workspace_sidecar_records_the_data_and_config_folders(
     tmp_path, monkeypatch, runtime_paths
 ):
