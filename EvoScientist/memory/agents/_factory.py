@@ -13,8 +13,8 @@ from langgraph.graph.state import CompiledStateGraph
 
 from ... import paths as _paths
 from ...paths import Workspace
+from ..types import MEMORY_AGENT_RECURSION_LIMIT
 
-MEMORY_AGENT_RECURSION_LIMIT = 100
 MEMORY_MAINTENANCE_EXCLUDED_TOOLS = frozenset(
     {
         "delete",

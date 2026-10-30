@@ -223,9 +223,9 @@ def _require_routed_api_key(
             )
         return "not-needed"
     raise ValueError(
-        f"The '{provider}' provider requires an API key. Please set the "
-        f"{api_key_env} environment variable (or configure it in your "
-        "config.yaml / .env) before using this provider."
+        f"The '{provider}' provider requires an API key. Save it with "
+        f"`EvoSci config set {api_key_env.lower()} <key>`, or set the "
+        f"{api_key_env} environment variable, before using this provider."
     )
 
 

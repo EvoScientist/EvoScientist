@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ...config import EvoScientistConfig
 from ...cron.schedule import (
     asearch_all,
-    create_cron,
-    delete_cron,
     owned,
     run_config,
-    search_all,
     workspace_key,
 )
+from ...langgraph_dev.assistants import launch_assistant_id
 from ...langgraph_dev.sdk import (
     default_scheduler_timezone,
     get_langgraph_async_client,
@@ -24,9 +24,21 @@ from ...langgraph_dev.sdk import (
     messages_input,
 )
 from ...paths import SessionDirs, Workspace
+from ..types import MEMORY_AGENT_RECURSION_LIMIT
 
 AUTOSKILL_GRAPH_ID = "evomemory-autoskills"
 AUTOSKILL_RUN_KIND = "evomemory_autoskills"
+# The settings an AutoSkills cron is built from (see plan_autoskill_schedule):
+# changing one reschedules every project's cron.
+AUTOSKILL_SETTINGS = frozenset(
+    {
+        "memory_skill_synthesis_enabled",
+        "memory_skill_synthesis_mode",
+        "memory_skill_synthesis_cadence",
+        "memory_skill_synthesis_time",
+        "scheduler_default_timezone",
+    }
+)
 
 
 def autoskill_cron(cadence: str, time_hhmm: str) -> str:
@@ -69,25 +81,12 @@ def _owned_by(
     return owned(rows, Workspace(workspace_dir))
 
 
-def list_autoskill_schedules(
-    config: EvoScientistConfig,
-    *,
-    workspace_dir: str | Path,
-) -> list[dict[str, Any]]:
-    """Return the workspace's internal AutoSkills cron records."""
-    rows = search_all(
-        get_langgraph_sync_client(url=langgraph_dev_url(config)),
-        metadata={"run_kind": AUTOSKILL_RUN_KIND},
-    )
-    return _owned_by(rows, workspace_dir)
-
-
 async def alist_autoskill_schedules(
     config: EvoScientistConfig,
     *,
     workspace_dir: str | Path,
 ) -> list[dict[str, Any]]:
-    """Async variant of :func:`list_autoskill_schedules`."""
+    """The workspace's internal AutoSkills cron records."""
     rows = await asearch_all(
         get_langgraph_async_client(url=langgraph_dev_url(config)),
         metadata={"run_kind": AUTOSKILL_RUN_KIND},
@@ -95,69 +94,86 @@ async def alist_autoskill_schedules(
     return await asyncio.to_thread(_owned_by, rows, workspace_dir)
 
 
+def _run_config(cron: dict[str, Any]) -> dict[str, Any]:
+    return (cron.get("payload") or {}).get("config") or {}
+
+
 def _forwarded_workspace(cron: dict[str, Any]) -> str | None:
     """The workspace a cron's runs forward (its run config), in stored form."""
-    payload = cron.get("payload") or {}
-    configurable = (payload.get("config") or {}).get("configurable") or {}
+    configurable = _run_config(cron).get("configurable") or {}
     return workspace_key(configurable.get("workspace_dir"))
 
 
-def reconcile_autoskill_schedule(
+@dataclass(frozen=True)
+class AutoskillCron:
+    """The AutoSkills cron the configuration asks for (the fields of
+    :func:`~EvoScientist.cron.schedule.cron_request`)."""
+
+    schedule: str
+    input: dict[str, Any]
+    metadata: dict[str, str]
+    timezone: str | None
+
+
+@dataclass(frozen=True)
+class AutoskillPlan:
+    """What a reconcile does with a workspace's AutoSkills crons: keep
+    *keep* (a matching cron) or create *create*, then delete *delete*."""
+
+    keep: dict[str, Any] | None
+    create: AutoskillCron | None
+    delete: list[dict[str, Any]]
+
+
+def plan_autoskill_schedule(
     config: EvoScientistConfig,
-    *,
-    workspace_dir: str | Path,
-) -> dict[str, Any]:
-    """Ensure the workspace's hidden AutoSkills cron matches config.
-
-    Only this workspace's AutoSkills crons are listed, replaced or deleted.
-    """
-    from ...langgraph_dev.manager import is_langgraph_dev_running
-
-    if not is_langgraph_dev_running(base_url=langgraph_dev_url(config)):
-        return {"status": "unavailable"}
-
-    workspace = Workspace(workspace_dir)
-    client = get_langgraph_sync_client(url=langgraph_dev_url(config))
-    existing = list_autoskill_schedules(config, workspace_dir=workspace_dir)
+    workspace: Workspace,
+    existing: list[dict[str, Any]],
+) -> AutoskillPlan:
+    """The reconcile of *workspace*'s AutoSkills crons *existing* against
+    *config*: disabled, every one goes; else a matching one is kept and the
+    rest go, or the replacement is created before the old ones go, so a
+    failed create leaves them running. Blocking (the default timezone reads
+    the system's); ``ValueError`` for an unknown timezone."""
     if not config.memory_skill_synthesis_enabled:
-        for row in existing:
-            delete_cron(client, row, workspace=workspace)
-        return {"status": "disabled", "deleted": len(existing)}
-
+        return AutoskillPlan(keep=None, create=None, delete=list(existing))
     schedule = autoskill_cron(
         config.memory_skill_synthesis_cadence,
         config.memory_skill_synthesis_time,
     )
     metadata = _autoskill_metadata(config=config, schedule=schedule)
-    # A cron created before its runs forwarded the workspace is replaced, so
-    # its runs carry ``configurable.workspace_dir`` too.
+    timezone = default_scheduler_timezone(config)
+    if timezone is not None:
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unknown scheduler timezone {timezone!r}.") from exc
+    # A cron created before its runs forwarded the workspace, ran on the
+    # workspace's assistant or carried the memory step limit does not match.
+    assistant_id = launch_assistant_id(AUTOSKILL_GRAPH_ID, workspace)
     matching = [
         row
         for row in existing
         if row.get("schedule") == schedule
+        and row.get("timezone") == timezone
         and bool(row.get("enabled", True))
         and (row.get("metadata") or {}).get("mode") == metadata["mode"]
         and _forwarded_workspace(row) == workspace.key
+        and str(row.get("assistant_id")) == assistant_id
+        and _run_config(row).get("recursion_limit") == MEMORY_AGENT_RECURSION_LIMIT
     ]
-    if len(matching) == 1 and len(existing) == 1:
-        return {"status": "unchanged", "cron_id": matching[0].get("cron_id")}
-
-    for row in existing:
-        delete_cron(client, row, workspace=workspace)
-    created = create_cron(
-        client,
-        workspace=workspace,
-        assistant_id=AUTOSKILL_GRAPH_ID,
+    if matching:
+        kept = matching[0]
+        return AutoskillPlan(
+            keep=kept, create=None, delete=[r for r in existing if r is not kept]
+        )
+    create = AutoskillCron(
         schedule=schedule,
         input=_autoskill_input(),
         metadata=metadata,
-        timezone=default_scheduler_timezone(config),
+        timezone=timezone,
     )
-    return {
-        "status": "created",
-        "cron_id": created.get("cron_id"),
-        "schedule": schedule,
-    }
+    return AutoskillPlan(keep=None, create=create, delete=list(existing))
 
 
 def run_autoskill_now(
@@ -175,10 +191,13 @@ def run_autoskill_now(
     )
     run = client.runs.create(
         thread_id=str(thread["thread_id"]),
-        assistant_id=AUTOSKILL_GRAPH_ID,
+        assistant_id=launch_assistant_id(AUTOSKILL_GRAPH_ID, workspace),
         input=_autoskill_input(),
         metadata={**_autoskill_metadata(config=config, schedule="manual"), **folders},
-        config=run_config(workspace, thread_id=str(thread["thread_id"])),
+        config={
+            **run_config(workspace, thread_id=str(thread["thread_id"])),
+            "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
+        },
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
 
@@ -198,9 +217,12 @@ async def arun_autoskill_now(
     )
     run = await client.runs.create(
         thread_id=str(thread["thread_id"]),
-        assistant_id=AUTOSKILL_GRAPH_ID,
+        assistant_id=launch_assistant_id(AUTOSKILL_GRAPH_ID, workspace),
         input=_autoskill_input(),
         metadata={**_autoskill_metadata(config=config, schedule="manual"), **folders},
-        config=run_config(workspace, thread_id=str(thread["thread_id"])),
+        config={
+            **run_config(workspace, thread_id=str(thread["thread_id"])),
+            "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
+        },
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}

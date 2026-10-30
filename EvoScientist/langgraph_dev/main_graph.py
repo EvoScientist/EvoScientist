@@ -1,13 +1,11 @@
 """Deployed graph entry for the main EvoScientist agent.
 
-The main ``EvoScientist_agent`` is exposed via ``__getattr__`` lazy loading
-in ``EvoScientist/EvoScientist.py`` so it doesn't construct on plain
-``import EvoScientist``. ``langgraph dev`` 's symbol resolver inspects
-module attributes directly and doesn't trigger ``__getattr__``, so we
-re-export here to make it visible.
+``EvoScientist_agent`` is the factory langgraph-api calls on every access to
+the main graph (see ``factories``); it returns the graph built for the
+access's folders.
 
-Before re-export we upgrade the compiled graph's class in place to
-``_EvoFilteredGraph``, which strips ``PrivateStateAttr``-marked fields
+Every served graph is upgraded in place to ``_EvoFilteredGraph`` when it is
+built, which strips ``PrivateStateAttr``-marked fields
 (currently just ``_quickjs_snapshot_payload``) from ``get_state`` /
 ``get_state_history`` responses. Upstream ``langchain_quickjs`` annotates
 the field ``PrivateStateAttr = OmitFromSchema(input=True, output=True)``,
@@ -18,28 +16,17 @@ closes the gap without touching the middleware's write path, preserving
 cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
-# Records config.yaml before the agent import below reads it.
-import EvoScientist.langgraph_dev.config_baseline  # noqa: F401
-
-# isort: split
-
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 
-from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 from EvoScientist.sessions import AGENT_NAME
+
+from .factories import served_graph
 
 # Re-exported so langgraph-api finds the ``stream_transformers`` symbol on this
 # graph's source module and opts the served graph into the ``custom`` stream
-# mode; the logic lives in the sibling module so it stays unit-testable without
-# building the agent this import triggers.
-from .folder_check import folder_checked
+# mode; the logic lives in the sibling module so it stays unit-testable.
 from .stream_transformers import stream_transformers
-
-# The model fallback chain is seeded in _get_default_middleware (the
-# factory every graph — main, sync/async subagent — is built through), so
-# no registration-time seeding is needed here: importing the agent builds
-# its middleware and seeds the chain in the same sync import context.
 
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
@@ -200,71 +187,9 @@ class _EvoFilteredGraph(CompiledStateGraph):
             yield _strip_private(snap)
 
 
-# In-place ``__class__`` swap: the subclass adds only methods (no new
-# instance attributes) so the memory layout is identical and the swap is
-# safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()`` would
-# require reproducing the deep-agent build pipeline; the swap avoids that.
-_agent.__class__ = _EvoFilteredGraph
-# The main agent works in the session's folder: a run for another workspace or
-# run folder is refused (see ``folder_check``).
-EvoScientist_agent = folder_checked(_agent, graph_id=AGENT_NAME)
-
-
-def _apply_filter_to_all_registered_graphs() -> None:
-    """Extend the class swap to every graph registered in ``langgraph.json``.
-
-    ``EvoScientist.py:_build_middleware_stack`` installs
-    ``create_code_interpreter_middleware`` unconditionally — it's not gated
-    on the ``for_async_subagent`` flag — so every subagent (sync ``task``
-    dispatch and async ``start_async_task``) carries the QuickJS REPL and
-    can produce ``_quickjs_snapshot_payload`` writes on its own checkpoint
-    namespace.
-
-    Async subagents get their own ``thread_id`` and their ``/threads/{id}/state``
-    endpoint is served by their own compiled graph. Without swapping the
-    class on those graphs, the filter we applied to ``EvoScientist_agent``
-    doesn't reach that endpoint and any real code_interpreter touch inside
-    a subagent leaks the anchor snapshot verbatim.
-
-    Reads the graph registry straight from ``langgraph.json`` so a new
-    subagent added to the config picks up the swap automatically — no
-    hardcoded list to keep in sync.
-
-    Idempotent (skips graphs already swapped) and safe on graphs that don't
-    use the middleware — ``_strip_private`` returns snapshots unchanged when
-    the private field is absent. Best-effort: if the config is unreadable
-    or an entry can't be resolved, the deployment still starts — only the
-    unresolvable subagents remain unfiltered.
-    """
-    import json
-    from importlib import import_module
-    from pathlib import Path
-
-    config_path = Path(__file__).parent / "langgraph.json"
-    try:
-        config = json.loads(config_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-
-    for path in config.get("graphs", {}).values():
-        # Format: "module.dotted.path:attr_name"
-        if ":" not in path:
-            continue
-        module_path, attr = path.rsplit(":", 1)
-        try:
-            module = import_module(module_path)
-        except ImportError:
-            continue
-        graph = getattr(module, attr, None)
-        # Registered graphs sit behind a folder-checking factory.
-        graph = getattr(graph, "graph", graph)
-        if isinstance(graph, CompiledStateGraph) and not isinstance(
-            graph, _EvoFilteredGraph
-        ):
-            graph.__class__ = _EvoFilteredGraph
-
-
-_apply_filter_to_all_registered_graphs()
+# The main agent works in the access's project and run folder: a run on a
+# thread bound to another one is refused (see ``folder_check``).
+EvoScientist_agent = served_graph(AGENT_NAME)
 
 
 __all__ = ["EvoScientist_agent", "stream_transformers"]

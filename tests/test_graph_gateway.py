@@ -1527,6 +1527,48 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
     assert start["config"]["recursion_limit"] == 100
 
 
+async def test_server_gateway_streams_on_target_workspace_assistant():
+    """A turn names its project by the target's workspace assistant."""
+    from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    request = RunRequest(
+        message="hi", thread_id="abc12345", target=GraphTarget(workspace_dir="/ws")
+    )
+    async for _event in gateway.stream_events(request):
+        pass
+
+    assert threads.stream_calls == [
+        ("abc12345", workspace_assistant_id("EvoScientist", "/ws"))
+    ]
+
+
+async def test_server_gateway_target_without_workspace_runs_on_graph():
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    async for _event in gateway.stream_events(
+        RunRequest(message="hi", thread_id="abc12345")
+    ):
+        pass
+
+    assert threads.stream_calls == [("abc12345", "EvoScientist")]
+
+
 @pytest.mark.parametrize("resume", [False, True])
 async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     from langgraph.types import Command

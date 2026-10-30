@@ -37,7 +37,7 @@ def resolve_per_run_config(
     - the server gateway extracts ``model`` / ``model_provider`` /
       ``recursion_limit`` from the live session config (a per-call
       ``recursion_limit`` overrides the server's construction-time
-      ``.with_config`` binding, so a keepalive server picks up the client's
+      ``.with_config`` binding, so a shared server picks up the client's
       live limit per run instead of at restart);
     - both backends pass ``hitl_suppressed`` from
       ``backends.hitl_suppressed_for_run`` (``config.auto_mode`` or

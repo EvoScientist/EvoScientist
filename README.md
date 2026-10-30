@@ -354,16 +354,40 @@ What the mounts are for:
 
 | Mount | Purpose |
 | --- | --- |
-| `--env-file .env` | API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) |
+| `--env-file .env` | API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …), set as environment variables of the container |
 | `./workspace:/workspace` | The agent's working directory |
 | `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
 
 The image does not include the agent's research Python; run `EvoSci setup` once in a container with the same `evosci-data` mount (`docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup`, since the image's entrypoint is `evosci`; with compose, `docker compose run --rm evoscientist setup`), and it builds the environment in that volume, where it survives image upgrades.
 
 > [!IMPORTANT]
-> The image runs as a non-root user (`evosci`, UID `1000`). For the `./workspace` bind mount, the host directory must be writable by that UID. If your host user ID differs, either `chown -R 1000:1000 ./workspace` once, or pass `--user "$(id -u):$(id -g)"` on every `docker run` so the container takes on your UID.
+> The image runs as a non-root user (`evosci`, UID `1000`). On Linux hosts:
+>
+> - Create the workspace before the first run with `mkdir -p workspace`. Otherwise Docker creates it as `root` and the container can't write to it, even with UID `1000`.
+> - If you work as `root`, run `chown -R 1000:1000 ./workspace` once after creating it. The build below doesn't work for UID `0`, and as `root` you can still edit those files from the host.
+> - If your host user ID is neither `1000` nor `0`, build the image as yourself from a clone of this repository, so the host and the container can both write to `./workspace`:
+>
+>   ```bash
+>   docker build --build-arg UID="$(id -u)" -t evoscientist:local .
+>   ```
+>
+>   Then use `evoscientist:local` in place of the published image, including for `setup`; with compose, set `image: evoscientist:local` in `docker-compose.yml`. If you already used the published image, hand the data volume to your UID once:
+>
+>   ```bash
+>   docker run --rm --user 0 --entrypoint chown -v evosci-data:/home/evosci/.evoscientist evoscientist:local -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
+>
+>   With compose, run it through compose instead (after setting `image: evoscientist:local`), since compose names the volume `<project>_evosci-data`:
+>
+>   ```bash
+>   docker compose run --rm --user 0 --entrypoint chown evoscientist -R "$(id -u):$(id -g)" /home/evosci/.evoscientist
+>   ```
+>
+>   Alternatively, run `sudo chown -R 1000:1000 ./workspace` once, but you'll then need `sudo` to change those files from the host.
+>
+> Docker Desktop (macOS, Windows) generally handles bind-mount permissions itself, so these steps are not needed there. Apart from the one-off `chown` commands above, don't pass `--user` to `docker run` or set `user:` in compose: the image keeps its data and config under `/home/evosci/.evoscientist`, which belongs to the build-time UID, so any other UID fails with `Permission denied`.
 
-Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included):
+Or use `docker compose` (a starter [`docker-compose.yml`](./docker-compose.yml) is included; it reads your API keys from a `.env` file next to it, one `NAME=value` per line, which you create):
 
 ```bash
 docker compose run --rm evoscientist
@@ -433,13 +457,9 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yaml`.
 
-Alternatively, copy the example `.env` file for project-level configuration:
+Every agent takes its keys from `config.yaml` or the environment. A project `.env` holds only settings of the `EvoSci` command started in that folder, such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`; `EvoSci` warns about, and ignores, any key or other setting EvoScientist reads in it. Other variables in it, such as `HF_TOKEN`, are ignored too: export them in your shell before starting EvoSci.
 
-```bash
-cp .env.example .env  # then fill in your keys
-```
-
-> ⚠️ Never commit `.env` files with real keys. It is already in `.gitignore`.
+The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs (the project is the one the WebUI and the desktop app open), and after changing that, run `EvoSci service stop` and start it again.
 
 </details>
 
@@ -486,7 +506,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a 
 <details>
 <summary>Desktop WebUI</summary>
 
-Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal — no second process to manage:
+Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal. The server keeps running after the WebUI closes, for every EvoSci session, until `EvoSci service stop`; `EvoSci --ui webui` opens only the project that server was started from, so stop it first to open another:
 
 ```bash
 EvoSci config set ui_backend webui   # persist; or one-off with `EvoSci --ui webui`
@@ -499,7 +519,7 @@ Requires **Node.js 20.9 or newer** (`EvoSci setup` installs Node.js 24 LTS when 
 **Opening it from another machine.** Both servers bind loopback (`127.0.0.1`) by default, so the WebUI is local-only out of the box. To use it over the LAN, widen both — the UI connects to the backend **from the browser**, so also point the UI's deployment URL at `http://<this-machine-ip>:6174` rather than leaving it on localhost:
 
 ```bash
-EvoSci --host 0.0.0.0                          # this session only, both servers
+EvoSci --host 0.0.0.0                          # both servers; a running backend keeps its own bind until EvoSci server stop
 EvoSci config set webui_host 0.0.0.0           # persist, front-end (port 4716)
 EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 ```
@@ -514,7 +534,7 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
 
-**Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend:
+**Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend (`EvoSci server stop`; the next session starts it again):
 
 ```bash
 EvoSci config set backend_allowed_origins https://smith.langchain.com
@@ -547,8 +567,8 @@ During a session you can also reply **3** (Approve all) at any approval prompt t
 > **Dangerous mode** lifts the workspace sandbox entirely — the agent can read, write, and delete files **anywhere on the real filesystem** (privileged commands like `sudo`/`rm -rf /` are still blocked). It implies `--auto-approve` (no prompts). Use only when you fully trust the task.
 >
 > ```bash
-> EvoSci --dangerous                       # per-session
-> EvoSci config set dangerous_mode true    # persistent
+> EvoSci --dangerous                       # this session's own agent
+> EvoSci config set dangerous_mode true    # persistent, the background server and WebUI too
 > ```
 
 </details>

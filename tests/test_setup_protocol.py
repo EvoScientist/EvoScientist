@@ -45,6 +45,7 @@ def test_manifest_shape(monkeypatch, plat):
             {"id": "node", "title": "Node.js"},
             {"id": "research-env", "title": "Python research environment"},
             {"id": "webui", "title": "WebUI"},
+            {"id": "server", "title": "Background agent server"},
         ],
     }
 
@@ -56,6 +57,7 @@ def test_manifest_lists_git_on_windows_only(monkeypatch):
         {"id": "git", "title": "Git for Windows"},
         {"id": "research-env", "title": "Python research environment"},
         {"id": "webui", "title": "WebUI"},
+        {"id": "server", "title": "Background agent server"},
     ]
 
 
@@ -176,7 +178,12 @@ def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
     )
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
-    assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env", "webui"]
+    assert [s["id"] for s in manifest()["stages"]] == [
+        "node",
+        "research-env",
+        "webui",
+        "server",
+    ]
 
 
 def test_json_emitter_writes_one_line_per_event(tmp_path):

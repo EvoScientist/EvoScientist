@@ -1367,7 +1367,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=1.7.2" },
     { name = "langchain-openrouter", specifier = ">=0.2.9" },
     { name = "langchain-quickjs", specifier = ">=0.3.9" },
-    { name = "langgraph-api", specifier = ">=0.7.30" },
+    { name = "langgraph-api", specifier = ">=0.13.3" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0" },
     { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4" },
     { name = "langgraph-sdk", specifier = ">=0.4" },

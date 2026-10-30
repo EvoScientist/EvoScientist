@@ -8,7 +8,6 @@ had before.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import sqlite3
 import sys
@@ -168,122 +167,36 @@ def test_run_mode_memory_is_keyed_to_the_workspace_root(run_dirs, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Server pinned to (workspace, run folder)
+# The server serves projects, not run folders
 # ---------------------------------------------------------------------------
 
 
-def test_server_starts_in_the_root_with_the_run_folder_in_its_env(
-    run_dirs, monkeypatch, tmp_path, runtime_paths
-):
+def test_server_env_has_no_run_folder(run_dirs, monkeypatch, tmp_path, runtime_paths):
+    """A run names its run folder itself; the server has none of its own."""
     from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs
 
     monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=run_dirs.workspace.root,
-            run_dir=run_dirs.run_dir,
-            port=16190,
-        )
-    assert captured["env"]["EVOSCIENTIST_WORKSPACE_DIR"] == str(run_dirs.workspace.root)
-    assert captured["env"]["EVOSCIENTIST_RUN_DIR"] == str(run_dirs.run_dir)
-
-
-def test_daemon_server_env_has_no_run_folder(
-    workspace, monkeypatch, tmp_path, runtime_paths
-):
-    from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs
-
-    monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
-    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
-    with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=workspace.root, port=16191)
+        manager.start_langgraph_dev(workspace_dir=run_dirs.workspace.root, port=16190)
     assert "EVOSCIENTIST_RUN_DIR" not in captured["env"]
 
 
-def _reuse_running_server(monkeypatch):
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
-    monkeypatch.setattr(manager, "_PROCESS_RUN_DIR", None)
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    return cfg
-
-
-def test_reuse_refuses_another_run_folder_of_the_same_workspace(
-    workspace, monkeypatch, runtime_paths
-):
-    manager._write_workspace_sidecar(
-        workspace_dir=workspace.root, pid=1, run_dir=workspace.runs_dir / "a"
-    )
-    cfg = _reuse_running_server(monkeypatch)
-    for run_dir in (workspace.runs_dir / "b", None):
-        with pytest.raises(manager.WorkspaceMismatchError) as exc:
-            manager.ensure_langgraph_dev(
-                cfg, workspace_dir=workspace.root, run_dir=run_dir
-            )
-        # Same workspace: pointing at --workdir would name the user's own folder.
-        assert "--workdir" not in str(exc.value)
-
-
-def test_reuse_accepts_the_same_pair(run_dirs, monkeypatch, runtime_paths):
-    manager._write_workspace_sidecar(
-        workspace_dir=run_dirs.workspace.root, pid=1, run_dir=run_dirs.run_dir
-    )
-    cfg = _reuse_running_server(monkeypatch)
-    manager.ensure_langgraph_dev(
-        cfg, workspace_dir=run_dirs.workspace.root, run_dir=run_dirs.run_dir
-    )
-
-
-def test_owned_server_restarts_for_another_run_folder(
-    workspace, monkeypatch, runtime_paths
-):
-    class _LiveProc:
-        def poll(self):
-            return None
-
-    stopped: list = []
-    started: list = []
-    monkeypatch.setattr(manager, "_PROCESS", _LiveProc())
-    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", workspace.root)
-    monkeypatch.setattr(manager, "_PROCESS_RUN_DIR", workspace.runs_dir / "a")
-    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *a: stopped.append(1))
-    monkeypatch.setattr(manager, "_wait_for_port_release", lambda *a, **k: True)
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(
-        manager, "start_langgraph_dev", lambda **kw: started.append(kw) or object()
-    )
-    monkeypatch.setattr(manager.atexit, "register", lambda *a, **k: None)
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-
-    manager.ensure_langgraph_dev(
-        cfg, workspace_dir=workspace.root, run_dir=workspace.runs_dir / "b"
-    )
-
-    assert stopped == [1]
-    assert started[0]["workspace_dir"] == workspace.root
-    assert started[0]["run_dir"] == workspace.runs_dir / "b"
-
-
 def test_server_graphs_work_in_the_run_folder_and_crons_in_the_root(
-    run_dirs, monkeypatch
+    run_dirs, monkeypatch, tiny_graph
 ):
     """Deployed sub-agents work where the session works; scheduled tasks
     belong to the workspace and work in its root."""
-    import EvoScientist.memory.agents as memory_agents
     import EvoScientist.subagents._factory as factory
     import EvoScientist.subagents.expert_container_async as expert_async
-    from EvoScientist.paths import process_session_dirs, process_workspace
+    from EvoScientist.langgraph_dev.factories import GraphCache
 
     built: dict[str, dict] = {}
 
     def _record(name):
         def _build(*args, **kwargs):
             built[args[0] if args and isinstance(args[0], str) else name] = kwargs
-            return object()
+            return tiny_graph()
 
         return _build
 
@@ -291,23 +204,9 @@ def test_server_graphs_work_in_the_run_folder_and_crons_in_the_root(
     monkeypatch.setattr(
         expert_async, "build_expert_container_async_graph", _record("expert")
     )
-    for name in (
-        "build_memory_worker_graph",
-        "build_observation_linker_graph",
-        "build_autoskills_graph",
-    ):
-        monkeypatch.setattr(memory_agents, name, lambda *a, **k: object())
-    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(run_dirs.workspace.root))
-    monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run_dirs.run_dir))
-    process_workspace.cache_clear()
-    process_session_dirs.cache_clear()
-    monkeypatch.delitem(sys.modules, "EvoScientist.langgraph_dev.graphs", raising=False)
-
-    try:
-        importlib.import_module("EvoScientist.langgraph_dev.graphs")
-    finally:
-        # Built for this test's folders: later imports must build their own.
-        sys.modules.pop("EvoScientist.langgraph_dev.graphs", None)
+    graphs = GraphCache()
+    for graph_id in ("writing-agent", "expert-container-async", "scheduler"):
+        graphs.get(graph_id, run_dirs)
 
     assert built["writing-agent"]["work_dir"] == run_dirs.run_dir
     assert built["expert"]["work_dir"] == run_dirs.run_dir
@@ -597,7 +496,7 @@ async def test_cli_and_server_upgrade_before_reading(
         "langgraph_runtime_inmem.database",
         SimpleNamespace(GLOBAL_STORE=store),
     )
-    monkeypatch.setattr(sessions, "_api_session_dirs", lambda: SessionDirs(workspace))
+    monkeypatch.setattr(sessions, "_known_workspace_keys", lambda: {workspace.key})
     async with sessions.create_checkpointer_for_langgraph_api():
         pass
     (restored,) = store["threads"]
@@ -606,8 +505,10 @@ async def test_cli_and_server_upgrade_before_reading(
     assert restored["metadata"]["run_dir"] == run_meta["run_dir"]
 
 
-def _stamped(run_dirs: SessionDirs, monkeypatch, graph_id: str) -> dict:
-    """Metadata the server's checkpointer writes for an unstamped row."""
+def _stamped(folders: SessionDirs, monkeypatch) -> dict:
+    """Metadata the server's checkpointer writes after a factory decided *folders*."""
+    import contextvars
+
     import EvoScientist.sessions as sessions
 
     captured: dict = {}
@@ -615,24 +516,26 @@ def _stamped(run_dirs: SessionDirs, monkeypatch, graph_id: str) -> dict:
     async def _fake_super_aput(self, config, checkpoint, metadata, new_versions):
         captured.update(metadata)
 
-    monkeypatch.setattr(sessions, "_api_session_dirs", lambda: run_dirs)
+    async def _put():
+        sessions.RESOLVED_FOLDERS.set(folders)
+        saver = object.__new__(sessions._ApiPruningCheckpointer)
+        await saver.aput({}, {}, {"graph_id": "writing-agent"}, {})
+
     monkeypatch.setattr(sessions.PruningCheckpointer, "aput", _fake_super_aput)
-    saver = object.__new__(sessions._ApiPruningCheckpointer)
-    asyncio.run(saver.aput({}, {}, {"graph_id": graph_id}, {}))
+    contextvars.copy_context().run(asyncio.run, _put())
     return captured
 
 
-def test_server_stamps_its_run_folder_on_unstamped_rows(run_dirs, monkeypatch):
-    stamped = _stamped(run_dirs, monkeypatch, "writing-agent")
+def test_server_stamps_resolved_run_folder(run_dirs, monkeypatch):
+    stamped = _stamped(run_dirs, monkeypatch)
 
     assert stamped["workspace_dir"] == run_dirs.workspace.key
     assert stamped["run_dir"] == run_dirs.run_dir.as_posix()
 
 
-@pytest.mark.parametrize("graph_id", ["scheduler", "evomemory-turn-worker"])
-def test_server_stamps_root_graph_rows_without_run_dir(run_dirs, monkeypatch, graph_id):
+def test_server_stamps_root_folders_without_run_dir(run_dirs, monkeypatch):
     """Scheduled tasks and memory workers work in the workspace root."""
-    stamped = _stamped(run_dirs, monkeypatch, graph_id)
+    stamped = _stamped(SessionDirs(run_dirs.workspace), monkeypatch)
 
     assert stamped["workspace_dir"] == run_dirs.workspace.key
     assert "run_dir" not in stamped
@@ -868,7 +771,7 @@ async def test_channel_attachments_follow_resume_into_another_workspace(
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ),
         patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),

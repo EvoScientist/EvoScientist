@@ -27,6 +27,7 @@ from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.middleware import events as mw_events
+from EvoScientist.paths import Workspace
 from EvoScientist.stream import display as display_mod
 from tests.fakes.common import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes.common import StubChannel as _StubChannel
@@ -1133,6 +1134,7 @@ class TestConsumerSessionGrantReachesTheGraph:
             manager=manager,
             agent=agent,
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=gateway,
             max_concurrent=2,
             max_pending=10,
@@ -1231,6 +1233,7 @@ class TestConsumerHitlRoundBudget:
                 manager=mgr,
                 agent=agent,
                 thread_id="",
+                workspace=Workspace("/tmp/channel-project"),
                 graph_gateway=gateway,
                 max_concurrent=2,
                 max_pending=10,

@@ -2,8 +2,11 @@
 
 from unittest.mock import MagicMock
 
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 
-def _patch_client(monkeypatch):
+
+def _patch_client(monkeypatch, workspace=None):
+    """A fake client whose one scheduled task is *workspace*'s."""
     from EvoScientist.cron import schedule as crons
 
     fake = MagicMock()
@@ -11,6 +14,9 @@ def _patch_client(monkeypatch):
     fake.crons.search.return_value = [
         {
             "cron_id": "c-1",
+            "assistant_id": workspace_assistant_id("scheduler", workspace)
+            if workspace is not None
+            else None,
             "schedule": "*/10 * * * *",
             "metadata": {"run_kind": "scheduled_task", "name": "weather"},
         },
@@ -30,7 +36,9 @@ def test_create_schedule_targets_scheduler(monkeypatch, workspace):
     )
     assert rec["cron_id"] == "c-1"
     kw = fake.crons.create.call_args.kwargs
-    assert kw["assistant_id"] == crons.SCHEDULER_GRAPH_ID
+    assert kw["assistant_id"] == workspace_assistant_id(
+        crons.SCHEDULER_GRAPH_ID, workspace
+    )
     assert kw["schedule"] == "*/10 * * * *"
     assert kw["input"] == {
         "messages": [{"role": "user", "content": "search uk weather and summarize"}]
@@ -41,7 +49,7 @@ def test_create_schedule_targets_scheduler(monkeypatch, workspace):
 
 
 def test_list_schedules_uses_server_side_filter(monkeypatch, workspace):
-    crons, fake = _patch_client(monkeypatch)
+    crons, fake = _patch_client(monkeypatch, workspace)
     out = crons.list_schedules(workspace=workspace)
     assert [c["cron_id"] for c in out] == ["c-1"]
     # Filtered server-side by run_kind metadata (the workspace is filtered
@@ -52,7 +60,7 @@ def test_list_schedules_uses_server_side_filter(monkeypatch, workspace):
 
 
 def test_delete_and_set_enabled(monkeypatch, workspace):
-    crons, fake = _patch_client(monkeypatch)
+    crons, fake = _patch_client(monkeypatch, workspace)
     (row,) = crons.list_schedules(workspace=workspace)
     crons.delete_schedule(row, workspace=workspace)
     fake.crons.delete.assert_called_once_with("c-1")
@@ -69,7 +77,9 @@ def test_run_now_dispatches_thread_then_run(monkeypatch, workspace):
     assert fake.threads.create.call_args.kwargs["graph_id"] == crons.SCHEDULER_GRAPH_ID
     run_kw = fake.runs.create.call_args.kwargs
     assert run_kw["thread_id"] == "t-1"
-    assert run_kw["assistant_id"] == crons.SCHEDULER_GRAPH_ID
+    assert run_kw["assistant_id"] == workspace_assistant_id(
+        crons.SCHEDULER_GRAPH_ID, workspace
+    )
     assert run_kw["input"] == {
         "messages": [{"role": "user", "content": "do the thing"}]
     }
@@ -286,7 +296,7 @@ def test_create_cron_without_a_thread_passes_no_new_arguments(workspace):
     create_cron(
         fake,
         workspace=workspace,
-        assistant_id="scheduler",
+        graph_id="scheduler",
         schedule="0 9 * * *",
         input={},
         metadata={"run_kind": "scheduled_task"},
@@ -311,7 +321,7 @@ def test_create_cron_on_a_thread_keeps_the_workspace_tag_and_run_config(workspac
     create_cron(
         fake,
         workspace=workspace,
-        assistant_id="proactive",
+        graph_id="proactive",
         schedule="*/10 * * * *",
         input={"candidates": []},
         metadata={"run_kind": "proactive_check"},
@@ -322,7 +332,7 @@ def test_create_cron_on_a_thread_keeps_the_workspace_tag_and_run_config(workspac
     )
     fake.crons.create.assert_not_called()
     args = fake.crons.create_for_thread.call_args
-    assert args.args == ("t-cron", "proactive")
+    assert args.args == ("t-cron", workspace_assistant_id("proactive", workspace))
     assert args.kwargs["metadata"] == {
         "run_kind": "proactive_check",
         "workspace_dir": workspace.key,

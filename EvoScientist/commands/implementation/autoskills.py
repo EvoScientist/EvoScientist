@@ -326,9 +326,7 @@ class AutoSkillsCommand(Command):
         value: str | None,
     ) -> None:
         from ...config import get_effective_config, set_config_value
-        from ...memory.autoskills.schedule import reconcile_autoskill_schedule
 
-        workspace_dir = self._workspace_dir(ctx)
         if not value:
             cfg = get_effective_config()
             current = self._display_value(getattr(cfg, key))
@@ -359,15 +357,15 @@ class AutoSkillsCommand(Command):
         cfg = get_effective_config()
         if ctx.config is not None and hasattr(ctx.config, key):
             setattr(ctx.config, key, getattr(cfg, key))
-        await asyncio.to_thread(
-            reconcile_autoskill_schedule,
-            cfg,
-            workspace_dir=workspace_dir,
-        )
         ctx.ui.append_system(
             f"Updated {self._config_label(key)} = {self._display_value(getattr(cfg, key))}",
             style="green",
         )
+        from ...langgraph_dev.registration import apply_autoskills_settings
+
+        note = await asyncio.to_thread(apply_autoskills_settings, cfg)
+        if note is not None:
+            ctx.ui.append_system(note, style="yellow")
 
     @staticmethod
     def _config_label(key: str) -> str:

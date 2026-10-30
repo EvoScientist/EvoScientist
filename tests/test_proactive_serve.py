@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.paths import Workspace
 from EvoScientist.proactive.commit import read_proactive_tag
 from EvoScientist.proactive.serve import (
@@ -112,6 +113,7 @@ def test_reconcile_with_nothing_armed_deletes_leftover_crons(setup, workspace):
     client.crons.rows.append(
         {
             "cron_id": "old",
+            "assistant_id": workspace_assistant_id("proactive", workspace),
             "metadata": {"run_kind": "proactive_check", "workspace_dir": workspace.key},
         }
     )

@@ -208,7 +208,7 @@ def test_without_bash_the_command_goes_to_the_default_shell(scripts):
     assert launch.env is env
     assert launch.script is None
     assert launch.creationflags == 0
-    assert launch.text_options == {}
+    assert launch.text_options == {"errors": "replace"}
     launch.cleanup()
     assert not scripts.exists()
 
