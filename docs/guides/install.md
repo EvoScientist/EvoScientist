@@ -107,7 +107,9 @@ reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
 same packages, or by running the command again. `EvoSci update` asks before it
 stops the background agent service, starts it again after the update, and
 waits until other EvoScientist sessions and MCP servers started from the
-install have closed, naming them; Ctrl+C cancels and changes nothing.
+install have closed, naming them; Ctrl+C cancels and changes nothing. Before it
+stops anything it installs the new release once into a temporary folder, so a
+download or build that fails leaves the installed version as it was.
 
 ## Uninstalling
 
