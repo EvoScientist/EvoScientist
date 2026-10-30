@@ -280,6 +280,7 @@ def _write_workspace_sidecar(
     agent_bash: str | object | None = _NOT_RECORDED,
     host: str | None = None,
     lasting: bool | None = None,
+    port: int | None = None,
 ) -> None:
     """Record the pid of the langgraph dev we just started, and the project
     of the client that started it.
@@ -294,7 +295,9 @@ def _write_workspace_sidecar(
     config folders, which the server inherits (``paths.dir_env``), so a
     client attaching from another environment reads the server's own.
     ``host`` is the interface the server binds, so a client can tell
-    whether its probe reaches this server. ``lasting`` says
+    whether its probe reaches this server. ``port`` is the port it listens
+    on, for a client started apart from it (a WebUI run by hand) that would
+    otherwise only know the configured one. ``lasting`` says
     whether it outlives the process that started it.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
@@ -317,6 +320,8 @@ def _write_workspace_sidecar(
         }
         if host is not None:
             payload["host"] = host
+        if port is not None:
+            payload["port"] = port
         if lasting is not None:
             payload["lasting"] = lasting
         if config_fingerprint is not None:
@@ -1321,6 +1326,7 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         host=host,
         lasting=lasting,
+        port=port,
     )
 
     # langgraph dev cold-starts in ~10-15s normally, so the budget is
