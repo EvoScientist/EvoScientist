@@ -463,6 +463,24 @@ def test_start_records_the_bind_host(monkeypatch, tmp_path, runtime_paths):
     assert recorded["host"] == "0.0.0.0"
 
 
+def test_start_records_the_listening_port(monkeypatch, tmp_path, runtime_paths):
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242)
+    )
+    recorded: dict = {}
+
+    def _write(**kwargs):
+        recorded.update(kwargs)
+        raise PopenAbort("recorded")
+
+    monkeypatch.setattr(manager, "_write_workspace_sidecar", _write)
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16181)
+    assert recorded["port"] == 16181
+
+
 def test_start_passes_env_origins_to_the_server_only(
     monkeypatch, tmp_path, runtime_paths
 ):
