@@ -69,8 +69,8 @@ class ToolErrorHandlerMiddleware(AgentMiddleware):
 
 
 def _describe_exception(exc: BaseException) -> str:
-    """The exception, the causes it was raised from and a group's members
-    (MCP transport failures arrive as a group), without the stack."""
+    """The exception, what it was raised from or while handling, and a group's
+    members (MCP transport failures arrive as a group), without the stack."""
     lines: list[str] = []
     size = 0
     seen: set[int] = set()
@@ -84,8 +84,12 @@ def _describe_exception(exc: BaseException) -> str:
         line = label + "".join(traceback.format_exception_only(current)).strip()
         lines.append(line)
         size += len(line) + 1
-        # Pushed in reverse: a group's members come before its cause.
-        pending.append((current.__cause__, "Caused by: "))
+        # Pushed in reverse: a group's members come before its cause. Python's
+        # own rule: the explicit cause, else the handled exception unless hidden.
+        if current.__cause__ is not None:
+            pending.append((current.__cause__, "Caused by: "))
+        elif not current.__suppress_context__:
+            pending.append((current.__context__, "While handling: "))
         if isinstance(current, BaseExceptionGroup):
             pending.extend(
                 (member, "Sub-exception: ") for member in reversed(current.exceptions)
