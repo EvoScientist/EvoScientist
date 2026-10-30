@@ -64,6 +64,7 @@ from .async_notifier import (
     enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
     enqueue_completions_from_state_throttled,
+    enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -1397,8 +1398,17 @@ def run_textual_interactive(
             # `await _run_turn` from inside a nested call_later chain don't
             # get viewport-follow during streaming (only after completion).
             effective_tid = target_thread_id or self._conversation_tid
+            from ..stream.display import is_stream_cancel_requested
+
+            sent = False
+            stopped = False
+
+            def mark_sent() -> None:
+                nonlocal sent
+                sent = True
 
             async def _run_and_publish() -> None:
+                nonlocal stopped
                 response = await self._run_turn(
                     text,
                     skip_user_message=True,
@@ -1406,7 +1416,9 @@ def run_textual_interactive(
                     thread_id_override=target_thread_id,
                     # A notifier turn only finishes a grading the thread deferred.
                     rubric_mode="followup",
+                    on_request_sent=mark_sent,
                 )
+                stopped = is_stream_cancel_requested()
                 if _ch_mod.publish_to_channel_origin(effective_tid, response or ""):
                     # Mirror a normal channel turn's closing "Replied to" line
                     # so the forwarded notification reads as terminated.
@@ -1420,6 +1432,13 @@ def run_textual_interactive(
 
             # Taken in this step, so the next poll tick does not re-enter.
             self._own_app(_run_and_publish())
+
+            def requeue_if_unsent(task: asyncio.Future) -> None:
+                if not sent and (task.cancelled() or stopped):
+                    for notification in notifs:
+                        enqueue_task_notification(notification)
+
+            self._run_task.add_done_callback(requeue_if_unsent)
 
         async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
@@ -1711,6 +1730,7 @@ def run_textual_interactive(
             rubric_mode: str | None = "thread",
             approve_all_at_start: bool = False,
             goal_request: dict[str, Any] | None = None,
+            on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -2088,6 +2108,8 @@ def run_textual_interactive(
                         ),
                         cancel_scope,
                     )
+                    if on_request_sent is not None:
+                        on_request_sent()
                     async for event in events:
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -3151,6 +3173,7 @@ def run_textual_interactive(
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
             goal_request: dict[str, Any] | None = None,
+            on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Handle a user turn: stream agent response with widgets.
 
@@ -3175,6 +3198,8 @@ def run_textual_interactive(
                     to the live tid when ``None``.
                 goal_request: A ``/goal`` request; the run then carries it
                     and no message (*user_text* is empty).
+                on_request_sent: Called immediately before gateway iteration,
+                    so a notifier can distinguish an unsent interrupted turn.
             """
             response = ""
             load_failed = False
@@ -3218,6 +3243,7 @@ def run_textual_interactive(
                     thread_id_override=thread_id_override,
                     rubric_mode=rubric_mode,
                     goal_request=goal_request,
+                    on_request_sent=on_request_sent,
                 )
             except asyncio.CancelledError:
                 try:
