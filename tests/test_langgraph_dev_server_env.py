@@ -394,6 +394,69 @@ def test_start_records_the_agent_python_in_the_sidecar(
     assert sidecar["agent_python"] == "/env/bin/python"
 
 
+@pytest.mark.parametrize("os_name", ["nt", "posix"])
+def test_start_records_that_the_server_leads_its_process_group(
+    monkeypatch, tmp_path, runtime_paths, os_name
+):
+    """Only a server recorded as a group leader is sent Ctrl+Break on stop:
+    for any other PID Windows sends it to the whole console."""
+    from EvoScientist import agent_shell
+    from EvoScientist.setup import research_env
+
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.RUNTIME, workspace_sidecar=tmp_path / "workspace.json"
+        ),
+    )
+    monkeypatch.setattr(research_env, "agent_python", lambda: None)
+    monkeypatch.setattr(agent_shell, "sidecar_bash", lambda: None)
+    monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", set())
+    monkeypatch.setattr(manager, "_create_time", lambda pid: 1234.5)
+    monkeypatch.setattr(manager.os, "name", os_name)
+
+    def _poll():
+        raise PopenAbort("sidecar written")
+
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242, poll=_poll)
+    )
+    with pytest.raises(PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+    sidecar = json.loads((tmp_path / "workspace.json").read_text())
+    windows = os_name == "nt"
+    assert sidecar.get("ctrl_break_group", False) is windows
+    # A stop checks the live process against it, so a reused PID gets nothing.
+    assert sidecar.get("create_time") == (1234.5 if windows else None)
+    assert (4242 in manager._BREAK_GROUP_PIDS) is windows
+
+
+def test_start_stops_an_unhealthy_server_without_the_clean_stop(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """A server that never answered has no run to put back in the queue."""
+    import itertools
+
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    proc = SimpleNamespace(pid=4242, poll=lambda: None)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw: proc)
+    clock = itertools.count(0, 61)  # each reading is past the 60 s deadline
+    monkeypatch.setattr(
+        manager,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _s: None),
+    )
+    stops: list = []
+    monkeypatch.setattr(
+        manager, "stop_langgraph_dev", lambda *a, **kw: stops.append((a, kw))
+    )
+    with pytest.raises(RuntimeError, match="did not become healthy"):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+    assert stops == [((proc,), {"clean": False})]
+
+
 def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime_paths):
     """The server is spawned with the job's flags and joins the job before the
     PID file is written (``started`` stops the run here)."""

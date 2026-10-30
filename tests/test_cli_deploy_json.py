@@ -68,6 +68,7 @@ class Harness:
         self.workspace = str(tmp_path / "ws")
         self.config = _config(default_workdir=self.workspace)
         self.log: list[Any] = []
+        self.clean_stops: list[bool] = []
         self.started: dict[str, Any] | None = None
         self.proc = _Proc()
         self.occupied = False
@@ -147,8 +148,9 @@ class Harness:
         self.log.append("backend start")
         return self.proc
 
-    def _stop(self, proc=None):
+    def _stop(self, proc=None, *, clean=True):
         self.log.append(("backend stop", proc))
+        self.clean_stops.append(clean)
 
     def _register(self, _workspace, *, url):
         """The backend's answer: one this run started reports its options."""
@@ -264,6 +266,7 @@ def test_end_of_stdin_stops_the_owned_backend_before_stopped(h, capsys):
     h.run(capsys)
     stop = h.log.index(("backend stop", h.proc))
     assert h.log.index(("event", "stopped")) > stop
+    assert h.clean_stops == [True]
 
 
 def test_stdout_carries_only_json(h, capsys, monkeypatch):
@@ -435,7 +438,7 @@ def test_a_failed_backend_stop_still_stops_ccproxy_and_closes_the_job(
 
     from EvoScientist.langgraph_dev import manager as lgm
 
-    def _stop(proc=None):
+    def _stop(proc=None, **_kw):
         h.log.append(("backend stop", proc))
         raise psutil.AccessDenied(proc.pid)
 
@@ -836,6 +839,7 @@ def test_a_start_cut_after_the_spawn_stops_the_backend(
     _, lines = h.run(capsys)
     assert _events(lines) == ["starting", terminal]
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
+    assert h.clean_stops == [False]
 
 
 def test_stdin_closed_during_the_ccproxy_start_starts_no_backend(
@@ -1130,7 +1134,7 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "m.is_langgraph_dev_running = lambda *a, **k: True\n"
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
         "m.start_langgraph_dev = lambda **k: P()\n"
-        "m.stop_langgraph_dev = lambda p=None: print('stopped backend', file=sys.stderr)\n"
+        "m.stop_langgraph_dev = lambda p=None, **_k: print('stopped backend', file=sys.stderr)\n"
         "from EvoScientist.langgraph_dev import registration as r\n"
         "r.register_folder = lambda *a, **k: None\n"
         + (_GRANDCHILD if grandchild else "")
