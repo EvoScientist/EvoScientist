@@ -1,5 +1,6 @@
 """Custom backends for EvoScientist agent."""
 
+import asyncio
 import contextlib
 import errno
 import os
@@ -33,7 +34,7 @@ from deepagents.backends.protocol import (
 )
 
 from . import paths, shell_syntax
-from .cancellation import current_cancel_event
+from .cancellation import bind_cancel_event, current_cancel_event
 
 if TYPE_CHECKING:
     from langgraph.types import Command
@@ -2237,6 +2238,15 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
 
 
+class _ExecuteCancelEvent(threading.Event):
+    def __init__(self, parent: threading.Event | None) -> None:
+        super().__init__()
+        self._parent = parent
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self._parent is not None and self._parent.is_set())
+
+
 class CustomSandboxBackend(LocalShellBackend):
     """
     Custom sandbox backend - inherits LocalShellBackend with added safety.
@@ -2514,6 +2524,17 @@ class CustomSandboxBackend(LocalShellBackend):
                 for path, _ in files
             ]
         return super().upload_files(files)
+
+    async def aexecute(
+        self, command: str, *, timeout: int | None = None
+    ) -> ExecuteResponse:
+        event = _ExecuteCancelEvent(current_cancel_event())
+        with bind_cancel_event(event):
+            try:
+                return await super().aexecute(command, timeout=timeout)
+            except asyncio.CancelledError:
+                event.set()
+                raise
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """

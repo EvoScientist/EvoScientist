@@ -1,10 +1,12 @@
 """Tests for EvoScientist/backends.py — validate_command, path conversion, resolve_path."""
 
+import asyncio
 import locale
 import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +30,72 @@ def _sleep_cmd(seconds: int) -> str:
     if sys.platform == "win32":
         return f"ping -n {seconds + 1} 127.0.0.1 > nul"
     return f"sleep {seconds}"
+
+
+async def test_async_execute_cancellation_stops_child(tmp_path):
+    script = tmp_path / "child.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import time\n"
+        "Path('ready').write_text('ready')\n"
+        "time.sleep(3)\n"
+        "Path('late').write_text('late')\n"
+    )
+    backend = CustomSandboxBackend(root_dir=str(tmp_path))
+    task = asyncio.create_task(backend.aexecute("python child.py"))
+    try:
+        async with asyncio.timeout(15):
+            while not (tmp_path / "ready").exists():
+                await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(4)
+        assert not (tmp_path / "late").exists()
+    finally:
+        task.cancel()
+
+
+async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.cancellation import bind_cancel_event, current_cancel_event
+
+    backend = CustomSandboxBackend(root_dir=str(tmp_path))
+    started = {name: threading.Event() for name in ("first", "second")}
+    stopped = {name: threading.Event() for name in started}
+
+    def execute(command, *, timeout=None):
+        event = current_cancel_event()
+        assert event is not None
+        started[command].set()
+        while not event.is_set():
+            time.sleep(0.01)
+        stopped[command].set()
+
+    monkeypatch.setattr(backend, "execute", execute)
+    parent = threading.Event()
+    with bind_cancel_event(parent):
+        first = asyncio.create_task(backend.aexecute("first"))
+        second = asyncio.create_task(backend.aexecute("second"))
+        try:
+            async with asyncio.timeout(10):
+                while not all(event.is_set() for event in started.values()):
+                    await asyncio.sleep(0.01)
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+                while not stopped["first"].is_set():
+                    await asyncio.sleep(0.01)
+                assert not parent.is_set()
+                assert not stopped["second"].is_set()
+                parent.set()
+                await second
+                assert stopped["second"].is_set()
+        finally:
+            parent.set()
+            first.cancel()
+            second.cancel()
 
 
 def _split_cmd(s: str) -> list[str]:
