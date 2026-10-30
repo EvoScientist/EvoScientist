@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -418,73 +417,6 @@ def _memories_dir_from_env() -> Path:
 
 
 MEMORIES_DIR: Path = _memories_dir_from_env()
-
-
-# DEPRECATED(0.1.0): remove this migration helper and its call site below.
-def migrate_legacy_sessions_db() -> None:
-    """One-time migration: copy sessions.db (and its WAL/SHM siblings) from
-    ~/.config/evoscientist/ to ~/.evoscientist/.
-
-    Scope is intentionally narrow — only the SQLite trio, because users can't
-    easily move those by hand. User-facing files (skills/, memories/, history)
-    are migrated via an agent prompt documented in the release notes.
-
-    Idempotent via ``.migrated`` marker file. The marker is not written when
-    a copy fails, so transient I/O errors don't permanently block retry.
-    """
-    marker = DATA_DIR / ".migrated"
-    if marker.exists():
-        return
-
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
-        return
-
-    legacy = CONFIG_DIR
-    if not legacy.exists():
-        marker.touch()
-        return
-
-    migrated: list[str] = []
-    failed: list[str] = []
-    for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
-        src = legacy / name
-        dst = DATA_DIR / name
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue  # already migrated
-        try:
-            shutil.copy2(src, dst)
-            migrated.append(name)
-        except OSError as e:
-            logger.warning("Failed to migrate %s: %s", src, e)
-            failed.append(name)
-
-    if migrated:
-        logger.info(
-            "Migrated legacy session DB from %s to %s: %s. "
-            "Legacy files are kept as backup; this auto-migration will be "
-            "removed in EvoScientist 0.1.0.",
-            legacy,
-            DATA_DIR,
-            ", ".join(migrated),
-        )
-
-    # Only write the marker when there were no failures — preserves retry
-    # on transient I/O errors.
-    if not failed:
-        marker.touch()
-
-
-# DEPRECATED(0.1.0): remove this call together with migrate_legacy_sessions_db().
-try:
-    migrate_legacy_sessions_db()
-except Exception:
-    # Never block startup on migration failures
-    logger.exception("Legacy session DB migration failed; continuing without it.")
 
 
 def ensure_dirs() -> None:
