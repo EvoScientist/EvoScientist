@@ -39,6 +39,7 @@ class AutoSkillsCommand(Command):
     ]
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        """Dispatch one ``autoskills`` subcommand."""
         sub = args[0].lower() if args else "help"
         rest = args[1:]
         if sub in {"help", "-h", "--help", "?"}:
@@ -50,7 +51,14 @@ class AutoSkillsCommand(Command):
         elif sub == "review":
             await self._list(ctx, status="pending")
         elif sub in {"approve", "accept"}:
-            await self._approve(ctx, self._first_arg(rest))
+            scope, scope_error = self._scope_arg(rest)
+            if scope_error is not None:
+                ctx.ui.append_system(
+                    f"autoskills approve: {scope_error}",
+                    style="red",
+                )
+                return
+            await self._approve(ctx, self._first_arg(rest), scope=scope)
         elif sub in {"reject", "deny", "decline"}:
             await self._reject(ctx, self._first_arg(rest))
         elif sub in {"run", "now"}:
@@ -159,6 +167,7 @@ class AutoSkillsCommand(Command):
         await self._list(ctx, status=status)
 
     async def _list(self, ctx: CommandContext, *, status: str | None = None) -> None:
+        """Render the proposal table, optionally filtered by status."""
         from ... import paths
         from ...memory.autoskills.proposals import list_skill_proposals
 
@@ -188,6 +197,8 @@ class AutoSkillsCommand(Command):
         table.add_column("ID", style="cyan")
         table.add_column("Action", style="magenta")
         table.add_column("AutoSkill", style="green")
+        table.add_column("Scope", style="cyan")
+        table.add_column("Provenance", style="blue")
         table.add_column("Status", style="yellow")
         table.add_column("Observations", justify="right")
         table.add_column("Description", style="dim")
@@ -196,6 +207,12 @@ class AutoSkillsCommand(Command):
                 proposal.proposal_id,
                 proposal.operation,
                 proposal.skill_name,
+                proposal.effective_scope,
+                (
+                    f"upstream: {proposal.upstream_source}"
+                    if proposal.upstream_source
+                    else "local"
+                ),
                 proposal.status,
                 str(len(proposal.source_observation_ids)),
                 proposal.description,
@@ -207,13 +224,20 @@ class AutoSkillsCommand(Command):
             style="dim",
         )
 
-    async def _approve(self, ctx: CommandContext, proposal_id: str | None) -> None:
+    async def _approve(
+        self,
+        ctx: CommandContext,
+        proposal_id: str | None,
+        *,
+        scope: str | None = None,
+    ) -> None:
+        """Approve a proposal, optionally into a given scope."""
         from ... import paths
         from ...memory.autoskills.proposals import approve_skill_proposal
 
         if not proposal_id:
             ctx.ui.append_system(
-                f"Usage: {AUTOSKILLS_COMMAND} approve <id>",
+                f"Usage: {AUTOSKILLS_COMMAND} approve <id> [workspace|global]",
                 style="yellow",
             )
             ctx.ui.append_system(
@@ -228,11 +252,21 @@ class AutoSkillsCommand(Command):
             proposal_id,
             skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
+            scope=scope,
         )
         if result.get("approved"):
             verb = "Updated" if result.get("operation") == "update" else "Approved"
+            upstream = result.get("upstream_source")
+            provenance_note = (
+                f"; upstream provenance: {upstream} (a future reinstall may overwrite this change)"
+                if upstream
+                else ""
+            )
+            shadow = result.get("workspace_shadow")
+            shadow_note = f"; workspace shadow remains at {shadow}" if shadow else ""
             ctx.ui.append_system(
-                f"{verb} autoskill: {result['skill_name']} ({result['path']})",
+                f"{verb} autoskill: {result['skill_name']} ({result['path']})"
+                f"{provenance_note}{shadow_note}",
                 style="green",
             )
         else:
@@ -385,6 +419,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _show_help(ctx: CommandContext, *, prefix: str | None = None) -> None:
+        """Render the command reference."""
         if prefix:
             ctx.ui.append_system(prefix, style="yellow")
         ctx.ui.append_system(
@@ -401,7 +436,10 @@ class AutoSkillsCommand(Command):
             (AUTOSKILLS_COMMAND, "Show this command reference"),
             (f"{AUTOSKILLS_COMMAND} status", "Show config and the next useful action"),
             (f"{AUTOSKILLS_COMMAND} review", "Review proposals waiting for a decision"),
-            (f"{AUTOSKILLS_COMMAND} approve <id>", "Install a reviewed autoskill"),
+            (
+                f"{AUTOSKILLS_COMMAND} approve <id> [scope]",
+                "Install a reviewed autoskill; scope is workspace or global",
+            ),
             (f"{AUTOSKILLS_COMMAND} reject <id>", "Dismiss a reviewed proposal"),
             (f"{AUTOSKILLS_COMMAND} run", "Start a one-off background autoskill run"),
             (f"{AUTOSKILLS_COMMAND} on|off", "Enable or disable scheduled runs"),
@@ -430,7 +468,27 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:
+        """The first argument, or ``None`` when there is none."""
         return args[0] if args else None
+
+    @staticmethod
+    def _scope_arg(args: list[str]) -> tuple[str | None, str | None]:
+        """The optional scope word that follows the proposal id.
+
+        Returns ``(scope, error)``. A scope word the user typed but that is
+        not a tier is an error, not a missing word: falling back to the
+        scope the proposal recorded would install the skill somewhere the
+        user did not ask for.
+        """
+        extra = args[1:]
+        if not extra:
+            return None, None
+        if len(extra) > 1:
+            return None, "expected one optional scope: workspace or global"
+        word = extra[0].strip().lower()
+        if word not in {"workspace", "global"}:
+            return None, (f"unknown scope {extra[0]!r}: expected workspace or global")
+        return word, None
 
 
 manager.register(AutoSkillsCommand())
