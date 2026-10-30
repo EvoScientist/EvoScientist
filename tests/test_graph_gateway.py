@@ -37,6 +37,18 @@ from tests.fakes.common import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fast_thread_replay_skip_timeouts(monkeypatch):
+    """Keep ``_ThreadEvents.skip_replay`` off the wall clock in the suite.
+
+    Production defaults stay in ``EvoScientist.gateway.server``; skip_replay
+    reads them at call time when the constructor left timeouts unset.
+    """
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.01)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_FIRST_EVENT_SECONDS", 0.05)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.5)
+
+
 async def test_local_gateway_streams_from_injected_streamer():
     seen: dict[str, Any] = {}
 
@@ -1931,11 +1943,45 @@ async def test_langgraph_server_gateway_ignores_non_root_value_messages():
 
 
 async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
+    # Pause on the new-message path: the envelope carries payload (ignored by
+    # the processor) and stream.interrupted can still lag, so the interrupt
+    # comes from thread state after paused is set.
     stream = FakeLangGraphThreadStream(
         "abc12345",
-        events=[],
-        interrupts=[{"interrupt_id": "interrupt-1", "value": None}],
-        interrupted=True,
+        events=[
+            {
+                "method": "lifecycle",
+                "params": {"namespace": [], "data": {"event": "running"}},
+                "event_id": "synth:run-1:lc::running",
+            },
+            {
+                "method": "input.requested",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "payload": {
+                            "action_requests": [
+                                {
+                                    "name": "execute",
+                                    "args": {"command": "echo hello"},
+                                    "id": "tool-1",
+                                }
+                            ],
+                            "review_configs": [
+                                {
+                                    "action_name": "execute",
+                                    "allowed_decisions": ["approve", "reject"],
+                                }
+                            ],
+                        },
+                    },
+                },
+                "event_id": "2-0",
+            },
+        ],
+        interrupted=False,
+        stay_open=True,
     )
     threads = FakeLangGraphThreadsClient(
         threads=[],
@@ -2456,7 +2502,7 @@ async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
 async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2597,7 +2643,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2643,7 +2689,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2704,7 +2750,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
 ):
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
