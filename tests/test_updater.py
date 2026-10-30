@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 from pathlib import Path
 from typing import ClassVar
@@ -68,7 +69,7 @@ def uv_install(tmp_path, monkeypatch):
         dest.write_text("six==1.17.0\n")
 
     monkeypatch.setattr(updater, "download_constraints", fake_download)
-    monkeypatch.setattr(updater, "check_server", lambda opts, emit, confirm: None)
+    monkeypatch.setattr(updater, "check_server", _no_server)
     monkeypatch.setattr(updater, "tool_bin_dir", lambda uv: tmp_path / "bin")
     # Nothing else runs from the environment (tests below set blockers).
     monkeypatch.setattr(updater, "running_from_env", lambda: [])
@@ -76,21 +77,45 @@ def uv_install(tmp_path, monkeypatch):
     # The Windows handover creates the data dir's tools folder (its lock).
     monkeypatch.setattr("EvoScientist.paths.DATA_DIR", tmp_path / "data")
     monkeypatch.setattr("EvoScientist.update_helper.has_visible_desktop", lambda: True)
+    # The update's temp dirs inside the test's folder: the Windows hand-over
+    # leaves its temp dir to the helper, which these tests replace.
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
     return {"env": env, "downloads": downloads, "tmp": tmp_path}
 
 
 class Runs:
-    """Records subprocess.run calls; uv and setup succeed unless told."""
+    """Records subprocess.run calls; uv and setup succeed unless told.
+    *uv_rcs* gives each uv run's exit code in turn."""
 
-    def __init__(self, uv_rc=0, setup_rc=0):
+    def __init__(self, uv_rc=0, setup_rc=0, uv_rcs=None):
         self.calls: list[dict] = []
         self.uv_rc = uv_rc
+        self.uv_rcs = list(uv_rcs) if uv_rcs is not None else None
         self.setup_rc = setup_rc
 
     def __call__(self, cmd, **kwargs):
         self.calls.append({"cmd": list(cmd), **kwargs})
-        rc = self.uv_rc if cmd[0] == "/opt/uv" else self.setup_rc
+        if cmd[0] != "/opt/uv":
+            return subprocess.CompletedProcess(cmd, self.setup_rc)
+        if _is_check({"cmd": cmd, **kwargs}):  # uv creates the tool dir
+            tool_dir = Path(kwargs["env"]["UV_TOOL_DIR"])
+            (tool_dir / "evoscientist").mkdir(parents=True, exist_ok=True)
+        rc = self.uv_rcs.pop(0) if self.uv_rcs is not None else self.uv_rc
         return subprocess.CompletedProcess(cmd, rc)
+
+
+def _no_server(opts, emit, confirm, before_stop=None):
+    """check_server without a server: the update goes on."""
+    if before_stop is not None:
+        before_stop()
+
+
+def _is_check(call: dict) -> bool:
+    """A uv run into a scratch tool dir inside the update's temp dir."""
+    tool_dir = (call.get("env") or {}).get("UV_TOOL_DIR")
+    return bool(tool_dir) and Path(tool_dir).is_relative_to(Path(call["cwd"]))
 
 
 class FakePopen:
@@ -295,14 +320,17 @@ def test_json_update_forwards_setup_lines(uv_install, monkeypatch):
     done = _terminal(lines)
     assert done["status"] == "done"
     assert done["detail"] == {"version": "0.3.10"}
-    # uv output goes to stderr, never stdout.
-    uv_call = runs.calls[0]
-    # The constraints file by name, from its temp dir (removed afterwards).
-    assert uv_call["cmd"][uv_call["cmd"].index("-c") + 1] == "constraints.txt"
-    assert Path(uv_call["cwd"]).name.startswith("evosci-update-")
-    assert not Path(uv_call["cwd"]).exists()
-    assert uv_call["cmd"][0] == "/opt/uv"
-    assert uv_call["stdout"] is sys.stderr
+    check, install = runs.calls  # setup runs through Popen
+    assert _is_check(check)
+    assert not _is_check(install)
+    for uv_call in (check, install):
+        # The constraints file by name, from its temp dir (removed afterwards).
+        assert uv_call["cmd"][uv_call["cmd"].index("-c") + 1] == "constraints.txt"
+        assert Path(uv_call["cwd"]).name.startswith("evosci-update-")
+        assert not Path(uv_call["cwd"]).exists()
+        assert uv_call["cmd"][0] == "/opt/uv"
+        # uv output goes to stderr, never stdout.
+        assert uv_call["stdout"] is sys.stderr
     # --skip reaches the new setup, by absolute path in uv's bin dir.
     assert FakePopen.calls == [
         [
@@ -321,7 +349,7 @@ def test_terminal_update_runs_setup_on_the_console(uv_install, monkeypatch):
     monkeypatch.setattr(updater.subprocess, "run", runs)
     code, lines, _ = _run(updater.UpdateOptions(version="0.3.8"))
     assert code == 0
-    assert runs.calls[1]["cmd"] == [str(uv_install["tmp"] / "bin" / "EvoSci"), "setup"]
+    assert runs.calls[-1]["cmd"] == [str(uv_install["tmp"] / "bin" / "EvoSci"), "setup"]
     assert _terminal(lines)["detail"] == {"version": "0.3.8"}
 
 
@@ -341,7 +369,11 @@ def test_cn_mirror_update_uses_mirrors(uv_install, monkeypatch):
     assert code == 0
     assert indexes == ["https://pypi.tuna.tsinghua.edu.cn/simple"]
     assert uv_install["downloads"][0].startswith("https://cdn.jsdelivr.net/")
-    assert runs.calls[0]["env"]["UV_DEFAULT_INDEX"] == indexes[0]
+    check, install = runs.calls[:2]
+    assert _is_check(check)
+    assert not _is_check(install)
+    assert check["env"]["UV_DEFAULT_INDEX"] == indexes[0]
+    assert install["env"]["UV_DEFAULT_INDEX"] == indexes[0]
 
 
 def test_already_newest_changes_nothing(uv_install, monkeypatch):
@@ -421,6 +453,135 @@ def test_uv_failure_is_install_failed(uv_install, monkeypatch):
     assert code == 1
     assert _terminal(lines)["code"] == "install_failed"
     assert len(runs.calls) == 1  # no setup after a failed install
+
+
+def test_install_is_checked_in_a_scratch_tool_dir_before_the_server_stops(
+    uv_install, monkeypatch
+):
+    """uv removes the installed tool before it builds or downloads, so the
+    same install first goes into a scratch tool dir, while nothing has been
+    stopped yet."""
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    uv_runs_at: dict[str, int] = {}
+
+    def server(opts, emit, confirm, before_stop=None):
+        uv_runs_at["question"] = len(runs.calls)
+        before_stop()
+        uv_runs_at["stop"] = len(runs.calls)
+
+    monkeypatch.setattr(updater, "check_server", server)
+    code, _, _ = _run(updater.UpdateOptions())
+    assert code == 0
+    check, install = runs.calls[0], runs.calls[1]
+    assert _is_check(check)
+    assert Path(check["env"]["UV_TOOL_BIN_DIR"]).is_relative_to(Path(check["cwd"]))
+    assert not _is_check(install)
+    assert check["cmd"] == install["cmd"]
+    # The same settings as the real install, so a passing check speaks for it.
+    scratch_keys = {"UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "PATH"}
+    assert {k: v for k, v in check["env"].items() if k not in scratch_keys} == {
+        k: v for k, v in install["env"].items() if k not in scratch_keys
+    }
+    # The scratch bin dir first on PATH, so uv does not warn it is missing.
+    assert check["env"]["PATH"].split(os.pathsep) == [
+        check["env"]["UV_TOOL_BIN_DIR"],
+        *os.environ["PATH"].split(os.pathsep),
+    ]
+    assert install["env"]["PATH"] == os.environ["PATH"]
+    # The update hands the check to check_server, which runs it between its
+    # question and its stop (the real one: test_before_stop_runs_...).
+    assert uv_runs_at == {"question": 0, "stop": 1}
+
+
+def test_failed_check_changes_nothing(uv_install, monkeypatch):
+    runs = Runs(uv_rcs=[1])
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    stopped: list[bool] = []
+
+    def server(opts, emit, confirm, before_stop=None):
+        before_stop()
+        stopped.append(True)
+
+    monkeypatch.setattr(updater, "check_server", server)
+    code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "install_failed"
+    assert "the installed version is unchanged" in end["message"]
+    (check,) = runs.calls  # no real install
+    assert _is_check(check)
+    assert stopped == []  # the server keeps running
+
+
+def test_install_failing_after_the_check_points_at_the_install_script(
+    uv_install, monkeypatch
+):
+    """Past the check, uv may already have removed the installed tool."""
+    runs = Runs(uv_rcs=[0, 1])
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions())
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "install_failed"
+    assert "unchanged" not in end["message"]
+    assert updater.INSTALL_COMMAND in end["message"]
+    assert len(runs.calls) == 2  # no setup after a failed install
+
+
+@pytest.mark.parametrize(("uv_rcs", "named"), [([1], True), ([0, 1], False)])
+def test_exclude_newer_is_named_only_when_the_check_fails(
+    uv_install, monkeypatch, uv_rcs, named
+):
+    """A passing check ran with the same settings, so exclude-newer cannot be
+    why the install then failed."""
+    monkeypatch.setenv("UV_EXCLUDE_NEWER", "2026-01-01T00:00:00Z")
+    monkeypatch.setattr(updater.subprocess, "run", Runs(uv_rcs=uv_rcs))
+    _code, lines, _ = _run(updater.UpdateOptions(json=True))
+    assert ("exclude-newer" in _terminal(lines)["message"]) is named
+
+
+@pytest.mark.parametrize("phase", ["environment", "uv", "cleanup"])
+def test_ctrl_c_during_the_check_changes_nothing(uv_install, monkeypatch, phase):
+    runs = Runs()
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    def run(cmd, **kwargs):
+        result = runs(cmd, **kwargs)
+        if phase == "uv":
+            raise KeyboardInterrupt
+        return result
+
+    rmtree = shutil.rmtree
+
+    def rmtree_interrupted_in_the_check(path, **kwargs):
+        if Path(path).name == "check":
+            raise KeyboardInterrupt
+        rmtree(path, **kwargs)
+
+    if phase == "environment":  # the check's is the first uv environment
+        monkeypatch.setattr(uv_tool, "uv_environment", interrupted)
+    elif phase == "cleanup":
+        monkeypatch.setattr(shutil, "rmtree", rmtree_interrupted_in_the_check)
+    monkeypatch.setattr(updater.subprocess, "run", run)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert "Nothing was changed" in end["message"]
+    assert all(_is_check(call) for call in runs.calls)  # no real install
+
+
+def test_check_path_has_no_empty_entry(uv_install, monkeypatch):
+    """An empty entry would put the current directory on uv's PATH."""
+    monkeypatch.setenv("PATH", "")
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    _run(updater.UpdateOptions())
+    check = runs.calls[0]
+    assert check["env"]["PATH"] == check["env"]["UV_TOOL_BIN_DIR"]
 
 
 def test_failed_setup_stage_is_setup_failed(uv_install, monkeypatch):
@@ -589,6 +750,60 @@ def _emits():
     return events.append
 
 
+@pytest.mark.parametrize(
+    ("owned", "running", "opts", "confirm"),
+    [
+        (True, True, updater.UpdateOptions(yes=True), None),
+        (False, True, updater.UpdateOptions(), lambda q: True),
+        (True, False, updater.UpdateOptions(), None),
+    ],
+    ids=["own server", "server without a record", "no server"],
+)
+def test_before_stop_runs_while_everything_still_runs(
+    server, monkeypatch, owned, running, opts, confirm
+):
+    server["owned"], server["running"] = owned, running
+    ccproxy_stops: list[bool] = []
+    monkeypatch.setattr(
+        updater, "_stop_service_ccproxy", lambda emit: ccproxy_stops.append(True)
+    )
+    seen: list[tuple[int, int]] = []
+    updater.check_server(
+        opts,
+        _emits(),
+        confirm,
+        before_stop=lambda: seen.append((server["stopped"], len(ccproxy_stops))),
+    )
+    assert seen == [(0, 0)]  # once, before the server or ccproxy was stopped
+
+
+def test_failing_before_stop_leaves_the_server_running(server, monkeypatch):
+    import EvoScientist.langgraph_dev.manager as manager
+    from EvoScientist.setup import server as server_stage
+
+    monkeypatch.setattr(
+        manager,
+        "_read_workspace_sidecar",
+        lambda: {"pid": 42, "workspace": "/proj", "lasting": True},
+    )
+    recorded: list = []
+    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+    monkeypatch.setattr(
+        updater, "_stop_service_ccproxy", lambda emit: pytest.fail("ccproxy stopped")
+    )
+
+    def failing_check():
+        raise updater.UpdateError("install_failed", "uv could not install")
+
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(
+            updater.UpdateOptions(yes=True), _emits(), None, before_stop=failing_check
+        )
+    assert exc.value.code == "install_failed"
+    assert (server["stopped"], server["running"]) == (0, True)
+    assert recorded == []  # nothing to restart: it keeps running
+
+
 def test_json_without_yes_ends_with_server_running(server):
     emit = _emits()
     with pytest.raises(updater.UpdateError) as exc:
@@ -685,7 +900,7 @@ def test_has_busy_thread_asks_for_busy_threads_only(monkeypatch):
 def test_ctrl_c_at_the_question_cancels(uv_install, monkeypatch):
     import click
 
-    def abort(opts, emit, confirm):
+    def abort(opts, emit, confirm, before_stop=None):
         raise click.exceptions.Abort()
 
     monkeypatch.setattr(updater, "check_server", abort)
@@ -748,7 +963,10 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     monkeypatch.setattr(updater.subprocess, "run", runs)
     code, lines, _ = _run(updater.UpdateOptions(json=True, skip=["webui"]))
     assert code == 0
-    assert runs.calls == []  # uv runs in the helper, after EvoSci has exited
+    # Only the check runs here; the install runs in the helper, after EvoSci
+    # has exited.
+    (check,) = runs.calls
+    assert _is_check(check)
     # The helper writes the terminal line.
     assert all(e["status"] == "running" for e in lines)
     (call,) = started
@@ -756,6 +974,8 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     assert call["json"] is True
     assert call["own"] is False
     assert call["tmp"].is_dir()  # the helper deletes it
+    # Without the check's tool dir, which can hold hundreds of MB.
+    assert [p.name for p in call["tmp"].iterdir()] == ["constraints.txt"]
     assert (call["tmp"] / "constraints.txt").read_text() == "six==1.17.0\n"
     assert config["env_dir"] == str(Path(sys.prefix).resolve())
     assert config["wait_pids"][0] == os.getpid()
@@ -769,7 +989,23 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     assert config["lock"] == str(uv_install["tmp"] / "data" / "tools" / "update.lock")
     assert (uv_install["tmp"] / "data" / "tools").is_dir()
     assert config["unattended"] is False
-    assert "install_hint" in config
+
+
+def test_windows_failed_check_does_not_hand_over(uv_install, monkeypatch):
+    from EvoScientist import update_helper
+
+    started: list[dict] = []
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(
+        update_helper, "start_helper", lambda tmp, config, **kw: started.append(config)
+    )
+    monkeypatch.setattr(updater.subprocess, "run", Runs(uv_rcs=[1]))
+    code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "install_failed"
+    assert "the installed version is unchanged" in end["message"]
+    assert started == []
 
 
 def test_windows_handover_passes_the_uv_environment(uv_install, monkeypatch):
@@ -817,6 +1053,7 @@ def test_terminal_handover_without_a_desktop_stays_on_this_console(
             {"config": config, "own": own_window}
         ),
     )
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
     _code, lines, _ = _run(updater.UpdateOptions())
     assert "continues here" in lines[-1]["message"]
     assert started[0]["own"] is False
@@ -879,6 +1116,7 @@ def test_terminal_handover_says_new_window(uv_install, monkeypatch):
 
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(update_helper, "start_helper", lambda *a, **kw: None)
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
     _code, lines, _ = _run(updater.UpdateOptions())
     assert "new window" in lines[-1]["message"]
 
@@ -937,7 +1175,9 @@ def test_truncated_constraints_download_is_download_failed(tmp_path, monkeypatch
 
 def test_ctrl_c_while_uv_runs_still_ends_with_a_terminal_line(uv_install, monkeypatch):
     def interrupted(cmd, **kwargs):
-        raise KeyboardInterrupt
+        if _is_check({"cmd": cmd, **kwargs}):
+            return subprocess.CompletedProcess(cmd, 0)
+        raise KeyboardInterrupt  # in the real install
 
     monkeypatch.setattr(updater.subprocess, "run", interrupted)
     code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
@@ -1114,7 +1354,6 @@ def _helper(root: Path, *, json_mode: bool = True, **config) -> list[str]:
         "installed": "0.3.6",
         "target": "0.3.7",
         "install_command": "install-script",
-        "install_hint": "",
         "lock": str(root / "update.lock"),
         "unattended": False,
         **config,
@@ -1207,17 +1446,16 @@ def test_helper_keeps_setup_output_that_is_not_an_event_off_stdout(tmp_path):
 
 
 @needs_pwsh
-def test_helper_install_failure_names_exclude_newer(tmp_path):
-    hint = " ~/.config/uv/uv.toml sets exclude-newer: uv ignores releases."
-    cmd = _helper(
-        tmp_path, uv=str(_script(tmp_path / "uv", "exit 1")), install_hint=hint
-    )
+def test_helper_install_failure_points_at_the_install_script(tmp_path):
+    cmd = _helper(tmp_path, uv=str(_script(tmp_path / "uv", "exit 1")))
     result = subprocess.run(
         cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
     )
     end = json.loads(result.stdout.splitlines()[-1])
     assert end["code"] == "install_failed"
-    assert "sets exclude-newer" in end["message"]
+    assert end["message"].startswith(
+        "uv could not install EvoScientist 0.3.7 (exit 1, see its output). If EvoSci"
+    )
     assert "install-script" in end["message"]
 
 
