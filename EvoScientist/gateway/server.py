@@ -215,6 +215,23 @@ def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
 
 
+def _root_run_failure(event: Mapping[str, Any]) -> str | None:
+    """Return the error for a root-namespace ``lifecycle`` ``failed`` event.
+
+    The server reports a run that raised as ``{method: "lifecycle", params:
+    {namespace: [], data: {event: "failed", error: ...}}}``. Lifecycle events
+    with a namespace belong to sub-agents and are left to the subagent tracker.
+    """
+    if event.get("method") != "lifecycle" or _event_namespace(event):
+        return None
+    params = _as_raw_map(event.get("params"))
+    data = _as_raw_map(params.get("data")) if params is not None else None
+    if data is None or data.get("event") != "failed":
+        return None
+    error = data.get("error")
+    return f"Run failed: {error}" if error else "Run failed"
+
+
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
     values = state.get("values")
     if not isinstance(values, dict):
@@ -1342,6 +1359,10 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
+                    # A run that failed on the server ends the turn through the
+                    # error path below, like a local failure (#599).
+                    if (failure := _root_run_failure(event_map)) is not None:
+                        raise RuntimeError(failure)
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(
