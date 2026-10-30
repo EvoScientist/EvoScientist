@@ -825,9 +825,9 @@ def _resolve_backend(
             f"port or interface, not this one.",
             fields={"reason": "record_mismatch"},
         )
-    if Path(sidecar["workspace"]).resolve() != Path(cfg.workspace_dir).resolve():
-        from ..paths import command_arg
+    from ..paths import command_arg, normalize_path
 
+    if normalize_path(sidecar["workspace"]) != normalize_path(cfg.workspace_dir):
         raise LauncherError(
             "workspace_mismatch",
             f"Port {cfg.backend_port} is serving the backend started from "

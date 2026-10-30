@@ -294,6 +294,19 @@ def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
     return out
 
 
+def installed_skill_provenance(skill_dir: str | Path) -> dict[str, str] | None:
+    """Return install provenance recorded for an installed skill directory.
+
+    The sidecar manifest is keyed by the physical directory name, so this
+    helper is useful to callers that already resolved the skill path. A
+    missing entry means the skill was created locally or predates provenance
+    tracking.
+    """
+    path = Path(skill_dir)
+    entry = _load_manifest(path.parent).get(path.name)
+    return dict(entry) if entry is not None else None
+
+
 def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
     path = _manifest_path(dest_dir)
     try:

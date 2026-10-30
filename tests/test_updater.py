@@ -1053,18 +1053,37 @@ def _script(path: Path, body: str) -> Path:
     return path
 
 
-def _start_blocker(path: Path, seconds: int = 30) -> int:
-    """A copy of sleep at *path*, started through a shell that exits at once,
-    so init reaps it: a zombie child of the test would still count."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _start_blocker(folder: Path, seconds: int = 30) -> int:
+    """A copy of sleep at *folder*/sleep, started through a shell that exits
+    at once, so init reaps it: a zombie child of the test would still count.
+
+    The copy keeps the name ``sleep``: on ubuntu-26.04 ``sleep`` is the uutils
+    multi-call binary, which picks the program from its file name and exits
+    under any other (``coreutils: unknown program 'blocker'``). A copy that is
+    not running fails the test here, not later for another reason, or not at
+    all."""
+    import time
+
+    import psutil
+
+    folder.mkdir(parents=True, exist_ok=True)
+    path, err = folder / "sleep", folder / "sleep.err"
     shutil.copy(shutil.which("sleep"), path)
     started = subprocess.run(
-        ["sh", "-c", f"'{path}' {seconds} >/dev/null 2>&1 & echo $!"],
+        ["sh", "-c", f"'{path}' {seconds} >/dev/null 2>'{err}' & echo $!"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return int(started.stdout.strip())
+    pid = int(started.stdout.strip())
+    time.sleep(0.3)
+    try:
+        running = psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        running = False
+    if not running:
+        pytest.fail(f"{path} did not keep running: {err.read_text().strip()}")
+    return pid
 
 
 def _helper(root: Path, *, json_mode: bool = True, **config) -> list[str]:
@@ -1106,6 +1125,18 @@ def _helper(root: Path, *, json_mode: bool = True, **config) -> list[str]:
     cmd = ["pwsh", "-NoProfile", "-File", str(script)]
     cmd += ["-ConfigPath", str(root / "config.json"), "-TempDir", str(work)]
     return cmd + (["-Json"] if json_mode else [])
+
+
+@needs_blocker
+def test_start_blocker_fails_when_the_copy_does_not_keep_running(tmp_path, monkeypatch):
+    """A blocker that exits at once, as ubuntu-26.04's multi-call coreutils
+    does under another name, fails the test where it starts, with its error."""
+    exits = _script(tmp_path / "exits", "echo 'unknown program' >&2; exit 1")
+    monkeypatch.setattr(shutil, "which", lambda _name: str(exits))
+    with pytest.raises(
+        pytest.fail.Exception, match="did not keep running: unknown program"
+    ):
+        _start_blocker(tmp_path / "env" / "bin")
 
 
 def _kill(*pids: int) -> None:
@@ -1194,7 +1225,8 @@ def test_helper_install_failure_names_exclude_newer(tmp_path):
 def test_helper_cancel_before_retry_is_install_failed(tmp_path):
     """A failed uv run may have changed the environment: a wait cancelled
     before the retry must not claim that nothing was changed."""
-    blocker = tmp_path / "env" / "bin" / "blocker"
+    # Named sleep, as in _start_blocker: uutils runs under no other name.
+    blocker = tmp_path / "env" / "bin" / "sleep"
     blocker.parent.mkdir(parents=True)
     shutil.copy(shutil.which("sleep"), blocker)
     # Starts a process from the environment, then fails, as a uv run that
@@ -1225,13 +1257,16 @@ def test_helper_cancel_before_retry_is_install_failed(tmp_path):
     end = events[-1]
     assert end["status"] == "error"
     assert end["code"] == "install_failed"
+    # The cancel before the retry, not a second failed uv run, which ends on
+    # install_failed with the install command too.
+    assert end["message"].startswith("Update cancelled after a failed install")
     assert "install-script" in end["message"]
     assert any("trying once more" in e.get("message", "") for e in events)
 
 
 @needs_blocker
 def test_helper_cancelled_wait_is_environment_busy(tmp_path):
-    blocker_pid = _start_blocker(tmp_path / "env" / "bin" / "blocker")
+    blocker_pid = _start_blocker(tmp_path / "env" / "bin")
     ran = tmp_path / "uv-ran"
     cmd = _helper(tmp_path, uv=str(_script(tmp_path / "uv", f"touch '{ran}'")))
     proc = subprocess.Popen(
@@ -1263,7 +1298,7 @@ def test_helper_cancelled_wait_is_environment_busy(tmp_path):
 @needs_blocker
 def test_second_helper_ends_while_one_waits(tmp_path):
     lock = str(tmp_path / "update.lock")
-    first_blocker = _start_blocker(tmp_path / "first" / "env" / "bin" / "blocker")
+    first_blocker = _start_blocker(tmp_path / "first" / "env" / "bin")
     second_ran = tmp_path / "second-uv-ran"
     first = subprocess.Popen(
         _helper(tmp_path / "first", lock=lock),
@@ -1299,7 +1334,7 @@ def test_second_helper_ends_while_one_waits(tmp_path):
 def test_helper_waits_for_its_exiting_caller(tmp_path):
     """The caller still exiting when the helper starts is waited for, not
     reported as a process that blocks the environment."""
-    exiting_pid = _start_blocker(tmp_path / "env" / "bin" / "caller", seconds=2)
+    exiting_pid = _start_blocker(tmp_path / "env" / "bin" / "caller", seconds=10)
     try:
         result = subprocess.run(
             _helper(tmp_path, wait_pids=[exiting_pid]),
@@ -1319,7 +1354,7 @@ def test_helper_waits_for_its_exiting_caller(tmp_path):
 def test_helper_without_a_desktop_does_not_wait(tmp_path):
     """Unattended text mode (an SSH session): plain lines on stdout, and a
     blocked environment ends the update at once."""
-    blocker_pid = _start_blocker(tmp_path / "env" / "bin" / "blocker")
+    blocker_pid = _start_blocker(tmp_path / "env" / "bin")
     try:
         result = subprocess.run(
             _helper(tmp_path, json_mode=False, unattended=True),
@@ -1330,7 +1365,7 @@ def test_helper_without_a_desktop_does_not_wait(tmp_path):
         )
     finally:
         _kill(blocker_pid)
-    assert "Update pending until you close: blocker" in result.stdout
+    assert "Update pending until you close: sleep" in result.stdout
     assert "Ctrl+C" not in result.stdout
     assert result.stdout.rstrip().endswith("(environment_busy)")
 

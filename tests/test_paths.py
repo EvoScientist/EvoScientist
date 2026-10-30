@@ -1,6 +1,7 @@
 """Tests for EvoScientist.paths — the Workspace type, start resolution, ensure_dirs."""
 
 import os
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -115,6 +116,62 @@ class TestNormalizePath:
     def test_nul_byte_is_rejected(self, tmp_path):
         with pytest.raises(ValueError, match="NUL byte"):
             normalize_path(f"{tmp_path}/evil\x00x")
+
+    def test_darwin_canonicalises_stored_case_via_f_getpath(
+        self, tmp_path, monkeypatch
+    ):
+        """#692: on macOS, ``Workspace('~/Project')`` and ``Workspace('~/project')``
+        must resolve to the on-disk spelling returned by ``fcntl(fd, F_GETPATH)``."""
+        import types
+
+        stored_dir = tmp_path.resolve() / "Project"
+        typed_dir = tmp_path.resolve() / "project"
+
+        real_open = os.open
+        real_close = os.close
+        sentinel_fd = 99991
+
+        def fake_open(target, flags, *args, **kwargs):
+            p = Path(target)
+            assert flags & os.O_NONBLOCK
+            if p in (stored_dir, typed_dir):
+                return sentinel_fd
+            return real_open(target, flags, *args, **kwargs)
+
+        def fake_close(fd):
+            if fd == sentinel_fd:
+                return
+            real_close(fd)
+
+        fake_fcntl_mod = types.SimpleNamespace(F_GETPATH=50)
+
+        def fake_fcntl(fd, cmd, arg=0):
+            assert cmd == fake_fcntl_mod.F_GETPATH
+            if fd == sentinel_fd:
+                raw = os.fsencode(str(stored_dir)) + b"\x00"
+                return raw.ljust(1024, b"\x00")
+            raise OSError("unexpected fd")
+
+        fake_fcntl_mod.fcntl = fake_fcntl
+        # Simulate the Darwin open flag too: Windows does not expose it.
+        monkeypatch.setattr(
+            paths.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0x800), raising=False
+        )
+        monkeypatch.setattr(paths.sys, "platform", "darwin")
+        monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl_mod)
+        monkeypatch.setattr(paths.os, "open", fake_open)
+        monkeypatch.setattr(paths.os, "close", fake_close)
+
+        ws_upper = Workspace(stored_dir)
+        ws_lower = Workspace(typed_dir)
+        assert ws_lower == ws_upper
+        assert ws_lower.key == ws_upper.key == stored_dir.as_posix()
+
+        # Non-existent child folders under a differently-cased existing parent
+        # still inherit the parent's stored on-disk case without creating dirs.
+        child = Workspace(typed_dir / "runs" / "20260930_120000")
+        assert child.key == (stored_dir / "runs" / "20260930_120000").as_posix()
+        assert not (stored_dir / "runs").exists()
 
 
 class TestStartWorkspacePath:
@@ -573,3 +630,28 @@ def test_command_arg_quotes_path_with_whitespace_on_windows(path, shown):
     from EvoScientist.paths import command_arg
 
     assert command_arg(path) == shown
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS filesystem")
+def test_darwin_stored_case_and_run_directories(tmp_path):
+    """Real APFS spellings preserve project identity and resumed run folders."""
+    (tmp_path / "Project" / "Runs").mkdir(parents=True)
+    if not (tmp_path / "project" / "runs").exists():
+        pytest.skip("case-sensitive volume")
+    typed = Workspace(tmp_path / "project")
+    assert typed.key == Workspace(tmp_path / "Project").key
+    assert typed.root.name == "Project"
+    run = typed.runs_dir / "20260930_120000"
+    assert typed.is_run_folder(run)
+    assert SessionDirs.from_stored(typed.key, run).run_dir is not None
+    assert SessionDirs.from_legacy(run).run_dir is not None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS F_GETPATH")
+@pytest.mark.parametrize("child", [False, True])
+def test_darwin_fifo_path_does_not_block(tmp_path, child):
+    """A real FIFO or a missing child under it must not wait for a writer."""
+    fifo = tmp_path / "Pipe"
+    os.mkfifo(fifo)
+    candidate = fifo / "missing" if child else fifo
+    assert normalize_path(candidate) == candidate.resolve()

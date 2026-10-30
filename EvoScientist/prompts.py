@@ -263,6 +263,8 @@ python long_task.py > {log_path} 2>&1 &
 echo "PID: $!"          # check: ps -p <PID>   ·   stop: kill <PID>   ·   read: cat {log_path}
 ```
 
+Stop only processes you started, by their id (`stop_process(<id>)`, or `kill <PID>` with the PID you captured), never by name or pattern (`pkill`, `killall`, `kill $(pgrep ...)`): those can stop EvoScientist itself.
+
 **Before heavy compute**: Estimate runtime. If likely > 5 minutes, use background execution from the start. If GPU memory is uncertain, start with a small test run (1 epoch, small batch) before the full run.
 
 This prevents blocking the conversation during long operations."""
@@ -288,7 +290,7 @@ When using the `execute` tool for shell commands:
 
 _SHELL_GUIDELINES_DANGEROUS_FOOTER = """
 
-**Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`) and `rm -rf /` are rejected regardless of mode."""
+**Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`), killing by name or all at once (`pkill`, `killall`, `kill $(pgrep ...)`, `kill -9 -1`) and `rm -rf /` are rejected regardless of mode."""
 
 
 # Windows with the recorded Git Bash (EvoScientist.agent_shell). The sandbox

@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,18 +16,49 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _darwin_stored_path(path: Path) -> Path:
+    """Spell the deepest existing part as stored on disk (macOS)."""
+    import fcntl
+
+    missing: list[str] = []
+    current = path
+    while True:
+        try:
+            fd = os.open(current, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            # Fallback to parent walk is deliberate: components that do not exist or cannot
+            # be opened (e.g. EACCES without read permission) keep their typed spelling.
+            if current.parent == current:
+                return path
+            missing.append(current.name)
+            current = current.parent
+        else:
+            try:
+                raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            except OSError:
+                return path
+            finally:
+                os.close(fd)
+            stored = Path(os.fsdecode(raw.split(b"\x00", 1)[0]))
+            return stored.joinpath(*reversed(missing)) if missing else stored
+
+
 def normalize_path(path: str | Path) -> Path:
     """Return the canonical absolute form of *path*.
 
     Expands ``~`` and resolves symlinks, so ``/tmp/x`` and ``/private/tmp/x``
     on macOS, or two spellings of a symlinked project folder, compare equal.
+    On macOS, the existing part of the path is spelled as stored on disk (so
+    ``~/research`` and ``~/Research`` compare equal) and the missing tail
+    keeps the typed spelling.
     The path does not need to exist. Raises ``ValueError`` for a path with a
     NUL byte, which no platform accepts (Windows on Python 3.13 would
     otherwise resolve it without complaint).
     """
     if "\x00" in str(path):
         raise ValueError(f"Path contains a NUL byte: {path!r}")
-    return Path(path).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
+    return _darwin_stored_path(resolved) if sys.platform == "darwin" else resolved
 
 
 def file_tool_path(path: str | Path) -> str:
@@ -103,7 +135,10 @@ class Workspace:
 
         Resolves *path*, so call it off the event loop on the server.
         """
-        return normalize_path(path).parent == self.runs_dir
+        runs = self.runs_dir
+        if runs.is_symlink():
+            return False
+        return normalize_path(path).parent == normalize_path(runs)
 
     @property
     def media_dir(self) -> Path:
@@ -201,8 +236,9 @@ class SessionDirs:
         uses this; new values carry ``run_dir`` themselves.
         """
         path = normalize_path(workspace_dir)
-        if path.parent.name == "runs" and is_generated_run_name(path.name):
-            return cls(Workspace(path.parent.parent), path)
+        project = Workspace(path.parent.parent)
+        if is_generated_run_name(path.name) and project.is_run_folder(path):
+            return cls(project, path)
         return cls(Workspace(path))
 
 
