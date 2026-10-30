@@ -314,7 +314,6 @@ def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
 def test_pinned_hashes_are_sha256_for_the_supported_platforms():
     assert set(node.NODE_SHA256) == {
         "darwin-arm64",
-        "darwin-x64",
         "linux-x64",
         "linux-arm64",
         "win-x64",
@@ -432,7 +431,6 @@ def glibc(monkeypatch):
     ("sys_platform", "machine", "expected"),
     [
         ("darwin", "arm64", "darwin-arm64"),
-        ("darwin", "x86_64", "darwin-x64"),
         ("linux", "x86_64", "linux-x64"),
         ("linux", "aarch64", "linux-arm64"),
         ("win32", "AMD64", "win-x64"),
@@ -456,6 +454,7 @@ def test_platform_id(monkeypatch, glibc, sys_platform, machine, expected):
         # CentOS 7 / RHEL 7.
         ("linux", "x86_64", (2, 17), "glibc 2.17"),
         ("linux", "aarch64", (2, 27), "glibc 2.27"),
+        ("darwin", "x86_64", None, "No Node.js build"),
         ("linux", "riscv64", (2, 39), "No Node.js build"),
         ("freebsd14", "amd64", None, "No Node.js build"),
     ],
