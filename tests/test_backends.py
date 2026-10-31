@@ -35,12 +35,8 @@ def _sleep_cmd(seconds: int) -> str:
 
 @pytest.mark.parametrize("cancel_parent", [False, True])
 async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
-    from EvoScientist.agent_shell import agent_bash
     from EvoScientist.cancellation import bind_cancel_event
 
-    bash = agent_bash()
-    if bash is not None and not bash.bash.is_file():
-        pytest.skip("configured Git Bash is unavailable")
     script = tmp_path / "child.py"
     script.write_text(
         "from pathlib import Path\n"
@@ -50,18 +46,26 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
         "time.sleep(30)\n"
     )
     ready = tmp_path / "ready"
-    backend = CustomSandboxBackend(root_dir=str(tmp_path))
+    backend = CustomSandboxBackend(
+        root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
+    )
     parent = threading.Event()
-    with bind_cancel_event(parent):
-        task = asyncio.create_task(
-            backend.aexecute(
-                f'"{Path(sys.executable).as_posix()}" '
-                f'"{script.as_posix()}" "{ready.as_posix()}"'
-            )
-        )
+    python = (
+        Path(sys.executable).as_posix()
+        if sys.platform == "win32"
+        else "$EVOSCI_TEST_PYTHON"
+    )
+    command = f'"{python}" child.py ready'
+    if cancel_parent:
+        with bind_cancel_event(parent):
+            task = asyncio.create_task(backend.aexecute(command))
+    else:
+        task = asyncio.create_task(backend.aexecute(command))
     try:
         async with asyncio.timeout(15):
             while not ready.exists():
+                if task.done():
+                    pytest.fail(task.result().output)
                 await asyncio.sleep(0.05)
         child = psutil.Process(int(ready.read_text()))
         assert child.is_running()

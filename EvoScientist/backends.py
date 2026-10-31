@@ -2246,7 +2246,7 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
 
 
 class _ExecuteCancelEvent(threading.Event):
-    """A per-call event whose is_set() also checks its parent."""
+    """A per-call event whose is_set(), but not wait(), checks its parent."""
 
     def __init__(self, parent: threading.Event | None) -> None:
         super().__init__()
@@ -2543,7 +2543,6 @@ class CustomSandboxBackend(LocalShellBackend):
                 return await super().aexecute(command, timeout=timeout)
             except asyncio.CancelledError:
                 event.set()
-                await asyncio.to_thread(cancel_active_shell_processes, event)
                 raise
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
