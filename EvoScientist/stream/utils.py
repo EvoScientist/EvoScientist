@@ -13,6 +13,8 @@ from pathlib import PurePath
 # === Status marker constants ===
 SUCCESS_PREFIX = "[OK]"
 FAILURE_PREFIX = "[FAILED]"
+# How ToolErrorHandlerMiddleware starts the result of a tool that raised.
+TOOL_ERROR_PREFIX = "[TOOL ERROR]"
 
 
 # === Tool status indicators ===
@@ -71,7 +73,7 @@ def is_success(content: str) -> bool:
     content = content.strip()
     if content.startswith(SUCCESS_PREFIX):
         return True
-    if content.startswith(FAILURE_PREFIX):
+    if content.startswith((FAILURE_PREFIX, TOOL_ERROR_PREFIX)):
         return False
     # Only check the first 3 lines — real tool errors appear at the top,
     # not buried deep inside file content or command output.
