@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.8" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[31 Oct 2026]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — One background service for every project (stop it with `EvoSci server stop`); new model: GPT-6.1 Terra (OpenAI + OpenRouter); a project `.env` now holds only `EvoSci` command settings; hardened setup, a stricter shell sandbox and a safer `EvoSci update`; Apple silicon only on macOS; fixes for memory workers, serve turns and standalone channels.
 - **[24 Oct 2026]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — Desktop groundwork: `EvoSci deploy --json` and a settings API for the WebUI; new models: Kimi K3.1 Pro (Moonshot + OpenRouter) and MiniMax M3.1 Flash (MiniMax + OpenRouter), with the Kimi and MiniMax lists trimmed to K3.1 Pro / K3 and M3.1 Flash / M3; routed providers use only their own API key; bounded memory worker writes; tool selection keeps the built-in tools; fixes for scheduled tasks after restarts, Windows output, hangs at exit, standalone channels and unresponsive MCP servers; deepagents 0.7.32.
 - **[17 Oct 2026]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — One-line install for macOS, Windows and Linux, and `EvoSci update` to move an install between releases; acceptance criteria and goals: `--rubric`, `/rubric` and `/goal` grade work against criteria you set; proactivity: `EvoSci serve` follows up in channel chats on its own (`/proactive`); sign in with ChatGPT directly; the backend answers browser requests only from trusted pages; transient model failures retry within a wait budget; new models: Claude Haiku 5.5 (Anthropic), Gemini 4 Argon, Muse Wonder and Muse Spark Open (OpenRouter), with the Claude lists trimmed to the four current models and Claude Sonnet 5.5 as the default; Windows channel attachments and `@file` mentions open in the file tools; deepagents 0.7.28.
 - **[09 Oct 2026]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — New model: Claude Haiku 5.5 (OpenRouter); new provider: Opper; installed skills apply from the next message without `/new`, and `/skill-name` pins a skill to a message; the WebUI installs locally and starts offline; on Windows the agent's commands run in Git Bash set up by `EvoSci setup`; sessions, memory and scheduled tasks are scoped to their project, and `/threads` shows each thread's workspace; a slow MCP server no longer stalls the server start; deepagents 0.7.23.
@@ -212,7 +213,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 ### Quick Install
 
-**macOS, Linux, WSL2**
+**macOS (Apple silicon), Linux, WSL2**
 
 ```bash
 curl -fsSL https://evoscientist.ai/install.sh | bash

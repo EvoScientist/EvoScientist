@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.8" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 10 月 31 日]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — 所有项目共用一个后台服务（用 `EvoSci server stop` 停止）；新增模型：GPT-6.1 Terra（OpenAI 与 OpenRouter）；项目 `.env` 只保存 `EvoSci` 命令自身的设置；安装更稳健、shell 沙箱更严格、`EvoSci update` 更安全；macOS 只支持 Apple 芯片；修复 memory worker、serve 后续轮次和独立渠道等问题。
 - **[2026 年 10 月 24 日]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — 桌面应用铺垫：`EvoSci deploy --json` 与供 WebUI 使用的设置 API；新增模型：Kimi K3.1 Pro（Moonshot 与 OpenRouter）、MiniMax M3.1 Flash（MiniMax 与 OpenRouter），Kimi 与 MiniMax 列表分别精简为 K3.1 Pro / K3 与 M3.1 Flash / M3；路由类提供商只使用各自的 API key；memory worker 写入有上限；工具筛选始终保留内置工具；修复重启后定时任务失效、Windows 输出、退出卡住、独立渠道退出和 MCP 服务器无响应等问题；deepagents 0.7.32。
 - **[2026 年 10 月 17 日]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — macOS、Windows、Linux 一行命令安装，`EvoSci update` 可在版本之间切换；验收标准与目标：`--rubric`、`/rubric`、`/goal` 按你设定的标准检查工作结果；主动性：`EvoSci serve` 会在频道对话里主动跟进（`/proactive`）；可直接用 ChatGPT 账号登录；后端只响应可信页面的浏览器请求；模型调用遇到临时故障会在等待时限内重试；新增模型：Claude Haiku 5.5（Anthropic）、Gemini 4 Argon、Muse Wonder、Muse Spark Open（OpenRouter），Claude 列表精简为当前的四个模型，默认模型改为 Claude Sonnet 5.5；Windows 下频道附件和 `@file` 提及的文件可直接用文件工具打开；deepagents 0.7.28。
 - **[2026 年 10 月 9 日]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — 新增模型：Claude Haiku 5.5（OpenRouter）；新增 Opper 提供商；安装的 skill 从下一条消息起生效，无需 `/new`，`/skill-name` 可在消息中点名使用某个 skill；WebUI 改为本地安装，可离线启动；Windows 下 agent 的命令改在 `EvoSci setup` 配置的 Git Bash 中运行；会话、记忆与定时任务按项目隔离，`/threads` 显示每个会话所属的工作区；响应慢的 MCP 服务不再拖住服务启动；deepagents 0.7.23。
@@ -221,7 +222,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 ### 快速安装
 
-**macOS、Linux、WSL2**
+**macOS（Apple 芯片）、Linux、WSL2**
 
 ```bash
 curl -fsSL https://evoscientist.ai/install.sh | bash
