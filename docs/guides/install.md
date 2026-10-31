@@ -80,9 +80,10 @@ tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
 A package that went into the environment another way (on Windows, or with an
 older release, when you added a channel or an MCP server) is not in the
 receipt and is removed; add it again afterwards. Close EvoScientist and stop
-the background agent service (`EvoSci service stop`) first: it keeps running
-after your sessions end. On Windows the script stops and names the EvoScientist
-processes that still run, because a running process keeps the files locked.
+the background agent service (`EvoSci service stop`; before 0.4.0,
+`EvoSci server stop`) first: it keeps running after your sessions end. On
+Windows the script stops and names the EvoScientist processes that still run,
+because a running process keeps the files locked.
 
 A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
 server error, no data for two minutes) is retried up to three times; a retry
@@ -114,8 +115,8 @@ download or build that fails leaves the installed version as it was.
 ## Uninstalling
 
 There is no `--uninstall` option. First stop the background agent service,
-which keeps running after your sessions end: `EvoSci service stop`. Then, on
-macOS and Linux:
+which keeps running after your sessions end: `EvoSci service stop` (before
+0.4.0, `EvoSci server stop`). Then, on macOS and Linux:
 
 1. Remove the package with the uv the script installed, which
    `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or
