@@ -1,13 +1,16 @@
 """Tests for EvoScientist/backends.py — validate_command, path conversion, resolve_path."""
 
+import asyncio
 import locale
 import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from EvoScientist import backends, paths
@@ -28,6 +31,155 @@ def _sleep_cmd(seconds: int) -> str:
     if sys.platform == "win32":
         return f"ping -n {seconds + 1} 127.0.0.1 > nul"
     return f"sleep {seconds}"
+
+
+@pytest.mark.parametrize("cancel_parent", [False, True])
+async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
+    from EvoScientist.cancellation import bind_cancel_event
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import os, sys, time\n"
+        "Path(sys.argv[1] + '.starting').write_text(str(os.getpid()))\n"
+        "Path(sys.argv[1] + '.starting').replace(sys.argv[1])\n"
+        "time.sleep(30)\n"
+    )
+    ready = tmp_path / "ready"
+    backend = CustomSandboxBackend(
+        root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
+    )
+    parent = threading.Event()
+    python = (
+        Path(sys.executable).as_posix()
+        if sys.platform == "win32"
+        else "$EVOSCI_TEST_PYTHON"
+    )
+    command = f'"{python}" child.py ready'
+    if cancel_parent:
+        with bind_cancel_event(parent):
+            task = asyncio.create_task(backend.aexecute(command))
+    else:
+        task = asyncio.create_task(backend.aexecute(command))
+    try:
+        async with asyncio.timeout(15):
+            while not ready.exists():
+                if task.done():
+                    pytest.fail(task.result().output)
+                await asyncio.sleep(0.05)
+        child = psutil.Process(int(ready.read_text()))
+        assert child.is_running()
+        if cancel_parent:
+            await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
+            await asyncio.wait_for(task, 15)
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        try:
+            async with asyncio.timeout(10):
+                while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    await asyncio.sleep(0.05)
+        except psutil.NoSuchProcess:
+            pass
+    finally:
+        parent.set()
+        await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_async_execute_parent_event_stops_child(tmp_path):
+    from EvoScientist.cancellation import bind_cancel_event
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import os, sys, time\n"
+        "Path(sys.argv[1] + '.starting').write_text(str(os.getpid()))\n"
+        "Path(sys.argv[1] + '.starting').replace(sys.argv[1])\n"
+        "time.sleep(30)\n"
+    )
+    ready = tmp_path / "ready"
+    backend = CustomSandboxBackend(
+        root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
+    )
+    python = (
+        Path(sys.executable).as_posix()
+        if sys.platform == "win32"
+        else "$EVOSCI_TEST_PYTHON"
+    )
+    parent = threading.Event()
+    with bind_cancel_event(parent):
+        task = asyncio.create_task(backend.aexecute(f'"{python}" child.py ready'))
+    try:
+        async with asyncio.timeout(15):
+            while not ready.exists():
+                if task.done():
+                    pytest.fail(task.result().output)
+                await asyncio.sleep(0.05)
+        child = psutil.Process(int(ready.read_text()))
+        assert child.is_running()
+        parent.set()
+        await asyncio.wait_for(task, 15)
+        try:
+            async with asyncio.timeout(10):
+                while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    await asyncio.sleep(0.05)
+        except psutil.NoSuchProcess:
+            pass
+    finally:
+        parent.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.cancellation import bind_cancel_event, current_cancel_event
+
+    backend = CustomSandboxBackend(root_dir=str(tmp_path))
+    started = {name: threading.Event() for name in ("first", "second")}
+    stopped = {name: threading.Event() for name in started}
+
+    def execute(command, *, timeout=None):
+        event = current_cancel_event()
+        assert event is not None
+        started[command].set()
+        while not event.is_set():
+            time.sleep(0.01)
+        stopped[command].set()
+        return backends.ExecuteResponse(output=command, exit_code=0, truncated=False)
+
+    monkeypatch.setattr(backend, "execute", execute)
+    parent = threading.Event()
+    with bind_cancel_event(parent):
+        first = asyncio.create_task(backend.aexecute("first"))
+        second = asyncio.create_task(backend.aexecute("second"))
+        try:
+            async with asyncio.timeout(10):
+                while not all(event.is_set() for event in started.values()):
+                    await asyncio.sleep(0.01)
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+                while not stopped["first"].is_set():
+                    await asyncio.sleep(0.01)
+                assert not parent.is_set()
+                assert not stopped["second"].is_set()
+                parent.set()
+                response = await second
+                assert response.output == "second"
+                assert response.exit_code == 0
+                assert not response.truncated
+                assert stopped["second"].is_set()
+        finally:
+            parent.set()
+            first.cancel()
+            second.cancel()
 
 
 def _split_cmd(s: str) -> list[str]:
