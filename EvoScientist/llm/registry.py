@@ -101,6 +101,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-haiku-5-5", "claude-haiku-5-5", "anthropic"),
     # OpenAI
     ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
+    ("gpt-6.1-terra", "gpt-6.1-terra", "openai"),
     ("gpt-6-sol", "gpt-6-sol", "openai"),
     ("gpt-6-luna", "gpt-6-luna", "openai"),
     ("gpt-6-astra", "gpt-6-astra", "openai"),
@@ -169,6 +170,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),
     ("claude-haiku-5.5", "anthropic/claude-haiku-5.5", "openrouter"),
     ("gpt-6.1-sol", "openai/gpt-6.1-sol", "openrouter"),
+    ("gpt-6.1-terra", "openai/gpt-6.1-terra", "openrouter"),
     ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
