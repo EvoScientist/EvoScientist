@@ -90,6 +90,52 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_async_execute_parent_event_stops_child(tmp_path):
+    from EvoScientist.cancellation import bind_cancel_event
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import os, sys, time\n"
+        "Path(sys.argv[1] + '.starting').write_text(str(os.getpid()))\n"
+        "Path(sys.argv[1] + '.starting').replace(sys.argv[1])\n"
+        "time.sleep(30)\n"
+    )
+    ready = tmp_path / "ready"
+    backend = CustomSandboxBackend(
+        root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
+    )
+    python = (
+        Path(sys.executable).as_posix()
+        if sys.platform == "win32"
+        else "$EVOSCI_TEST_PYTHON"
+    )
+    parent = threading.Event()
+    with bind_cancel_event(parent):
+        task = asyncio.create_task(backend.aexecute(f'"{python}" child.py ready'))
+    try:
+        async with asyncio.timeout(15):
+            while not ready.exists():
+                if task.done():
+                    pytest.fail(task.result().output)
+                await asyncio.sleep(0.05)
+        child = psutil.Process(int(ready.read_text()))
+        assert child.is_running()
+        parent.set()
+        await asyncio.wait_for(task, 15)
+        try:
+            async with asyncio.timeout(10):
+                while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    await asyncio.sleep(0.05)
+        except psutil.NoSuchProcess:
+            pass
+    finally:
+        parent.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_async_execute_cancellation_is_isolated_and_inherits_parent(
     tmp_path, monkeypatch
 ):
