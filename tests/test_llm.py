@@ -82,6 +82,7 @@ class TestModelsRegistry:
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
         assert "novita" in providers
+        assert "runcrate" in providers
         assert "xiaomi" in providers
         assert "xiaomi-token-plan" in providers
 
@@ -110,6 +111,7 @@ class TestModelsRegistry:
             "kimi-coding",
             "atlascloud",
             "novita",
+            "runcrate",
             "xiaomi",
             "xiaomi-token-plan",
         }
@@ -140,6 +142,11 @@ class TestModelsRegistry:
         assert get_models_for_provider("atlas") == []
         novita_models = get_models_for_provider("novita")
         assert ("kimi-k3", "moonshotai/kimi-k3") in novita_models
+        runcrate_models = get_models_for_provider("runcrate")
+        assert (
+            "deepseek-v4.1-flash",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+        ) in runcrate_models
 
 
 # =============================================================================
@@ -504,6 +511,28 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.novita.ai/openai/v1"
         assert call_kwargs["api_key"] == "novita-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_runcrate_routes_through_openai(self, mock_init, monkeypatch):
+        """Runcrate provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("RUNCRATE_API_KEY", "runcrate-key-123")
+
+        get_chat_model("deepseek-v4.1-flash", provider="runcrate")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.runcrate.ai/v1"
+        assert call_kwargs["api_key"] == "runcrate-key-123"
+
+    def test_runcrate_host_maps_to_provider(self):
+        """Provider error envelopes should identify Runcrate by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.runcrate.ai/v1", "openai") == "runcrate"
+        )
 
     def test_novita_host_maps_to_provider(self):
         """Provider error envelopes should identify Novita by host."""

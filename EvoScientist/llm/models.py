@@ -3,7 +3,7 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, Opper, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
+Novita, Opper, Runcrate, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
 DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-
 compatible endpoints) and convenient short names for common models.
 """
