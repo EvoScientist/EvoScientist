@@ -19,12 +19,10 @@ from EvoScientist.gateway import (
 )
 from EvoScientist.gateway.composite import (
     CompositeGraphGateway,
-    LegacyThreadServerExecutionError,
 )
 from EvoScientist.gateway.types import ThreadResolution
 
 UUID = "11111111-1111-1111-1111-111111111111"
-LEGACY = "abcd1234"  # 8-hex, pre-migration CLI id (not a UUID)
 
 
 async def _empty_async_iter():
@@ -171,20 +169,11 @@ async def test_resolve_uuid_miss_does_not_hit_server():
     assert not execute.called("resolve_thread")
 
 
-async def test_resolve_legacy_miss_does_not_hit_server():
-    read = RecordingGateway("read", resolution=ThreadResolution(None, ()))
-    execute = RecordingGateway("exec")
-    res = await _composite(read, execute).resolve_thread(LEGACY)
-    assert res.thread_id is None
-    assert not execute.called("resolve_thread")
-
-
 async def test_metadata_reads_local_only():
     read = RecordingGateway("read", metadata={"src": "local"})
     execute = RecordingGateway("exec", metadata={"src": "server"})
     comp = _composite(read, execute)
     assert (await comp.get_thread_metadata(UUID)) == {"src": "local"}
-    assert (await comp.get_thread_metadata(LEGACY)) == {"src": "local"}
     assert not execute.called("get_thread_metadata")
 
 
@@ -193,30 +182,27 @@ async def test_messages_read_local_only():
     execute = RecordingGateway("exec", messages=["server"])
     comp = _composite(read, execute)
     assert (await comp.get_thread_messages(UUID)) == ["local"]
-    assert (await comp.get_thread_messages(LEGACY)) == ["local"]
     assert not execute.called("get_thread_messages")
 
 
-async def test_state_values_uuid_server_legacy_local():
+async def test_state_values_read_the_server():
     # get_state_values is the one read kept on the server: it reflects the run's
     # live next / interrupts, which only the executor holds.
     read = RecordingGateway("read", state={"src": "local"})
     execute = RecordingGateway("exec", state={"src": "server"})
     comp = _composite(read, execute)
     assert (await comp.get_state_values(None, UUID)) == {"src": "server"}
-    assert (await comp.get_state_values(None, LEGACY)) == {"src": "local"}
 
 
 async def test_thread_exists_reads_local_only():
     # local hit -> True, server never consulted
     comp = _composite(RecordingGateway("r", exists=True), RecordingGateway("e"))
     assert await comp.thread_exists(UUID) is True
-    # local miss -> False for both UUID and legacy, server never consulted
+    # local miss -> False, server never consulted
     read = RecordingGateway("r", exists=False)
     execute = RecordingGateway("e", exists=True)
     comp2 = _composite(read, execute)
     assert await comp2.thread_exists(UUID) is False
-    assert await comp2.thread_exists(LEGACY) is False
     assert not execute.called("thread_exists")
 
 
@@ -255,56 +241,6 @@ async def test_stream_events_early_close_closes_the_inner_stream():
     assert closed == [True]
 
 
-async def test_stream_events_legacy_yields_error_then_raises():
-    read = RecordingGateway("r")
-    execute = RecordingGateway("e")
-    events: list = []
-    stream = _composite(read, execute).stream_events(
-        RunRequest(message="hi", thread_id=LEGACY)
-    )
-    with pytest.raises(LegacyThreadServerExecutionError):
-        await _drain(stream, events)
-    # An error event reaches the consumer before the raise, so stream-json emits
-    # it instead of an empty stream; the server is never touched.
-    assert len(events) == 1
-    assert events[0]["type"] == "error"
-    assert LEGACY in events[0]["message"]
-    assert not execute.called("stream_events")
-
-
-async def test_stream_json_sink_emits_error_line_for_legacy_thread():
-    """The stream-json sink writes an error line, not an empty stream.
-
-    Regression for the raise-at-call-time bug: with a plain method the guard
-    escaped before ``write_events_as_json`` iterated, leaving stdout empty.
-    """
-    import io
-    import json as _json
-
-    from EvoScientist.stream.json_sink import write_events_as_json
-
-    comp = _composite(RecordingGateway("r"), RecordingGateway("e"))
-    out = io.StringIO()
-    with pytest.raises(LegacyThreadServerExecutionError):
-        await write_events_as_json(
-            comp.stream_events(RunRequest(message="hi", thread_id=LEGACY)), out
-        )
-    lines = [line for line in out.getvalue().splitlines() if line]
-    assert len(lines) == 1
-    assert _json.loads(lines[0])["type"] == "error"
-
-
-async def test_update_state_values_legacy_refused():
-    read = RecordingGateway("r")
-    execute = RecordingGateway("e")
-    comp = _composite(read, execute)
-    with pytest.raises(LegacyThreadServerExecutionError):
-        await comp.update_state_values(None, LEGACY, {})
-    assert not execute.called("update_state_values")
-    await comp.update_state_values(None, UUID, {})
-    assert execute.called("update_state_values")
-
-
 async def test_update_state_values_forwards_as_node():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
@@ -315,13 +251,12 @@ async def test_update_state_values_forwards_as_node():
     assert not read.called("update_state_values")
 
 
-async def test_state_snapshot_uuid_server_legacy_local():
+async def test_state_snapshot_reads_the_server():
     read = RecordingGateway("r", state={"src": "local"})
     execute = RecordingGateway("e", state={"src": "server"})
     comp = _composite(read, execute)
     assert (await comp.get_state_snapshot(None, UUID)).values == {"src": "server"}
     assert not read.called("get_state_snapshot")
-    assert (await comp.get_state_snapshot(None, LEGACY)).values == {"src": "local"}
 
 
 async def test_close_parked_checkpoint_through_composite():
@@ -397,13 +332,11 @@ def test_gateway_matches_protocol_signature(gateway_cls, method):
     assert _signature_shape(impl) == _signature_shape(getattr(GraphGateway, method))
 
 
-async def test_clone_thread_uuid_server_legacy_refused():
+async def test_clone_thread_routes_to_server():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
     comp = _composite(read, execute)
     assert (await comp.clone_thread(UUID)) == "e-clone"
-    with pytest.raises(LegacyThreadServerExecutionError):
-        await comp.clone_thread(LEGACY)
 
 
 async def test_create_thread_routes_to_server():
@@ -437,13 +370,6 @@ async def test_delete_both_miss_returns_false():
     read = RecordingGateway("r", delete_result=False)
     execute = RecordingGateway("e", delete_result=False)
     assert await _composite(read, execute).delete_thread(UUID) is False
-
-
-async def test_delete_legacy_local_only():
-    read = RecordingGateway("r", delete_result=True)
-    execute = RecordingGateway("e", delete_result=True)
-    assert await _composite(read, execute).delete_thread(LEGACY) is True
-    assert not execute.called("delete_thread")
 
 
 async def test_delete_server_error_is_non_fatal():
