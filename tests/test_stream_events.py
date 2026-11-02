@@ -652,6 +652,25 @@ class TestV3ProtocolStreaming:
         assert tool_result["success"] is True
         assert tool_result["id"] == "tc1"
 
+    async def test_a_tool_result_with_error_status_is_a_failure(self):
+        """An MCP server's error result reaches the stream as a handled
+        ToolMessage whose text carries no error marker."""
+        output = ToolMessage(
+            name="lookup_dataset",
+            content="Error executing tool lookup_dataset: dataset not found: iris",
+            tool_call_id="tc1",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(output),
+            ]
+        )
+        events = await collect_events(agent)
+        tool_result = next(e for e in events if e.get("type") == "tool_result")
+        assert tool_result["success"] is False
+
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )

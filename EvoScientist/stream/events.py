@@ -1157,9 +1157,13 @@ class _V3EventProcessor:
                 success = False
             else:
                 output = data_map.get("output")
+                # A tool that handled its own error (an MCP error result) says so
+                # in its status, whatever its text.
+                status_error = False
                 if isinstance(output, ToolMessage):
                     name = output.name or name
                     raw_content, _ = _extract_tool_content(output)
+                    status_error = output.status == "error"
                 elif isinstance(output, Command):
                     command_content = _extract_command_tool_content(
                         output, tool_call_id
@@ -1172,7 +1176,7 @@ class _V3EventProcessor:
                 content = raw_content[: DisplayLimits.TOOL_RESULT_MAX]
                 if len(raw_content) > DisplayLimits.TOOL_RESULT_MAX:
                     content += "\n... (truncated)"
-                success = is_success(content)
+                success = not status_error and is_success(content)
 
             if subagent is not None:
                 events.append(

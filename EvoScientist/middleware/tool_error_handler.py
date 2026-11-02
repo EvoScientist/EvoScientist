@@ -102,11 +102,7 @@ def _describe_exception(exc: BaseException) -> str:
 
 def _build_error_message(request: ToolCallRequest, exc: BaseException) -> ToolMessage:
     tool_name = request.tool_call.get("name", "unknown_tool")
-    logger.error(
-        "Tool %r raised an exception:\n%s",
-        tool_name,
-        "".join(traceback.format_exception(exc)),
-    )
+    logger.error("Tool %r raised an exception", tool_name, exc_info=exc)
     content = (
         f"[TOOL ERROR] Tool '{tool_name}' failed with an exception:\n\n"
         f"{_describe_exception(exc)}\n\n"
