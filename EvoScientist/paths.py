@@ -231,8 +231,9 @@ class SessionDirs:
         folder ``<root>/runs/<name>`` whose name has the form ``--mode=run``
         generates is split into the workspace and ``run_dir``. Named runs are
         left as they are, because a project folder can itself live in a
-        folder called ``runs``. Only the import of an older server's store
-        uses this; new values carry ``run_dir`` themselves.
+        folder called ``runs``. The one-time upgrade of stored values and the
+        import of an older server's store use this; new values carry
+        ``run_dir`` themselves.
         """
         path = normalize_path(workspace_dir)
         project = Workspace(path.parent.parent)

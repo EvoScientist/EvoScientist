@@ -171,6 +171,35 @@ def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
         return text
 
 
+def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
+    """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
+
+    Proposals made by ``--mode=run`` sessions named the run folder; they
+    belong to its workspace. Other proposals, and folders that cannot be
+    resolved, are left as they are. Part of the one-time upgrade of stored
+    values (see ``sessions._upgrade_stored_dirs``). Returns the number
+    rewritten.
+    """
+    root = _proposal_root(memory_dir)
+    if not root.exists():
+        return 0
+    rewritten = 0
+    for manifest_path in sorted(root.glob("*/manifest.json")):
+        manifest = _read_manifest(manifest_path)
+        stored = manifest.get("workspace_dir") if manifest else None
+        if not isinstance(stored, str) or not stored.strip():
+            continue
+        try:
+            dirs = paths.SessionDirs.from_legacy(stored.strip())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if dirs.run_dir is not None:
+            manifest["workspace_dir"] = dirs.workspace.key
+            _write_manifest(manifest_path, manifest)
+            rewritten += 1
+    return rewritten
+
+
 def _proposal_from_manifest(
     path: Path, manifest: dict[str, Any]
 ) -> SkillProposal | None:

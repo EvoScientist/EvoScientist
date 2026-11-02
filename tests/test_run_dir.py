@@ -214,7 +214,7 @@ def test_server_graphs_work_in_the_run_folder_and_crons_in_the_root(
 
 
 # ---------------------------------------------------------------------------
-# Stored folders are read back with their run_dir
+# Folders stored before run_dir are upgraded once
 # ---------------------------------------------------------------------------
 
 
@@ -243,13 +243,150 @@ def _write_rows(db: Path, rows: list[tuple[str, str, dict]]) -> None:
     con.close()
 
 
+def _stored(db: Path) -> dict[str, tuple[str, dict]]:
+    """``checkpoint_id -> (SQLite type of metadata, metadata)``."""
+    con = sqlite3.connect(db)
+    rows = con.execute(
+        "SELECT checkpoint_id, typeof(metadata), metadata FROM checkpoints"
+    ).fetchall()
+    con.close()
+    return {cid: (kind, json.loads(meta)) for cid, kind, meta in rows}
+
+
+def _upgrade_recorded(db: Path) -> bool:
+    """True if the upgrade's bit of ``user_version`` is set."""
+    from EvoScientist.sessions import _STORED_DIRS_VERSION
+
+    con = sqlite3.connect(db)
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    con.close()
+    return bool(version & _STORED_DIRS_VERSION)
+
+
 @pytest.fixture
 def sessions_db(tmp_path, monkeypatch):
+    import EvoScientist.paths as paths
     import EvoScientist.sessions as sessions
 
     db = tmp_path / "sessions.db"
     monkeypatch.setattr(sessions, "get_db_path", lambda: db)
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     return db
+
+
+def test_upgrade_splits_generated_run_folders_once(workspace, sessions_db):
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    run = workspace.runs_dir / TS_RUN
+    named = workspace.runs_dir / "exp"
+    base = {"agent_name": "EvoScientist", "model": "m"}
+    _write_rows(
+        sessions_db,
+        [
+            ("t1", "old-run", {**base, "workspace_dir": str(run)}),
+            ("t2", "named-run", {**base, "workspace_dir": str(named)}),
+            ("t3", "daemon", {**base, "workspace_dir": f"{workspace.root}/"}),
+            ("t4", "new", {**base, **SessionDirs(workspace, run).metadata()}),
+        ],
+    )
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    stored = _stored(sessions_db)
+    assert stored["old-run"] == (
+        "blob",
+        {**base, **SessionDirs(workspace, run).metadata()},
+    )
+    # A project can live in a folder called ``runs``: named runs stay roots.
+    assert stored["named-run"][1] == {**base, "workspace_dir": str(named)}
+    # Rows that gain no ``run_dir`` keep their spelling; readers normalise it.
+    assert stored["daemon"][1] == {**base, "workspace_dir": f"{workspace.root}/"}
+    assert stored["new"][1] == {**base, **SessionDirs(workspace, run).metadata()}
+    assert _upgrade_recorded(sessions_db)
+
+
+def test_rows_written_after_the_upgrade_are_never_split(workspace, sessions_db):
+    """Continuing in an old run folder in daemon mode makes it a root."""
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    folder = workspace.runs_dir / TS_RUN
+    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": workspace.key})])
+    asyncio.run(_upgrade_stored_dirs())
+    _write_rows(sessions_db, [("t2", "c2", SessionDirs(Workspace(folder)).metadata())])
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    assert _stored(sessions_db)["c2"][1] == {"workspace_dir": folder.as_posix()}
+
+
+def test_upgrade_of_a_new_db_only_records_the_version(sessions_db):
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    asyncio.run(_upgrade_stored_dirs())
+    assert _upgrade_recorded(sessions_db)
+
+
+def test_failed_upgrade_changes_nothing_and_retries(
+    workspace, sessions_db, monkeypatch
+):
+    import EvoScientist.memory.autoskills.proposals as proposals
+    from EvoScientist.sessions import (
+        _upgrade_stored_dirs,
+        _upgrade_stored_dirs_safely,
+    )
+
+    run = workspace.runs_dir / TS_RUN
+    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": str(run)})])
+
+    real_upgrade = proposals.upgrade_proposal_workspaces
+
+    def _fail(_memory_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(proposals, "upgrade_proposal_workspaces", _fail)
+    asyncio.run(_upgrade_stored_dirs_safely())
+
+    assert _stored(sessions_db)["c1"][1] == {"workspace_dir": str(run)}
+    assert not _upgrade_recorded(sessions_db)
+
+    monkeypatch.setattr(proposals, "upgrade_proposal_workspaces", real_upgrade)
+    asyncio.run(_upgrade_stored_dirs())
+    assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
+
+
+def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
+    """Unreadable rows leave the others upgraded and the upgrade done."""
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    run = workspace.runs_dir / TS_RUN
+    unresolvable = f"{workspace.root}/evil\x00x"
+    _write_rows(
+        sessions_db,
+        [
+            ("t1", "good", {"workspace_dir": str(run)}),
+            ("t2", "unreadable", {"workspace_dir": unresolvable}),
+        ],
+    )
+    con = sqlite3.connect(sessions_db)
+    con.execute(
+        "INSERT INTO checkpoints VALUES ('t3', '', 'broken', NULL, 'empty', NULL, "
+        "CAST('{not json' AS BLOB))"
+    )
+    con.commit()
+    _write_proposal(tmp_path / "memories", "unreadable", unresolvable)
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    rows = dict(
+        con.execute(
+            "SELECT checkpoint_id, CAST(metadata AS TEXT) FROM checkpoints"
+        ).fetchall()
+    )
+    con.close()
+    assert json.loads(rows["good"]) == SessionDirs(workspace, run).metadata()
+    assert json.loads(rows["unreadable"]) == {"workspace_dir": unresolvable}
+    assert rows["broken"] == "{not json"
+    assert _upgrade_recorded(sessions_db)
 
 
 def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
@@ -276,6 +413,81 @@ def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
         run.resolve().as_posix()
     )
     assert asyncio.run(get_thread_metadata("t-daemon"))["run_dir"] is None
+
+
+def _write_proposal(memory_dir: Path, name: str, workspace_dir: str) -> Path:
+    from EvoScientist.memory.autoskills.proposals import _proposal_root
+
+    manifest_dir = _proposal_root(memory_dir) / name
+    manifest_dir.mkdir(parents=True)
+    manifest = manifest_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "proposal_id": name,
+                "skill_name": name,
+                "description": "d",
+                "status": "pending",
+                "operation": "create",
+                "created_at": "2026-09-01T00:00:00+00:00",
+                "updated_at": "2026-09-01T00:00:00+00:00",
+                "cluster_hash": "h",
+                "source_observation_ids": [],
+                "workspace_dir": workspace_dir,
+            }
+        )
+    )
+    (manifest_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+    return manifest
+
+
+def test_upgrade_moves_old_run_mode_proposals_to_their_workspace(
+    workspace, sessions_db, tmp_path
+):
+    from EvoScientist.memory.autoskills.proposals import list_skill_proposals
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    memory_dir = tmp_path / "memories"
+    _write_proposal(memory_dir, "demo", str(workspace.runs_dir / TS_RUN))
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    listed = list_skill_proposals(memory_dir, workspace_dir=workspace.root)
+    assert [p.skill_name for p in listed] == ["demo"]
+
+
+async def test_cli_and_server_upgrade_before_reading(
+    workspace, sessions_db, monkeypatch
+):
+    """Opening the DB from the CLI or the server upgrades old rows first, so
+    the WebUI lists an old run-mode thread with its run folder."""
+    import EvoScientist.sessions as sessions
+
+    run = workspace.runs_dir / TS_RUN
+    cli_tid, server_tid = (str(uuid.uuid4()) for _ in range(2))
+    base = {"graph_id": "EvoScientist", "updated_at": "2026-09-01T00:00:00+00:00"}
+    run_meta = SessionDirs(workspace, run).metadata()
+
+    _write_rows(sessions_db, [(cli_tid, "c1", {**base, "workspace_dir": str(run)})])
+    async with sessions.get_checkpointer():
+        pass
+    assert _stored(sessions_db)["c1"][1] == {**base, **run_meta}
+
+    sessions_db.unlink()
+    _write_rows(sessions_db, [(server_tid, "c2", {**base, "workspace_dir": str(run)})])
+    store: dict = {"threads": []}
+    monkeypatch.setitem(
+        sys.modules,
+        "langgraph_runtime_inmem.database",
+        SimpleNamespace(GLOBAL_STORE=store),
+    )
+    monkeypatch.setattr(sessions, "_known_workspace_keys", lambda: {workspace.key})
+    async with sessions.create_checkpointer_for_langgraph_api():
+        pass
+    (restored,) = store["threads"]
+    assert str(restored["thread_id"]) == server_tid
+    assert restored["metadata"]["workspace_dir"] == run_meta["workspace_dir"]
+    assert restored["metadata"]["run_dir"] == run_meta["run_dir"]
 
 
 async def test_server_restores_a_run_mode_thread_with_its_run_dir(
