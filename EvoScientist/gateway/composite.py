@@ -28,15 +28,22 @@ Routing table (read = local, execute = langgraph server):
   server thread created but not yet run, until its first run writes a checkpoint;
   the execution surfaces go create -> stream without resolving in between, so this
   is unreachable on the current paths.)
-- Live state: ``get_state_values`` and ``get_state_snapshot`` go to the
+- Live state: ``get_state_values`` and ``get_state_snapshot`` route UUIDs to the
   server with NO local fallback (the local versions need a local graph the
   server-execute caller does not supply); they reflect the run's live ``next`` /
-  interrupts, which only the executor holds.
-- Execution: ``create_thread``, ``stream_events``, ``update_state_values``,
-  ``clone_thread``, ``get_run_status`` and ``get_process_status`` go to the
-  server, where runs and background processes live.
+  interrupts, which only the executor holds. Legacy ids read local.
+- Execution: ``create_thread`` goes to the server (it mints the id, so there is
+  no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
+  go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
+  go to the server, where runs and background processes live.
 - ``delete_thread`` fans out to both stores; success if either deleted, so a
   thread that only exists in one store is still removed without error.
+
+**Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
+ids, so a legacy thread can never be registered or executed server-side. Reads
+keep working through the local route; execution raises
+:class:`LegacyThreadServerExecutionError` with clear guidance rather than failing
+silently or splitting execution back across two live executors.
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
+from .server import _is_uuid
 from .types import (
     GraphEvent,
     GraphStateValues,
@@ -59,6 +67,23 @@ if TYPE_CHECKING:
     from .types import GraphGateway
 
 logger = logging.getLogger(__name__)
+
+
+class LegacyThreadServerExecutionError(RuntimeError):
+    """Raised when server execution is requested for a legacy (non-UUID) thread.
+
+    langgraph-api only accepts UUID-shaped thread ids, so a pre-migration thread
+    (short-hex id) can never run server-side. Its history stays readable through
+    the local route; only execution is refused.
+    """
+
+    def __init__(self, thread_id: str) -> None:
+        super().__init__(
+            f"Thread {thread_id!r} predates server execution (legacy non-UUID id) "
+            f"and cannot run on the langgraph server. Start a new session with "
+            f"/new to continue on the server backend; the old thread stays readable."
+        )
+        self.thread_id = thread_id
 
 
 class CompositeGraphGateway:
@@ -130,7 +155,9 @@ class CompositeGraphGateway:
     ) -> GraphStateValues:
         # No local fallback here: local get_state_values needs target.local_graph,
         # which a server-execute caller does not supply.
-        return await self._execute.get_state_values(target, thread_id)
+        if _is_uuid(thread_id):
+            return await self._execute.get_state_values(target, thread_id)
+        return await self._read.get_state_values(target, thread_id)
 
     async def get_state_snapshot(
         self,
@@ -140,7 +167,9 @@ class CompositeGraphGateway:
         # Same routing as get_state_values: HITL close reads ``next`` / tasks /
         # interrupts and then writes through the server, so the snapshot must
         # come from the executor too.
-        return await self._execute.get_state_snapshot(target, thread_id)
+        if _is_uuid(thread_id):
+            return await self._execute.get_state_snapshot(target, thread_id)
+        return await self._read.get_state_snapshot(target, thread_id)
 
     async def thread_exists(
         self,
@@ -156,21 +185,23 @@ class CompositeGraphGateway:
     ) -> bool:
         read_ok = await self._read.delete_thread(thread_id, target)
         exec_ok = False
-        try:
-            exec_ok = await self._execute.delete_thread(thread_id, target)
-        except Exception:  # server hiccup must not block the local delete
-            # WARNING, not DEBUG: the call still returns success off the
-            # local delete, so a thread the server still holds reports as
-            # deleted. Without a breadcrumb at a normal log level the
-            # divergence is invisible in any real deployment. The full fix
-            # (report failure only when neither side deleted) is a tracked
-            # follow-up; this keeps the current behavior self-reporting.
-            logger.warning(
-                "composite: server-side delete failed for thread %s; local delete %s",
-                thread_id,
-                "succeeded" if read_ok else "failed",
-                exc_info=True,
-            )
+        if _is_uuid(thread_id):
+            try:
+                exec_ok = await self._execute.delete_thread(thread_id, target)
+            except Exception:  # server hiccup must not block the local delete
+                # WARNING, not DEBUG: the call still returns success off the
+                # local delete, so a thread the server still holds reports as
+                # deleted. Without a breadcrumb at a normal log level the
+                # divergence is invisible in any real deployment. The full fix
+                # (report failure only when neither side deleted) is a tracked
+                # follow-up; this keeps the current behavior self-reporting.
+                logger.warning(
+                    "composite: server-side delete failed for thread %s; "
+                    "local delete %s",
+                    thread_id,
+                    "succeeded" if read_ok else "failed",
+                    exc_info=True,
+                )
         return read_ok or exec_ok
 
     # --- Execution ------------------------------------------------------------
@@ -190,11 +221,25 @@ class CompositeGraphGateway:
         metadata: dict[str, Any] | None = None,
         target: GraphTarget | None = None,
     ) -> str:
+        if not _is_uuid(source_thread_id):
+            raise LegacyThreadServerExecutionError(source_thread_id)
         return await self._execute.clone_thread(
             source_thread_id, metadata=metadata, target=target
         )
 
     async def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
+        # Async generator, not a plain method returning the inner iterator: the
+        # legacy-thread guard must fire *inside* iteration, not at call time. If
+        # it raised at call time, a stream consumer that only guards its
+        # ``async for`` (``--output-format stream-json`` via ``write_events_as_json``)
+        # would get an empty stream — no ``error`` line, no ``done`` — because the
+        # raise escapes before the first ``__anext__``. Yielding a normalized
+        # error event first lets that consumer emit the failure; the raise still
+        # reaches surfaces that render the exception directly (the Rich CLI).
+        if not _is_uuid(request.thread_id):
+            exc = LegacyThreadServerExecutionError(request.thread_id)
+            yield {"type": "error", "message": str(exc)}
+            raise exc
         # ``aclosing`` forwards an early close (the consumer leaving the stream
         # at an approval or a question) to the inner iterator, so it is closed
         # in the consumer's task and context rather than by the loop's
@@ -211,6 +256,8 @@ class CompositeGraphGateway:
         *,
         as_node: str | None = None,
     ) -> None:
+        if not _is_uuid(thread_id):
+            raise LegacyThreadServerExecutionError(thread_id)
         await self._execute.update_state_values(
             target, thread_id, values, as_node=as_node
         )
