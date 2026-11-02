@@ -2896,6 +2896,114 @@ async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort()
     assert cancel_calls == [("abc12345", ["run-1"])]
 
 
+_PAUSE_VALUE = {
+    "action_requests": [{"name": "execute", "args": {"command": "ls"}, "id": "t-1"}],
+    "review_configs": [{"action_name": "execute", "allowed_decisions": ["approve"]}],
+}
+_RESUME_DECISIONS = {"decisions": [{"type": "approve"}]}
+
+
+def _root_pause(data_key: str) -> dict[str, Any]:
+    return {
+        "method": "input.requested",
+        "params": {
+            "namespace": [],
+            "data": {"interrupt_id": "interrupt-2", data_key: _PAUSE_VALUE},
+        },
+        "event_id": "2-0",
+    }
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
+@pytest.mark.parametrize(
+    "data_key",
+    [
+        # langgraph-api 0.17 sends ``payload``, which the event processor does
+        # not parse: the interrupt is read after the pause, once the run is
+        # marked completed.
+        pytest.param("payload", id="server-shape"),
+        # The ``value`` shape is emitted inside the loop, before the run is
+        # marked completed: only the ``emitted_interrupt`` gate keeps it.
+        pytest.param("value", id="value-shape"),
+    ],
+)
+async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
+    resume, data_key
+):
+    """A consumer that stops at the interrupt event must leave the paused run alone."""
+    from langgraph.types import Command
+
+    lifecycle = {
+        "method": "lifecycle",
+        "params": {"namespace": [], "data": {"event": "running"}},
+        "event_id": "synth:run-1:lc::running",
+    }
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[_root_pause(data_key)]
+        if resume
+        else [lifecycle, _root_pause(data_key)],
+    )
+    if resume:
+        stream.interrupts = [{"interrupt_id": "interrupt-1"}]
+        respond = stream.run.respond
+
+        async def respond_and_pause(response, *, interrupt_id=None):
+            # The resumed run pauses again on a new interrupt.
+            stream.interrupts = [{"interrupt_id": "interrupt-2", "value": _PAUSE_VALUE}]
+            return await respond(response, interrupt_id=interrupt_id)
+
+        stream.run.respond = respond_and_pause
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("tools",),
+                "interrupts": [{"id": "interrupt-2", "value": _PAUSE_VALUE}],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status != "running":
+                return []
+            return [
+                {"run_id": "run-1", "status": "running"},
+                {
+                    "run_id": "resumed-run",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {"resume": {"interrupt-1": _RESUME_DECISIONS}}
+                    },
+                },
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+    message = Command(resume={"interrupt-1": _RESUME_DECISIONS}) if resume else "hi"
+
+    gen = gateway.stream_events(RunRequest(message=message, thread_id="abc12345"))
+    interrupt = None
+    async for event in gen:
+        if event["type"] == "interrupt":
+            interrupt = event
+            break
+    await gen.aclose()
+
+    assert interrupt is not None
+    assert interrupt["interrupt_id"] == "interrupt-2"
+    assert cancel_calls == []
+    assert threads.state_updates == []
+
+
 @pytest.mark.parametrize(
     ("active_after_respond", "expected_run_ids"),
     [
