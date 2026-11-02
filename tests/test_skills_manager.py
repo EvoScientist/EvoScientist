@@ -1,5 +1,6 @@
 """Tests for EvoScientist.tools.skills_manager module."""
 
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1189,7 +1190,9 @@ metadata:
         # The tags path still reads metadata — only `type` is ignored there.
         assert result.tags == ["core"]
 
-    def test_type_expert_frontmatter_without_expert_md_is_a_plain_skill(self, tmp_path):
+    def test_type_expert_frontmatter_without_expert_md_is_a_plain_skill(
+        self, tmp_path, caplog
+    ):
         """Only a sibling EXPERT.md declares an expert; ``type: expert`` in
         SKILL.md frontmatter is not read."""
         skill_dir = tmp_path / "frontmatter-only"
@@ -1205,9 +1208,11 @@ role: a reviewer
 You are a reviewer.
 """
         )
-        result = _parse_skill_md(skill_dir / "SKILL.md")
+        with caplog.at_level(logging.WARNING):
+            result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
         assert result.expert_body == ""
+        assert "no longer read; add a sibling EXPERT.md" in caplog.text
 
     def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
         """EXPERT.md carries no frontmatter, but YAML must never reach the prompt."""

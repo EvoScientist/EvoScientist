@@ -461,6 +461,13 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         frontmatter = yaml.safe_load(frontmatter_yaml)
         if not isinstance(frontmatter, dict):
             return _info(parent.name, "(empty frontmatter)")
+        if frontmatter.get("type") == "expert" and not declares_actor:
+            _warn_once(
+                f"{parent}:type-expert",
+                "Skill %r declares `type: expert` in SKILL.md, which is no longer "
+                "read; add a sibling EXPERT.md to make it an expert.",
+                parent.name,
+            )
         # Tags: check top-level first, fall back to metadata.tags
         tags = _normalize_tags(frontmatter.get("tags"))
         if not tags:
