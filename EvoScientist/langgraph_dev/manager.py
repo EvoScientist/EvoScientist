@@ -11,6 +11,7 @@ Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -410,6 +411,12 @@ _PROCESS: subprocess.Popen | None = None
 _BREAK_GROUP_PIDS: set[int] = set()
 _BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
 _CREATE_TIME_TOLERANCE = 1.0
+
+# Windows: the access right a stop asks for to hold a recorded server's PID
+# (:func:`_hold_pid`), granted for an elevated process too, and the error
+# ``OpenProcess`` gives for a PID no process has.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_INVALID_PARAMETER = 87
 
 # How long a stop on Windows waits for the server to exit after Ctrl+Break
 # before it ends the process tree hard, and how long the helper that sends it
@@ -948,6 +955,43 @@ def _same_process(pid: int, created: float) -> bool:
     return now is not None and abs(now - created) <= _CREATE_TIME_TOLERANCE
 
 
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32, ctypes.get_last_error
+
+
+@contextlib.contextmanager
+def _hold_pid(pid: int):
+    """Windows: hold a handle to ``pid`` for the block. While it is open,
+    Windows does not give the PID to another process, so the checks of a
+    stop and the Ctrl+Break and kills that follow reach the same process,
+    even if it exits in between. Raises ``psutil.NoSuchProcess`` when no
+    process has ``pid``. Yields False when the handle is refused for another
+    reason: the PID is not held, so no Ctrl+Break may be sent to it. Off
+    Windows it holds nothing and yields True: a stop there sends no
+    Ctrl+Break."""
+    if os.name != "nt":
+        yield True
+        return
+    kernel32, get_last_error = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        if get_last_error() == _ERROR_INVALID_PARAMETER:
+            raise psutil.NoSuchProcess(pid)
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     """Explicitly stop the langgraph dev recorded in our PID file.
 
@@ -1028,31 +1072,37 @@ def _stop_recorded_server_locked() -> int | None:
         return None
     except OSError:
         return None
-    try:
-        proc = psutil.Process(owned_pid)
-        cmdline = proc.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        stop_langgraph_dev()  # dead/inaccessible — clean the stale files
-        return None
-    if not any("langgraph" in arg for arg in cmdline):
-        stop_langgraph_dev()  # pid recycled by a foreign process — files only
-        return None
-    # A record from before the server led its own process group, or from
-    # another release, does not say so: no Ctrl+Break, the stop ends it hard.
-    # Nor for a PID reused since (a langgraph dev in the user's own terminal
-    # passes the check above): the creation time must match the record's.
-    sidecar = _read_workspace_sidecar()
-    recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
-    break_group = (
-        sidecar is not None
-        and sidecar.get("pid") == owned_pid
-        and isinstance(recorded_created, float)
-        and _same_process(owned_pid, recorded_created)
-    )
-    try:
-        _end_server_tree(owned_pid, break_group=break_group)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
+    # The PID is held from before the checks until the stop is done, so what
+    # the checks found is what gets the Ctrl+Break and the kills.
+    with contextlib.ExitStack() as hold:
+        try:
+            held = hold.enter_context(_hold_pid(owned_pid))
+            proc = psutil.Process(owned_pid)
+            cmdline = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            stop_langgraph_dev()  # dead/inaccessible — clean the stale files
+            return None
+        if not any("langgraph" in arg for arg in cmdline):
+            stop_langgraph_dev()  # pid recycled by a foreign process — files only
+            return None
+        # A record from before the server led its own process group, or from
+        # another release, does not say so: no Ctrl+Break, the stop ends it
+        # hard. Nor for a PID reused since (a langgraph dev in the user's own
+        # terminal passes the check above): the creation time must match the
+        # record's.
+        sidecar = _read_workspace_sidecar()
+        recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
+        break_group = (
+            held
+            and sidecar is not None
+            and sidecar.get("pid") == owned_pid
+            and isinstance(recorded_created, float)
+            and _same_process(owned_pid, recorded_created)
+        )
+        try:
+            _end_server_tree(owned_pid, break_group=break_group)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     stop_langgraph_dev()
     return owned_pid
 
