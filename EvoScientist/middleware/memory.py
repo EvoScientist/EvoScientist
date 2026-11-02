@@ -1,11 +1,11 @@
 """Memory middleware for EvoScientist.
 
 The middleware owns the markdown files under ``/memories/profile/``: it creates
-them when missing, migrates the old ``/memories/MEMORY.md`` file when present,
-injects either profile contents or profile file pointers into model calls, and
-points agents at observation memory under ``/memories/observations/``. Agents
-still read and edit profile files through their normal ``/memories/...`` tools;
-observation writes go through the structured ``record_observation`` tool.
+them when missing, injects either profile contents or profile file pointers into
+model calls, and points agents at observation memory under
+``/memories/observations/``. Agents still read and edit profile files through
+their normal ``/memories/...`` tools; observation writes go through the
+structured ``record_observation`` tool.
 """
 
 from __future__ import annotations
@@ -48,8 +48,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 60_000
 _TRUNCATED_PROFILE_HEAD_RATIO = 0.75
 _warned_profile_truncations: set[tuple[str, ...]] = set()
-_LEGACY_MEMORY_FILENAME = "MEMORY.md"
-_LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
 
 PROFILE_MEMORY_INSTRUCTIONS = """
@@ -487,59 +485,11 @@ def _warn_profile_truncation(agent_paths: list[str], budget: int) -> None:
     )
 
 
-def _legacy_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
-    """Split the old ``MEMORY.md`` format into preface and top-level sections."""
-    pattern = re.compile(
-        r"^## (?P<heading>.+?)\n(?P<body>.*?)(?=^## |\Z)",
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    sections = [
-        (match.group("heading").strip(), match.group("body").strip())
-        for match in pattern.finditer(content)
-    ]
-    first = pattern.search(content)
-    preface = content[: first.start()].strip() if first else content.strip()
-    return preface, sections
-
-
-def _is_legacy_placeholder_line(line: str) -> bool:
-    """Return whether a legacy line is only default-template filler."""
-    stripped = line.strip()
-    if stripped in {"", "- (none yet)", "- (none)", "(No experiments yet)", "(none)"}:
-        return True
-    return bool(re.fullmatch(r"- \*\*[^*]+\*\*:\s*\(unknown\)", stripped))
-
-
-def _clean_legacy_body(body: str) -> str:
-    """Drop old template placeholders while keeping real legacy notes."""
-    lines = [
-        line.rstrip()
-        for line in body.strip().splitlines()
-        if not _is_legacy_placeholder_line(line)
-    ]
-    return "\n".join(lines).strip()
-
-
-def _clean_legacy_preface(preface: str) -> str:
-    """Remove the old root heading from pre-section legacy text."""
-    lines = [
-        line.rstrip()
-        for line in preface.strip().splitlines()
-        if line.strip() != "# EvoScientist Memory"
-    ]
-    return "\n".join(lines).strip()
-
-
-def _append_imported_section(content: str, body: str) -> str:
-    """Append migrated legacy text under a clear, inspectable heading."""
-    return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
-    The middleware bootstraps missing files, migrates legacy memory, and adds
-    profile context to model requests.
+    The middleware bootstraps missing files and adds profile context to model
+    requests.
     """
 
     def __init__(
@@ -667,17 +617,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return False
         return True
 
-    def _delete_legacy_memory(self, legacy_path: Path) -> bool:
-        """Remove the old memory file after it has no content left to preserve."""
-        try:
-            legacy_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning("Failed to delete legacy memory %s: %s", legacy_path, e)
-            return False
-        return True
-
     def _ensure_observation_dirs(self) -> None:
         """Create non-project observation directories agents are prompted to search."""
         try:
@@ -708,80 +647,11 @@ class EvoMemoryMiddleware(AgentMiddleware):
             records.append((memory_path, content))
         return records
 
-    def _migrate_legacy_memory(self) -> bool:
-        """Import recognized sections from legacy ``MEMORY.md`` into profiles.
-
-        The legacy file is removed only after real content is copied or the file
-        is found to contain only old template placeholders.
-        """
-        legacy_path = self._memory_dir / _LEGACY_MEMORY_FILENAME
-        legacy = self._read_text(legacy_path)
-        if legacy is None:
-            return True
-        if not legacy.strip():
-            return self._delete_legacy_memory(legacy_path)
-
-        user_profile_path = "/profile/USER_PROFILE.md"
-        research_taste_path = "/profile/RESEARCH_TASTE.md"
-        imports: dict[str, list[str]] = {
-            user_profile_path: [],
-            research_taste_path: [],
-        }
-        recognized_paths = {
-            "User Profile": user_profile_path,
-            "Research Preferences": research_taste_path,
-            "Experiment History": user_profile_path,
-            "Learned Preferences": user_profile_path,
-        }
-
-        preface, legacy_sections = _legacy_sections(legacy)
-        preface_body = _clean_legacy_preface(preface)
-        if preface_body:
-            imports[user_profile_path].append(f"### Notes\n{preface_body}")
-        for heading, body in legacy_sections:
-            cleaned = _clean_legacy_body(body)
-            if not cleaned:
-                continue
-            target_path = recognized_paths.get(heading, user_profile_path)
-            imports.setdefault(target_path, []).append(f"### {heading}\n{cleaned}")
-
-        imported_any = False
-        for memory_path, bodies in imports.items():
-            if not bodies:
-                continue
-            path = self._file_path(memory_path)
-            content = self._read_text(path)
-            if content is None:
-                logger.warning(
-                    "Skipping legacy memory migration for missing profile %s", path
-                )
-                return False
-            body = "\n\n".join(bodies)
-            if not self._write_text(path, _append_imported_section(content, body)):
-                return False
-            imported_any = True
-
-        if not imported_any:
-            logger.debug("Legacy MEMORY.md contained no real content to migrate")
-
-        return self._delete_legacy_memory(legacy_path)
-
-    def _read_bootstrapped_profile_records(self) -> list[tuple[str, str]]:
-        records = self._ensure_profile_files()
-        if self._migrate_legacy_memory():
-            records = [
-                (memory_path, self._read_text(self._file_path(memory_path)) or "")
-                for memory_path, _ in records
-            ]
-        return records
-
     def _read_profile_records(self) -> list[tuple[str, str]]:
-        """Load all profile files after bootstrapping and legacy migration."""
-        if not self._enable_observation_memory:
-            return self._read_bootstrapped_profile_records()
-
-        self._ensure_observation_dirs()
-        return self._read_bootstrapped_profile_records()
+        """Load all profile files, creating any that are missing."""
+        if self._enable_observation_memory:
+            self._ensure_observation_dirs()
+        return self._ensure_profile_files()
 
     def _profile_context_from_records(self, records: list[tuple[str, str]]) -> str:
         """Inline profile files, truncating only those over their share of the budget."""
