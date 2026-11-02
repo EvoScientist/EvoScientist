@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -1004,44 +1005,36 @@ def test_stop_langgraph_dev_sends_ctrl_break_only_to_its_own_group(
 ):
     monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
     monkeypatch.setattr(manager, "_PROCESS", None)
-    proc = _sleeper()
+    proc = SimpleNamespace(pid=4242, poll=lambda: None)
     seen: list = []
-
-    def _end(pid, popen=None, *, break_group=False):
-        seen.append(break_group)
-        popen.kill()
-        popen.wait()
-
-    monkeypatch.setattr(manager, "_end_server_tree", _end)
-    if spawned_here:
-        monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {proc.pid})
-    try:
-        manager.stop_langgraph_dev(proc, clean=clean)
-        assert seen == [expected]
-        assert proc.pid not in manager._BREAK_GROUP_PIDS
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
+    monkeypatch.setattr(
+        manager,
+        "_end_server_tree",
+        lambda pid, popen=None, *, break_group=False: seen.append(break_group),
+    )
+    monkeypatch.setattr(
+        manager, "_BREAK_GROUP_PIDS", {proc.pid} if spawned_here else set()
+    )
+    manager.stop_langgraph_dev(proc, clean=clean)
+    assert seen == [expected]
+    assert proc.pid not in manager._BREAK_GROUP_PIDS
 
 
-def test_stop_inflight_owned_server_skips_the_clean_stop(
-    monkeypatch, runtime_paths, stop_steps
-):
+def test_stop_inflight_owned_server_skips_the_clean_stop(monkeypatch, runtime_paths):
     """A server still starting has no run to put back in the queue."""
-    owned = _sleeper()
-    try:
-        monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
-        monkeypatch.setattr(manager, "_PROCESS", owned)
-        monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {owned.pid})
-        _clean_stop(monkeypatch, stop_steps)
-        assert manager.stop_inflight_owned_server() == owned.pid
-        assert ("clean", owned.pid) not in stop_steps
-        assert owned.poll() is not None
-    finally:
-        if owned.poll() is None:
-            owned.kill()
-            owned.wait()
+    owned = SimpleNamespace(pid=4242, poll=lambda: None)
+    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", owned)
+    monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {owned.pid})
+    seen: list = []
+    monkeypatch.setattr(
+        manager,
+        "_end_server_tree",
+        lambda pid, popen=None, *, break_group=False: seen.append((pid, break_group)),
+    )
+    assert manager.stop_inflight_owned_server() == owned.pid
+    assert seen == [(owned.pid, False)]
+    assert manager._PROCESS is None
 
 
 @pytest.mark.parametrize(
