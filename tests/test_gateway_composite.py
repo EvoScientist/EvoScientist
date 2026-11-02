@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -451,6 +452,15 @@ async def test_delete_server_error_is_non_fatal():
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
     assert await _composite(read, execute).delete_thread(UUID) is True
+
+
+async def test_delete_server_error_after_a_failed_local_delete(caplog):
+    read = RecordingGateway("r", delete_result=False)
+    execute = RecordingGateway("e", delete_result=True)
+    execute.delete_raises = True
+    with caplog.at_level(logging.WARNING):
+        assert await _composite(read, execute).delete_thread(UUID) is False
+    assert "local delete failed" in caplog.text
 
 
 def test_execute_gateway_exposes_execution_side():

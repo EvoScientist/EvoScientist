@@ -608,6 +608,31 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_profile_without_frontmatter_is_injected_as_stored_when_repair_fails(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+    middleware.modify_request(_request())  # profile files exist now
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "# User profile\n\n## Preferences\n- Likes short reports\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        memory_module.EvoMemoryMiddleware,
+        "_write_text",
+        lambda _self, _path, _content: False,
+    )
+
+    system = _system(middleware.modify_request(_request()))
+
+    assert "- Likes short reports" in system
+    assert "intro: pending" not in system
+
+
 def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
