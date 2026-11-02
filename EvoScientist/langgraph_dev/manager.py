@@ -1046,7 +1046,7 @@ def _stop_recorded_server_locked() -> int | None:
     break_group = (
         sidecar is not None
         and sidecar.get("pid") == owned_pid
-        and isinstance(recorded_created, (int, float))
+        and isinstance(recorded_created, float)
         and _same_process(owned_pid, recorded_created)
     )
     try:
