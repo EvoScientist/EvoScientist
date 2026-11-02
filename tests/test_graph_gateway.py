@@ -1597,7 +1597,11 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
     )
-    message = Command(resume={"answer": "yes"}) if resume else "hi"
+    message = (
+        Command(resume={"first": {"decisions": [{"type": "approve"}]}})
+        if resume
+        else "hi"
+    )
     events = [
         event
         async for event in gateway.stream_events(
@@ -1612,7 +1616,7 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     assert len(threads.created) == 1
     if resume:
         assert stream.run.responses == [
-            {"response": {"answer": "yes"}, "interrupt_id": "first"}
+            {"response": {"decisions": [{"type": "approve"}]}, "interrupt_id": "first"}
         ]
         assert stream.run.starts == []
     else:
@@ -1663,7 +1667,11 @@ async def test_metadata_refresh_carries_the_model_of_each_turn(resume):
         pass
     if resume:
         stream.interrupts = [{"interrupt_id": "first"}]
-    second = Command(resume={"answer": "yes"}) if resume else "again"
+    second = (
+        Command(resume={"first": {"decisions": [{"type": "approve"}]}})
+        if resume
+        else "again"
+    )
     async for _event in gateway.stream_events(
         RunRequest(message=second, thread_id="abc12345", metadata={"model": "model-b"})
     ):
@@ -2941,10 +2949,12 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
         respond = stream.run.respond
 
         async def respond_and_pause(response, *, interrupt_id=None):
-            # The resumed run pauses again on a new interrupt; on server-shape
-            # the resume turn reads it from here after the loop.
-            stream.interrupts = [{"interrupt_id": "interrupt-2", "value": _PAUSE_VALUE}]
-            return await respond(response, interrupt_id=interrupt_id)
+            # The resumed run pauses again on a new interrupt.
+            result = await respond(response, interrupt_id=interrupt_id)
+            value = _PAUSE_VALUE if data_key == "value" else None
+            stream.interrupts = [{"interrupt_id": "interrupt-2", "value": value}]
+            stream.interrupted = True
+            return result
 
         stream.run.respond = respond_and_pause
     threads = FakeLangGraphThreadsClient(
@@ -2953,7 +2963,7 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
             "abc12345": {
                 "values": {},
                 "next": ("tools",),
-                # On server-shape the new-message turn reads the pause from here.
+                # Both server-shape cases read the pause from here.
                 "interrupts": [{"id": "interrupt-2", "value": _PAUSE_VALUE}],
             }
         },
