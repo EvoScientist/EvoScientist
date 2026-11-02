@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -1452,6 +1453,23 @@ class TestPruningCheckpointerDeltaChannel(unittest.IsolatedAsyncioTestCase):
 
         survivors = await _go()
         assert survivors == ["cp_001", "cp_002", "cp_003"]
+
+
+async def test_get_checkpointer_prunes_the_sessions_db(tmp_path, monkeypatch):
+    """The CLI checkpointer is a pruning saver on the sessions DB, at the
+    configured retention."""
+    import EvoScientist.sessions as sessions
+
+    db = tmp_path / "sessions.db"
+    monkeypatch.setattr(sessions, "get_db_path", lambda: db)
+    monkeypatch.setattr(sessions, "_resolve_keep_per_ns", lambda: 7)
+    async with sessions.get_checkpointer() as saver:
+        assert isinstance(saver, sessions.PruningCheckpointer)
+        assert saver._keep_per_ns == 7
+        await saver.setup()
+    with sqlite3.connect(db) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert {"checkpoints", "writes"} <= tables
 
 
 class TestDbStats(unittest.IsolatedAsyncioTestCase):

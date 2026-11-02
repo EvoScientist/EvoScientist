@@ -50,8 +50,8 @@ def make_skill_manager_tool(
           Returns skill names, descriptions, tags, and install sources you can pass to action="install".
 
         action="info" (requires name):
-          Get details (description, source, path, tags) about a specific skill by name.
-          Expert skills also surface their role, byline, and capability tags.
+          Get details (description, source, path, tags) about a specific skill by name;
+          an expert skill is marked as such.
           Searches both user and system skills.
 
         action="uninstall" (requires name):

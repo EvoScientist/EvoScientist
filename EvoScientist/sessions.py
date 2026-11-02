@@ -291,9 +291,6 @@ class PruningCheckpointer(AsyncSqliteSaver):
         """
         keep = self._keep_per_ns
         async with self.lock:
-            # ``writes`` table is checked inside ``_delete_outside`` so a
-            # DB that only has ``checkpoints`` still gets pruned
-            # (writes DELETE silently skipped; checkpoints DELETE runs).
             for key, value, walk_to_snapshot, max_keep in _PRUNED_ROWS:
                 rule_keep = keep if max_keep is None else min(keep, max_keep)
                 anchor_ids = await self._fetch_recent_checkpoint_ids(
@@ -432,31 +429,27 @@ class PruningCheckpointer(AsyncSqliteSaver):
         kept_list = list(kept_ids)
         placeholders = ",".join("?" * len(kept_list))
 
-        # Writes DELETE only runs if the ``writes`` table exists. Legacy
-        # DBs from pre-DeltaChannel builds may have only ``checkpoints`` —
-        # we still want to prune those, just skipping the writes step.
-        if await _table_exists(self.conn, "writes"):
-            del_writes = (
-                "DELETE FROM writes "
-                "WHERE thread_id = ? AND checkpoint_ns = ? "
-                "  AND checkpoint_id IN ("
-                "    SELECT checkpoint_id FROM checkpoints "
-                "    WHERE thread_id = ? AND checkpoint_ns = ? "
-                f"      AND json_extract(metadata, '$.{key}') = ? "
-                f"     AND checkpoint_id NOT IN ({placeholders})"
-                "  )"
-            )
-            await self.conn.execute(
-                del_writes,
-                (
-                    thread_id,
-                    checkpoint_ns,
-                    thread_id,
-                    checkpoint_ns,
-                    value,
-                    *kept_list,
-                ),
-            )
+        del_writes = (
+            "DELETE FROM writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND checkpoint_id IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            f"      AND json_extract(metadata, '$.{key}') = ? "
+            f"     AND checkpoint_id NOT IN ({placeholders})"
+            "  )"
+        )
+        await self.conn.execute(
+            del_writes,
+            (
+                thread_id,
+                checkpoint_ns,
+                thread_id,
+                checkpoint_ns,
+                value,
+                *kept_list,
+            ),
+        )
 
         del_checkpoints = (
             "DELETE FROM checkpoints "
@@ -1810,11 +1803,10 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
     loses that row.
 
     On startup it sets up the schema, then, each best-effort (a failure does
-    not stop the server): upgrades stored folders, purges leftover
-    evomemory-worker rows, rebuilds the in-memory thread registry from
-    SQLite (and, when that succeeds, drops runs and thread-bound crons whose
-    thread is not in the restored registry), and clears the stored run user
-    from every saved cron.
+    not stop the server): purges leftover evomemory-worker rows, rebuilds the
+    in-memory thread registry from SQLite (and, when that succeeds, drops runs
+    and thread-bound crons whose thread is not in the restored registry), and
+    clears the stored run user from every saved cron.
 
     The yielded ``_ApiPruningCheckpointer`` stamps rows with their thread's
     folders (the binding the graph factory resolved) and graph rows with

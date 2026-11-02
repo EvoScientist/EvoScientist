@@ -30,12 +30,6 @@ async def _empty_async_iter():
         yield
 
 
-async def _drain(agen, sink: list) -> None:
-    """Consume an async event stream into ``sink`` (keeps pytest.raises simple)."""
-    async for event in agen:
-        sink.append(event)
-
-
 class RecordingGateway:
     """Minimal GraphGateway that records which methods were called."""
 

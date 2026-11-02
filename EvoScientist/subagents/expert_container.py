@@ -78,9 +78,8 @@ def build_expert_subagent_spec(
 
     Args:
         skill_info: An expert skill (``type == "expert"``). The caller is
-            responsible for filtering — passing a utility skill here builds a
-            spec anyway (utility skills just don't have persona content in
-            the body, so the result is nonsensical rather than broken).
+            responsible for filtering — a utility skill has no EXPERT.md, so
+            its spec would carry an empty system prompt.
         tool_registry: Same registry `load_subagents` uses to resolve tool
             names to callables (e.g. `{"think_tool": think_tool, ...}`).
             Unresolved tools are skipped with a warning, matching

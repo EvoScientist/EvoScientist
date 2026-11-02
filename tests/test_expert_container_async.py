@@ -95,8 +95,9 @@ class TestComposePrompt:
 
     def test_empty_body_returns_error_cue(self, workspace):
         """A skill with an empty EXPERT.md body would otherwise run against a
-        persona-less system prompt. Mirror the sync fold-in's policy: refuse to compose a prompt at all and surface the
-        skill-authoring bug through the LLM's error envelope."""
+        persona-less system prompt. Mirror the sync fold-in's policy: refuse to
+        compose a prompt at all and surface the skill-authoring bug through the
+        LLM's error envelope."""
         mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",

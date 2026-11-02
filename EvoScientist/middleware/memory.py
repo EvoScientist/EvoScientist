@@ -639,11 +639,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 and content.strip()
                 and _FRONTMATTER_RE.match(content) is None
             ):
-                # Pre-frontmatter profiles: prepend defaults, keep the body verbatim.
-                content = _join_frontmatter(
+                # A profile without frontmatter: prepend defaults, keep the body
+                # verbatim; inject what is on disk if the rewrite fails.
+                repaired = _join_frontmatter(
                     _default_user_profile_frontmatter(), content
                 )
-                self._write_text(path, content)
+                if self._write_text(path, repaired):
+                    content = repaired
             records.append((memory_path, content))
         return records
 

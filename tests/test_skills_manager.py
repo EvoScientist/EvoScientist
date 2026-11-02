@@ -1189,6 +1189,26 @@ metadata:
         # The tags path still reads metadata — only `type` is ignored there.
         assert result.tags == ["core"]
 
+    def test_type_expert_frontmatter_without_expert_md_is_a_plain_skill(self, tmp_path):
+        """Only a sibling EXPERT.md declares an expert; ``type: expert`` in
+        SKILL.md frontmatter is not read."""
+        skill_dir = tmp_path / "frontmatter-only"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: frontmatter-only
+description: Says it is an expert but ships no EXPERT.md
+type: expert
+role: a reviewer
+---
+
+You are a reviewer.
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "utility"
+        assert result.expert_body == ""
+
     def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
         """EXPERT.md carries no frontmatter, but YAML must never reach the prompt."""
         skill_dir = _write_actor_skill(

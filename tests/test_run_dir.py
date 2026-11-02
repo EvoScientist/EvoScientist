@@ -11,6 +11,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -213,7 +214,7 @@ def test_server_graphs_work_in_the_run_folder_and_crons_in_the_root(
 
 
 # ---------------------------------------------------------------------------
-# Folders stored before run_dir are upgraded once
+# Stored folders are read back with their run_dir
 # ---------------------------------------------------------------------------
 
 
@@ -244,12 +245,10 @@ def _write_rows(db: Path, rows: list[tuple[str, str, dict]]) -> None:
 
 @pytest.fixture
 def sessions_db(tmp_path, monkeypatch):
-    import EvoScientist.paths as paths
     import EvoScientist.sessions as sessions
 
     db = tmp_path / "sessions.db"
     monkeypatch.setattr(sessions, "get_db_path", lambda: db)
-    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     return db
 
 
@@ -277,6 +276,36 @@ def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
         run.resolve().as_posix()
     )
     assert asyncio.run(get_thread_metadata("t-daemon"))["run_dir"] is None
+
+
+async def test_server_restores_a_run_mode_thread_with_its_run_dir(
+    workspace, sessions_db, monkeypatch
+):
+    """The server's startup restore lists a run-mode thread with its run folder,
+    so the WebUI shows where it ran."""
+    import EvoScientist.sessions as sessions
+
+    run = workspace.runs_dir / TS_RUN
+    thread_id = str(uuid.uuid4())
+    meta = {
+        "graph_id": "EvoScientist",
+        "updated_at": "2026-09-01T00:00:00+00:00",
+        **SessionDirs(workspace, run).metadata(),
+    }
+    _write_rows(sessions_db, [(thread_id, "c1", meta)])
+    store: dict = {"threads": []}
+    monkeypatch.setitem(
+        sys.modules,
+        "langgraph_runtime_inmem.database",
+        SimpleNamespace(GLOBAL_STORE=store),
+    )
+    monkeypatch.setattr(sessions, "_known_workspace_keys", lambda: {workspace.key})
+    async with sessions.create_checkpointer_for_langgraph_api():
+        pass
+    (restored,) = store["threads"]
+    assert str(restored["thread_id"]) == thread_id
+    assert restored["metadata"]["workspace_dir"] == meta["workspace_dir"]
+    assert restored["metadata"]["run_dir"] == meta["run_dir"]
 
 
 def _stamped(folders: SessionDirs, monkeypatch) -> dict:

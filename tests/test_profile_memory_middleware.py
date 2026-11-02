@@ -45,13 +45,6 @@ def _path_project_id(workspace) -> str:
     return memory_module.resolve_project_id(workspace)
 
 
-def _profile_texts(memories):
-    return [
-        path.read_text(encoding="utf-8")
-        for path in (memories / "profile").rglob("*.md")
-    ]
-
-
 def _sorted_tool_names(middleware) -> list[str]:
     return sorted(tool.name for tool in middleware.tools)
 

@@ -108,8 +108,7 @@ async def get_teams(request: Request) -> JSONResponse:
 
     A "team" in the WebUI vocabulary is an installed expert skill — a skill
     directory carrying a sibling ``EXPERT.md``. The response is a curated,
-    gallery-safe projection: name + description. Richer cards would source
-    decoration from index metadata, not from frontmatter.
+    gallery-safe projection.
 
     Backend implementation details (system prompt, tool list, source tier,
     filesystem path, tags) are intentionally NOT projected. The gallery only needs
