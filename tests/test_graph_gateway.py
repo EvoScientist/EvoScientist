@@ -2919,8 +2919,10 @@ def _root_pause(data_key: str) -> dict[str, Any]:
     "data_key",
     [
         # langgraph-api 0.17 sends ``payload``, which the event processor does
-        # not parse: the interrupt is read after the pause, once the run is
-        # marked completed.
+        # not parse (#706): the interrupt is read after the pause, once the run is
+        # marked completed. When #706 lands, this case moves onto the in-loop path;
+        # pin the run_completed ordering with a pause the processor cannot parse
+        # (e.g. a root ``lifecycle: interrupted`` only).
         pytest.param("payload", id="server-shape"),
         # The ``value`` shape is emitted inside the loop, before the run is
         # marked completed: only the ``emitted_interrupt`` gate keeps it.
@@ -2933,23 +2935,14 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
     """A consumer that stops at the interrupt event must leave the paused run alone."""
     from langgraph.types import Command
 
-    lifecycle = {
-        "method": "lifecycle",
-        "params": {"namespace": [], "data": {"event": "running"}},
-        "event_id": "synth:run-1:lc::running",
-    }
-    stream = FakeLangGraphThreadStream(
-        "abc12345",
-        events=[_root_pause(data_key)]
-        if resume
-        else [lifecycle, _root_pause(data_key)],
-    )
+    stream = FakeLangGraphThreadStream("abc12345", events=[_root_pause(data_key)])
     if resume:
         stream.interrupts = [{"interrupt_id": "interrupt-1"}]
         respond = stream.run.respond
 
         async def respond_and_pause(response, *, interrupt_id=None):
-            # The resumed run pauses again on a new interrupt.
+            # The resumed run pauses again on a new interrupt; on server-shape
+            # the resume turn reads it from here after the loop.
             stream.interrupts = [{"interrupt_id": "interrupt-2", "value": _PAUSE_VALUE}]
             return await respond(response, interrupt_id=interrupt_id)
 
@@ -2960,6 +2953,7 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
             "abc12345": {
                 "values": {},
                 "next": ("tools",),
+                # On server-shape the new-message turn reads the pause from here.
                 "interrupts": [{"id": "interrupt-2", "value": _PAUSE_VALUE}],
             }
         },
@@ -2973,7 +2967,7 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
             if status != "running":
                 return []
             return [
-                {"run_id": "run-1", "status": "running"},
+                # The run the finally would cancel if the gate let it.
                 {
                     "run_id": "resumed-run",
                     "status": "running",
