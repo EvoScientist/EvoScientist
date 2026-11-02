@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.implementation.experts import (
@@ -91,6 +93,11 @@ class TestExpertsList:
             await ExpertsCommand().execute(ctx, args=[])
         # A Rich Table was mounted, and the no-experts-invited hint appeared.
         assert len(ui.mounted) == 1
+        console = Console(file=io.StringIO(), width=120, record=True)
+        console.print(ui.mounted[0])
+        rendered = console.export_text()
+        assert "Description" in rendered
+        assert "Research idea brainstormer" in rendered
         assert any("No experts invited" in text for text, _ in ui.lines)
 
     async def test_empty_list_prints_help_hint(self, workspace):

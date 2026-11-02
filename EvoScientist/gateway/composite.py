@@ -166,9 +166,9 @@ class CompositeGraphGateway:
             # (report failure only when neither side deleted) is a tracked
             # follow-up; this keeps the current behavior self-reporting.
             logger.warning(
-                "composite: server-side delete failed for thread %s; "
-                "local delete succeeded",
+                "composite: server-side delete failed for thread %s; local delete %s",
                 thread_id,
+                "succeeded" if read_ok else "failed",
                 exc_info=True,
             )
         return read_ok or exec_ok

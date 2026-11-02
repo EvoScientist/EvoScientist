@@ -244,14 +244,14 @@ def test_get_teams_omits_backend_implementation_fields():
 @pytest.mark.usefixtures("launcher")
 def test_get_teams_entry_is_name_and_description():
     """Each gallery card carries name and description only."""
-    experts = [_expert_info("minimal-expert")]
+    experts = [_expert_info("minimal-expert", description="Minimal expert")]
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
         body = client.get("/api/teams").json()
     entry = body["teams"][0]
-    assert set(entry.keys()) == {"name", "description"}
+    assert entry == {"name": "minimal-expert", "description": "Minimal expert"}
 
 
 @pytest.mark.usefixtures("launcher")
