@@ -325,7 +325,6 @@ def _write_workspace_sidecar(
         if lasting is not None:
             payload["lasting"] = lasting
         if break_group_created is not None:
-            payload[_BREAK_GROUP_KEY] = True
             payload[_BREAK_GROUP_CREATED_KEY] = break_group_created
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
@@ -400,11 +399,11 @@ _PROCESS: subprocess.Popen | None = None
 # Windows: servers this process spawned as the leader of their own process
 # group, the only PIDs a Ctrl+Break may be sent to (for any other PID Windows
 # sends it to every process on the console). The sidecar records the same for
-# a server another process started (``_BREAK_GROUP_KEY``), with the server's
-# creation time: a PID reused by another process must not get the event.
+# a server another process started, as the server's creation time
+# (``_BREAK_GROUP_CREATED_KEY``): a PID reused by another process must not get
+# the event.
 _BREAK_GROUP_PIDS: set[int] = set()
-_BREAK_GROUP_KEY = "ctrl_break_group"
-_BREAK_GROUP_CREATED_KEY = "create_time"
+_BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
 _CREATE_TIME_TOLERANCE = 1.0
 
 # How long a stop on Windows waits for the server to exit after Ctrl+Break
@@ -1042,7 +1041,6 @@ def _stop_recorded_server_locked() -> int | None:
     break_group = (
         sidecar is not None
         and sidecar.get("pid") == owned_pid
-        and sidecar.get(_BREAK_GROUP_KEY) is True
         and isinstance(recorded_created, (int, float))
         and _same_process(owned_pid, recorded_created)
     )

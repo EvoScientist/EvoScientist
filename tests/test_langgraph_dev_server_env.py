@@ -427,9 +427,8 @@ def test_start_records_that_the_server_leads_its_process_group(
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
     sidecar = json.loads((tmp_path / "workspace.json").read_text())
     windows = os_name == "nt"
-    assert sidecar.get("ctrl_break_group", False) is windows
     # A stop checks the live process against it, so a reused PID gets nothing.
-    assert sidecar.get("create_time") == (1234.5 if windows else None)
+    assert sidecar.get("ctrl_break_create_time") == (1234.5 if windows else None)
     assert (4242 in manager._BREAK_GROUP_PIDS) is windows
 
 

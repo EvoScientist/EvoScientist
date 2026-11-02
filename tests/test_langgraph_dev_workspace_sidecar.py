@@ -1047,13 +1047,12 @@ def test_stop_inflight_owned_server_skips_the_clean_stop(
 @pytest.mark.parametrize(
     ("record", "created_offset", "expected"),
     [
-        ({"ctrl_break_group": True}, 0.0, True),
+        ({}, 0.0, True),
         ({}, None, False),  # a record from before this release
-        ({"ctrl_break_group": True}, None, False),  # no creation time recorded
-        ({"ctrl_break_group": True, "pid": 1}, 0.0, False),  # another server
+        ({"pid": 1}, 0.0, False),  # another server
         # The PID was reused by a process started later: no Ctrl+Break, which
         # would reach every process on that process's console.
-        ({"ctrl_break_group": True}, -60.0, False),
+        ({}, -60.0, False),
     ],
 )
 def test_stop_recorded_server_trusts_the_record_for_the_process_group(
@@ -1066,7 +1065,7 @@ def test_stop_recorded_server_trusts_the_record_for_the_process_group(
         pid_file.write_text(str(victim.pid))
         if created_offset is not None:
             created = psutil.Process(victim.pid).create_time() + created_offset
-            record = {**record, "create_time": created}
+            record = {**record, "ctrl_break_create_time": created}
         sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid, **record}))
         monkeypatch.setattr(
             manager,
@@ -1102,14 +1101,12 @@ def test_sidecar_records_the_process_group_only_when_asked(
     )
     manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
     record = manager._read_workspace_sidecar()
-    assert "ctrl_break_group" not in record
-    assert "create_time" not in record
+    assert "ctrl_break_create_time" not in record
     manager._write_workspace_sidecar(
         workspace_dir=tmp_path, pid=1, break_group_created=1234.5
     )
     record = manager._read_workspace_sidecar()
-    assert record["ctrl_break_group"] is True
-    assert record["create_time"] == 1234.5
+    assert record["ctrl_break_create_time"] == 1234.5
 
 
 def test_server_config_fingerprint_tracks_dangerous_mode():
