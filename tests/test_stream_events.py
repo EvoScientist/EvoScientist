@@ -671,6 +671,37 @@ class TestV3ProtocolStreaming:
         tool_result = next(e for e in events if e.get("type") == "tool_result")
         assert tool_result["success"] is False
 
+    async def test_a_serialized_tool_message_is_read_like_the_message(self):
+        """The server gateway delivers tool results in their JSON form."""
+        failed = {
+            "type": "tool",
+            "content": [{"type": "text", "text": "dataset not found: iris"}],
+            "name": "lookup_dataset",
+            "tool_call_id": "tc1",
+            "status": "error",
+        }
+        done = {
+            "type": "tool",
+            "content": "File content",
+            "name": "read_file",
+            "tool_call_id": "tc2",
+            "status": "success",
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(failed),
+                tool_started("read_file", {"path": "notes.txt"}, tool_call_id="tc2"),
+                tool_finished(done, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [(r["content"], r["success"]) for r in results] == [
+            ("dataset not found: iris", False),
+            ("File content", True),
+        ]
+
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )

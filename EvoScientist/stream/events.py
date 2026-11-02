@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
+from pydantic import ValidationError
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
 from ..middleware.tool_history_repair import (
@@ -1157,6 +1158,13 @@ class _V3EventProcessor:
                 success = False
             else:
                 output = data_map.get("output")
+                # The server gateway hands the message over in its serialized form.
+                output_map = _as_raw_map(output)
+                if output_map is not None and output_map.get("type") == "tool":
+                    try:
+                        output = ToolMessage.model_validate(output_map)
+                    except ValidationError:
+                        pass
                 # A tool that handled its own error (an MCP error result) says so
                 # in its status, whatever its text.
                 status_error = False
