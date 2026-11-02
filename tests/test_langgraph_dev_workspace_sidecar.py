@@ -1146,6 +1146,13 @@ def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
         steps: list = []
         _fake_hold(monkeypatch, steps)
 
+        class _Process(psutil.Process):
+            def cmdline(self):
+                steps.append(("cmdline", self.pid))
+                return super().cmdline()
+
+        monkeypatch.setattr(manager.psutil, "Process", _Process)
+
         def _end(pid, popen=None, *, break_group=False):
             steps.append(("end", pid, break_group))
             victim.kill()
@@ -1155,6 +1162,7 @@ def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
         assert manager.stop_recorded_server() == victim.pid
         assert steps == [
             ("hold", victim.pid),
+            ("cmdline", victim.pid),
             ("end", victim.pid, True),
             ("release", victim.pid),
         ]
@@ -1233,6 +1241,7 @@ def test_stop_recorded_server_only_cleans_up_a_server_it_may_not_open(
         assert ended == []
         assert not pid_file.exists()
         assert not sidecar.exists()
+        assert victim.poll() is None
     finally:
         victim.kill()
         victim.wait()
