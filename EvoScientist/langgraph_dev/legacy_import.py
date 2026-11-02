@@ -557,13 +557,13 @@ def _tagged_project(holder: Workspace, tag: Any) -> Workspace:
         return holder
     # A named run folder of a registered project; a project may itself
     # live in a folder called ``runs``, so only of a registered one.
-    runs = tagged.root.parent
+    project = Workspace(tagged.root.parent.parent)
     if (
         tagged.root == path
-        and runs.name == "runs"
-        and is_served(Workspace(runs.parent), registry.REGISTRY)
+        and project.is_run_folder(path)
+        and is_served(project, registry.REGISTRY)
     ):
-        return Workspace(runs.parent)
+        return project
     # The old server's rule: a tag whose folder is gone (or cannot be
     # looked at) is the file's.
     if not os.path.isdir(tagged.root):

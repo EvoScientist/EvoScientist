@@ -250,10 +250,16 @@ def download_constraints(target: str, mirror: str, dest: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Running server
 # --------------------------------------------------------------------------- #
-def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
+def check_server(
+    opts: UpdateOptions,
+    emit: Emitter,
+    confirm: Confirm,
+    before_stop: Callable[[], None] | None = None,
+) -> None:
     """Stop the langgraph dev server this EvoSci started, after asking; a
     server it has no ownership record for is never touched. Raises
-    ``server_running`` when the update must not go on."""
+    ``server_running`` when the update must not go on. *before_stop* runs
+    once the update goes on, before anything is stopped."""
     from .cli.server_cmd import manual_stop_command
     from .config import get_effective_config
     from .deploy.busy import has_busy_thread, running_bg_process_names
@@ -270,7 +276,9 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     config = get_effective_config()
     port, host = configured_address(config)
     # A stale record whose server does not answer is ignored.
+    go_on = before_stop or (lambda: None)
     if not is_langgraph_dev_running(port=port, host=host):
+        go_on()
         _stop_service_ccproxy(emit)
         return
     sidecar = _read_workspace_sidecar()
@@ -298,6 +306,7 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
                 raise UpdateError(
                     "server_running", "Update cancelled; the server keeps running."
                 )
+        go_on()
         # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
         # is started again by the setup after the update, from the project it
         # was started from.
@@ -330,6 +339,7 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     )
     if confirm is not None and not opts.yes:
         if confirm(f"{message}\nUpdate anyway?"):
+            go_on()
             _stop_service_ccproxy(emit)
             return
         raise UpdateError("server_running", "Update cancelled.")
@@ -394,6 +404,54 @@ def uv_install_command(
         f"EvoScientist{extras}=={target}",
         *receipt.with_args(),
     ]
+
+
+def check_install(
+    cmd: list[str],
+    tmp: Path,
+    target: str,
+    mirror: str,
+    opts: UpdateOptions,
+    emit: Emitter,
+) -> None:
+    """Run the install into a scratch tool dir under *tmp* first: uv removes
+    the installed tool before it builds or downloads, so a failure there must
+    not reach the real one."""
+    scratch = tmp / "check"
+    try:
+        env = uv_tool.uv_environment(cmd[0], mirror)
+        env["UV_TOOL_DIR"] = str(scratch / "tools")
+        env["UV_TOOL_BIN_DIR"] = str(scratch / "bin")
+        # On PATH, so uv does not warn that the scratch bin dir is not.
+        env["PATH"] = os.pathsep.join(
+            filter(None, (env["UV_TOOL_BIN_DIR"], env.get("PATH")))
+        )
+        emit(
+            make_event(
+                STAGE,
+                "running",
+                progress=0.25,
+                message=f"Checking that EvoScientist {target} installs",
+            )
+        )
+        try:
+            result = subprocess.run(
+                cmd, cwd=tmp, env=env, stdout=sys.stderr if opts.json else None
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    except KeyboardInterrupt:  # only the scratch dir was touched
+        raise UpdateError(
+            "environment_busy",
+            "Update cancelled. Nothing was changed.",
+            detail={"waiting_for": []},
+        ) from None
+    if result.returncode != 0:
+        raise UpdateError(
+            "install_failed",
+            f"uv could not install EvoScientist {target} (see uv's output); "
+            f"the installed version is unchanged.{exclude_newer_hint()}",
+        )
 
 
 def exclude_newer_hint() -> str:
@@ -643,12 +701,19 @@ def _update(
                 )
             )
             download_constraints(target, mirror, constraints)
+            cmd = uv_install_command(uv, receipt, target, constraints)
             if sys.platform != "win32":
                 lock = _hold_update_lock()
                 # Before the server is stopped: a run that cannot wait then ends
-                # with nothing changed. The server itself is stopped next.
+                # with nothing changed. The server question, the install check
+                # and the stop come next.
                 wait_until_free(opts, emit, tmp, skip_server=True)
-            check_server(opts, emit, confirm)
+            check_server(
+                opts,
+                emit,
+                confirm,
+                before_stop=lambda: check_install(cmd, tmp, target, mirror, opts, emit),
+            )
             if _version(target) < _version(installed):
                 backup = backup_config(installed)
                 if backup is not None:
@@ -660,7 +725,6 @@ def _update(
                             message=f"Copied the config to {backup} before the rollback",
                         )
                     )
-            cmd = uv_install_command(uv, receipt, target, constraints)
             evosci = tool_bin_dir(uv) / (
                 "EvoSci.exe" if sys.platform == "win32" else "EvoSci"
             )
@@ -685,10 +749,13 @@ def _update(
                 stdout=sys.stderr if opts.json else None,
             )
             if result.returncode != 0:
+                # uv may already have removed the installed tool. The check
+                # passed with the same settings, so exclude-newer is no cause.
                 raise UpdateError(
                     "install_failed",
-                    f"uv could not install EvoScientist {target} (see uv's output); "
-                    f"the installed version is unchanged.{exclude_newer_hint()}",
+                    f"uv could not install EvoScientist {target} (see uv's "
+                    f"output). If EvoSci no longer starts, run the install "
+                    f"script again: {install_command()}",
                 )
         finally:
             if not handed_over:  # the helper deletes it when it ends
@@ -949,7 +1016,6 @@ def _hand_over(
             "installed": installed,
             "target": target,
             "install_command": install_command(),
-            "install_hint": exclude_newer_hint(),
             # One helper at a time, whichever window started it.
             "lock": str(tools_dir() / "update.lock"),
             "unattended": not opts.json and not own_window,

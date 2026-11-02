@@ -8,6 +8,7 @@ polling.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1269,3 +1270,24 @@ def test_wait_ready_opens_no_console_browser_without_a_display(monkeypatch):
     launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
     assert launcher.wait_ready(timeout=1).browser_opened is False
     assert opened == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS case-insensitive volume")
+def test_resolve_backend_same_folder_in_other_case_reuses(monkeypatch, tmp_path):
+    """A stored sidecar and typed config can name the same APFS folder."""
+    (tmp_path / "Project").mkdir()
+    if not (tmp_path / "project").exists():
+        pytest.skip("case-sensitive volume")
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": str(tmp_path / "Project"),
+            "config_fingerprint": "fp-now",
+        },
+    )
+    decision = lm._resolve_backend(
+        _cfg(workspace_dir=str(tmp_path / "project")), object()
+    )
+    assert decision.action == "reuse"

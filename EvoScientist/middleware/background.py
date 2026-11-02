@@ -136,9 +136,10 @@ def _make_run_in_background(
         """Launch a long-running shell command in the background and return immediately.
 
         Use for unbounded or very long tasks (model training, large downloads, servers)
-        that should not block the conversation. Output streams to a log file; poll it with
-        check_process and stop it with stop_process. For a bounded command that just needs
-        more time, prefer execute(..., timeout=N) instead of backgrounding.
+        that should not block the conversation. Output goes only to a log file: read it
+        with check_process and stop the process with stop_process. For a command that
+        finishes in seconds use execute, which returns its output directly; for a bounded
+        command that just needs more time, use execute(..., timeout=N).
 
         Args:
             command: The shell command to run in the background.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pickle
 import shutil
+import sys
 import uuid
 from datetime import UTC, datetime
 
@@ -1265,3 +1266,25 @@ async def test_import_unreadable_system_cron_is_left_to_its_reconcile(
     report = await legacy_import._import(workspace, old, workspace, first_read=True)
 
     assert report.skipped == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS case-insensitive volume")
+async def test_import_cron_tagged_with_named_run_in_other_case_goes_to_its_project(
+    runtime_store, workspace, tmp_path
+):
+    """A named run stored as Runs still belongs to its registered project."""
+    other = _project(tmp_path / "other")
+    await ensure_workspace_assistants(other)
+    (other.root / "Runs" / "my-run").mkdir(parents=True)
+    if not (other.root / "runs").exists():
+        pytest.skip("case-sensitive volume")
+    cron = _cron("11111111-1111-1111-1111-111111111111")
+    cron["metadata"]["workspace_dir"] = str(other.root / "runs" / "my-run")
+    _write_old_store(workspace.root, crons=[cron])
+    await ensure_workspace_assistants(workspace)
+    await legacy_import.import_once(workspace)
+    assert _assistants(runtime_store) == {
+        "11111111-1111-1111-1111-111111111111": workspace_assistant_id(
+            "scheduler", other
+        )
+    }

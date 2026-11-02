@@ -281,6 +281,7 @@ def _write_workspace_sidecar(
     agent_bash: str | object | None = _NOT_RECORDED,
     host: str | None = None,
     lasting: bool | None = None,
+    port: int | None = None,
     break_group_created: float | None = None,
 ) -> None:
     """Record the pid of the langgraph dev we just started, and the project
@@ -296,7 +297,9 @@ def _write_workspace_sidecar(
     config folders, which the server inherits (``paths.dir_env``), so a
     client attaching from another environment reads the server's own.
     ``host`` is the interface the server binds, so a client can tell
-    whether its probe reaches this server. ``lasting`` says
+    whether its probe reaches this server. ``port`` is the port it listens
+    on, for a client started apart from it (a WebUI run by hand) that would
+    otherwise only know the configured one. ``lasting`` says
     whether it outlives the process that started it. ``break_group_created``
     is the server's ``create_time()`` when it leads its own process group on
     Windows, so a stop may send it Ctrl+Break; the stop sends it only to a
@@ -322,6 +325,8 @@ def _write_workspace_sidecar(
         }
         if host is not None:
             payload["host"] = host
+        if port is not None:
+            payload["port"] = port
         if lasting is not None:
             payload["lasting"] = lasting
         if break_group_created is not None:
@@ -1489,6 +1494,7 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         host=host,
         lasting=lasting,
+        port=port,
         break_group_created=_create_time(proc.pid) if os.name == "nt" else None,
     )
 

@@ -67,11 +67,10 @@ The scripts set `UV_SYSTEM_CERTS=1` for their own uv calls (unless you set it),
 so uv trusts the certificates of your operating system, and give uv a longer
 download timeout (`UV_HTTP_TIMEOUT=300`) for slow mirrors.
 
-Supported: macOS (Apple Silicon; Intel Macs on a best-effort basis), Linux on
-x86_64 or arm64 with glibc 2.28 or newer, Windows 10 and 11 on x64. The scripts
-stop before downloading anything on Windows on arm64 and on Linux with musl
-(such as Alpine) or an older glibc. On an Intel Mac the `stt` extra cannot be
-installed (its `onnxruntime` has no Intel macOS build).
+Supported: macOS on Apple silicon, Linux on x86_64 or arm64 with glibc 2.28 or
+newer, Windows 10 and 11 on x64. The scripts stop before downloading anything on
+Intel Macs, on Windows on arm64 and on Linux with musl (such as Alpine) or an
+older glibc.
 
 ## Running it again
 
@@ -81,9 +80,10 @@ tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
 A package that went into the environment another way (on Windows, or with an
 older release, when you added a channel or an MCP server) is not in the
 receipt and is removed; add it again afterwards. Close EvoScientist and stop
-the background agent service (`EvoSci service stop`) first: it keeps running
-after your sessions end. On Windows the script stops and names the EvoScientist
-processes that still run, because a running process keeps the files locked.
+the background agent service (`EvoSci service stop`; before 0.4.0,
+`EvoSci server stop`) first: it keeps running after your sessions end. On
+Windows the script stops and names the EvoScientist processes that still run,
+because a running process keeps the files locked.
 
 A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
 server error, no data for two minutes) is retried up to three times; a retry
@@ -108,13 +108,15 @@ reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
 same packages, or by running the command again. `EvoSci update` asks before it
 stops the background agent service, starts it again after the update, and
 waits until other EvoScientist sessions and MCP servers started from the
-install have closed, naming them; Ctrl+C cancels and changes nothing.
+install have closed, naming them; Ctrl+C cancels and changes nothing. Before it
+stops anything it installs the new release once into a temporary folder, so a
+download or build that fails leaves the installed version as it was.
 
 ## Uninstalling
 
 There is no `--uninstall` option. First stop the background agent service,
-which keeps running after your sessions end: `EvoSci service stop`. Then, on
-macOS and Linux:
+which keeps running after your sessions end: `EvoSci service stop` (before
+0.4.0, `EvoSci server stop`). Then, on macOS and Linux:
 
 1. Remove the package with the uv the script installed, which
    `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or
