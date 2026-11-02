@@ -420,7 +420,7 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
 
 
 async def _unregister(workspace: Workspace) -> JSONResponse:
-    from EvoScientist.langgraph_dev import server_crons
+    from EvoScientist.langgraph_dev import server_crons, server_runs
     from EvoScientist.langgraph_dev.registry import REGISTRY
 
     if not await asyncio.to_thread(REGISTRY.is_registered, workspace.key):
@@ -434,11 +434,39 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
             },
             status_code=409,
         )
-    await server_crons.delete_crons(
-        [cron["cron_id"] for cron in server_crons.system_crons(crons)]
-    )
+    was_set_up = workspace.key in workspace_setup.SET_UP
     await workspace_setup.unregister_workspace(workspace)
+    try:
+        await server_runs.cancel_project_runs(workspace)
+        await server_crons.delete_crons(
+            [cron["cron_id"] for cron in server_crons.system_crons(crons)]
+        )
+    except BaseException:
+        await asyncio.to_thread(REGISTRY.set_registered, workspace.key, True)
+        if was_set_up:
+            workspace_setup.SET_UP.add(workspace.key)
+        raise
     return JSONResponse({"workspace_dir": workspace.key})
+
+
+_unregister_tasks: set[asyncio.Task[JSONResponse]] = set()
+
+
+async def _unregister_locked(workspace: Workspace) -> JSONResponse:
+    try:
+        async with workspace_setup.registration_lock():
+            return await _unregister(workspace)
+    except Exception as exc:
+        logger.exception("Could not unregister %s.", workspace.key)
+        return JSONResponse(
+            {"error": "unregister_failed", "detail": str(exc)}, status_code=500
+        )
+
+
+def _unregister_finished(task: asyncio.Task[JSONResponse]) -> None:
+    _unregister_tasks.discard(task)
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error("Unregister task failed: %s", exc, exc_info=exc)
 
 
 async def unregister_workspace(request: Request) -> JSONResponse:
@@ -459,14 +487,10 @@ async def unregister_workspace(request: Request) -> JSONResponse:
     )
     if workspace is None:
         return JSONResponse({"error": "invalid_path"}, status_code=400)
-    try:
-        async with workspace_setup.registration_lock():
-            return await _unregister(workspace)
-    except Exception as exc:
-        logger.exception("Could not unregister %s.", workspace.key)
-        return JSONResponse(
-            {"error": "unregister_failed", "detail": str(exc)}, status_code=500
-        )
+    task = asyncio.create_task(_unregister_locked(workspace))
+    _unregister_tasks.add(task)
+    task.add_done_callback(_unregister_finished)
+    return await asyncio.shield(task)
 
 
 async def get_settings(_request: Request) -> JSONResponse:

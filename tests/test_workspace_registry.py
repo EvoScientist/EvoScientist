@@ -601,6 +601,352 @@ def test_unregister_workspace_route_reports_failure(
     assert projects.is_registered(workspace.key)
 
 
+def test_unregister_cancels_workspace_assistant_runs(
+    server, secret, projects, monkeypatch, workspace
+):
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setenv("LANGGRAPH_RUNTIME_EDITION", "inmem")
+    from langgraph_runtime import database, ops
+
+    from EvoScientist.langgraph_dev.assistants import workspace_assistant_ids
+
+    projects.set_registered(workspace.key, True)
+    cancelled = []
+
+    @asynccontextmanager
+    async def connect():
+        yield object()
+
+    async def cancel(_conn, *, assistant_id):
+        cancelled.append(str(assistant_id))
+
+    async def search(_conn, **_kwargs):
+        async def rows():
+            if False:
+                yield None
+
+        return rows(), None
+
+    async def crons(_workspace):
+        return []
+
+    async def delete(_ids):
+        pass
+
+    monkeypatch.setattr(database, "connect", connect)
+    monkeypatch.setattr(ops.Runs, "cancel", cancel)
+    monkeypatch.setattr(ops.Threads, "search", search)
+    monkeypatch.setattr(server_crons, "project_crons", crons)
+    monkeypatch.setattr(server_crons, "delete_crons", delete)
+
+    response = server.delete(
+        "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
+    )
+
+    assert response.status_code == 200
+    assert set(cancelled) == workspace_assistant_ids(workspace)
+
+
+def test_unregister_restores_registration_when_cancel_fails(
+    server, secret, projects, monkeypatch, workspace
+):
+    from EvoScientist.langgraph_dev import server_runs
+
+    projects.set_registered(workspace.key, True)
+    workspace_setup.SET_UP.add(workspace.key)
+
+    async def crons(_workspace):
+        return []
+
+    async def fail(_workspace):
+        assert not projects.is_registered(workspace.key)
+        raise RuntimeError("cancellation failed")
+
+    monkeypatch.setattr(server_crons, "project_crons", crons)
+    monkeypatch.setattr(server_runs, "cancel_project_runs", fail)
+    response = server.delete(
+        "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
+    )
+
+    assert response.status_code == 500
+    assert projects.is_registered(workspace.key)
+    assert workspace.key in workspace_setup.SET_UP
+
+
+async def test_unregister_finishes_after_request_is_cancelled(
+    monkeypatch, projects, workspace
+):
+    import httpx
+
+    from EvoScientist.langgraph_dev import server_runs
+    from EvoScientist.langgraph_dev.http import app
+
+    projects.set_registered(workspace.key, True)
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def crons(_workspace):
+        return []
+
+    async def cancel(_workspace):
+        entered.set()
+        await release.wait()
+
+    async def delete(_ids):
+        finished.set()
+
+    monkeypatch.setattr(server_crons, "project_crons", crons)
+    monkeypatch.setattr(server_crons, "delete_crons", delete)
+    monkeypatch.setattr(server_runs, "cancel_project_runs", cancel)
+    monkeypatch.setattr(local_secret, "_value", "secret")
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1"
+    ) as client:
+        request = asyncio.create_task(
+            client.delete(
+                "/api/workspaces",
+                params={"workspace_dir": workspace.key},
+                headers={local_secret.HEADER: "secret"},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        release.set()
+        await asyncio.wait_for(finished.wait(), 5)
+
+    assert not projects.is_registered(workspace.key)
+
+
+async def test_cancel_project_runs_includes_bound_threads(
+    monkeypatch, workspace, tmp_path
+):
+    from contextlib import asynccontextmanager
+    from uuid import uuid4
+
+    monkeypatch.setenv("LANGGRAPH_RUNTIME_EDITION", "inmem")
+    from langgraph_runtime import database, ops
+
+    from EvoScientist.langgraph_dev import server_runs
+    from EvoScientist.langgraph_dev.assistants import workspace_assistant_ids
+
+    other = Workspace(tmp_path / "other")
+    threads = [uuid4() for _ in range(3)]
+    cancelled = []
+    runs = {"pending": [uuid4(), uuid4(), uuid4()], "running": [uuid4()]}
+
+    @asynccontextmanager
+    async def connect():
+        yield object()
+
+    async def rows(items):
+        for item in items:
+            yield item
+
+    async def search_threads(_conn, *, limit, offset, **_kwargs):
+        return rows([{"thread_id": t} for t in threads[offset : offset + limit]]), None
+
+    async def search_runs(_conn, thread_id, *, status, limit, offset):
+        assert thread_id == threads[0]
+        return rows([{"run_id": r} for r in runs[status][offset : offset + limit]])
+
+    async def cancel(_conn, run_ids=None, *, assistant_id=None, thread_id=None):
+        cancelled.append((assistant_id, thread_id, run_ids))
+
+    def binding(thread_id):
+        project = workspace if thread_id == str(threads[0]) else other
+        return SessionDirs(project) if thread_id != str(threads[2]) else None
+
+    monkeypatch.setattr(database, "connect", connect)
+    monkeypatch.setattr(ops.Threads, "search", search_threads)
+    monkeypatch.setattr(ops.Runs, "search", search_runs)
+    monkeypatch.setattr(ops.Runs, "cancel", cancel)
+    monkeypatch.setattr(server_runs, "thread_binding", binding)
+
+    await server_runs.cancel_project_runs(workspace)
+
+    assert {str(a) for a, _, _ in cancelled if a} == workspace_assistant_ids(workspace)
+    assert [(t, ids) for _, t, ids in cancelled if t] == [
+        (threads[0], runs["pending"] + runs["running"])
+    ]
+
+
+async def test_cancel_project_runs_with_inmemory_runtime(
+    monkeypatch, workspace, tmp_path
+):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from uuid import UUID, uuid4
+
+    monkeypatch.setenv("LANGGRAPH_RUNTIME_EDITION", "inmem")
+    from langgraph_runtime import database
+    from langgraph_runtime_inmem import ops
+
+    from EvoScientist.langgraph_dev import server_runs
+    from EvoScientist.langgraph_dev.assistants import chat_assistant_id
+
+    other = Workspace(tmp_path / "other")
+    own_thread, legacy_thread, other_thread = (uuid4() for _ in range(3))
+    now = datetime.now(UTC)
+    threads = [
+        {"thread_id": t, "metadata": {}, "status": "busy", "updated_at": now}
+        for t in (own_thread, legacy_thread, other_thread)
+    ]
+    runs = [
+        {
+            "run_id": uuid4(),
+            "thread_id": own_thread,
+            "assistant_id": UUID(chat_assistant_id(workspace)),
+            "status": "pending",
+        },
+        {
+            "run_id": uuid4(),
+            "thread_id": legacy_thread,
+            "assistant_id": uuid4(),
+            "status": "running",
+        },
+        {
+            "run_id": uuid4(),
+            "thread_id": other_thread,
+            "assistant_id": UUID(chat_assistant_id(other)),
+            "status": "running",
+        },
+    ]
+    for run in runs:
+        run.update(metadata={}, created_at=now, updated_at=now)
+    conn = SimpleNamespace(store={"threads": threads, "runs": runs})
+    messages = []
+
+    class StreamManager:
+        async def put(self, run_id, thread_id, message):
+            messages.append((run_id, thread_id, message.data))
+
+        def get_queues(self, _run_id, _thread_id):
+            return []
+
+    @asynccontextmanager
+    async def connect():
+        yield conn
+
+    async def no_auth(*_args, **_kwargs):
+        return None
+
+    def binding(thread_id):
+        if thread_id == str(legacy_thread):
+            return SessionDirs(workspace)
+        if thread_id == str(other_thread):
+            return SessionDirs(other)
+        return None
+
+    monkeypatch.setattr(database, "connect", connect)
+    monkeypatch.setattr(ops, "_using_encryption", lambda: False)
+    monkeypatch.setattr(ops.Threads, "handle_event", no_auth)
+    monkeypatch.setattr(ops.Runs, "handle_event", no_auth)
+    monkeypatch.setattr(ops, "get_stream_manager", lambda: StreamManager())
+    monkeypatch.setattr(server_runs, "thread_binding", binding)
+
+    await server_runs.cancel_project_runs(workspace)
+
+    assert [run["status"] for run in runs] == ["interrupted", "interrupted", "running"]
+    assert {(run_id, thread_id) for run_id, thread_id, _ in messages} == {
+        (runs[0]["run_id"], own_thread),
+        (runs[1]["run_id"], legacy_thread),
+    }
+
+
+async def test_cancel_project_runs_refuses_incomplete_thread_search(
+    monkeypatch, workspace
+):
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setenv("LANGGRAPH_RUNTIME_EDITION", "inmem")
+    from langgraph_runtime import database, ops
+
+    from EvoScientist.langgraph_dev import server_runs
+
+    @asynccontextmanager
+    async def connect():
+        yield object()
+
+    async def search(_conn, **_kwargs):
+        async def rows():
+            if False:
+                yield None
+
+        return rows(), 100_000
+
+    monkeypatch.setattr(database, "connect", connect)
+    monkeypatch.setattr(ops.Threads, "search", search)
+    with pytest.raises(RuntimeError, match="Too many threads"):
+        await server_runs.cancel_project_runs(workspace)
+
+
+async def test_unregister_route_interrupts_runtime_runs(
+    runtime_store, projects, monkeypatch, workspace, tmp_path
+):
+    from uuid import uuid4
+
+    import httpx
+    from langgraph_runtime.database import connect
+    from langgraph_runtime.ops import Runs
+    from langgraph_runtime_inmem import ops
+
+    from EvoScientist.langgraph_dev.http import app
+
+    other = Workspace(tmp_path / "other")
+    projects.set_registered(workspace.key, True)
+    projects.set_registered(other.key, True)
+    await ensure_workspace_assistants(workspace)
+    await ensure_workspace_assistants(other)
+
+    async with connect() as conn:
+        for project in (workspace, other):
+            rows = await Runs.put(
+                conn,
+                workspace_assistant_id("EvoScientist", project),
+                {"config": {}},
+                thread_id=uuid4(),
+                run_id=uuid4(),
+                metadata={},
+                prevent_insert_if_inflight=False,
+                if_not_exists="create",
+            )
+            await anext(rows)
+    runtime_store["runs"][0]["status"] = "running"
+    messages = []
+
+    class StreamManager:
+        async def put(self, run_id, thread_id, message):
+            messages.append((run_id, thread_id, message.data))
+
+        def get_queues(self, _run_id, _thread_id):
+            return []
+
+    monkeypatch.setattr(ops, "get_stream_manager", lambda: StreamManager())
+    monkeypatch.setattr(local_secret, "_value", "secret")
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.delete(
+            "/api/workspaces",
+            params={"workspace_dir": workspace.key},
+            headers={local_secret.HEADER: "secret"},
+        )
+
+    assert response.status_code == 200
+    assert [run["status"] for run in runtime_store["runs"]] == [
+        "interrupted",
+        "pending",
+    ]
+    assert len(messages) == 1
+    assert not projects.is_registered(workspace.key)
+    assert projects.is_registered(other.key)
+
+
 async def test_unregister_workspace_route_waits_for_registration_in_progress(
     monkeypatch, projects, setup_calls, workspace
 ):
