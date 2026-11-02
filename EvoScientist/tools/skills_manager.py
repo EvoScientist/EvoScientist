@@ -464,8 +464,8 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         if frontmatter.get("type") == "expert" and not declares_actor:
             _warn_once(
                 f"{parent}:type-expert",
-                "Skill %r declares `type: expert` in SKILL.md, which is no longer "
-                "read; add a sibling EXPERT.md to make it an expert.",
+                "Skill %r declares `type: expert` in SKILL.md, which no longer "
+                "makes a skill an expert; add a sibling EXPERT.md instead.",
                 parent.name,
             )
         # Tags: check top-level first, fall back to metadata.tags

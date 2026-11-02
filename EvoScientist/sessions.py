@@ -1134,9 +1134,8 @@ async def get_thread_messages(thread_id: str) -> list:
 # PRAGMA user_version
 # ---------------------------------------------------------------------------
 
-# PRAGMA user_version is a 32-bit int slot in the SQLite file header; each
-# one-time job owns one bit of it and is gated on its own bit (bit 1 belonged
-# to a retired legacy-bloat sweep).
+# One bit of PRAGMA user_version per one-time job; bit 1 is still set on older
+# DBs by a retired sweep, so do not reuse it.
 
 
 async def _get_user_version(conn: aiosqlite.Connection) -> int:
@@ -1954,10 +1953,10 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
 
     On startup it sets up the schema, then, each best-effort (a failure does
     not stop the server): upgrades stored folders, purges leftover
-    evomemory-worker rows, rebuilds the in-memory thread registry from SQLite
-    (and, when that succeeds, drops runs and thread-bound crons whose thread is
-    not in the restored registry), and clears the stored run user from every
-    saved cron.
+    evomemory-worker rows, rebuilds the in-memory thread registry from
+    SQLite (and, when that succeeds, drops runs and thread-bound crons whose
+    thread is not in the restored registry), and clears the stored run user
+    from every saved cron.
 
     The yielded ``_ApiPruningCheckpointer`` stamps rows with their thread's
     folders (the binding the graph factory resolved) and graph rows with

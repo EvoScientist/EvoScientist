@@ -389,6 +389,25 @@ def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
     assert _upgrade_recorded(sessions_db)
 
 
+def test_upgrade_runs_when_another_user_version_bit_is_set(workspace, sessions_db):
+    """A DB that a retired job marked in another bit is still upgraded."""
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    run = workspace.runs_dir / TS_RUN
+    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": str(run)})])
+    con = sqlite3.connect(sessions_db)
+    con.execute("PRAGMA user_version = 1")
+    con.commit()
+    con.close()
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
+    con = sqlite3.connect(sessions_db)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    con.close()
+
+
 def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
     from EvoScientist.sessions import get_thread_metadata, list_threads
 

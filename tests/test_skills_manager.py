@@ -1194,7 +1194,7 @@ metadata:
         self, tmp_path, caplog
     ):
         """Only a sibling EXPERT.md declares an expert; ``type: expert`` in
-        SKILL.md frontmatter is not read."""
+        SKILL.md frontmatter no longer makes a skill an expert, and says so once."""
         skill_dir = tmp_path / "frontmatter-only"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -1210,9 +1210,11 @@ You are a reviewer.
         )
         with caplog.at_level(logging.WARNING):
             result = _parse_skill_md(skill_dir / "SKILL.md")
+            _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
         assert result.expert_body == ""
-        assert "no longer read; add a sibling EXPERT.md" in caplog.text
+        warnings = [r for r in caplog.records if "add a sibling EXPERT.md" in r.message]
+        assert len(warnings) == 1
 
     def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
         """EXPERT.md carries no frontmatter, but YAML must never reach the prompt."""
