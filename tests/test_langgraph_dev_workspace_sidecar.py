@@ -1215,9 +1215,9 @@ def test_stop_recorded_server_treats_a_pid_it_cannot_find_as_dead(
 def test_stop_recorded_server_only_cleans_up_a_server_it_may_not_open(
     tmp_path, monkeypatch, runtime_paths
 ):
-    """Access denied: the command line, which needs more than the hold's
-    query-limited access, is refused too, so the stop removes the files and
-    leaves the server alone, as ``main`` does for a server it may not read."""
+    """Access denied: reading the command line needs at least the hold's
+    query-limited access, so it is refused too, and the stop removes the files
+    and leaves the server alone, as ``main`` does for a server it may not read."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
