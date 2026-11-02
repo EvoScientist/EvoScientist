@@ -413,8 +413,10 @@ _BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
 _CREATE_TIME_TOLERANCE = 1.0
 
 # Windows: the access right a stop asks for to hold a recorded server's PID
-# (:func:`_hold_pid`), granted for an elevated process too, and the error
-# ``OpenProcess`` gives for a PID no process has.
+# (:func:`_hold_pid`), and the error ``OpenProcess`` gives for a PID no process
+# has. Query-limited access is enough, as nothing waits on the handle, and an
+# elevated process grants it to a non-elevated caller, where it refuses
+# ``PROCESS_QUERY_INFORMATION``.
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _ERROR_INVALID_PARAMETER = 87
 

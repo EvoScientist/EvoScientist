@@ -1136,7 +1136,8 @@ def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
     tmp_path, monkeypatch, runtime_paths, held
 ):
     """A process given the server's PID during the stop gets neither the
-    Ctrl+Break nor the kills. A PID that could not be held gets no Ctrl+Break."""
+    Ctrl+Break nor the kills. A PID that could not be held, for a reason that
+    still lets the stop read its command line, gets no Ctrl+Break."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
@@ -1210,6 +1211,39 @@ def test_stop_recorded_server_treats_a_pid_it_cannot_find_as_dead(
         victim.wait()
 
 
+def test_stop_recorded_server_only_cleans_up_a_server_it_may_not_open(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """Access denied: the command line, which needs more than the hold's
+    query-limited access, is refused too, so the stop removes the files and
+    leaves the server alone, as ``main`` does for a server it may not read."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        pid_file, sidecar = _record_server(
+            tmp_path, monkeypatch, runtime_paths, victim.pid
+        )
+        _fake_hold(monkeypatch, [], held=False)
+
+        def _denied():
+            raise psutil.AccessDenied(victim.pid)
+
+        monkeypatch.setattr(
+            manager.psutil, "Process", lambda pid: SimpleNamespace(cmdline=_denied)
+        )
+        ended: list = []
+        monkeypatch.setattr(
+            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
+        )
+        assert manager.stop_recorded_server() is None
+        assert ended == []
+        assert not pid_file.exists()
+        assert not sidecar.exists()
+    finally:
+        victim.kill()
+        victim.wait()
+
+
 class _FakeKernel32:
     def __init__(self, handle):
         self.handle = handle
@@ -1256,8 +1290,8 @@ def test_hold_pid_raises_for_a_pid_no_process_has(monkeypatch):
 
 
 def test_hold_pid_refused_does_not_hold_it(monkeypatch):
-    """Access denied, or any other refusal: the stop goes on, without the
-    Ctrl+Break."""
+    """Access denied, or any other refusal: the PID is not held, so the stop
+    sends no Ctrl+Break."""
     kernel32 = _windows_kernel32(monkeypatch, handle=None, error=5)
     with manager._hold_pid(4242) as held:
         assert held is False
