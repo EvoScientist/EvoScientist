@@ -452,7 +452,6 @@ class EvoScientistConfig:
     allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
 
     # iMessage Settings
-    imessage_enabled: bool = False  # legacy compat
     imessage_allowed_senders: str = ""
 
     # Telegram Settings

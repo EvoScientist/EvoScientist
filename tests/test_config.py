@@ -155,7 +155,6 @@ class TestEvoScientistConfig:
         assert config.memory_skill_synthesis_time == "03:00"
         assert config.ollama_base_url == ""
         assert config.channel_debug_tracing is False
-        assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
     def test_bind_hosts_default_to_loopback(self):
@@ -530,16 +529,6 @@ class TestGetSetValues:
 
         set_config_value("show_thinking", "yes")
         assert get_config_value("show_thinking") is True
-
-    def test_set_imessage_enabled_coercion(self, temp_config_dir, clean_env):
-        """Test that imessage_enabled is coerced from string to bool."""
-        save_config(EvoScientistConfig())
-
-        set_config_value("imessage_enabled", "true")
-        assert get_config_value("imessage_enabled") is True
-
-        set_config_value("imessage_enabled", "false")
-        assert get_config_value("imessage_enabled") is False
 
     def test_set_imessage_allowed_senders(self, temp_config_dir, clean_env):
         """Test that imessage_allowed_senders stores comma-separated string."""
