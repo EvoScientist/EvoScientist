@@ -33,8 +33,8 @@ def _sleep_cmd(seconds: int) -> str:
     return f"sleep {seconds}"
 
 
-@pytest.mark.parametrize("cancel_parent", [False, True])
-async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
+@pytest.mark.parametrize("cancel_mode", ["task_cancel", "registry_kill", "parent_set"])
+async def test_async_execute_cancellation_stops_child(tmp_path, cancel_mode):
     from EvoScientist.cancellation import bind_cancel_event
 
     script = tmp_path / "child.py"
@@ -50,17 +50,19 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
         root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
     )
     parent = threading.Event()
+    # POSIX absolute interpreter paths are rejected by sandbox validation, so
+    # the test passes the path through an environment variable there.
     python = (
         Path(sys.executable).as_posix()
         if sys.platform == "win32"
         else "$EVOSCI_TEST_PYTHON"
     )
     command = f'"{python}" child.py ready'
-    if cancel_parent:
+    if cancel_mode == "task_cancel":
+        task = asyncio.create_task(backend.aexecute(command))
+    else:
         with bind_cancel_event(parent):
             task = asyncio.create_task(backend.aexecute(command))
-    else:
-        task = asyncio.create_task(backend.aexecute(command))
     try:
         async with asyncio.timeout(15):
             while not ready.exists():
@@ -69,13 +71,16 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
                 await asyncio.sleep(0.05)
         child = psutil.Process(int(ready.read_text()))
         assert child.is_running()
-        if cancel_parent:
-            await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
-            await asyncio.wait_for(task, 15)
-        else:
+        if cancel_mode == "task_cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+        elif cancel_mode == "registry_kill":
+            await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
+            await asyncio.wait_for(task, 15)
+        else:
+            parent.set()
+            await asyncio.wait_for(task, 15)
         try:
             async with asyncio.timeout(10):
                 while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
@@ -85,52 +90,6 @@ async def test_async_execute_cancellation_stops_child(tmp_path, cancel_parent):
     finally:
         parent.set()
         await asyncio.to_thread(backends.cancel_active_shell_processes, parent)
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_async_execute_parent_event_stops_child(tmp_path):
-    from EvoScientist.cancellation import bind_cancel_event
-
-    script = tmp_path / "child.py"
-    script.write_text(
-        "from pathlib import Path\n"
-        "import os, sys, time\n"
-        "Path(sys.argv[1] + '.starting').write_text(str(os.getpid()))\n"
-        "Path(sys.argv[1] + '.starting').replace(sys.argv[1])\n"
-        "time.sleep(30)\n"
-    )
-    ready = tmp_path / "ready"
-    backend = CustomSandboxBackend(
-        root_dir=str(tmp_path), env={"EVOSCI_TEST_PYTHON": sys.executable}
-    )
-    python = (
-        Path(sys.executable).as_posix()
-        if sys.platform == "win32"
-        else "$EVOSCI_TEST_PYTHON"
-    )
-    parent = threading.Event()
-    with bind_cancel_event(parent):
-        task = asyncio.create_task(backend.aexecute(f'"{python}" child.py ready'))
-    try:
-        async with asyncio.timeout(15):
-            while not ready.exists():
-                if task.done():
-                    pytest.fail(task.result().output)
-                await asyncio.sleep(0.05)
-        child = psutil.Process(int(ready.read_text()))
-        assert child.is_running()
-        parent.set()
-        await asyncio.wait_for(task, 15)
-        try:
-            async with asyncio.timeout(10):
-                while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-                    await asyncio.sleep(0.05)
-        except psutil.NoSuchProcess:
-            pass
-    finally:
-        parent.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
