@@ -232,11 +232,6 @@ async def download_attachment(
         return None, f"[attachment: {filename} - download failed]"
 
 
-# Deprecated aliases — use InboundMessage / OutboundMessage instead.
-IncomingMessage = InboundMessage
-OutgoingMessage = OutboundMessage
-
-
 @dataclass
 class RawIncoming:
     """Raw data extracted from a platform-specific message event.

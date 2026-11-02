@@ -155,7 +155,6 @@ class TestEvoScientistConfig:
         assert config.memory_skill_synthesis_time == "03:00"
         assert config.ollama_base_url == ""
         assert config.channel_debug_tracing is False
-        assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
     def test_bind_hosts_default_to_loopback(self):
@@ -328,18 +327,10 @@ class TestEvoScientistConfig:
             resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
         )
 
-    def test_ui_backend_legacy_aliases_and_case_fold(self):
-        """Legacy ``ui_backend`` spellings survive Literal normalization.
-
-        Earlier onboarding wrote ``rich``/``textual`` into ``config.yaml``;
-        ``normalize_ui_backend`` still maps those to ``cli``/``tui``. The
-        Literal check must fold case and honour the same aliases, or a stored
-        ``rich`` is dropped and the user silently comes back in the TUI.
-        """
-        assert EvoScientistConfig(ui_backend="rich").ui_backend == "cli"
-        assert EvoScientistConfig(ui_backend="textual").ui_backend == "tui"
+    def test_ui_backend_case_fold(self):
+        """The Literal check folds case, as ``normalize_ui_backend`` does."""
         assert EvoScientistConfig(ui_backend="CLI").ui_backend == "cli"
-        assert EvoScientistConfig(ui_backend="Rich").ui_backend == "cli"
+        assert EvoScientistConfig(ui_backend="Tui").ui_backend == "tui"
 
 
 # =============================================================================
@@ -539,16 +530,6 @@ class TestGetSetValues:
         set_config_value("show_thinking", "yes")
         assert get_config_value("show_thinking") is True
 
-    def test_set_imessage_enabled_coercion(self, temp_config_dir, clean_env):
-        """Test that imessage_enabled is coerced from string to bool."""
-        save_config(EvoScientistConfig())
-
-        set_config_value("imessage_enabled", "true")
-        assert get_config_value("imessage_enabled") is True
-
-        set_config_value("imessage_enabled", "false")
-        assert get_config_value("imessage_enabled") is False
-
     def test_set_imessage_allowed_senders(self, temp_config_dir, clean_env):
         """Test that imessage_allowed_senders stores comma-separated string."""
         save_config(EvoScientistConfig())
@@ -720,15 +701,15 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.ui_backend == "tui"
 
-    def test_env_ui_backend_legacy_alias_override(self, temp_config_dir, monkeypatch):
-        """A legacy env spelling resolves through the same alias map.
+    def test_env_ui_backend_case_folds(self, temp_config_dir, monkeypatch):
+        """An env override folds case like the file value.
 
-        Without case-folding and alias support in ``_coerce_value`` the
-        override raises and is swallowed by ``get_effective_config``, so
-        ``EVOSCIENTIST_UI_BACKEND=rich`` is silently ignored.
+        Without case-folding in ``_coerce_value`` the override raises and is
+        swallowed by ``get_effective_config``, so ``EVOSCIENTIST_UI_BACKEND=CLI``
+        is silently ignored.
         """
         save_config(EvoScientistConfig(ui_backend="tui"))
-        monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "rich")
+        monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "CLI")
         config = get_effective_config()
         assert config.ui_backend == "cli"
 

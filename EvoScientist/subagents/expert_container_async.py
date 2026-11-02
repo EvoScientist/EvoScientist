@@ -2,8 +2,7 @@
 
 One generic graph that reads ``skill_name`` from initial state and loads
 that expert skill's actor definition as the sub-agent's system prompt at
-invocation time — its ``EXPERT.md`` body under the current skill contract,
-or its ``SKILL.md`` body for legacy ``type: expert`` skills. Registered once
+invocation time — its ``EXPERT.md`` body. Registered once
 in ``langgraph.json``; parameterised per run via the payload the main
 agent's ``start_async_task`` passes through
 :class:`EvoScientist.middleware.expert_async_subagent.EvoAsyncSubAgentMiddleware`.
@@ -84,12 +83,10 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
     """Load the expert's actor definition as system prompt on every model call.
 
     Reads ``state.skill_name``, resolves the corresponding installed expert
-    skill via ``list_expert_skills()``, composes the system message from
-    ``role`` + the skill's prompt body (EXPERT.md under the current contract,
-    SKILL.md for legacy frontmatter experts — resolved by
-    ``expert_container.expert_prompt_body``, mirroring the sync path in
-    ``expert_container._compose_system_prompt``), and overrides
-    ``request.system_message`` before the handler runs.
+    skill via ``list_expert_skills()``, composes the system message from the
+    skill's EXPERT.md body (``expert_container.expert_prompt_body``, as the
+    sync path does), and overrides ``request.system_message`` before the
+    handler runs.
 
     The container graph's static ``system_prompt`` at construction time is a
     minimal fallback; this middleware is the load-bearing component. If the
@@ -142,40 +139,28 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
             )
 
         # Mirrors the sync fold-in's empty-body skip in
-        # ``expert_container.py::build_expert_subagent_specs``. A skill with
-        # only a role line (or nothing) would otherwise run against a
-        # persona-less system prompt — a worse failure mode than the expert
-        # being absent. Prefer a well-formed error envelope over silent
-        # nonsense.
-        #
-        # Which file is checked follows the skill's contract:
-        # ``expert_prompt_body`` reads EXPERT.md for experts declared that
-        # way and SKILL.md for legacy frontmatter experts. Checking ``.body``
-        # directly would clear a paper-review-shaped skill on the strength of
-        # its knowledge file while its actor definition is empty.
+        # ``expert_container.py::build_expert_subagent_specs``: a persona-less
+        # system prompt is a worse failure mode than the expert being absent,
+        # so prefer a well-formed error envelope over silent nonsense.
         from .expert_container import expert_prompt_body
 
         body = expert_prompt_body(match)
         if not body.strip():
-            source_file = (
-                "EXPERT.md" if match.expert_source == "expert_md" else "SKILL.md"
-            )
             return (
-                f"ERROR: Expert skill '{skill_name}' has an empty {source_file} "
+                f"ERROR: Expert skill '{skill_name}' has an empty EXPERT.md "
                 "body — the persona / pipeline the sub-agent needs is missing. "
                 "This is a skill-authoring bug; the sub-agent cannot proceed. "
                 "Return an error envelope with status='error' naming the "
                 "empty skill."
             )
 
-        # Compose: role prepend (if present) + body + runtime-context tail.
-        head = f"You are {match.role}.\n\n" if match.role else ""
+        # Compose: body + runtime-context tail.
         runtime_block = (
             "\n---\n\n"
             "## Runtime context (injected by the container)\n\n"
             f"- ``skill_name``: ``{skill_name}``\n"
         )
-        return (head + body).rstrip() + runtime_block
+        return body.rstrip() + runtime_block
 
     def _compose_system_message(self, request: ModelRequest[Any]) -> SystemMessage:
         """Return the base-stack ``system_message`` with the persona swapped in.
@@ -276,10 +261,8 @@ def build_expert_async_subagent_specs(
     # ``scheduler``, …) and ``general-purpose`` share the async spec pool
     # by name, so an expert skill named after any of them would raise
     # ``ValueError: Duplicate async subagent names`` inside
-    # ``AsyncSubAgentMiddleware.__init__`` and kill CLI startup. The local
-    # ``seen`` set catches the second failure trigger: two workspace-tier
-    # skills that share the same frontmatter ``name`` (workspace listing
-    # uses ``check_seen=False``, so both survive to this point).
+    # ``AsyncSubAgentMiddleware.__init__`` and kill CLI startup. The same
+    # ``taken`` set keeps any repeated expert name out as well.
     taken = set(_reserved_subagent_names())
     specs: list[dict[str, Any]] = []
     for skill in list_expert_skills(include_system=True, workspace=workspace):
@@ -297,10 +280,9 @@ def build_expert_async_subagent_specs(
         if not expert_prompt_body(skill).strip():
             _warn_once(
                 f"expert-async-empty-body:{skill.name}",
-                "Expert skill %r: %s body is empty; skipping "
+                "Expert skill %r: EXPERT.md body is empty; skipping "
                 "async-dispatch registration.",
                 skill.name,
-                "EXPERT.md" if skill.expert_source == "expert_md" else "SKILL.md",
             )
             continue
         if skill.name in taken:

@@ -180,14 +180,7 @@ def launcher(monkeypatch, tmp_path):
     return workspace
 
 
-def _expert_info(
-    name: str,
-    *,
-    description: str = "",
-    byline: str = "",
-    capability_tags: list[str] | None = None,
-    avatar_hint: str = "",
-):
+def _expert_info(name: str, *, description: str = ""):
     """Build a SkillInfo for an expert skill (agent-teams v1)."""
     from pathlib import Path
 
@@ -199,9 +192,6 @@ def _expert_info(
         path=Path(f"/skills/{name}"),
         source="builtin",
         type="expert",
-        byline=byline,
-        capability_tags=list(capability_tags or []),
-        avatar_hint=avatar_hint,
     )
 
 
@@ -252,41 +242,16 @@ def test_get_teams_omits_backend_implementation_fields():
 
 
 @pytest.mark.usefixtures("launcher")
-def test_get_teams_projects_optional_gallery_metadata_when_present():
-    experts = [
-        _expert_info(
-            "idea-brainstorm",
-            description="Multi-round brainstorm",
-            byline="Research idea brainstormer",
-            capability_tags=["Iteration", "ELO ranking"],
-            avatar_hint="lightbulb",
-        ),
-    ]
+def test_get_teams_entry_is_name_and_description():
+    """Each gallery card carries name and description only."""
+    experts = [_expert_info("minimal-expert", description="Minimal expert")]
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
         body = client.get("/api/teams").json()
     entry = body["teams"][0]
-    assert entry["name"] == "idea-brainstorm"
-    assert entry["description"] == "Multi-round brainstorm"
-    assert entry["byline"] == "Research idea brainstormer"
-    assert entry["capability_tags"] == ["Iteration", "ELO ranking"]
-    assert entry["avatar_hint"] == "lightbulb"
-
-
-@pytest.mark.usefixtures("launcher")
-def test_get_teams_omits_optional_fields_when_absent():
-    """Gallery card should degrade gracefully when an expert declares
-    only the minimum (name, description, type: expert)."""
-    experts = [_expert_info("minimal-expert")]  # no byline / tags / avatar
-    with patch(
-        "EvoScientist.tools.skills_manager.list_expert_skills",
-        return_value=experts,
-    ):
-        body = client.get("/api/teams").json()
-    entry = body["teams"][0]
-    assert set(entry.keys()) == {"name", "description"}
+    assert entry == {"name": "minimal-expert", "description": "Minimal expert"}
 
 
 @pytest.mark.usefixtures("launcher")

@@ -37,7 +37,6 @@ _SKILLS_WITNESS = "## Skills System\n\nInstalled skills are mounted under ..."
 def _skill_info(
     *,
     name: str = "literature-review",
-    role: str = "literature-review strategist",
     body: str = "You produce manuscript-quality surveys.\n\nPipeline: ...\n",
     description: str = "d",
 ) -> SkillInfo:
@@ -47,34 +46,21 @@ def _skill_info(
         path=Path("/tmp/does-not-matter"),
         source="builtin",
         type="expert",
-        role=role,
-        body=body,
+        expert_body=body,
     )
 
 
 class TestComposePrompt:
-    def test_returns_role_and_body_for_known_skill(self, workspace):
+    def test_returns_body_for_known_skill(self, workspace):
         mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info()],
         ):
             composed = mw._compose_prompt({"skill_name": "literature-review"})
-        # Role prepended, body preserved, trailing newline guaranteed.
-        assert composed.startswith("You are literature-review strategist.")
+        # Body preserved, trailing newline guaranteed.
         assert "You produce manuscript-quality surveys." in composed
         assert composed.endswith("\n")
-
-    def test_omits_role_line_when_absent(self, workspace):
-        mw = ExpertSkillLoaderMiddleware(workspace)
-        info = _skill_info(role="", body="Second-person persona body.\n")
-        with patch(
-            "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[info],
-        ):
-            composed = mw._compose_prompt({"skill_name": "literature-review"})
-        assert not composed.startswith("You are ")
-        assert "Second-person persona body." in composed
 
     def test_missing_skill_name_returns_error_cue(self, workspace):
         mw = ExpertSkillLoaderMiddleware(workspace)
@@ -108,10 +94,10 @@ class TestComposePrompt:
         assert "(none)" in composed
 
     def test_empty_body_returns_error_cue(self, workspace):
-        """A skill with an empty SKILL.md body would otherwise run against a
-        persona-less system prompt (just the role line). Mirror the sync
-        fold-in's policy: refuse to compose a prompt at all and surface the
-        skill-authoring bug through the LLM's error envelope."""
+        """A skill with an empty EXPERT.md body would otherwise run against a
+        persona-less system prompt. Mirror the sync fold-in's policy: refuse to
+        compose a prompt at all and surface the skill-authoring bug through the
+        LLM's error envelope."""
         mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -119,7 +105,7 @@ class TestComposePrompt:
         ):
             composed = mw._compose_prompt({"skill_name": "literature-review"})
         assert composed.startswith("ERROR:")
-        assert "empty SKILL.md body" in composed
+        assert "empty EXPERT.md body" in composed
         assert "literature-review" in composed  # names the offending skill
 
     def test_whitespace_only_body_returns_error_cue(self, workspace):
@@ -132,53 +118,7 @@ class TestComposePrompt:
         ):
             composed = mw._compose_prompt({"skill_name": "literature-review"})
         assert composed.startswith("ERROR:")
-        assert "empty SKILL.md body" in composed
-
-    def test_expert_md_expert_prompted_from_actor_definition(self, workspace):
-        """EXPERT.md experts are prompted from EXPERT.md, not SKILL.md.
-
-        Both files exist for these skills, so composing from ``.body`` would
-        silently work — and hand the expert a knowledge document written for
-        a different reader in place of its persona.
-        """
-        mw = ExpertSkillLoaderMiddleware(workspace)
-        info = _skill_info(
-            name="paper-review",
-            role="",
-            body="# Knowledge\n\nThe 5-aspect checklist.\n",
-        )
-        info.expert_source = "expert_md"
-        info.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
-        with patch(
-            "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[info],
-        ):
-            composed = mw._compose_prompt({"skill_name": "paper-review"})
-        assert "You are an adversarial reviewer." in composed
-        assert "5-aspect checklist" not in composed
-
-    def test_empty_actor_definition_names_expert_md_in_error(self, workspace):
-        """The error cue names the file the author has to fix.
-
-        An EXPERT.md expert with a healthy SKILL.md would otherwise be told
-        its SKILL.md body is empty, sending the author to the wrong file.
-        """
-        mw = ExpertSkillLoaderMiddleware(workspace)
-        info = _skill_info(
-            name="paper-review",
-            role="",
-            body="# Knowledge\n\nPlenty of content here.\n",
-        )
-        info.expert_source = "expert_md"
-        info.expert_body = "  \n"
-        with patch(
-            "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[info],
-        ):
-            composed = mw._compose_prompt({"skill_name": "paper-review"})
-        assert composed.startswith("ERROR:")
         assert "empty EXPERT.md body" in composed
-        assert "paper-review" in composed
 
     def test_runtime_context_tail_surfaces_skill_name(self, workspace):
         """The tail block re-asserts ``skill_name`` on every model call so the
@@ -283,9 +223,9 @@ class TestWrapModelCall:
 
         composed = seen[0]
         block_texts = [b.get("text", "") for b in composed.content_blocks]
-        # Persona landed — role prepend visible.
+        # Persona landed.
         assert any(
-            t.startswith("You are literature-review strategist.") for t in block_texts
+            t.startswith("You produce manuscript-quality surveys.") for t in block_texts
         )
         # Sentinel gone (block was replaced, not appended).
         assert not any(_PERSONA_SENTINEL in t for t in block_texts)
@@ -327,7 +267,7 @@ class TestWrapModelCall:
         block_texts = [b.get("text", "") for b in composed.content_blocks]
         # Persona appended as a new block.
         assert any(
-            t.startswith("You are literature-review strategist.") for t in block_texts
+            t.startswith("You produce manuscript-quality surveys.") for t in block_texts
         )
         # Witnesses still present.
         assert _TASK_WITNESS in block_texts
@@ -410,7 +350,6 @@ class TestSpecWalkSkipsWarnOnce:
             path=tmp_path,
             source="builtin",
             type="expert",
-            expert_source="expert_md",
             expert_body="",
         )
 
@@ -443,7 +382,6 @@ class TestSpecWalkSkipsWarnOnce:
             path=tmp_path,
             source="builtin",
             type="expert",
-            expert_source="expert_md",
             expert_body="Solid persona.\n",
         )
 
