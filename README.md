@@ -534,6 +534,8 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 > **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
+>
+> **Loopback is not private on a shared machine.** It keeps the servers off the network, not away from this machine's other accounts: any program on the machine can reach ports 6174 and 4716, and the backend trusts it. EvoScientist assumes one user per machine. On a shared server, other accounts can use your backend, run its agent as you and read your projects, so use a machine, VM or container of your own.
 
 **Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend (`EvoSci server stop`; the next session starts it again):
 
