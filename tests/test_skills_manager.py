@@ -1064,109 +1064,8 @@ class TestSkillManagerList:
 # =============================================================================
 
 
-def _write_expert_skill(
-    parent: Path,
-    name: str,
-    *,
-    role: str = "One-line role",
-    byline: str = "Test persona",
-    capability_tags: list[str] | None = None,
-    avatar_hint: str = "star",
-    include_description: bool = True,
-) -> Path:
-    """Write an expert SKILL.md under parent/<name>/ and return the skill dir."""
-    skill_dir = parent / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    tags_str = "[" + ", ".join(capability_tags or []) + "]" if capability_tags else "[]"
-    desc_line = f"description: A {name} expert skill\n" if include_description else ""
-    (skill_dir / "SKILL.md").write_text(
-        f"""---
-name: {name}
-{desc_line}type: expert
-role: {role}
-byline: {byline}
-capability_tags: {tags_str}
-avatar_hint: {avatar_hint}
----
-
-# {name}
-
-Expert-skill body.
-"""
-    )
-    return skill_dir
-
-
 class TestParseSkillMdExpertFields:
-    """`_parse_skill_md` extracts expert-skill frontmatter fields onto SkillInfo."""
-
-    def test_utility_default_when_type_absent(self, sample_skill_dir):
-        """Existing skills (no `type` field) default to utility with empty expert fields."""
-        result = _parse_skill_md(sample_skill_dir / "SKILL.md")
-        assert result.type == "utility"
-        assert result.role == ""
-        assert result.byline == ""
-        assert result.capability_tags == []
-        assert result.avatar_hint == ""
-
-    def test_expert_fields_extracted(self, tmp_path):
-        skill_dir = _write_expert_skill(
-            tmp_path,
-            "expert-a",
-            role="Expert in A",
-            byline="A Byline",
-            capability_tags=["tag-1", "tag-2"],
-            avatar_hint="atom",
-        )
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.type == "expert"
-        assert result.role == "Expert in A"
-        assert result.byline == "A Byline"
-        assert result.capability_tags == ["tag-1", "tag-2"]
-        assert result.avatar_hint == "atom"
-
-    def test_body_populated_from_skill_md(self, tmp_path):
-        """`SkillInfo.body` carries the post-frontmatter content so the expert
-        container factory can build the system_prompt without re-reading disk."""
-        skill_dir = _write_expert_skill(tmp_path, "expert-body")
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert "# expert-body" in result.body
-        assert "Expert-skill body." in result.body
-        # Frontmatter fences must NOT leak into the body.
-        assert "---" not in result.body
-
-    def test_body_captured_when_no_frontmatter(self, tmp_path):
-        """Skills without a frontmatter block still cache their full text as
-        the body — the expert-container factory can then use it without a
-        second disk read."""
-        skill_dir = tmp_path / "no-frontmatter"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("Just body content, no fences.\n")
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.body.strip() == "Just body content, no fences."
-
-    def test_unknown_type_falls_back_to_utility(self, tmp_path, caplog):
-        """A typo in `type` (e.g. `charcter`) must not silently register as an expert
-        and must log so authors can debug a missing-expert case."""
-        skill_dir = tmp_path / "typo-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: typo-skill
-description: Has a bad type value
-type: charcter
-role: This should be ignored
----
-
-# Body
-"""
-        )
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.type == "utility"
-        assert any(
-            "unrecognized type" in r.message and "charcter" in r.message
-            for r in caplog.records
-        )
+    """`_parse_skill_md` placeholders, and frontmatter it does not read."""
 
     def test_default_dispatch_frontmatter_is_not_read(self, tmp_path):
         """A skill cannot pin its own dispatch shape.
@@ -1176,41 +1075,12 @@ role: This should be ignored
         by nothing. Nothing consumes the field now — the orchestrator picks
         a reach per task — so it must not reappear on ``SkillInfo``.
         """
-        skill_dir = tmp_path / "async-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: async-skill
-description: declares a dispatch shape the runtime ignores
-type: expert
-role: Some role
-default_dispatch: async
----
-
-# Body
-"""
+        skill_dir = _write_actor_skill(
+            tmp_path, "async-skill", skill_frontmatter="default_dispatch: async\n"
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
         assert not hasattr(result, "default_dispatch")
-
-    def test_capability_tags_accepts_comma_string(self, tmp_path):
-        """capability_tags falls back to comma-separated string parsing (like `tags`)."""
-        skill_dir = tmp_path / "comma-tags"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: comma-tags
-description: Comma-separated capability tags
-type: expert
-capability_tags: alpha, beta, gamma
----
-
-# Body
-"""
-        )
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.capability_tags == ["alpha", "beta", "gamma"]
 
     def test_unreadable_skill_md_returns_placeholder(self, tmp_path, caplog):
         """A non-UTF-8 SKILL.md must degrade to an ``(unreadable)`` placeholder
@@ -1224,22 +1094,18 @@ capability_tags: alpha, beta, gamma
         assert result.name == "bad-utf8"
         assert result.description == "(unreadable)"
         assert result.type == "utility"
-        assert result.body == ""
         assert any("could not read" in r.message for r in caplog.records)
 
     def test_empty_name_value_coerces_to_parent_dir(self, tmp_path):
         """A ``name:`` line with no value parses to ``None`` in YAML. Without
         the ``.get(...) or parent.name`` guard, ``SkillInfo.name`` becomes
-        ``None`` and slips past the ``_fold_expert_subagents`` collision
-        check (a ``None``-named expert would land in the ``task`` schema)."""
+        ``None``."""
         skill_dir = tmp_path / "empty-name"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             """---
 name:
 description: A skill with an empty name value
-type: expert
-role: some role
 ---
 
 Body content.
@@ -1294,19 +1160,7 @@ class TestAgentsMdExpertContract:
         skill_dir = _write_actor_skill(tmp_path, "actor-skill")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.expert_source == "expert_md"
         assert result.expert_body.startswith("## Persona")
-        # SKILL.md stays pure knowledge and is still cached for in-turn use.
-        assert "The portable workflow." in result.body
-
-    def test_no_actor_frontmatter_needed(self, tmp_path):
-        """The decoration fields the contract removed stay empty, not invented."""
-        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
-        result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.role == ""
-        assert result.byline == ""
-        assert result.capability_tags == []
-        assert result.avatar_hint == ""
 
     def test_metadata_type_alone_does_not_classify(self, tmp_path):
         """``metadata.type: [skill, expert]`` is index-facing only.
@@ -1332,7 +1186,6 @@ metadata:
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
-        assert result.expert_source == ""
         # The tags path still reads metadata — only `type` is ignored there.
         assert result.tags == ["core"]
 
@@ -1355,7 +1208,6 @@ metadata:
         skill_dir = _write_actor_skill(tmp_path, "blank-actor", expert_body="   \n")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.expert_source == "expert_md"
         assert result.expert_body.strip() == ""
 
     def test_unreadable_skill_md_keeps_expert_declaration(self, tmp_path):
@@ -1367,38 +1219,7 @@ metadata:
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.description == "(unreadable)"
         assert result.type == "expert"
-        assert result.expert_source == "expert_md"
         assert result.expert_body == "## Persona\n\nStill valid.\n"
-
-    def test_expert_md_overrides_legacy_frontmatter(self, tmp_path, caplog):
-        """A skill mid-migration resolves to one contract, not a blend."""
-        import logging
-
-        skill_dir = _write_actor_skill(
-            tmp_path,
-            "migrating",
-            skill_frontmatter=(
-                "type: expert\nrole: legacy role\nbyline: Legacy\n"
-                "capability_tags: [legacy]\navatar_hint: legacy-avatar\n"
-                "default_dispatch: sync\n"
-            ),
-        )
-        with caplog.at_level(
-            logging.WARNING, logger="EvoScientist.tools.skills_manager"
-        ):
-            result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.expert_source == "expert_md"
-        # EXPERT.md wins on every axis: the legacy decoration fields must be
-        # cleared, not merely warned about — otherwise `role` is prepended to
-        # the EXPERT.md prompt and the gallery chips leak stale frontmatter.
-        assert result.role == ""
-        assert result.byline == ""
-        assert result.capability_tags == []
-        assert result.avatar_hint == ""
-        assert any(
-            "is ignored and should be removed" in r.message and "migrating" in r.message
-            for r in caplog.records
-        )
 
     def test_expert_md_expert_name_is_directory_name(self, tmp_path):
         """Registry identity for an EXPERT.md expert is the directory name.
@@ -1415,40 +1236,7 @@ metadata:
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.name == "real-dir"
 
-    def test_legacy_frontmatter_expert_warns_once(self, tmp_path, caplog):
-        """The deprecated path keeps working, and says so — once per skill.
-
-        ``_parse_skill_md`` runs on every ``list_skills`` call (agent
-        construction, /expert completion, GET /api/teams), so a per-parse
-        warning would bury real diagnostics under repeats.
-        """
-        import logging
-
-        skill_dir = tmp_path / "legacy-expert"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: legacy-expert
-description: Declares itself the old way
-type: expert
-role: legacy role
----
-
-# Persona body
-"""
-        )
-        with caplog.at_level(
-            logging.WARNING, logger="EvoScientist.tools.skills_manager"
-        ):
-            first = _parse_skill_md(skill_dir / "SKILL.md")
-            _parse_skill_md(skill_dir / "SKILL.md")
-        assert first.type == "expert"
-        assert first.expert_source == "frontmatter"
-        assert first.role == "legacy role"
-        deprecations = [r for r in caplog.records if "deprecated" in r.message.lower()]
-        assert len(deprecations) == 1
-
-    def test_utility_skill_has_no_expert_source(self, tmp_path):
+    def test_utility_skill_has_no_expert_body(self, tmp_path):
         skill_dir = tmp_path / "plain"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -1456,7 +1244,6 @@ role: legacy role
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
-        assert result.expert_source == ""
         assert result.expert_body == ""
 
 
@@ -1470,7 +1257,7 @@ class TestListExpertSkills:
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         # An expert skill and a utility skill, both in workspace tier.
-        _write_expert_skill(workspace_dir, "expert-a")
+        _write_actor_skill(workspace_dir, "expert-a")
         util = workspace_dir / "util-b"
         util.mkdir()
         (util / "SKILL.md").write_text(
@@ -1522,10 +1309,6 @@ class TestSkillManagerToolExpertSurface:
                 source="builtin",
                 tags=["research"],
                 type="expert",
-                role="Research idea brainstormer",
-                byline="Ideation persona",
-                capability_tags=["Iteration", "ELO"],
-                avatar_hint="lightbulb",
             ),
             SkillInfo(
                 name="util-b",
@@ -1636,10 +1419,6 @@ class TestSkillManagerToolExpertSurface:
         ):
             out = skill_manager.invoke({"action": "info", "name": "expert-a"})
         assert "Type: expert" in out
-        assert "Role: Research idea brainstormer" in out
-        assert "Byline: Ideation persona" in out
-        assert "Capability tags: Iteration, ELO" in out
-        assert "Avatar hint: lightbulb" in out
         # No dispatch line: an expert does not pin its own reach.
         assert "Default dispatch" not in out
 
@@ -1654,9 +1433,6 @@ class TestSkillManagerToolExpertSurface:
         ):
             out = skill_manager.invoke({"action": "info", "name": "util-b"})
         assert "Type: expert" not in out
-        assert "Role:" not in out
-        assert "Byline:" not in out
-        assert "Capability tags:" not in out
         assert "Default dispatch:" not in out
 
 

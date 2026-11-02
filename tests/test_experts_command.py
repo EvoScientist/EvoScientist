@@ -51,19 +51,12 @@ class _FakeSkillInfo:
 
     name: str
     description: str = ""
-    role: str = ""
     type: str = "expert"
     tags: list[str] = field(default_factory=list)
     source: str = "builtin"
     # Non-empty by default so the fake passes the empty-body filter in
-    # ``list_dispatchable_experts``. Tests that specifically want to
-    # exercise the empty-body reject path pass ``body=""``.
-    body: str = "persona"
-    # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
-    # ``body`` for these. Set ``expert_source="expert_md"`` plus
-    # ``expert_body`` to fake an expert on the current contract.
-    expert_source: str = "frontmatter"
-    expert_body: str = ""
+    # ``list_dispatchable_experts``.
+    expert_body: str = "persona"
 
 
 def _make_ctx(
@@ -91,7 +84,7 @@ class TestExpertsList:
             return_value=[
                 _FakeSkillInfo(
                     name="idea-brainstorm",
-                    role="Research idea brainstormer",
+                    description="Research idea brainstormer",
                 ),
             ],
         ):
@@ -117,7 +110,7 @@ class TestExpertsList:
             return_value=[
                 _FakeSkillInfo(
                     name="idea-brainstorm",
-                    role="Research idea brainstormer",
+                    description="Research idea brainstormer",
                 ),
             ],
         ):

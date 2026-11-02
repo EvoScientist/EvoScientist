@@ -30,8 +30,7 @@ def _skill(name: str) -> SkillInfo:
         path=Path("/tmp/does-not-matter"),
         source="builtin",
         type="expert",
-        role=f"{name} role",
-        body="body\n",
+        expert_body="body\n",
     )
 
 
@@ -106,7 +105,7 @@ class TestBuildExpertAsyncSubagentSpecs:
         ]
         # Second skill has no body — dataclass field default is ``""``, but
         # helper sets it to "body\n" — override to empty.
-        skills[1].body = ""
+        skills[1].expert_body = ""
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -119,32 +118,6 @@ class TestBuildExpertAsyncSubagentSpecs:
         ):
             specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert [s["name"] for s in specs] == ["literature-review"]
-
-    def test_expert_md_expert_registered_and_gated_on_its_own_file(self, workspace):
-        """EXPERT.md experts reach async dispatch, and their gate is EXPERT.md.
-
-        The empty-persona gate has to follow the skill's contract: a healthy
-        SKILL.md must not vouch for a skill whose actor definition is blank.
-        """
-        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
-        healthy = _skill("paper-review")
-        healthy.expert_source = "expert_md"
-        healthy.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
-        blank_actor = _skill("blank-actor")
-        blank_actor.expert_source = "expert_md"
-        blank_actor.expert_body = "   \n"  # SKILL.md body is fine; actor isn't
-        with (
-            patch(
-                "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=[healthy, blank_actor],
-            ),
-            patch(
-                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-                return_value=True,
-            ),
-        ):
-            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
-        assert [s["name"] for s in specs] == ["paper-review"]
 
     def test_reserved_name_collision_skipped(self, caplog, workspace):
         """A skill named after a yaml async sub-agent (or ``general-purpose``)

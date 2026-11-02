@@ -219,20 +219,9 @@ def make_skill_manager_tool(
             ]
             if info.tags:
                 lines.append(f"Tags: {', '.join(info.tags)}")
-            # Expert surface: shown when the skill can also act as an expert —
-            # declared by a sibling EXPERT.md, or by legacy `type: expert`
-            # frontmatter. The decoration lines below exist only on the legacy
-            # path, so an EXPERT.md expert renders the type line and stops.
+            # A sibling EXPERT.md makes the skill an expert as well.
             if info.type == "expert":
                 lines.append("Type: expert")
-                if info.role:
-                    lines.append(f"Role: {info.role}")
-                if info.byline:
-                    lines.append(f"Byline: {info.byline}")
-                if info.capability_tags:
-                    lines.append(f"Capability tags: {', '.join(info.capability_tags)}")
-                if info.avatar_hint:
-                    lines.append(f"Avatar hint: {info.avatar_hint}")
             return "\n".join(lines)
 
         else:
