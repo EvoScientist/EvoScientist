@@ -753,45 +753,9 @@ async def _load_checkpoint_messages(
     event = target_cv.get("_summarization_event")
     summarization_event = event if isinstance(event, dict) else None
 
-    if not accumulated:
-        await _log_orphan_warning_if_pruned(saver.conn, thread_id)
-
     if not isinstance(accumulated, list):
         return []
     return _apply_summarization_event(accumulated, summarization_event)
-
-
-async def _log_orphan_warning_if_pruned(
-    conn: aiosqlite.Connection, thread_id: str
-) -> None:
-    """Emit a WARNING if *thread_id* has orphan ``parent_checkpoint_id`` refs.
-
-    Empty reconstructed history + a broken parent chain is the signature
-    of a pre-fix DB where the old ``keep_per_ns=10`` default pruned early
-    writes before the snapshot frequency materialized a ``_DeltaSnapshot``
-    seed. The DB has no path to recover those messages — log so /resume
-    showing a stub history isn't silent.
-    """
-    query = """
-        SELECT 1 FROM checkpoints c1
-        WHERE c1.thread_id = ? AND c1.checkpoint_ns = ''
-          AND c1.parent_checkpoint_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM checkpoints c2
-              WHERE c2.thread_id = c1.thread_id
-                AND c2.checkpoint_ns = ''
-                AND c2.checkpoint_id = c1.parent_checkpoint_id
-          )
-        LIMIT 1
-    """
-    async with conn.execute(query, (thread_id,)) as cur:
-        if await cur.fetchone():
-            _logger.warning(
-                "Thread %s has orphan checkpoints (pre-fix pruning) "
-                "and no surviving DeltaChannel snapshot; reconstructed "
-                "history is empty. Early messages cannot be recovered.",
-                thread_id,
-            )
 
 
 def _unwrap_messages_seed(value: object) -> list | None:
