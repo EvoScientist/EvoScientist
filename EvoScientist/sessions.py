@@ -498,7 +498,6 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     async with PruningCheckpointer.from_conn_string_with_keep(
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
-        await _upgrade_stored_dirs_safely()
         yield saver
 
 
@@ -1174,153 +1173,6 @@ async def get_thread_messages(thread_id: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# PRAGMA user_version
-# ---------------------------------------------------------------------------
-
-# PRAGMA user_version is a 32-bit int slot in the SQLite file header; each
-# one-time job owns one bit of it and is gated on its own bit (bit 1 belonged
-# to a retired legacy-bloat sweep).
-
-
-async def _get_user_version(conn: aiosqlite.Connection) -> int:
-    async with conn.execute("PRAGMA user_version") as cur:
-        row = await cur.fetchone()
-        return int(row[0]) if row else 0
-
-
-async def _set_user_version(conn: aiosqlite.Connection, version: int) -> None:
-    # PRAGMAs cannot be parameter-bound; the integer is interpolated safely
-    # because we control the value (constant int).
-    await conn.execute(f"PRAGMA user_version = {int(version)}")
-    await conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Stored workspace folders (one-time upgrade)
-# ---------------------------------------------------------------------------
-
-# ``user_version`` bit set once stored ``workspace_dir`` values name the
-# workspace root, with a ``--mode=run`` session's folder in ``run_dir``.
-_STORED_DIRS_VERSION = 2
-
-
-def _upgraded_dir_fields(values: list[str]) -> dict[str, dict[str, str]]:
-    """New metadata fields for each stored ``workspace_dir`` naming a run folder.
-
-    Every other value is left as it is: readers normalise the stored string
-    themselves, and cannot resolve a value this cannot resolve either.
-    Resolves paths; run it off the event loop.
-    """
-    upgraded: dict[str, dict[str, str]] = {}
-    for value in values:
-        try:
-            fields = SessionDirs.from_legacy(value).metadata()
-        except (ValueError, OSError, RuntimeError) as exc:
-            _logger.warning("Leaving stored workspace folder %r as is: %s", value, exc)
-            continue
-        if fields.get("run_dir"):
-            upgraded[value] = fields
-    return upgraded
-
-
-async def _apply_dir_upgrade(
-    conn: aiosqlite.Connection, upgraded: dict[str, dict[str, str]]
-) -> None:
-    """Split every upgraded ``workspace_dir`` in one pass over the table."""
-    await conn.execute(
-        "CREATE TEMP TABLE _dir_upgrade "
-        "(old TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, run_dir TEXT NOT NULL)"
-    )
-    await conn.executemany(
-        "INSERT INTO _dir_upgrade VALUES (?, ?, ?)",
-        [
-            (old, fields["workspace_dir"], fields["run_dir"])
-            for old, fields in upgraded.items()
-        ],
-    )
-    # ``metadata`` is stored as a BLOB of JSON text; keep it one. A correlated
-    # subquery rather than ``UPDATE ... FROM``, which needs SQLite 3.33.
-    await conn.execute(
-        """
-        UPDATE checkpoints SET metadata = CAST(
-            (SELECT json_set(CAST(checkpoints.metadata AS TEXT),
-                             '$.workspace_dir', u.workspace_dir,
-                             '$.run_dir', u.run_dir)
-             FROM _dir_upgrade AS u
-             WHERE u.old = json_extract(checkpoints.metadata, '$.workspace_dir'))
-            AS BLOB)
-        WHERE json_valid(metadata)
-          AND json_extract(metadata, '$.workspace_dir')
-              IN (SELECT old FROM _dir_upgrade)
-          AND json_extract(metadata, '$.run_dir') IS NULL
-        """
-    )
-    await conn.execute("DROP TABLE _dir_upgrade")
-
-
-async def _upgrade_stored_dirs_safely() -> None:
-    """:func:`_upgrade_stored_dirs`, never blocking startup on failure."""
-    try:
-        await _upgrade_stored_dirs()
-    except Exception as exc:
-        _logger.warning(
-            "Upgrading stored workspace folders failed; will retry on the next "
-            "start: %s",
-            exc,
-            exc_info=True,
-        )
-
-
-async def _upgrade_stored_dirs() -> None:
-    """Rewrite the folders stored before ``run_dir`` existed, once per DB.
-
-    Run-mode sessions stored their run folder as ``workspace_dir``. Rows
-    whose folder has the name ``--mode=run`` generates get the workspace
-    root plus ``run_dir``; no other row is rewritten, since readers
-    normalise the stored folder themselves. Rows whose metadata is not
-    valid JSON, or whose folder cannot be resolved, are skipped. AutoSkills
-    proposals get the same upgrade.
-
-    Runs in one ``BEGIN IMMEDIATE`` transaction that also sets the
-    ``_STORED_DIRS_VERSION`` bit of ``user_version``, so concurrent
-    processes upgrade once. On failure nothing is committed and the next
-    start retries.
-    """
-    from . import paths
-    from .memory.autoskills.proposals import upgrade_proposal_workspaces
-
-    async with aiosqlite.connect(str(get_db_path()), timeout=30.0) as conn:
-        if await _get_user_version(conn) & _STORED_DIRS_VERSION:
-            return
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            version = await _get_user_version(conn)
-            if version & _STORED_DIRS_VERSION:
-                await conn.rollback()
-                return
-            if await _table_exists(conn, "checkpoints"):
-                async with conn.execute(
-                    "SELECT DISTINCT json_extract(metadata, '$.workspace_dir') "
-                    "FROM checkpoints "
-                    "WHERE json_valid(metadata) "
-                    "AND json_extract(metadata, '$.run_dir') IS NULL"
-                ) as cur:
-                    values = [
-                        row[0]
-                        for row in await cur.fetchall()
-                        if isinstance(row[0], str) and row[0]
-                    ]
-                upgraded = await asyncio.to_thread(_upgraded_dir_fields, values)
-                if upgraded:
-                    await _apply_dir_upgrade(conn, upgraded)
-            await asyncio.to_thread(upgrade_proposal_workspaces, paths.MEMORIES_DIR)
-            await _set_user_version(conn, version | _STORED_DIRS_VERSION)
-        except BaseException:
-            await conn.rollback()
-            raise
-
-
-# ---------------------------------------------------------------------------
 # DB stats (read-only diagnostic for `EvoSci sessions stats`)
 # ---------------------------------------------------------------------------
 
@@ -1646,9 +1498,7 @@ async def _restore_webui_threads_to_global_store(
     a project that was never registered here are not added, so not exposed
     on the unauthenticated API (worst case ``--tunnel``). CLI/TUI threads (8-char
     hex IDs, managed by ``list_threads()``) and pre-stamping rows without
-    ``workspace_dir`` are excluded. A run-mode row that
-    :func:`_upgrade_stored_dirs` has not split still holds its run folder
-    in ``workspace_dir``, so its workspace reads as that run folder.
+    ``workspace_dir`` are excluded.
 
     Best-effort: any exception is logged and swallowed so a broken restore
     never prevents the ``langgraph dev`` server from starting. Returns True
@@ -2020,7 +1870,6 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
         await saver.setup()
-        await _upgrade_stored_dirs_safely()
         await _purge_internal_worker_threads()
         if await _restore_webui_threads_to_global_store():
             await _sweep_orphaned_runs_in_global_store()
