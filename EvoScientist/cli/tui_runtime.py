@@ -22,7 +22,6 @@ STREAM_CANCEL_SETTLE_TIMEOUT = 5.0
 # streaming backends, but is listed here so normalize/resolve preserve it
 # rather than falling back to "cli".
 SUPPORTED_UI_BACKENDS = ("cli", "tui", "webui")
-_LEGACY_BACKEND_MAP = {"textual": "tui", "rich": "cli"}
 
 
 class StreamCancellationTimeout(RuntimeError):
@@ -65,7 +64,6 @@ def normalize_ui_backend(value: str | None) -> str:
     if not value:
         return DEFAULT_UI_BACKEND
     normalized = value.strip().lower()
-    normalized = _LEGACY_BACKEND_MAP.get(normalized, normalized)
     if normalized in SUPPORTED_UI_BACKENDS:
         return normalized
     return DEFAULT_UI_BACKEND

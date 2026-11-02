@@ -29,13 +29,6 @@ def test_normalize_ui_backend_accepts_known_values():
     assert normalize_ui_backend("TUI") == "tui"
 
 
-def test_normalize_ui_backend_maps_legacy_values():
-    assert normalize_ui_backend("textual") == "tui"
-    assert normalize_ui_backend("Textual") == "tui"
-    assert normalize_ui_backend("rich") == "cli"
-    assert normalize_ui_backend("Rich") == "cli"
-
-
 def test_normalize_ui_backend_unknown_falls_back_to_cli():
     assert normalize_ui_backend("unknown-ui") == "cli"
 

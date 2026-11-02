@@ -908,19 +908,10 @@ def display_config_value(key: str, value: Any) -> str:
 # Config value operations
 # =============================================================================
 
-_LITERAL_ALIASES = {"rich": "cli", "textual": "tui"}
-"""Legacy ``ui_backend`` spellings written by earlier onboarding versions.
-
-Kept in step with ``_LEGACY_BACKEND_MAP`` in ``cli/tui_runtime.py``; config is a
-foundational module, so the map is duplicated here rather than importing across
-the config -> cli boundary.
-"""
-
 
 def _match_literal(value: Any, allowed: tuple[Any, ...]) -> str | None:
-    """Case-insensitive Literal match that also accepts legacy aliases."""
+    """Case-insensitive Literal match."""
     text = str(value).strip().lower()
-    text = _LITERAL_ALIASES.get(text, text)
     return text if text in allowed else None
 
 
