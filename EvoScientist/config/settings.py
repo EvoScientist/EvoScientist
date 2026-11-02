@@ -583,8 +583,7 @@ class EvoScientistConfig:
     # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
     # normal usage produces linear growth, so this default is set well above
     # any realistic conversation length (~180-450 turns of dialogue) while
-    # still capping legacy bloat at upgrade time. 0 disables ongoing pruning
-    # entirely; the one-time legacy migration sweep still runs.
+    # still capping runaway growth. 0 disables pruning entirely.
     checkpoint_keep_per_thread: int = 1000
 
     # DM access control policy

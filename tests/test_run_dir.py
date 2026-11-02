@@ -354,21 +354,6 @@ def test_failed_upgrade_changes_nothing_and_retries(
     assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
 
 
-def test_upgrade_keeps_bloat_sweep_gate(workspace, sessions_db, monkeypatch):
-    """The legacy-bloat sweep and the folder upgrade are gated independently."""
-    import EvoScientist.sessions as sessions
-    from EvoScientist.sessions import _needs_migration, _upgrade_stored_dirs
-
-    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": workspace.key})])
-    monkeypatch.setattr(sessions, "_MIGRATION_THRESHOLD_BYTES", 0)
-    assert asyncio.run(_needs_migration()) is True
-
-    asyncio.run(_upgrade_stored_dirs())
-
-    assert _upgrade_recorded(sessions_db)
-    assert asyncio.run(_needs_migration()) is True
-
-
 def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
     """Unreadable rows leave the others upgraded and the upgrade done."""
     from EvoScientist.sessions import _upgrade_stored_dirs
