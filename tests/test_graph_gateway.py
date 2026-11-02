@@ -1642,6 +1642,46 @@ async def test_metadata_best_effort_does_not_swallow_thread_registration_failure
     assert stream.run.starts == []
 
 
+@pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
+async def test_metadata_refresh_carries_the_model_of_each_turn(resume):
+    """The thread is registered once; every later turn must refresh its metadata."""
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+    async for _event in gateway.stream_events(
+        RunRequest(message="hi", thread_id="abc12345", metadata={"model": "model-a"})
+    ):
+        pass
+    if resume:
+        stream.interrupts = [{"interrupt_id": "first"}]
+    second = Command(resume={"answer": "yes"}) if resume else "again"
+    async for _event in gateway.stream_events(
+        RunRequest(message=second, thread_id="abc12345", metadata={"model": "model-b"})
+    ):
+        pass
+
+    assert len(threads.created) == 1
+    assert [
+        (thread_id, metadata["model"])
+        for thread_id, metadata in threads.metadata_updates
+    ] == [("abc12345", "model-a"), ("abc12345", "model-b")]
+    assert threads.threads[0]["metadata"]["model"] == "model-b"
+    if resume:
+        assert len(stream.run.starts) == 1
+        assert len(stream.run.responses) == 1
+    else:
+        assert len(stream.run.starts) == 2
+
+
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
     """The gateway derives the run's HITL suppression from the live session
     config's auto_mode and forwards it per run."""
