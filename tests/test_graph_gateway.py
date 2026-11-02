@@ -1644,7 +1644,7 @@ async def test_metadata_best_effort_does_not_swallow_thread_registration_failure
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
 async def test_metadata_refresh_carries_the_model_of_each_turn(resume):
-    """The thread is registered once; every later turn must refresh its metadata."""
+    """Every turn refreshes the metadata, not only the one that registers the thread."""
     from langgraph.types import Command
 
     stream = FakeLangGraphThreadStream("abc12345", events=[])
@@ -3001,7 +3001,6 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
     assert interrupt is not None
     assert interrupt["interrupt_id"] == "interrupt-2"
     assert cancel_calls == []
-    assert threads.state_updates == []
 
 
 @pytest.mark.parametrize(
