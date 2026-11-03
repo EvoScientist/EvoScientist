@@ -74,6 +74,9 @@ class AsyncTaskNotification:
     # find the task_id). ``None`` means "unrouted" — the notification
     # drains for any current_thread_id (back-compat for direct callers).
     origin_cli_thread_id: str | None = None
+    # OS pid of a background process, for an ``untracked`` one the agent can
+    # only check from its shell.
+    pid: int | None = None
 
 
 # Per-thread routing: notifications with ``origin_cli_thread_id`` land in
@@ -122,6 +125,7 @@ def enqueue_bg_process_notification(
     status: str,
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
+    pid: int | None = None,
 ) -> None:
     """Build and enqueue a background-process completion notification.
 
@@ -139,6 +143,7 @@ def enqueue_bg_process_notification(
             prompt=prompt,
             kind="bg-process",
             origin_cli_thread_id=origin_cli_thread_id,
+            pid=pid,
         )
     )
 
@@ -390,6 +395,13 @@ _reader_enqueued_process_ids: set[str] = set()
 # enqueue the completion twice.
 _bg_reader_in_flight: set[str] = set()
 _bg_idle_reader_last_poll: dict[str | None, float] = {}
+
+UNTRACKED_STATUS: Final = "untracked"
+"""``bg_processes[*].status`` of a process its registry no longer has.
+
+The reader writes it into thread state when it reports the process, so a later
+EvoSci process that resumes the thread does not report it again.
+"""
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}
 
 
@@ -414,6 +426,51 @@ async def read_bg_processes_from_gateway(
     return values.get("bg_processes", {})
 
 
+async def _mark_untracked(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+    process_id: str,
+    record: dict,
+) -> bool:
+    """Write ``status: "untracked"`` into the thread's record of ``process_id``.
+
+    Returns False when the mark cannot be written yet, so the caller retries on
+    a later poll and reports the process only once the mark is in state:
+
+    - the thread has pending tasks (``next``): a state write on a thread paused
+      at an interrupt drops the interrupt, so the thread is left alone until the
+      user answers it;
+    - the write fails: the server refuses ``update_state`` while a run is in
+      flight on the thread (409).
+
+    ``as_node`` is left to the graph to infer: with no pending tasks that is the
+    node that ended the last run, and the write leaves ``next`` empty.
+
+    An in-process run has no in-flight check, and the idle reader does not hold
+    the turn lock: a run that starts between the snapshot and the write builds
+    its next checkpoint without the mark, so a later EvoSci process reports the
+    process once more.
+    """
+    try:
+        snapshot = await gateway.get_state_snapshot(target, thread_id)
+        if snapshot.next:
+            return False
+        await gateway.update_state_values(
+            target,
+            thread_id,
+            {"bg_processes": {process_id: {**record, "status": UNTRACKED_STATUS}}},
+        )
+    except Exception:
+        logger.debug(
+            "Could not mark background process %s untracked; retrying next poll",
+            process_id,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 async def enqueue_bg_process_completions_from_state(
     gateway: GraphGateway,
     target: GraphTarget,
@@ -427,7 +484,9 @@ async def enqueue_bg_process_completions_from_state(
     means the agent already observed the exit via check/stop/list — nothing to
     proactively surface, which is the state-based dedup), polls
     ``gateway.get_process_status``. Newly-terminal processes are enqueued as
-    ``kind="bg-process"`` notifications via the shared queue. Returns the
+    ``kind="bg-process"`` notifications via the shared queue. A process the
+    registry no longer has is marked ``untracked`` in state
+    (:func:`_mark_untracked`) and then reported with that status. Returns the
     still-active count for the idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
@@ -449,7 +508,9 @@ async def enqueue_bg_process_completions_from_state(
             or process_id in _bg_reader_in_flight
         ):
             continue
-        if record.get("status") in TERMINAL_STATUSES:
+        if record.get("status") in TERMINAL_STATUSES or (
+            record.get("status") == UNTRACKED_STATUS
+        ):
             continue
         # Reserve before the await so a concurrent reader invocation (idle
         # tick racing a turn-boundary read) cannot double-enqueue this exit.
@@ -461,9 +522,22 @@ async def enqueue_bg_process_completions_from_state(
                 still_active += 1  # gateway unavailable / transient — retry next poll
                 continue
             if status == "unknown":
-                # Process gone from the registry (e.g. a server restart cleared
-                # it) — its exit is unknowable, so stop polling it rather than
-                # spin forever.
+                # The registry that owns the process no longer has it: the
+                # process holding it restarted, or the dev server cannot be
+                # reached. Its exit is unknowable and it may still be running.
+                if not await _mark_untracked(
+                    gateway, target, thread_id, process_id, record
+                ):
+                    still_active += 1  # not writable yet — retry next poll
+                    continue
+                enqueue_bg_process_notification(
+                    task_id=process_id,
+                    agent_name=record.get("name", ""),
+                    status=UNTRACKED_STATUS,
+                    prompt=record.get("command", ""),
+                    origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
+                    pid=record.get("pid"),
+                )
                 _reader_enqueued_process_ids.add(process_id)
                 continue
             if status not in TERMINAL_STATUSES:
