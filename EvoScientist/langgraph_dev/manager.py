@@ -11,6 +11,7 @@ Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -19,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -266,23 +268,23 @@ def _rotate_log_if_needed(log_path: Path) -> None:
         )
 
 
-# Ownership record — JSON recording the pid of the running langgraph dev, the
-# project of the client that started it, and what it was launched with.
+# Ownership record — JSON recording the pid of the running langgraph dev and
+# what it was launched with.
 # Cross-process callers (e.g. a TUI starting while ``EvoSci deploy`` runs)
 # read it on the reuse path to report configuration drift.
 
 
 def _write_workspace_sidecar(
-    workspace_dir: Path,
     pid: int,
     config_fingerprint: str | None = None,
     agent_python: str | object | None = _NOT_RECORDED,
     agent_bash: str | object | None = _NOT_RECORDED,
     host: str | None = None,
     lasting: bool | None = None,
+    port: int | None = None,
+    break_group_created: float | None = None,
 ) -> None:
-    """Record the pid of the langgraph dev we just started, and the project
-    of the client that started it.
+    """Record the pid of the langgraph dev we just started.
 
     ``config_fingerprint`` (optional) captures the launch-time config subset
     the server consumed; a reuse compares it to detect drift.
@@ -294,8 +296,13 @@ def _write_workspace_sidecar(
     config folders, which the server inherits (``paths.dir_env``), so a
     client attaching from another environment reads the server's own.
     ``host`` is the interface the server binds, so a client can tell
-    whether its probe reaches this server. ``lasting`` says
-    whether it outlives the process that started it.
+    whether its probe reaches this server. ``port`` is the port it listens
+    on, for a client started apart from it (a WebUI run by hand) that would
+    otherwise only know the configured one. ``lasting`` says
+    whether it outlives the process that started it. ``break_group_created``
+    is the server's ``create_time()`` when it leads its own process group on
+    Windows, so a stop may send it Ctrl+Break; the stop sends it only to a
+    live process with that creation time, not to one that reuses the PID.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -310,15 +317,18 @@ def _write_workspace_sidecar(
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
         payload: dict = {
-            "workspace": str(workspace_dir),
             "pid": pid,
             "data_dir": str(paths.DATA_DIR),
             "config_dir": str(paths.CONFIG_DIR),
         }
         if host is not None:
             payload["host"] = host
+        if port is not None:
+            payload["port"] = port
         if lasting is not None:
             payload["lasting"] = lasting
+        if break_group_created is not None:
+            payload[_BREAK_GROUP_CREATED_KEY] = break_group_created
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
         if agent_python is not _NOT_RECORDED:
@@ -339,11 +349,11 @@ def _write_workspace_sidecar(
 
 def _read_workspace_sidecar() -> dict | None:
     """Read the workspace sidecar. Returns None if missing, corrupt, or
-    structurally wrong (must be a dict whose ``workspace`` value is a
-    non-empty string).
+    structurally wrong (must be a dict whose ``pid`` is an int of at least 1,
+    not a bool).
 
-    Readers show ``workspace`` as a path, so a payload like
-    ``{"workspace": null}`` counts as no record.
+    A record written by an older release also carries ``workspace``, the
+    project of the client that started the server; readers ignore it.
     """
     if not RUNTIME.workspace_sidecar.exists():
         return None
@@ -353,8 +363,8 @@ def _read_workspace_sidecar() -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    workspace = data.get("workspace")
-    if not isinstance(workspace, str) or not workspace:
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
         return None
     return data
 
@@ -389,6 +399,36 @@ _FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 # Stays None when we reused an existing process (managed by the user).
 _PROCESS: subprocess.Popen | None = None
 
+# Windows: servers this process spawned as the leader of their own process
+# group, the only PIDs a Ctrl+Break may be sent to (for any other PID Windows
+# sends it to every process on the console). The sidecar records the same for
+# a server another process started, as the server's creation time
+# (``_BREAK_GROUP_CREATED_KEY``): a PID reused by another process must not get
+# the event.
+_BREAK_GROUP_PIDS: set[int] = set()
+_BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
+_CREATE_TIME_TOLERANCE = 1.0
+
+# Windows: the access right a stop asks for to hold a recorded server's PID
+# (:func:`_hold_pid`), and the error ``OpenProcess`` gives for a PID no process
+# has. Query-limited access is enough, as nothing waits on the handle, and an
+# elevated process grants it to a non-elevated caller, where it refuses
+# ``PROCESS_QUERY_INFORMATION``.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_ACCESS_DENIED = 5
+_ERROR_PRIVILEGE_NOT_HELD = 1314
+
+# How long a stop on Windows waits for the server to exit after Ctrl+Break
+# before it ends the process tree hard, and how long the helper that sends it
+# may take.
+CLEAN_STOP_TIMEOUT = 10.0
+_CLEAN_STOP_HELPER_TIMEOUT = 5.0
+# How long a stop waits after terminate() before it kills, and how long the
+# server's children get to finish their own shutdown after the server exited.
+_TERMINATE_TIMEOUT = 5.0
+_SURVIVOR_GRACE = 2.0
+
 # Byte offset into ``RUNTIME.log_file`` captured the instant before the current
 # subprocess was spawned. ``read_tunnel_url`` scans only bytes written after
 # this point so a stale ``trycloudflare.com`` URL from a previous (appended,
@@ -396,8 +436,15 @@ _PROCESS: subprocess.Popen | None = None
 _LOG_OFFSET_AT_START: int = 0
 
 # Cloudflare quick-tunnel public URL, as printed by cloudflared into the
-# langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
-_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
+# langgraph dev log. Exclude the API endpoint logged when tunnel creation fails.
+_TUNNEL_URL_RE = re.compile(
+    r"https://(?!api\.)[A-Za-z0-9.-]+\.trycloudflare\.com", re.IGNORECASE
+)
+# cloudflared's quick-tunnel creation failures ("failed to request quick
+# Tunnel: ...", "failed to read quick-tunnel response: ..."); it exits after one.
+_TUNNEL_FAILED_RE = re.compile(
+    r"failed to [a-z ]*quick[ -]tunnel[^\r\n]*", re.IGNORECASE
+)
 
 # Whether async sub-agents are usable in this process.
 #
@@ -752,9 +799,17 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
 
 
 class ServerKeptError(RuntimeError):
-    """``EvoSci service stop`` left the recorded server running: ``EvoSci
-    deploy`` or the desktop app owns it, or another EvoSci process is starting
-    or stopping it."""
+    """The stop left the recorded server running, with its records. ``EvoSci
+    service stop`` keeps a server that ``EvoSci deploy`` or the desktop app
+    owns, or that another EvoSci process is starting or stopping; any stop
+    raises :class:`ServerStopFailedError` when it could not open the server
+    for a reason other than it being gone or refusing access."""
+
+
+class ServerStopFailedError(ServerKeptError):
+    """The stop could not open the recorded server, for a reason other than
+    the server being gone or refusing access (on Windows, out of resources),
+    so it stopped nothing. Its records are kept, so a retry finds it."""
 
 
 def owned_by_its_starter() -> bool:
@@ -769,6 +824,194 @@ def owned_by_its_starter() -> bool:
     )
 
 
+def _request_clean_stop(pid: int) -> bool:
+    """Windows: send Ctrl+Break to the server ``pid``, which must lead its own
+    process group. True when it was sent.
+
+    A helper process sends it (``console_break``): only a process attached to
+    the server's console can, and attaching would cut this one off its own
+    terminal. ``CREATE_NO_WINDOW`` keeps a windowless caller (the desktop app)
+    from flashing a console window. The helper needs only the standard
+    library, so it runs by its file path under ``-I``: found in any install
+    (a user-site one included), and nothing in the caller's working directory
+    or on ``PYTHONPATH`` (a project's ``signal.py``) shadows the standard
+    library.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                os.path.join(os.path.dirname(__file__), "console_break.py"),
+                str(pid),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_CLEAN_STOP_HELPER_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            f"Could not ask langgraph dev (pid {pid}) to shut down cleanly "
+            f"({exc}); ending it hard, so a run it was running stays unfinished."
+        )
+        return False
+    if result.returncode != 0:
+        logger.warning(
+            f"Could not ask langgraph dev (pid {pid}) to shut down cleanly: the "
+            f"Ctrl+Break helper exited with {result.returncode} "
+            f"({result.stderr.strip()}); ending it hard, so a run it was "
+            "running stays unfinished."
+        )
+        return False
+    return True
+
+
+def _wait_exit(
+    process: psutil.Process, popen: subprocess.Popen | None, timeout: float
+) -> bool:
+    """Wait up to ``timeout`` for ``process`` to exit; through ``popen`` when we
+    spawned it, so the handle is reaped. True when it exited."""
+    try:
+        if popen is not None:
+            popen.wait(timeout=timeout)
+        else:
+            process.wait(timeout=timeout)
+    except (subprocess.TimeoutExpired, psutil.TimeoutExpired):
+        return False
+    return True
+
+
+def _end_server_tree(
+    pid: int,
+    popen: subprocess.Popen | None = None,
+    *,
+    break_group: bool = False,
+) -> None:
+    """End the langgraph dev ``pid`` and every process it started.
+
+    With ``break_group`` (Windows, ``pid`` known to lead its own process
+    group) it first asks the server to shut down cleanly with Ctrl+Break and
+    waits up to :data:`CLEAN_STOP_TIMEOUT`: only a clean shutdown puts a run
+    the server was running back in the queue for the next server. Then, and
+    everywhere else, terminate, wait :data:`_TERMINATE_TIMEOUT`, kill: SIGTERM
+    then SIGKILL on POSIX,
+    where SIGTERM already shuts the server down cleanly.
+
+    The children are listed first: once the server has exited they can no
+    longer be found from it. Lets ``psutil.AccessDenied`` on ``pid`` through.
+    """
+    try:
+        server = psutil.Process(pid)
+        children = server.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return
+    if break_group and _request_clean_stop(pid):
+        if _wait_exit(server, popen, CLEAN_STOP_TIMEOUT):
+            _kill_survivors(children)
+            return
+        logger.warning(
+            f"langgraph dev (pid {pid}) did not exit within "
+            f"{CLEAN_STOP_TIMEOUT:g} s of Ctrl+Break; ending it hard, so a run "
+            "it was running stays unfinished."
+        )
+    try:
+        for child in children:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        server.terminate()
+        if not _wait_exit(server, popen, _TERMINATE_TIMEOUT):
+            for child in {*children, *server.children(recursive=True)}:
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            server.kill()
+            # Reap our handle; the kill above was SIGKILL / TerminateProcess.
+            _wait_exit(server, popen, 2)
+    except psutil.NoSuchProcess:
+        pass
+    _kill_survivors(children)
+
+
+def _kill_survivors(children: list[psutil.Process]) -> None:
+    """The server exiting does not prove its children did: they got the same
+    signal, so give them :data:`_SURVIVOR_GRACE` to finish their own shutdown,
+    then kill what is left. A wait that is refused (on Windows an elevated
+    child denies the handle) counts every child as left."""
+    try:
+        _, alive = psutil.wait_procs(children, timeout=_SURVIVOR_GRACE)
+    except psutil.Error:
+        alive = children
+    for child in alive:
+        try:
+            child.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
+def _create_time(pid: int) -> float | None:
+    """``pid``'s creation time, or None when it cannot be read."""
+    try:
+        return psutil.Process(pid).create_time()
+    except psutil.Error:
+        return None
+
+
+def _same_process(pid: int, created: float) -> bool:
+    """Whether ``pid`` is still the process created at ``created``."""
+    now = _create_time(pid)
+    return now is not None and abs(now - created) <= _CREATE_TIME_TOLERANCE
+
+
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32, ctypes.get_last_error
+
+
+@contextlib.contextmanager
+def _hold_pid(pid: int):
+    """Windows: hold a handle to ``pid`` for the block. While it is open,
+    Windows does not give the PID to another process, so the checks of a
+    stop and the Ctrl+Break and kills that follow reach the same process,
+    even if it exits in between. When the handle is refused, nothing runs:
+    ``psutil.NoSuchProcess`` when no process has ``pid``,
+    ``psutil.AccessDenied`` for the errors psutil counts as permission
+    errors, ``OSError`` with the system's message for any other. Off Windows
+    it holds nothing."""
+    if os.name != "nt":
+        yield
+        return
+    kernel32, get_last_error = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        error = get_last_error()
+        if error == _ERROR_INVALID_PARAMETER:
+            raise psutil.NoSuchProcess(pid)
+        if error in (_ERROR_ACCESS_DENIED, _ERROR_PRIVILEGE_NOT_HELD):
+            raise psutil.AccessDenied(pid)
+        import ctypes
+
+        raise ctypes.WinError(error)
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     """Explicitly stop the langgraph dev recorded in our PID file.
 
@@ -778,14 +1021,19 @@ def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     (same loose anti-PID-recycling match as ``_kill_owned_stale_process``,
     with PID-file ownership as the primary guard). Holds the cross-process
     file lock so a concurrent start can't have its fresh PID/sidecar records
-    wiped by this stop's cleanup. Kills the whole process tree, then removes
-    the PID file + sidecar. Returns the stopped pid, or ``None`` when nothing
+    wiped by this stop's cleanup. Ends the whole process tree
+    (:func:`_end_server_tree`: on Windows Ctrl+Break first when the record
+    says the server leads its process group), then removes the PID file +
+    sidecar. Returns the stopped pid, or ``None`` when nothing
     was stopped (stale/corrupt files, if any, are still cleaned up).
 
     With *keep_owned* (``EvoSci service stop``), a live server that ``EvoSci
     deploy`` or the desktop app owns is left running, and so is one whose lock
     another process holds too long: :class:`ServerKeptError`. A record of an
-    older release, which does not say, is stopped.
+    older release, which does not say, is stopped. A server that refuses
+    access has its records removed, and nothing is stopped; one the stop could
+    not open for any other reason is left running with its records:
+    :class:`ServerStopFailedError`.
     """
     try:
         with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
@@ -826,7 +1074,8 @@ def stop_inflight_owned_server() -> int | None:
     with _LOCK:
         if _PROCESS is not None and _PROCESS.poll() is None:
             pid = _PROCESS.pid
-            stop_langgraph_dev()
+            # Still starting: no run to put back in the queue.
+            stop_langgraph_dev(clean=False)
             return pid
     return None
 
@@ -846,42 +1095,45 @@ def _stop_recorded_server_locked() -> int | None:
         return None
     except OSError:
         return None
-    try:
-        proc = psutil.Process(owned_pid)
-        cmdline = proc.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        stop_langgraph_dev()  # dead/inaccessible — clean the stale files
-        return None
-    if not any("langgraph" in arg for arg in cmdline):
-        stop_langgraph_dev()  # pid recycled by a foreign process — files only
-        return None
-    try:
-        children = proc.children(recursive=True)
-        for child in children:
-            try:
-                child.terminate()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        proc.terminate()
+    # The PID is held from before the checks until the stop is done, so what
+    # the checks found is what gets the Ctrl+Break and the kills.
+    with contextlib.ExitStack() as hold:
         try:
-            proc.wait(timeout=5)
-        except psutil.TimeoutExpired:
-            for child in children:
-                try:
-                    child.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            proc.kill()
-        # The parent exiting promptly doesn't prove its workers did — sweep
-        # the pre-kill snapshot for survivors.
-        for child in children:
-            try:
-                if child.is_running():
-                    child.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
+            hold.enter_context(_hold_pid(owned_pid))
+            proc = psutil.Process(owned_pid)
+            cmdline = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            stop_langgraph_dev()  # dead/inaccessible — clean the stale files
+            return None
+        except OSError as exc:
+            # Neither gone nor refused (the hold, or an OS error psutil passes
+            # through): the server may be running, so it gets no signal and its
+            # records stay for a retry.
+            raise ServerStopFailedError(
+                f"Could not stop langgraph dev (pid {owned_pid}): "
+                f"{str(exc).rstrip('.')}. It "
+                "keeps running and its records are kept; try again."
+            ) from exc
+        if not any("langgraph" in arg for arg in cmdline):
+            stop_langgraph_dev()  # pid recycled by a foreign process — files only
+            return None
+        # A record from before the server led its own process group, or from
+        # another release, does not say so: no Ctrl+Break, the stop ends it
+        # hard. Nor for a PID reused since (a langgraph dev in the user's own
+        # terminal passes the check above): the creation time must match the
+        # record's.
+        sidecar = _read_workspace_sidecar()
+        recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
+        break_group = (
+            sidecar is not None
+            and sidecar.get("pid") == owned_pid
+            and isinstance(recorded_created, float)
+            and _same_process(owned_pid, recorded_created)
+        )
+        try:
+            _end_server_tree(owned_pid, break_group=break_group)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     stop_langgraph_dev()
     return owned_pid
 
@@ -1019,7 +1271,6 @@ def _refuse_running_server() -> None:
 
 
 def start_langgraph_dev(
-    workspace_dir: Path | None = None,
     *,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
@@ -1037,10 +1288,6 @@ def start_langgraph_dev(
     its runtime store, and serves every registered project.
 
     Args:
-        workspace_dir: The project of the client starting the server, passed
-            as ``paths.LAUNCHER_WORKSPACE_ENV``: ``GET /api/workspace``
-            reports it once the client registered it. Defaults to
-            ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
         host: Network interface to bind. Defaults to loopback. SECURITY:
             widening this exposes an unauthenticated API that serves every
@@ -1088,8 +1335,6 @@ def start_langgraph_dev(
             f"Packaged langgraph.json not found at {config_file}. "
             "This indicates a broken EvoScientist installation — reinstall."
         )
-
-    workspace_dir = workspace_dir or Path.cwd()
 
     # Install Node for npx MCP servers here, where progress is visible and no
     # health deadline applies; the server itself never downloads it.
@@ -1176,11 +1421,10 @@ def start_langgraph_dev(
         _LOG_OFFSET_AT_START = 0
 
     # The server serves every registered project from the server home, so it
-    # gets no workspace of its own; it is told the launcher's project, as an
-    # absolute path since it works in another folder. A run names its run
-    # folder itself. ``EVOSCIENTIST_WORKSPACE_DIR`` passes as inherited: it is
-    # the user's ``default_workdir`` override (Docker sets it), which the
-    # settings API reports. A project ``.env`` sets only this command's own
+    # gets no workspace of its own. A run names its run folder itself.
+    # ``EVOSCIENTIST_WORKSPACE_DIR`` passes as inherited: it is the user's
+    # ``default_workdir`` override (Docker sets it), which the settings API
+    # reports. A project ``.env`` sets only this command's own
     # settings, each only where the environment had none, so the server gets
     # the environment without them. A lasting server, which serves later
     # sessions too, gets none of this session's flags (``--dangerous``,
@@ -1195,7 +1439,6 @@ def start_langgraph_dev(
         }
     )
     sub_env.pop("EVOSCIENTIST_RUN_DIR", None)
-    sub_env[paths.LAUNCHER_WORKSPACE_ENV] = os.path.abspath(workspace_dir)
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
 
@@ -1305,6 +1548,8 @@ def start_langgraph_dev(
     # Recorded before anything else can fail or be interrupted, so every
     # later failure path, and a caller's stop_langgraph_dev(), reaches it.
     _PROCESS = proc
+    if os.name == "nt":
+        _BREAK_GROUP_PIDS.add(proc.pid)
     if job is not None:
         job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
@@ -1312,7 +1557,6 @@ def start_langgraph_dev(
     from EvoScientist.setup.research_env import agent_python
 
     _write_workspace_sidecar(
-        workspace_dir=workspace_dir,
         pid=proc.pid,
         config_fingerprint=config_fingerprint,
         # The server inherits this process's environment and data dir, so it
@@ -1321,6 +1565,8 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         host=host,
         lasting=lasting,
+        port=port,
+        break_group_created=_create_time(proc.pid) if os.name == "nt" else None,
     )
 
     # langgraph dev cold-starts in ~10-15s normally, so the budget is
@@ -1354,10 +1600,15 @@ def start_langgraph_dev(
             return proc
         time.sleep(0.5)
 
-    stop_langgraph_dev(proc)
+    stop_langgraph_dev(proc, clean=False)
     raise RuntimeError(
         f"langgraph dev did not become healthy within 60 seconds. Check {RUNTIME.log_file}"
     )
+
+
+class TunnelFailedError(RuntimeError):
+    """cloudflared logged that it could not create the quick tunnel; the
+    message is its log line."""
 
 
 def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | None:
@@ -1378,6 +1629,10 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
 
     Returns:
         The public tunnel URL, or ``None`` if it never appeared in time.
+
+    Raises:
+        TunnelFailedError: cloudflared logged a quick-tunnel failure, so no
+            URL will follow.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1390,15 +1645,25 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
         match = _TUNNEL_URL_RE.search(chunk)
         if match:
             return match.group(0)
+        failure = _TUNNEL_FAILED_RE.search(chunk)
+        if failure:
+            raise TunnelFailedError(failure.group(0).strip())
         time.sleep(poll_interval)
     return None
 
 
-def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
+def stop_langgraph_dev(
+    proc: subprocess.Popen | None = None, *, clean: bool = True
+) -> None:
     """Gracefully stop a langgraph dev process.
 
-    Sends SIGTERM to the process group (langgraph dev spawns worker children),
-    falling back to SIGKILL after 5 seconds. Safe to call with ``None``.
+    Sends SIGTERM to the process tree (langgraph dev spawns worker children),
+    falling back to SIGKILL after 5 seconds. On Windows a server this process
+    spawned first gets Ctrl+Break and up to :data:`CLEAN_STOP_TIMEOUT` to
+    exit before that (:func:`_end_server_tree`); ``clean=False``
+    skips that for a server that never became ready, which has no run to put
+    back in the queue and would only finish loading first. Safe to call with
+    ``None``.
 
     Acquires ``_LOCK`` (reentrant) before mutating ``_PROCESS`` so
     concurrent ``ensure_langgraph_dev`` callers (which also hold ``_LOCK``)
@@ -1415,40 +1680,14 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
             pass
         else:
             if proc.poll() is None:
-                # Cross-platform process-tree shutdown: walk children explicitly
-                # because POSIX process groups (``os.killpg``) don't exist on
-                # Windows. ``psutil.Process.children(recursive=True)`` works on
-                # both — we mirror the previous SIGTERM-then-SIGKILL escalation.
-                try:
-                    parent = psutil.Process(proc.pid)
-                    descendants = parent.children(recursive=True)
-                    for child in descendants:
-                        try:
-                            child.terminate()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    parent.terminate()
-                    proc.wait(timeout=5)
-                except psutil.NoSuchProcess:
-                    pass
-                except subprocess.TimeoutExpired:
-                    try:
-                        parent = psutil.Process(proc.pid)
-                        for child in parent.children(recursive=True):
-                            try:
-                                child.kill()
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-                        parent.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-                    # Reap the Popen handle so we don't leave a zombie until
-                    # the CLI itself exits. Short timeout because parent.kill()
-                    # above already issued SIGKILL to the process tree.
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        pass
+                # Walk the tree explicitly: POSIX process groups
+                # (``os.killpg``) don't exist on Windows.
+                _end_server_tree(
+                    proc.pid,
+                    proc,
+                    break_group=clean and proc.pid in _BREAK_GROUP_PIDS,
+                )
+            _BREAK_GROUP_PIDS.discard(proc.pid)
 
             if proc is _PROCESS:
                 _PROCESS = None
@@ -1501,8 +1740,7 @@ def ensure_langgraph_dev(
 
     Args:
         config: Active EvoScientistConfig.
-        workspace_dir: The project root to register. A server this call
-            starts reports it at ``GET /api/workspace``. If None, nothing is
+        workspace_dir: The project root to register. If None, nothing is
             registered.
         backend: The calling surface's resolved gateway backend. When ``None``,
             falls back to the global ``config.gateway_backend``. Determines
@@ -1559,7 +1797,7 @@ def ensure_langgraph_dev(
         return settle(_Found())
     try:
         with _LOCK:
-            found = _ensure_langgraph_dev_locked(config, workspace_dir)
+            found = _ensure_langgraph_dev_locked(config)
     except BaseException:
         settle(_Found())
         raise
@@ -1595,11 +1833,15 @@ def ensure_langgraph_dev(
 
 
 def serve_project(
-    config: EvoScientistConfig, workspace_dir: Path, *, with_ccproxy: bool = True
+    config: EvoScientistConfig,
+    workspace_dir: Path | None,
+    *,
+    with_ccproxy: bool = True,
 ) -> bool:
-    """Start the background server, or reuse a running one, for
-    *workspace_dir* (``EvoSci service start``, ``EvoSci server start``, the
-    restart after an update). With Anthropic OAuth the server routes through
+    """Start the background server, or reuse a running one, and register
+    *workspace_dir* with it (``EvoSci service start``, ``EvoSci server
+    start``); without one (the restart after an update) nothing is
+    registered. With Anthropic OAuth the server routes through
     ccproxy: *with_ccproxy* starts it first, lasting like the server
     (``RuntimeError`` or ``ValueError`` when it cannot start). Returns and
     raises like :func:`ensure_langgraph_dev`."""
@@ -1623,16 +1865,12 @@ class _Found:
     shell_drift: str | None = None
 
 
-def _ensure_langgraph_dev_locked(
-    config: EvoScientistConfig,
-    workspace_dir: Path | str | None,
-) -> _Found:
+def _ensure_langgraph_dev_locked(config: EvoScientistConfig) -> _Found:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     config_fp = _server_config_fingerprint(config)
     port, host = configured_address(config)
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
-    ws_path = Path(workspace_dir) if workspace_dir is not None else None
 
     if is_langgraph_dev_running(port=port, host=host):
         # The server serves every registered project, so any EvoScientist
@@ -1667,7 +1905,6 @@ def _ensure_langgraph_dev_locked(
 
     try:
         start_langgraph_dev(
-            workspace_dir=ws_path,
             port=port,
             host=host,
             file_persistence=file_persistence,

@@ -68,6 +68,7 @@ class Harness:
         self.workspace = str(tmp_path / "ws")
         self.config = _config(default_workdir=self.workspace)
         self.log: list[Any] = []
+        self.clean_stops: list[bool] = []
         self.started: dict[str, Any] | None = None
         self.proc = _Proc()
         self.occupied = False
@@ -79,6 +80,7 @@ class Harness:
         self.tunnel_url: str | None = None
         # What a reused backend answers the registration.
         self.exposure = registration.ServerExposure()
+        self.registered: list[Workspace] = []
         self.job: Any = None
         # "eof": a pipe closed right after ``ready``; "eof-now": already
         # closed; "devnull"; or a file object.
@@ -147,11 +149,13 @@ class Harness:
         self.log.append("backend start")
         return self.proc
 
-    def _stop(self, proc=None):
+    def _stop(self, proc=None, *, clean=True):
         self.log.append(("backend stop", proc))
+        self.clean_stops.append(clean)
 
-    def _register(self, _workspace, *, url):
+    def _register(self, workspace, *, url):
         """The backend's answer: one this run started reports its options."""
+        self.registered.append(workspace)
         if self.started is None:
             return self.exposure
         return registration.ServerExposure.of(
@@ -264,6 +268,7 @@ def test_end_of_stdin_stops_the_owned_backend_before_stopped(h, capsys):
     h.run(capsys)
     stop = h.log.index(("backend stop", h.proc))
     assert h.log.index(("event", "stopped")) > stop
+    assert h.clean_stops == [True]
 
 
 def test_stdout_carries_only_json(h, capsys, monkeypatch):
@@ -305,7 +310,7 @@ def test_start_gets_the_resolved_options(h, capsys):
     assert h.started["port"] == 7001
     assert h.started["host"] == "0.0.0.0"
     assert h.started["allowed_origins"] == "https://smith.langchain.com"
-    assert str(h.started["workspace_dir"]) == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started["job"] is None  # no job off Windows
 
 
@@ -352,6 +357,28 @@ def test_tunnel_url_is_read_in_short_waits(h, capsys, monkeypatch):
 def test_tunnel_without_url_reports_null(h, capsys):
     _, lines = h.run(capsys, tunnel=True)
     assert _by_event(lines, "ready")["public_url"] is None
+
+
+def test_tunnel_failure_reports_null_and_the_reason(h, capsys, monkeypatch):
+    """cloudflared could not create the tunnel: ``ready`` follows the first
+    read, with no URL and cloudflared's reason among the warnings."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    reads: list[float] = []
+
+    def _read(timeout=35.0, **_k):
+        reads.append(timeout)
+        raise lgm.TunnelFailedError("failed to request quick Tunnel: i/o timeout")
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _read)
+    _, lines = h.run(capsys, tunnel=True)
+    ready = _by_event(lines, "ready")
+    assert ready["public_url"] is None
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in ready["warnings"]
+    )
+    assert reads == [json_mode._TICK]
 
 
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5"])
@@ -435,7 +462,7 @@ def test_a_failed_backend_stop_still_stops_ccproxy_and_closes_the_job(
 
     from EvoScientist.langgraph_dev import manager as lgm
 
-    def _stop(proc=None):
+    def _stop(proc=None, **_kw):
         h.log.append(("backend stop", proc))
         raise psutil.AccessDenied(proc.pid)
 
@@ -465,7 +492,7 @@ def test_job_is_closed_after_a_failed_start(h, capsys):
 # --------------------------------------------------------------------------- #
 def _attach(h, **record):
     h.occupied = True
-    h.sidecar = {"workspace": h.workspace, "pid": 1, **record}
+    h.sidecar = {"pid": 1, **record}
 
 
 def test_attached_run_reports_the_running_backend_and_leaves_it(h, capsys):
@@ -617,15 +644,16 @@ def test_record_for_another_port_is_port_conflict(h, capsys):
     assert lines[-1]["detail"]["reason"] == "record_mismatch"
 
 
-def test_backend_started_from_another_project_is_workspace_conflict(h, capsys):
-    """The app gets the backend's default project from calls that name none."""
-    h.occupied = True
-    h.sidecar = {"workspace": str(h.tmp_path / "other"), "pid": 1}
+def test_older_record_of_another_project_attaches_and_registers(h, capsys):
+    """The backend serves every registered project: the project an older
+    record names does not matter, and this run registers its own."""
+    _attach(h, workspace=str(h.tmp_path / "other"))
     code, lines = h.run(capsys)
-    assert code == 1
-    assert lines[-1]["code"] == "workspace_conflict"
-    assert lines[-1]["detail"]["workspace"] == str(h.tmp_path / "other")
-    assert "hint" in lines[-1]["detail"]
+    assert code == 0
+    ready = _by_event(lines, "ready")
+    assert ready["owned"] is False
+    assert ready["workspace"] == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started is None
 
 
@@ -836,6 +864,7 @@ def test_a_start_cut_after_the_spawn_stops_the_backend(
     _, lines = h.run(capsys)
     assert _events(lines) == ["starting", terminal]
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
+    assert h.clean_stops == [False]
 
 
 def test_stdin_closed_during_the_ccproxy_start_starts_no_backend(
@@ -1130,7 +1159,7 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "m.is_langgraph_dev_running = lambda *a, **k: True\n"
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
         "m.start_langgraph_dev = lambda **k: P()\n"
-        "m.stop_langgraph_dev = lambda p=None: print('stopped backend', file=sys.stderr)\n"
+        "m.stop_langgraph_dev = lambda p=None, **_k: print('stopped backend', file=sys.stderr)\n"
         "from EvoScientist.langgraph_dev import registration as r\n"
         "r.register_folder = lambda *a, **k: None\n"
         + (_GRANDCHILD if grandchild else "")

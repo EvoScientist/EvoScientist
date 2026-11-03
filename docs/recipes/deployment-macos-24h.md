@@ -12,7 +12,7 @@ This guide covers deploying EvoScientist as a fully automated 24/7 service on ma
 
 ## Prerequisites
 
-- macOS 13+ (Apple Silicon or Intel)
+- macOS 13+ on Apple silicon
 - [Claude Code](https://claude.ai/code) installed and subscription active
 - [uv](https://astral.sh/uv) installed
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))

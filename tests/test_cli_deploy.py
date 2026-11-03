@@ -86,10 +86,13 @@ def _run_deploy_once(
     langgraph_dev_running: bool = True,  # health-check passes after start
     tunnel: bool = False,
     tunnel_url: str | None = None,
+    tunnel_error: str | None = None,
     on_port_check: Callable[[], None] | None = None,
+    printed: list | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
-    Returns a ``captured`` dict with observation points."""
+    Returns a ``captured`` dict with observation points; *printed* collects
+    the console output, also of a run that exits."""
     import EvoScientist.config as config_mod
 
     captured: dict[str, Any] = {
@@ -100,7 +103,7 @@ def _run_deploy_once(
         "workspace_passed": None,
         "port_passed": None,
         "host_passed": None,
-        "printed": [],
+        "printed": [] if printed is None else printed,
         "atexit_callbacks": [],
     }
 
@@ -131,7 +134,6 @@ def _run_deploy_once(
     )
 
     def _fake_start_langgraph_dev(
-        workspace_dir=None,
         *,
         port=None,
         host=None,
@@ -145,7 +147,6 @@ def _run_deploy_once(
         captured["langgraph_dev_started"] = True
         captured["lasting"] = lasting
         captured["allowed_origins_passed"] = allowed_origins
-        captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
         captured["host_passed"] = host
         captured["jobs_per_worker_passed"] = jobs_per_worker
@@ -161,17 +162,21 @@ def _run_deploy_once(
     from EvoScientist.langgraph_dev import registration
 
     # The started server's answer: the options it started with.
-    monkeypatch.setattr(
-        registration,
-        "register_folder",
-        lambda *_a, **_k: registration.ServerExposure.of(
+    def _fake_register_folder(workspace, **_k):
+        captured["workspace_passed"] = str(workspace.root)
+        return registration.ServerExposure.of(
             captured["host_passed"], captured.get("tunnel_passed")
-        ),
-    )
+        )
+
+    monkeypatch.setattr(registration, "register_folder", _fake_register_folder)
+
     # Never poll a real log for the tunnel URL in tests.
-    monkeypatch.setattr(
-        lgm, "read_tunnel_url", lambda *a, **k: tunnel_url, raising=False
-    )
+    def _fake_read_tunnel_url(*_a, **_k):
+        if tunnel_error is not None:
+            raise lgm.TunnelFailedError(tunnel_error)
+        return tunnel_url
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _fake_read_tunnel_url, raising=False)
 
     # ccproxy mocks
     from EvoScientist import ccproxy_manager as ccp
@@ -293,6 +298,35 @@ def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
 
     assert captured["tunnel_passed"] is True
     assert any("PUBLIC TUNNEL" in line for line in captured["printed"])
+
+
+def test_deploy_reports_a_tunnel_failure(monkeypatch, tmp_path):
+    """A failure cloudflared logged is reported with its reason, not as a URL
+    the user should look for in the log."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(
+        monkeypatch,
+        config,
+        tunnel=True,
+        tunnel_error="failed to request quick Tunnel: i/o timeout",
+    )
+
+    printed = "\n".join(captured["printed"])
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in printed
+    )
+    assert "tunnel up" not in printed
+    assert "not detected" not in printed
+
+
+def test_deploy_reports_a_tunnel_url_that_never_came(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, tunnel=True)
+
+    printed = "\n".join(captured["printed"])
+    assert "Tunnel URL not detected" in printed
+    assert "quick tunnel failed" not in printed
 
 
 def test_deploy_workdir_cli_arg_beats_config(monkeypatch, tmp_path):
@@ -565,6 +599,38 @@ def test_deploy_refuses_when_port_occupied_by_evosci(monkeypatch, tmp_path):
             langgraph_dev_running=True,  # /ok responds → existing EvoSci instance
         )
     assert exc.value.exit_code == 1
+
+
+@pytest.mark.parametrize("lasting", [True, False])
+@pytest.mark.parametrize(
+    ("bind", "points_to_status"),
+    [({}, True), ({"port": 7000}, False), ({"host": "0.0.0.0"}, False)],
+    ids=["configured", "port_flag", "host_flag"],
+)
+def test_deploy_occupied_port_names_recorded_server(
+    monkeypatch, tmp_path, lasting, bind, points_to_status
+):
+    """It names the recorded server's pid; ``EvoSci server status`` reads the
+    configured port and host, so it is named only for a deploy on those."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    monkeypatch.setattr(
+        lgm, "_read_workspace_sidecar", lambda: {"pid": 4242, "lasting": lasting}
+    )
+    monkeypatch.setattr(lgm, "_pid_serves_port", lambda *_a: True)
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            port_occupied=True,
+            langgraph_dev_running=True,
+            printed=printed,
+            **bind,
+        )
+    output = " ".join(" ".join(printed).split())
+    assert "4242" in output
+    assert ("EvoSci server status" in output) is points_to_status
 
 
 def test_deploy_refuses_when_port_occupied_by_foreign(monkeypatch, tmp_path):

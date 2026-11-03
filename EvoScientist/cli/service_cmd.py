@@ -21,7 +21,7 @@ def service_start(
     workdir: str | None = typer.Option(
         None,
         "--workdir",
-        help="The project to start it from (default: default_workdir, else "
+        help="The project it registers (default: default_workdir, else "
         "the current folder)",
     ),
 ) -> None:

@@ -187,7 +187,7 @@ def _run_webui_once(
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_kw: False)
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: None)
 
-    def _fake_start_langgraph_dev(workspace_dir=None, *, port=None, host=None, **_kw):
+    def _fake_start_langgraph_dev(*, port=None, host=None, **_kw):
         captured["backend_port"] = port
         captured["backend_host"] = host
         return SimpleNamespace(pid=99999)

@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.8" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[31 Oct 2026]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — One background service for every project (stop it with `EvoSci server stop`); new model: GPT-6.1 Terra (OpenAI + OpenRouter); a project `.env` now holds only `EvoSci` command settings; hardened setup, a stricter shell sandbox and a safer `EvoSci update`; Apple silicon only on macOS; fixes for memory workers, serve turns and standalone channels.
 - **[24 Oct 2026]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — Desktop groundwork: `EvoSci deploy --json` and a settings API for the WebUI; new models: Kimi K3.1 Pro (Moonshot + OpenRouter) and MiniMax M3.1 Flash (MiniMax + OpenRouter), with the Kimi and MiniMax lists trimmed to K3.1 Pro / K3 and M3.1 Flash / M3; routed providers use only their own API key; bounded memory worker writes; tool selection keeps the built-in tools; fixes for scheduled tasks after restarts, Windows output, hangs at exit, standalone channels and unresponsive MCP servers; deepagents 0.7.32.
 - **[17 Oct 2026]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — One-line install for macOS, Windows and Linux, and `EvoSci update` to move an install between releases; acceptance criteria and goals: `--rubric`, `/rubric` and `/goal` grade work against criteria you set; proactivity: `EvoSci serve` follows up in channel chats on its own (`/proactive`); sign in with ChatGPT directly; the backend answers browser requests only from trusted pages; transient model failures retry within a wait budget; new models: Claude Haiku 5.5 (Anthropic), Gemini 4 Argon, Muse Wonder and Muse Spark Open (OpenRouter), with the Claude lists trimmed to the four current models and Claude Sonnet 5.5 as the default; Windows channel attachments and `@file` mentions open in the file tools; deepagents 0.7.28.
 - **[09 Oct 2026]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — New model: Claude Haiku 5.5 (OpenRouter); new provider: Opper; installed skills apply from the next message without `/new`, and `/skill-name` pins a skill to a message; the WebUI installs locally and starts offline; on Windows the agent's commands run in Git Bash set up by `EvoSci setup`; sessions, memory and scheduled tasks are scoped to their project, and `/threads` shows each thread's workspace; a slow MCP server no longer stalls the server start; deepagents 0.7.23.
@@ -212,7 +213,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 ### Quick Install
 
-**macOS, Linux, WSL2**
+**macOS (Apple silicon), Linux, WSL2**
 
 ```bash
 curl -fsSL https://evoscientist.ai/install.sh | bash
@@ -459,7 +460,7 @@ Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yam
 
 Every agent takes its keys from `config.yaml` or the environment. A project `.env` holds only settings of the `EvoSci` command started in that folder, such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`; `EvoSci` warns about, and ignores, any key or other setting EvoScientist reads in it. Other variables in it, such as `HF_TOKEN`, are ignored too: export them in your shell before starting EvoSci.
 
-The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs (the project is the one the WebUI and the desktop app open), and after changing that, run `EvoSci service stop` and start it again.
+The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs, and after changing that, run `EvoSci service stop` and start it again.
 
 </details>
 
@@ -506,7 +507,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a 
 <details>
 <summary>Desktop WebUI</summary>
 
-Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal. The server keeps running after the WebUI closes, for every EvoSci session, until `EvoSci service stop`; `EvoSci --ui webui` opens only the project that server was started from, so stop it first to open another:
+Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal. The server keeps running after the WebUI closes, for every EvoSci session, until `EvoSci service stop`; the WebUI shows every project registered with that server:
 
 ```bash
 EvoSci config set ui_backend webui   # persist; or one-off with `EvoSci --ui webui`
@@ -533,6 +534,8 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 > **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
+>
+> **Loopback is not private on a shared machine.** It keeps the servers off the network, not away from this machine's other accounts: any program on the machine can reach ports 6174 and 4716, and the backend trusts it. EvoScientist assumes one user per machine. On a shared server, other accounts can use your backend, run its agent as you and read your projects, so use a machine, VM or container of your own.
 
 **Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend (`EvoSci server stop`; the next session starts it again):
 

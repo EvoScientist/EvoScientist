@@ -452,7 +452,7 @@ if own_extras:
             $blocking = Get-BlockingProcesses $envDir $binDir
             if ($blocking.Count -gt 0) {
                 throw ("EvoScientist is running, and the install cannot replace it while it runs:`n  " + ($blocking -join "`n  ") +
-                    "`nClose these windows (the background agent service: EvoSci service stop), then run this script again. Nothing was changed.")
+                    "`nClose these windows (the background agent service: EvoSci service stop; before 0.4.0, EvoSci server stop), then run this script again. Nothing was changed.")
             }
             $receipt = Join-Path $envDir 'uv-receipt.toml'
             $python = Join-Path $envDir 'Scripts\python.exe'

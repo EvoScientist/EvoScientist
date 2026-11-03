@@ -37,6 +37,18 @@ from tests.fakes.common import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fast_thread_replay_skip_timeouts(monkeypatch):
+    """Keep ``_ThreadEvents.skip_replay`` off the wall clock in the suite.
+
+    Production defaults stay in ``EvoScientist.gateway.server``; skip_replay
+    reads them at call time when the constructor left timeouts unset.
+    """
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.01)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_FIRST_EVENT_SECONDS", 0.05)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.5)
+
+
 async def test_local_gateway_streams_from_injected_streamer():
     seen: dict[str, Any] = {}
 
@@ -1585,7 +1597,11 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
     )
-    message = Command(resume={"answer": "yes"}) if resume else "hi"
+    message = (
+        Command(resume={"first": {"decisions": [{"type": "approve"}]}})
+        if resume
+        else "hi"
+    )
     events = [
         event
         async for event in gateway.stream_events(
@@ -1600,7 +1616,7 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     assert len(threads.created) == 1
     if resume:
         assert stream.run.responses == [
-            {"response": {"answer": "yes"}, "interrupt_id": "first"}
+            {"response": {"decisions": [{"type": "approve"}]}, "interrupt_id": "first"}
         ]
         assert stream.run.starts == []
     else:
@@ -1628,6 +1644,50 @@ async def test_metadata_best_effort_does_not_swallow_thread_registration_failure
         ):
             pass
     assert stream.run.starts == []
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
+async def test_metadata_refresh_carries_the_model_of_each_turn(resume):
+    """Every turn refreshes the metadata, not only the one that registers the thread."""
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+    async for _event in gateway.stream_events(
+        RunRequest(message="hi", thread_id="abc12345", metadata={"model": "model-a"})
+    ):
+        pass
+    if resume:
+        stream.interrupts = [{"interrupt_id": "first"}]
+    second = (
+        Command(resume={"first": {"decisions": [{"type": "approve"}]}})
+        if resume
+        else "again"
+    )
+    async for _event in gateway.stream_events(
+        RunRequest(message=second, thread_id="abc12345", metadata={"model": "model-b"})
+    ):
+        pass
+
+    assert len(threads.created) == 1
+    assert [
+        (thread_id, metadata["model"])
+        for thread_id, metadata in threads.metadata_updates
+    ] == [("abc12345", "model-a"), ("abc12345", "model-b")]
+    assert threads.threads[0]["metadata"]["model"] == "model-b"
+    if resume:
+        assert len(stream.run.starts) == 1
+        assert len(stream.run.responses) == 1
+    else:
+        assert len(stream.run.starts) == 2
 
 
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
@@ -1931,11 +1991,45 @@ async def test_langgraph_server_gateway_ignores_non_root_value_messages():
 
 
 async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
+    # Pause on the new-message path: the envelope carries payload (ignored by
+    # the processor) and stream.interrupted can still lag, so the interrupt
+    # comes from thread state after paused is set.
     stream = FakeLangGraphThreadStream(
         "abc12345",
-        events=[],
-        interrupts=[{"interrupt_id": "interrupt-1", "value": None}],
-        interrupted=True,
+        events=[
+            {
+                "method": "lifecycle",
+                "params": {"namespace": [], "data": {"event": "running"}},
+                "event_id": "synth:run-1:lc::running",
+            },
+            {
+                "method": "input.requested",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "interrupt_id": "interrupt-1",
+                        "payload": {
+                            "action_requests": [
+                                {
+                                    "name": "execute",
+                                    "args": {"command": "echo hello"},
+                                    "id": "tool-1",
+                                }
+                            ],
+                            "review_configs": [
+                                {
+                                    "action_name": "execute",
+                                    "allowed_decisions": ["approve", "reject"],
+                                }
+                            ],
+                        },
+                    },
+                },
+                "event_id": "2-0",
+            },
+        ],
+        interrupted=False,
+        stay_open=True,
     )
     threads = FakeLangGraphThreadsClient(
         threads=[],
@@ -2456,7 +2550,7 @@ async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
 async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2597,7 +2691,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2643,7 +2737,7 @@ async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after
 async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2704,7 +2798,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
 ):
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
-            for event in self.events:
+            for event in self.queued_events:
                 yield event
             raise RuntimeError("provider connection lost")
 
@@ -2808,6 +2902,109 @@ async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort()
     await gen.aclose()
 
     assert cancel_calls == [("abc12345", ["run-1"])]
+
+
+_PAUSE_VALUE = {
+    "action_requests": [{"name": "execute", "args": {"command": "ls"}, "id": "t-1"}],
+    "review_configs": [{"action_name": "execute", "allowed_decisions": ["approve"]}],
+}
+_RESUME_DECISIONS = {"decisions": [{"type": "approve"}]}
+
+
+def _root_pause(data_key: str) -> dict[str, Any]:
+    return {
+        "method": "input.requested",
+        "params": {
+            "namespace": [],
+            "data": {"interrupt_id": "interrupt-2", data_key: _PAUSE_VALUE},
+        },
+        "event_id": "2-0",
+    }
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
+@pytest.mark.parametrize(
+    "data_key",
+    [
+        # langgraph-api 0.17 sends ``payload``, which the event processor does
+        # not parse (#706): the interrupt is read after the pause, once the run is
+        # marked completed. When #706 lands, this case moves onto the in-loop path;
+        # pin the run_completed ordering with a pause the processor cannot parse
+        # (e.g. a root ``lifecycle: interrupted`` only).
+        pytest.param("payload", id="server-shape"),
+        # The ``value`` shape is emitted inside the loop, before the run is
+        # marked completed: only the ``emitted_interrupt`` gate keeps it.
+        pytest.param("value", id="value-shape"),
+    ],
+)
+async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
+    resume, data_key
+):
+    """A consumer that stops at the interrupt event must leave the paused run alone."""
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[_root_pause(data_key)])
+    if resume:
+        stream.interrupts = [{"interrupt_id": "interrupt-1"}]
+        respond = stream.run.respond
+
+        async def respond_and_pause(response, *, interrupt_id=None):
+            # The resumed run pauses again on a new interrupt.
+            result = await respond(response, interrupt_id=interrupt_id)
+            value = _PAUSE_VALUE if data_key == "value" else None
+            stream.interrupts = [{"interrupt_id": "interrupt-2", "value": value}]
+            stream.interrupted = True
+            return result
+
+        stream.run.respond = respond_and_pause
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("tools",),
+                # Both server-shape cases read the pause from here.
+                "interrupts": [{"id": "interrupt-2", "value": _PAUSE_VALUE}],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status != "running":
+                return []
+            return [
+                # The run the finally would cancel if the gate let it.
+                {
+                    "run_id": "resumed-run",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {"resume": {"interrupt-1": _RESUME_DECISIONS}}
+                    },
+                },
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+    message = Command(resume={"interrupt-1": _RESUME_DECISIONS}) if resume else "hi"
+
+    gen = gateway.stream_events(RunRequest(message=message, thread_id="abc12345"))
+    interrupt = None
+    async for event in gen:
+        if event["type"] == "interrupt":
+            interrupt = event
+            break
+    await gen.aclose()
+
+    assert interrupt is not None
+    assert interrupt["interrupt_id"] == "interrupt-2"
+    assert cancel_calls == []
 
 
 @pytest.mark.parametrize(

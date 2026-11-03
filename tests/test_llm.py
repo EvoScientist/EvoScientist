@@ -3977,7 +3977,10 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
 
     def respond(request):
         captured["url"] = str(request.url)
-        captured["api_key"] = request.headers.get("x-api-key")
+        # anthropic 2.x sends the key as a bearer token, 1.x as x-api-key.
+        captured["api_key"] = request.headers.get("x-api-key") or request.headers.get(
+            "authorization", ""
+        ).removeprefix("Bearer ")
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             200,

@@ -21,9 +21,8 @@ def pytest_configure(config):
     """Point the home folder at an empty one before EvoScientist is imported.
 
     ``EvoScientist.paths`` resolves the data and config folders from it at
-    import, and the import itself migrates files there, so a fixture would
-    act too late. ``XDG_CONFIG_HOME`` and ``EVOSCIENTIST_DATA_DIR`` would
-    override it, so they go too.
+    import, so a fixture would act too late. ``XDG_CONFIG_HOME`` and
+    ``EVOSCIENTIST_DATA_DIR`` would override it, so they go too.
     """
     global _test_home
     if "EvoScientist" in sys.modules:
@@ -301,18 +300,14 @@ def _no_health_server(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_process_workspace():
-    """``process_workspace()`` and ``launcher_workspace()`` are read once per
-    process; tests change env/cwd."""
-    from EvoScientist.paths import (
-        launcher_workspace,
-        process_session_dirs,
-        process_workspace,
-    )
+    """``process_workspace()`` and ``process_session_dirs()`` are read once
+    per process; tests change env/cwd."""
+    from EvoScientist.paths import process_session_dirs, process_workspace
 
-    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+    for cached in (process_workspace, process_session_dirs):
         cached.cache_clear()
     yield
-    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+    for cached in (process_workspace, process_session_dirs):
         cached.cache_clear()
 
 

@@ -13,9 +13,8 @@ from typer.testing import CliRunner
 from EvoScientist import paths
 from EvoScientist.cli._app import app
 from EvoScientist.config.settings import get_config_path
-from EvoScientist.langgraph_dev import manager
+from EvoScientist.langgraph_dev import manager, registration
 from EvoScientist.langgraph_dev.registration import OlderServerError
-from EvoScientist.paths import Workspace
 from EvoScientist.setup import server as server_stage
 
 
@@ -180,7 +179,7 @@ def _record_steps(monkeypatch) -> list:
     "sidecar",
     [
         None,
-        {"pid": 1, "workspace": "/a", "lasting": False},
+        {"pid": 1, "lasting": False},
         {"pid": 1, "lasting": True},
     ],
 )
@@ -200,6 +199,31 @@ def test_offer_leaves_running_service_alone(monkeypatch, sidecar):
     lasting = bool(sidecar and sidecar.get("lasting"))
     hint = "EvoSci service stop" if lasting else "not the background service"
     assert hint in " ".join(captured.get().split())
+
+
+@pytest.mark.parametrize("default_workdir", [True, False])
+def test_offer_restart_hint_follows_default_workdir(
+    monkeypatch, tmp_path, default_workdir
+):
+    """With a ``default_workdir`` a plain service start restarts it; without
+    one a session that needs it does."""
+    from EvoScientist.cli import commands
+
+    if default_workdir:
+        _saved(default_workdir=str(tmp_path))
+    _running_service(monkeypatch, {"pid": 1, "lasting": True})
+    _answer(monkeypatch, True)
+    steps = _record_steps(monkeypatch)
+
+    with commands.console.capture() as captured:
+        commands._offer_server_start()
+
+    output = " ".join(captured.get().split())
+    assert steps == []
+    assert "EvoSci service stop" in output
+    assert ("EvoSci service start" in output) is default_workdir
+    assert ("EvoSci session" in output) is not default_workdir
+    assert "--workdir" not in output
 
 
 def test_offer_service_start_failure_is_reported(monkeypatch, tmp_path):
@@ -263,27 +287,67 @@ def _updated(monkeypatch) -> None:
     monkeypatch.setattr(server_stage, "_installed_version", lambda: "new")
 
 
-def test_stage_restarts_server_update_stopped(started, monkeypatch, tmp_path):
-    project = Workspace(tmp_path / "proj")
-    project.root.mkdir()
-    server_stage.remember_for_restart(str(project.root))
+def test_stage_restarts_server_update_stopped(started, monkeypatch):
+    """The server restores every registered project: the restart registers
+    none."""
+    server_stage.remember_for_restart()
     _updated(monkeypatch)
     events, emit = _emit()
 
     result = server_stage.run_stage(emit, "default")
 
-    assert started == [(project.root, "langgraph_server")]
+    assert started == [(None, "langgraph_server")]
     assert result.detail["restarted"] is True
-    assert str(project.root) in result.message
+    assert "Started" in result.message
     assert not (paths.SERVER_HOME / "restart-after-update.json").exists()
     assert [e["status"] for e in events] == ["running"]
 
 
-def test_stage_ignores_record_of_failed_update(started, tmp_path):
+def test_stage_restart_finding_running_server_claims_no_start(started, monkeypatch):
+    """Another server took the port since the update: this process started
+    nothing, and says where to look."""
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    server_stage.remember_for_restart()
+    _updated(monkeypatch)
+
+    result = server_stage.run_stage(_emit()[1], "default")
+
+    assert started == [(None, "langgraph_server")]
+    assert result.detail["restarted"] is False
+    assert "Started" not in result.message
+    assert "EvoSci server status" in result.message
+
+
+def test_stage_restart_ignores_project_of_older_record(started, monkeypatch, tmp_path):
+    """An older updater recorded the project the server was started from;
+    the restart still registers none, so a project removed since stays
+    removed."""
+    project = tmp_path / "proj"
+    paths.SERVER_HOME.mkdir(parents=True, exist_ok=True)
+    (paths.SERVER_HOME / "restart-after-update.json").write_text(
+        json.dumps(
+            {
+                "workspace": str(project),
+                "stopped_at": time.time(),
+                "from_version": "old",
+            }
+        )
+    )
+    _updated(monkeypatch)
+
+    result = server_stage.run_stage(_emit()[1], "default")
+
+    assert started == [(None, "langgraph_server")]
+    assert result.detail["restarted"] is True
+    assert not project.exists()
+
+
+def test_stage_ignores_record_of_failed_update(started):
     """An update that failed after it stopped the server left it."""
     paths.SERVER_HOME.mkdir(parents=True, exist_ok=True)
     (paths.SERVER_HOME / "restart-after-update.json").write_text(
-        json.dumps({"workspace": str(tmp_path), "stopped_at": time.time() - 7200})
+        json.dumps({"stopped_at": time.time() - 7200})
     )
 
     result = server_stage.run_stage(_emit()[1], "default")
@@ -293,12 +357,12 @@ def test_stage_ignores_record_of_failed_update(started, tmp_path):
     assert not (paths.SERVER_HOME / "restart-after-update.json").exists()
 
 
-def test_stage_restart_failure_is_reported_not_raised(started, monkeypatch, tmp_path):
-    def older(*_a, **_k):
-        raise OlderServerError()
+def test_stage_restart_failure_is_reported_not_raised(started, monkeypatch):
+    def failed(*_a, **_k):
+        raise RuntimeError("ccproxy did not start")
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", older)
-    server_stage.remember_for_restart(str(tmp_path))
+    monkeypatch.setattr(manager, "ensure_langgraph_dev", failed)
+    server_stage.remember_for_restart()
     _updated(monkeypatch)
 
     result = server_stage.run_stage(_emit()[1], "default")
@@ -307,9 +371,9 @@ def test_stage_restart_failure_is_reported_not_raised(started, monkeypatch, tmp_
     assert "Could not start" in result.message
 
 
-def test_stage_ignores_record_when_update_did_not_install(started, tmp_path):
+def test_stage_ignores_record_when_update_did_not_install(started):
     """The update failed after it stopped the server: same version."""
-    server_stage.remember_for_restart(str(tmp_path))
+    server_stage.remember_for_restart()
 
     result = server_stage.run_stage(_emit()[1], "default")
 
@@ -373,7 +437,7 @@ def test_service_stop_leaves_deploy_owned_server(monkeypatch, tmp_path, ccproxy_
     monkeypatch.setattr(
         manager,
         "_read_workspace_sidecar",
-        lambda: {"workspace": "/a", "pid": 4242, "lasting": False},
+        lambda: {"pid": 4242, "lasting": False},
     )
     monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
     monkeypatch.setattr(
@@ -418,8 +482,8 @@ def test_service_stop_leaves_ccproxy_for_unrecorded_server(monkeypatch):
 @pytest.mark.parametrize(
     ("sidecar", "cmdline"),
     [
-        ({"workspace": "/a", "pid": 4242, "lasting": False}, None),
-        ({"workspace": "/a", "pid": 4242}, ["langgraph"]),
+        ({"pid": 4242, "lasting": False}, None),
+        ({"pid": 4242}, ["langgraph"]),
     ],
     ids=["server-gone", "older-release"],
 )
@@ -459,7 +523,7 @@ def test_server_stop_stops_deploy_owned_server(monkeypatch, tmp_path):
     monkeypatch.setattr(
         manager,
         "_read_workspace_sidecar",
-        lambda: {"workspace": "/a", "pid": 4242, "lasting": False},
+        lambda: {"pid": 4242, "lasting": False},
     )
     monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
     monkeypatch.setattr(
@@ -524,17 +588,128 @@ def test_server_start_that_lost_race_says_it_reused(monkeypatch, tmp_path):
 def test_server_status_names_server_on_another_port(monkeypatch):
     """langgraph_dev_port changed while the server ran."""
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(
-        manager, "_read_workspace_sidecar", lambda: {"workspace": "/a", "pid": 4242}
-    )
+    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": 4242})
     monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
     monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
+    monkeypatch.setattr(registration, "served_projects", lambda _url: [])
 
     result = CliRunner().invoke(app, ["server", "status"])
 
     output = " ".join(result.output.split())
     assert "serves port 7000" in output
     assert "stale record" not in output
+
+
+@pytest.mark.parametrize(
+    "configured_answers", [False, True], ids=["configured_idle", "configured_busy"]
+)
+def test_server_status_lists_projects_of_server_on_another_port(
+    monkeypatch, configured_answers
+):
+    """The projects are the recorded server's, whatever answers on the
+    configured port."""
+    urls = _status_server(
+        monkeypatch, projects=[{"workspace_dir": "/p/a", "missing": False}]
+    )
+    monkeypatch.setattr(
+        manager, "is_langgraph_dev_running", lambda **_k: configured_answers
+    )
+    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
+    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "192.0.2.10"))
+
+    output = _status_output()
+
+    assert [url.rsplit("//", 1)[-1] for url in urls] == ["192.0.2.10:7000"]
+    assert "projects (port 7000):" in output
+    assert "/p/a" in output
+
+
+def _status_server(monkeypatch, *, projects=None, error=None):
+    """A running server on the configured port, recorded and serving it;
+    *projects* is what it lists, *error* what the read raises instead."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(
+        manager, "_read_workspace_sidecar", lambda: {"pid": 4242, "lasting": True}
+    )
+    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: True)
+    urls: list[str] = []
+
+    def served_projects(url):
+        urls.append(url)
+        if error is not None:
+            raise error
+        return projects
+
+    monkeypatch.setattr(registration, "served_projects", served_projects)
+    return urls
+
+
+def _status_output() -> str:
+    result = CliRunner().invoke(app, ["server", "status"])
+    assert result.exit_code == 0, result.output
+    return " ".join(result.output.split())
+
+
+def test_server_status_lists_projects_of_own_server(monkeypatch):
+    kept, gone = "/p/kept", "/p/gone"
+    _status_server(
+        monkeypatch,
+        projects=[
+            {"workspace_dir": kept, "name": "kept", "missing": False},
+            {"workspace_dir": gone, "name": "gone", "missing": True},
+        ],
+    )
+
+    output = _status_output()
+
+    assert "on port 6174" in output
+    assert "4242" in output
+    assert f"{kept} (folder missing)" not in output
+    assert kept in output
+    assert f"{gone} (folder missing)" in output
+
+
+def test_server_status_without_projects_says_none(monkeypatch):
+    _status_server(monkeypatch, projects=[])
+
+    output = _status_output()
+
+    assert "projects: none" in output
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (lambda: registration.OtherServerError("another data folder"), "not listed"),
+        (lambda: OlderServerError(), "could not be read"),
+        (lambda: registration.RegistrationError("timed out"), "could not be read"),
+        (
+            lambda: registration.RegistrationError("Cannot read the local secret"),
+            "could not be read",
+        ),
+    ],
+    ids=["another_data_folder", "older_server", "read_failure", "unreadable_secret"],
+)
+def test_server_status_says_why_projects_are_not_listed(monkeypatch, error, said):
+    _status_server(monkeypatch, error=error())
+
+    output = _status_output()
+
+    assert said in output
+    assert "projects: none" not in output
+
+
+def test_server_status_not_running_lists_no_projects(monkeypatch):
+    urls = _status_server(monkeypatch, projects=[])
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: None)
+
+    output = _status_output()
+
+    assert "No background langgraph dev server is running" in output
+    assert urls == []
 
 
 def test_service_start_starts_ccproxy_with_server(started, tmp_path, monkeypatch):
@@ -774,6 +949,28 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
     assert result.exit_code == 0, result.output
     assert "--yes" not in result.output
     assert "left running" in result.output
+
+
+def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):
+    """Its records are kept: the stop says so and to try again, not that it
+    has no record, nor how to kill it by hand, and exits 1 for a script."""
+
+    def stop(*, keep_owned=False):
+        raise manager.ServerStopFailedError(
+            "Could not stop langgraph dev (pid 42): out of resources. It keeps "
+            "running and its records are kept; try again."
+        )
+
+    monkeypatch.setattr(manager, "stop_recorded_server", stop)
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "try again" in output
+    assert "ownership record" not in output
+    assert "kill" not in output
+    assert "Stop-Process" not in output
 
 
 def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):

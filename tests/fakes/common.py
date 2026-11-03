@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -561,12 +561,17 @@ class FakeCheckpointAgent:
             self.values = {**self.values, "messages": messages}
 
 
+FAKE_THREAD_RUN_ID = "run-1"
+FAKE_THREAD_RUN_COMPLETED_EVENT_ID = f"synth:{FAKE_THREAD_RUN_ID}:lc::completed"
+
+
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests."""
 
     def __init__(self) -> None:
         self.starts: list[dict[str, Any]] = []
         self.responses: list[dict[str, Any]] = []
+        self.started = asyncio.Event()
 
     async def start(
         self,
@@ -582,7 +587,8 @@ class FakeLangGraphRunModule:
                 "metadata": metadata,
             }
         )
-        return {"run_id": "run-1"}
+        self.started.set()
+        return {"run_id": FAKE_THREAD_RUN_ID}
 
     async def respond(
         self,
@@ -599,6 +605,20 @@ class FakeLangGraphRunModule:
         return {}
 
 
+def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
+    if event.get("method") != "lifecycle":
+        return False
+    params = event.get("params") or {}
+    if not isinstance(params, Mapping) or params.get("namespace"):
+        return False
+    data = params.get("data")
+    return isinstance(data, Mapping) and data.get("event") in {
+        "completed",
+        "failed",
+        "interrupted",
+    }
+
+
 class FakeLangGraphThreadStream:
     """Finite fake of the LangGraph SDK thread stream."""
 
@@ -609,15 +629,23 @@ class FakeLangGraphThreadStream:
         *,
         interrupts: list[dict[str, Any]] | None = None,
         interrupted: bool = False,
+        replay: Iterable[dict[str, Any]] | None = None,
+        stay_open: bool = False,
     ) -> None:
         self.thread_id = thread_id
-        self.events = list(events or [])
+        self.queued_events = list(events or [])
         self.interrupts = interrupts or []
         self.interrupted = interrupted
         self.run = FakeLangGraphRunModule()
         self.subscribed_channels: list[list[str]] = []
         self.entered = False
         self.exited = False
+        # ``events`` only: earlier runs' envelopes sent first on every new
+        # connection, and whether the SSE stays open after the queued run.
+        self.replay = list(replay or [])
+        self.stay_open = stay_open
+        self.event_streams_opened = 0
+        self.lost_live_events = False
 
     async def __aenter__(self) -> FakeLangGraphThreadStream:
         self.entered = True
@@ -627,8 +655,54 @@ class FakeLangGraphThreadStream:
         self.exited = True
 
     async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
-        for event in self.events:
+        for event in self.queued_events:
             yield event
+
+    @property
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        """All-channel thread SSE, shaped like langgraph-api's inmem runtime.
+
+        It replays ``replay`` first and registers for live envelopes only
+        after that, so a run started before the replay ends loses its
+        envelopes (and, with ``stay_open``, the stream never ends).
+        """
+        self.event_streams_opened += 1
+        # langgraph_sdk/_async/stream.py ``_ALL_CHANNELS``
+        self.subscribed_channels.append(
+            [
+                "values",
+                "updates",
+                "messages",
+                "tools",
+                "lifecycle",
+                "input",
+                "checkpoints",
+                "tasks",
+                "custom",
+            ]
+        )
+        return self._thread_events()
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        for event in self.replay:
+            yield event
+        if self.replay and self.run.started.is_set():
+            self.lost_live_events = True
+        else:
+            await self.run.started.wait()
+            last: dict[str, Any] | None = None
+            async for event in self._iter_events():
+                last = event
+                yield event
+            if last is None or not _is_root_lifecycle_stop(last):
+                # The server always ends a run with a root lifecycle event.
+                yield {
+                    "method": "lifecycle",
+                    "params": {"namespace": [], "data": {"event": "completed"}},
+                    "event_id": FAKE_THREAD_RUN_COMPLETED_EVENT_ID,
+                }
+        if self.stay_open:
+            await asyncio.Event().wait()
 
     def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
         self.subscribed_channels.append(channels)

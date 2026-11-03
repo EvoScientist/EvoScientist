@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -426,6 +427,8 @@ async def _runtime_run(assistant_id: str, thread_id: str, configurable=None) -> 
             assistant_id,
             {"config": {"configurable": configurable or {}}},
             thread_id=thread_id,
+            # As langgraph-api does: the store refuses a second run with the same ID.
+            run_id=uuid4(),
             metadata={},
             prevent_insert_if_inflight=False,
             if_not_exists="create",
