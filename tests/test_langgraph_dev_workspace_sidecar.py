@@ -143,7 +143,9 @@ def test_read_workspace_sidecar_reads_older_record_with_project(
     """A record an older release wrote also names the project of the client
     that started the server; it still reads."""
     sidecar = tmp_path / "old.json"
-    sidecar.write_text(json.dumps({"pid": 42, "lasting": True}))
+    sidecar.write_text(
+        json.dumps({"workspace": str(tmp_path / "proj"), "pid": 42, "lasting": True})
+    )
     monkeypatch.setattr(
         manager,
         "RUNTIME",
@@ -209,11 +211,21 @@ def test_ensure_langgraph_dev_serves_another_project_from_running_server(
     manager._write_workspace_sidecar(pid=99999)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
+    from EvoScientist.langgraph_dev import registration
+
+    registered: list[paths.Workspace] = []
+
+    def register_folder(workspace, *, url):
+        registered.append(workspace)
+        return registration.ServerExposure()
+
+    monkeypatch.setattr(registration, "register_folder", register_folder)
 
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B") is True
 
+    assert registered == [paths.Workspace(tmp_path / "B")]
     assert manager.is_async_subagents_available()
 
 
