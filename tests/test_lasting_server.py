@@ -591,6 +591,7 @@ def test_server_status_names_server_on_another_port(monkeypatch):
     monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": 4242})
     monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
     monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
+    monkeypatch.setattr(registration, "served_projects", lambda _url: [])
 
     result = CliRunner().invoke(app, ["server", "status"])
 
@@ -662,6 +663,7 @@ def test_server_status_lists_projects_of_own_server(monkeypatch):
 
     output = _status_output()
 
+    assert "on port 6174" in output
     assert "4242" in output
     assert f"{kept} (folder missing)" not in output
     assert kept in output

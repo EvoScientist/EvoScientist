@@ -310,6 +310,14 @@ def test_served_projects_lists_own_server_without_sending_secret(monkeypatch, se
         assert request["timeout"] == registration.STATUS_TIMEOUT
 
 
+def test_served_projects_drops_malformed_entries(monkeypatch, secret):
+    good = {"workspace_dir": "/p/a", "name": "a", "missing": False}
+    body = {"workspaces": [good, "x", {"name": "no-dir"}, {"workspace_dir": 1}]}
+    _listing(monkeypatch, httpx.Response(200, json=body))
+
+    assert registration.served_projects(URL) == [good]
+
+
 def test_served_projects_refuses_other_data_folder_server(monkeypatch, secret):
     sent = _listing(
         monkeypatch, httpx.Response(200, json={"workspaces": []}), instance="theirs"

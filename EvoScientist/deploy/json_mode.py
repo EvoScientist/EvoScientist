@@ -48,6 +48,9 @@ Events:
     for a backend-decision error this mode has no code for.
 
   ``port_conflict`` also carries ``hint``, the line the human mode prints.
+  ``workspace_conflict`` is not sent any more; older releases send it, with
+  ``workspace`` and ``hint``, when the backend was started from another
+  project.
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
