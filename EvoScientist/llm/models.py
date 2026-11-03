@@ -40,6 +40,7 @@ from .registry import (
     DEFAULT_MODEL,
     DEFAULT_REASONING_EFFORT,
     MODELS,
+    REASONING_LEVELS,
     UnknownModelError,
     _is_mandatory_thinking_kimi,
     _openrouter_needs_json_schema,  # noqa: F401 — re-exported
@@ -59,7 +60,7 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 # Reasoning levels on one scale. One level is stored for every model (main,
 # auxiliary, fallbacks); a route listed here accepts only a slice of the
 # scale, so a level outside it is sent as the nearest one it accepts.
-_REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_REASONING_SCALE = REASONING_LEVELS
 _ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "chatgpt": ("low", "medium", "high", "xhigh", "max"),
     "anthropic": ("low", "medium", "high", "xhigh", "max"),
@@ -82,10 +83,27 @@ def _nearest_reasoning_level(effort: str, levels: tuple[str, ...]) -> str:
     )
 
 
+_UNKNOWN_EFFORT_WARNED: set[str] = set()
+
+
 def _resolve_reasoning_effort(default: str, route: str) -> str:
     """Return the configured reasoning effort (or ``default``) as ``route`` takes it."""
-    effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
-    return _nearest_reasoning_level(effort, _ROUTE_REASONING_LEVELS.get(route, ()))
+    configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "")
+    effort = configured.strip().lower() or default
+    levels = _ROUTE_REASONING_LEVELS.get(route, ())
+    # A route with a level list never gets a value off the scale; native Claude
+    # would not even build.
+    if levels and effort not in _REASONING_SCALE:
+        if effort not in _UNKNOWN_EFFORT_WARNED:
+            _UNKNOWN_EFFORT_WARNED.add(effort)
+            warnings.warn(
+                f"Unknown reasoning_effort {effort!r}; using {default!r}. "
+                f"Set one of: {', '.join(_REASONING_SCALE)}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        effort = default
+    return _nearest_reasoning_level(effort, levels)
 
 
 # Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
@@ -408,10 +426,11 @@ def _apply_auto_config(
                 kwargs.setdefault("max_tokens", 16000)
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            kwargs.setdefault(
-                "effort",
-                _resolve_reasoning_effort(DEFAULT_REASONING_EFFORT, "anthropic"),
-            )
+            # A caller's own level (either name) skips the configured one.
+            if "effort" not in kwargs and "reasoning_effort" not in kwargs:
+                kwargs["effort"] = _resolve_reasoning_effort(
+                    DEFAULT_REASONING_EFFORT, "anthropic"
+                )
         elif original_provider == "minimax":
             # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
             kwargs["thinking"] = {"type": "adaptive"}

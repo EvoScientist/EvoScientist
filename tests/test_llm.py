@@ -3749,6 +3749,47 @@ class TestAutoConfig:
 
         assert mock_init.call_args[1]["effort"] == sent
 
+    @pytest.mark.parametrize(
+        ("configured", "sent"), [("High", "high"), ("Low ", "low"), ("default", "high")]
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_native_claude_never_gets_a_value_off_the_scale(
+        self, mock_init, configured, sent, monkeypatch
+    ):
+        """Case is folded; an unknown value runs at the default, so Claude still builds."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+        monkeypatch.setattr("EvoScientist.llm.models._UNKNOWN_EFFORT_WARNED", set())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("claude-sonnet-5-5", provider="anthropic")
+            get_chat_model("claude-haiku-5-5", provider="anthropic")
+
+        assert mock_init.call_args[1]["effort"] == sent
+        unknown = [w for w in caught if "Unknown reasoning_effort" in str(w.message)]
+        assert len(unknown) == (1 if configured == "default" else 0)
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_a_caller_level_skips_the_configured_one(self, mock_init, monkeypatch):
+        """No warning about the configured value when the caller sets its own."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "default")
+        monkeypatch.setattr("EvoScientist.llm.models._UNKNOWN_EFFORT_WARNED", set())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("claude-sonnet-5-5", provider="anthropic", effort="low")
+            assert mock_init.call_args[1]["effort"] == "low"
+            get_chat_model(
+                "claude-sonnet-5-5", provider="anthropic", reasoning_effort="low"
+            )
+            assert "effort" not in mock_init.call_args[1]
+
+        assert not [w for w in caught if "Unknown reasoning_effort" in str(w.message)]
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_claude_through_ccproxy_gets_no_effort(self, mock_init, monkeypatch):
         """Pro/Max sign-in sends no effort, so onboarding does not ask for one."""
@@ -4423,10 +4464,11 @@ class TestReasoningEffortAcrossProviders:
             ("low", "low"),
             ("xhigh", "xhigh"),
             ("max", "max"),
-            # Not a level on the scale: the backend answers for itself.
-            ("turbo", "turbo"),
+            # Not a level on the scale: the route's default.
+            ("turbo", "high"),
         ],
     )
+    @pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
     def test_sign_in_route_gets_the_nearest_level_it_accepts(
         self, monkeypatch, stored, sent
     ):

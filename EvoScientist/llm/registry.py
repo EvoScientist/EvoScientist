@@ -278,6 +278,8 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 # The reasoning level native Claude, OpenAI, OpenRouter and DeepSeek run at when
 # none is configured.
 DEFAULT_REASONING_EFFORT = "high"
+# Every reasoning level EvoScientist knows, lightest first.
+REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def get_models_for_provider(provider: str) -> list[tuple[str, str]]:

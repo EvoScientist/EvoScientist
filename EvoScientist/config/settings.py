@@ -1131,6 +1131,12 @@ def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
             raise ValueError("is a file, not a folder")
         if not path.exists():
             warning = "the folder does not exist yet; it is created at start"
+    if key == "reasoning_effort":
+        from ..llm.registry import REASONING_LEVELS
+
+        value = value.strip().lower()
+        if value and value not in REASONING_LEVELS:
+            raise ValueError(f"expected one of {', '.join(REASONING_LEVELS)}, or empty")
     return _plain_config_value(value), warning
 
 
