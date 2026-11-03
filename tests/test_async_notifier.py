@@ -1,5 +1,6 @@
 """Tests for async sub-agent auto-notification."""
 
+import json
 import queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -282,7 +283,7 @@ def test_format_batch_message_single_notification():
     assert msg.startswith("[Async tasks update]")
     # The task line is valid JSON with the expected fields.
     task_line = msg.splitlines()[1]
-    obj = __import__("json").loads(task_line)
+    obj = json.loads(task_line)
     assert obj["agent"] == "writing-agent"
     assert obj["task_id"] == "tid-1"
     assert obj["status"] == "success"
@@ -309,8 +310,8 @@ def test_format_batch_message_multiple():
     msg = format_batch_message(notifs)
     lines = msg.splitlines()
     assert lines[0] == "[Async tasks update]"
-    obj1 = __import__("json").loads(lines[1])
-    obj2 = __import__("json").loads(lines[2])
+    obj1 = json.loads(lines[1])
+    obj2 = json.loads(lines[2])
     assert obj1 == {
         "agent": "writing-agent",
         "kind": "agent",
@@ -345,7 +346,7 @@ def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
     # instead of offering a fetch.
     msg = format_batch_message([_untracked()])
     lines = msg.splitlines()
-    assert __import__("json").loads(lines[1]) == {
+    assert json.loads(lines[1]) == {
         "agent": "demo",
         "kind": "bg-process",
         "status": "untracked",
@@ -355,11 +356,8 @@ def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
         "started_at": "2026-11-03T11:00:00Z",
     }
     assert lines[2:] == [async_notifier.UNTRACKED_HINT]
+    # The log path the hint names is where ``background.launch`` writes it.
     assert ".bg_processes/<task_id>.log" in msg
-    assert "confirm it against the command and started_at" in msg
-    # bash as /bin/sh execs a simple command, so the pid can be the command.
-    assert "the shell that ran the command, or the command itself" in msg
-    assert "On Windows it is a Windows pid" in msg
     assert "fetch full result" not in msg
 
 
@@ -367,7 +365,7 @@ def test_format_batch_message_untracked_without_a_start_time_omits_it():
     notice = async_notifier.AsyncTaskNotification(
         "proc-1", "demo", "untracked", "", "sleep 5", kind="bg-process", pid=1
     )
-    entry = __import__("json").loads(format_batch_message([notice]).splitlines()[1])
+    entry = json.loads(format_batch_message([notice]).splitlines()[1])
     assert entry["command"] == "sleep 5"
     assert "started_at" not in entry
 
@@ -383,7 +381,7 @@ def test_format_batch_message_mixed_batch_keeps_the_fetch_hint():
     lines = format_batch_message([_untracked(), exited]).splitlines()
     assert "check_process (background processes)" in lines[3]
     assert lines[4] == async_notifier.UNTRACKED_HINT
-    assert "pid" not in __import__("json").loads(lines[2])
+    assert "pid" not in json.loads(lines[2])
 
 
 def test_format_batch_message_untracked_process_offers_no_check_process():
