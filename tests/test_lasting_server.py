@@ -599,6 +599,20 @@ def test_server_status_names_server_on_another_port(monkeypatch):
     assert "stale record" not in output
 
 
+def test_server_status_lists_projects_of_server_on_another_port(monkeypatch):
+    urls = _status_server(
+        monkeypatch, projects=[{"workspace_dir": "/p/a", "missing": False}]
+    )
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
+    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
+
+    output = _status_output()
+
+    assert [url.rsplit(":", 1)[-1] for url in urls] == ["7000"]
+    assert "/p/a" in output
+
+
 def _status_server(monkeypatch, *, projects=None, error=None):
     """A running server on the configured port, recorded and serving it;
     *projects* is what it lists, *error* what the read raises instead."""

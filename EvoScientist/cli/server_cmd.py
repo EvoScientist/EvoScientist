@@ -147,6 +147,7 @@ def server_status() -> None:
         return
     state = "[green]running[/green]" if running else "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
+    url = langgraph_dev_url(config) if running else None
     if sidecar is not None:
         pid = sidecar.get("pid")
         if _pid_serves_port(pid, port):
@@ -157,6 +158,8 @@ def server_status() -> None:
                 f"  pid:          {pid} [yellow](serves port {address[0]}, not "
                 f"port {port}; EvoSci server stop stops it)[/yellow]"
             )
+            if url is None:
+                url = langgraph_dev_url(port=address[0], host=address[1])
         else:
             console.print(
                 f"  pid:          {pid} [yellow](stale record — this pid does "
@@ -167,8 +170,8 @@ def server_status() -> None:
             "  [yellow]no ownership record — externally managed or older server"
             "[/yellow]"
         )
-    if running:
-        _print_projects(langgraph_dev_url(config))
+    if url is not None:
+        _print_projects(url)
 
 
 def _print_projects(url: str) -> None:
