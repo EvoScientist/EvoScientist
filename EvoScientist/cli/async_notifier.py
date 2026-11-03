@@ -400,7 +400,9 @@ UNTRACKED_STATUS: Final = "untracked"
 """``bg_processes[*].status`` of a process its registry no longer has.
 
 The reader writes it into thread state when it reports the process, so a later
-EvoSci process that resumes the thread does not report it again.
+EvoSci process that resumes the thread does not report it again. It still polls
+a marked process once: a terminal status from a registry that does track it is
+reported as usual.
 """
 
 UNTRACKED_HINT: Final = (
@@ -494,10 +496,11 @@ async def enqueue_bg_process_completions_from_state(
     means the agent already observed the exit via check/stop/list — nothing to
     proactively surface, which is the state-based dedup), polls
     ``gateway.get_process_status``. Newly-terminal processes are enqueued as
-    ``kind="bg-process"`` notifications via the shared queue. A process the
-    registry no longer has is marked ``untracked`` in state
-    (:func:`_mark_untracked`) and then reported with that status. Returns the
-    still-active count for the idle throttle.
+    ``kind="bg-process"`` notifications via the shared queue. A process no
+    registry this EvoSci process can ask has is marked ``untracked`` in state
+    (:func:`_mark_untracked`) and then reported with that status; a marked
+    record is still polled once per EvoSci process, so a terminal status wins
+    over the mark. Returns the still-active count for the idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
     if registry is None:
@@ -518,9 +521,7 @@ async def enqueue_bg_process_completions_from_state(
             or process_id in _bg_reader_in_flight
         ):
             continue
-        if record.get("status") in TERMINAL_STATUSES or (
-            record.get("status") == UNTRACKED_STATUS
-        ):
+        if record.get("status") in TERMINAL_STATUSES:
             continue
         # Reserve before the await so a concurrent reader invocation (idle
         # tick racing a turn-boundary read) cannot double-enqueue this exit.
@@ -532,9 +533,16 @@ async def enqueue_bg_process_completions_from_state(
                 still_active += 1  # gateway unavailable / transient — retry next poll
                 continue
             if status == "unknown":
-                # The registry that owns the process no longer has it: the
+                # No registry this EvoSci process can ask has the process: the
                 # process holding it restarted, or the dev server cannot be
-                # reached. Its exit is unknowable and it may still be running.
+                # reached. Its exit is unknowable here and it may still be
+                # running. A record already marked was reported once; stay
+                # silent. The mark is not trusted further than that: on the
+                # local backend another EvoSci process on the same thread may
+                # still track the process, and its terminal status still wins.
+                if record.get("status") == UNTRACKED_STATUS:
+                    _reader_enqueued_process_ids.add(process_id)
+                    continue
                 if not await _mark_untracked(
                     gateway, target, thread_id, process_id, record
                 ):

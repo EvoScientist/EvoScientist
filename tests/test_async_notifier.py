@@ -1435,23 +1435,50 @@ async def test_bg_reader_marks_and_reports_an_untracked_process():
     assert drain_notifications("cli-tid") == []
 
 
-async def test_bg_reader_skips_a_record_marked_untracked():
-    # A later EvoSci process resumes the thread: the mark in state stops the
-    # reader before it polls, so the process is not reported again.
+def _bg_untracked_registry():
     registry = _bg_running_registry()
     registry["bg_processes"]["proc-1"]["status"] = "untracked"
+    return registry
+
+
+async def test_bg_reader_does_not_report_a_marked_record_again():
+    # A later EvoSci process resumes the thread: it polls the marked process
+    # once, still gets "unknown", and stays silent from then on.
     gateway = FakeGraphGateway(
-        state_values=registry, process_statuses={"proc-1": "unknown"}
+        state_values=_bg_untracked_registry(), process_statuses={"proc-1": "unknown"}
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    for _ in range(2):
+        active = await async_notifier.enqueue_bg_process_completions_from_state(
+            gateway, target, "cli-tid"
+        )
+        assert active == 0
+
+    assert gateway.process_status_calls == ["proc-1"]
+    assert gateway.updated_states == []
+    assert drain_notifications("cli-tid") == []
+
+
+@pytest.mark.parametrize("status", ["running", "success"])
+async def test_bg_reader_lets_a_tracking_registry_win_over_the_mark(status):
+    # Local backend, two EvoSci processes on one thread: the one that did not
+    # launch the process marked it; the launcher's registry still tracks it,
+    # keeps polling while it runs and reports its exit.
+    gateway = FakeGraphGateway(
+        state_values=_bg_untracked_registry(), process_statuses={"proc-1": status}
     )
 
     active = await async_notifier.enqueue_bg_process_completions_from_state(
         gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
     )
 
-    assert active == 0
-    assert gateway.process_status_calls == []
+    notices = [n.status for n in drain_notifications("cli-tid")]
+    if status == "running":
+        assert (active, notices) == (1, [])
+    else:
+        assert (active, notices) == (0, ["success"])
     assert gateway.updated_states == []
-    assert drain_notifications("cli-tid") == []
 
 
 async def test_bg_reader_leaves_a_paused_thread_alone_until_it_resumes(monkeypatch):
@@ -1561,7 +1588,7 @@ async def test_bg_reader_marks_untracked_on_the_real_graph_when_the_dev_server_i
         gateway, target, "cli-tid"
     )
     assert drain_notifications("cli-tid") == []
-    client.http.get.assert_awaited_once()
+    assert client.http.get.await_count == 2  # polled once more, still unknown
 
 
 async def test_bg_reader_throttle_rate_limits(monkeypatch):
