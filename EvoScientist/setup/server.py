@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 LASTING_MESSAGE = (
     "The background agent service (the server, and ccproxy with Anthropic "
     "OAuth) now keeps running after your sessions end, so sessions in every "
-    "project share it. It starts with your next session, from that session's "
-    "project; `EvoSci service stop` stops it. The langgraph_dev_keepalive "
+    "project share it. It starts with your next session; `EvoSci service "
+    "stop` stops it. The langgraph_dev_keepalive "
     "setting is gone."
 )
 # A record older than this is not from the update this setup follows.

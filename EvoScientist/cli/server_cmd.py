@@ -148,6 +148,7 @@ def server_status() -> None:
     state = "[green]running[/green]" if running else "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
     url = langgraph_dev_url(config) if running else None
+    label = "projects:"
     if sidecar is not None:
         pid = sidecar.get("pid")
         if _pid_serves_port(pid, port):
@@ -159,6 +160,7 @@ def server_status() -> None:
                 f"port {port}; EvoSci server stop stops it)[/yellow]"
             )
             url = langgraph_dev_url(port=address[0], host=address[1])
+            label = f"projects (port {address[0]}):"
         else:
             console.print(
                 f"  pid:          {pid} [yellow](stale record — this pid does "
@@ -170,12 +172,12 @@ def server_status() -> None:
             "[/yellow]"
         )
     if url is not None:
-        _print_projects(url)
+        _print_projects(url, label)
 
 
-def _print_projects(url: str) -> None:
-    """List the projects the server at *url* serves, or say why they cannot
-    be listed."""
+def _print_projects(url: str, label: str = "projects:") -> None:
+    """List the projects the server at *url* serves under *label*, or say
+    why they cannot be listed."""
     from ..langgraph_dev.registration import (
         OlderServerError,
         OtherServerError,
@@ -186,19 +188,17 @@ def _print_projects(url: str) -> None:
     try:
         projects = served_projects(url)
     except OtherServerError as exc:
-        console.print(
-            f"  projects:     [yellow]not listed. {escape(str(exc))}[/yellow]"
-        )
+        console.print(f"  {label:<14}[yellow]not listed. {escape(str(exc))}[/yellow]")
         return
     except (OlderServerError, RegistrationError) as exc:
         console.print(
-            f"  projects:     [yellow]could not be read. {escape(str(exc))}[/yellow]"
+            f"  {label:<14}[yellow]could not be read. {escape(str(exc))}[/yellow]"
         )
         return
     if not projects:
-        console.print("  projects:     none")
+        console.print(f"  {label:<14}none")
         return
-    console.print("  projects:")
+    console.print(f"  {label}")
     for project in projects:
         missing = " [yellow](folder missing)[/yellow]" if project.get("missing") else ""
         console.print(f"    {escape(str(project['workspace_dir']))}{missing}")

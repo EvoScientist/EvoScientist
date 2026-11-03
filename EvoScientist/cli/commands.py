@@ -309,8 +309,8 @@ def onboard(
 
 
 def _offer_server_start() -> None:
-    """After onboarding: offer to start the background agent service from
-    ``default_workdir``. A running one keeps the settings it started with;
+    """After onboarding: offer to start the background agent service, which
+    registers ``default_workdir``. A running one keeps the settings it started with;
     say how to apply the new ones."""
     import questionary
 
@@ -324,7 +324,7 @@ def _offer_server_start() -> None:
     if manager.is_langgraph_dev_running(port=port, host=host):
         sidecar = manager._read_workspace_sidecar()
         if manager.is_lasting(sidecar):
-            # ``EvoSci service start`` starts it from ``default_workdir``.
+            # ``EvoSci service start`` registers ``default_workdir``.
             start_again = (
                 "then [bold]EvoSci service start[/bold]"
                 if config.default_workdir

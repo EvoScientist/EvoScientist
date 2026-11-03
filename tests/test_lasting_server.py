@@ -620,6 +620,7 @@ def test_server_status_lists_projects_of_server_on_another_port(
     output = _status_output()
 
     assert [url.rsplit("//", 1)[-1] for url in urls] == ["192.0.2.10:7000"]
+    assert "projects (port 7000):" in output
     assert "/p/a" in output
 
 
