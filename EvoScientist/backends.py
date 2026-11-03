@@ -1,5 +1,6 @@
 """Custom backends for EvoScientist agent."""
 
+import asyncio
 import contextlib
 import errno
 import os
@@ -12,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -33,7 +34,7 @@ from deepagents.backends.protocol import (
 )
 
 from . import paths, shell_syntax
-from .cancellation import current_cancel_event
+from .cancellation import bind_cancel_event, current_cancel_event
 
 if TYPE_CHECKING:
     from langgraph.types import Command
@@ -185,7 +186,8 @@ def _register_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        _active_shell_processes.setdefault(event, set()).add(process)
+        for owner in _shell_process_owners(event):
+            _active_shell_processes.setdefault(owner, set()).add(process)
         cancel_now = event.is_set()
     if cancel_now:
         _terminate_process_tree(process)
@@ -198,12 +200,18 @@ def _unregister_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        processes = _active_shell_processes.get(event)
-        if processes is None:
-            return
-        processes.discard(process)
-        if not processes:
-            _active_shell_processes.pop(event, None)
+        for owner in _shell_process_owners(event):
+            processes = _active_shell_processes.get(owner)
+            if processes is not None:
+                processes.discard(process)
+                if not processes:
+                    _active_shell_processes.pop(owner, None)
+
+
+def _shell_process_owners(event: threading.Event | None) -> Iterator[threading.Event]:
+    while event is not None:
+        yield event
+        event = event._parent if isinstance(event, _ExecuteCancelEvent) else None
 
 
 # Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
@@ -2237,6 +2245,17 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
 
 
+class _ExecuteCancelEvent(threading.Event):
+    """A per-call event whose is_set(), but not wait(), checks its parent."""
+
+    def __init__(self, parent: threading.Event | None) -> None:
+        super().__init__()
+        self._parent = parent
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self._parent is not None and self._parent.is_set())
+
+
 class CustomSandboxBackend(LocalShellBackend):
     """
     Custom sandbox backend - inherits LocalShellBackend with added safety.
@@ -2514,6 +2533,17 @@ class CustomSandboxBackend(LocalShellBackend):
                 for path, _ in files
             ]
         return super().upload_files(files)
+
+    async def aexecute(
+        self, command: str, *, timeout: int | None = None
+    ) -> ExecuteResponse:
+        event = _ExecuteCancelEvent(current_cancel_event())
+        with bind_cancel_event(event):
+            try:
+                return await super().aexecute(command, timeout=timeout)
+            except asyncio.CancelledError:
+                event.set()
+                raise
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """
