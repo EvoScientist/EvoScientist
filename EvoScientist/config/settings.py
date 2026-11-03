@@ -1401,7 +1401,7 @@ def is_client_only(field: str) -> bool:
 # the workspace are not. Every agent takes its keys and settings from
 # config.yaml and the environment (the credentials are process-wide; one
 # server serves every project), so any other key in a ``.env`` is ignored, and
-# ``start_langgraph_dev`` passes the server none of what a ``.env`` set.
+# ``manager._spawn_server`` passes the server none of what a ``.env`` set.
 DOTENV_FIELDS = frozenset(
     {
         "default_mode",

@@ -18,30 +18,36 @@ from EvoScientist.langgraph_dev.registration import OlderServerError
 from EvoScientist.setup import server as server_stage
 
 
-class _Started:
-    """The server process this process started."""
+def _record(pid=4242, *, port=6174, host="127.0.0.1", lasting=True, **kw):
+    """The record of a running server, as ``read_record`` returns it."""
+    return manager.ServerRecord(pid=pid, port=port, host=host, lasting=lasting, **kw)
 
-    pid = 4242
 
-    def poll(self):
-        return None
+def _result(*, started: bool, record=None) -> manager.ServerResult:
+    from tests.fakes.langgraph_dev import FakeProc
+
+    return manager.ServerResult(
+        available=True,
+        served=True,
+        proc=FakeProc() if started else None,
+        url="http://127.0.0.1:6174",
+        record=record,
+    )
 
 
 @pytest.fixture
 def started(monkeypatch) -> list:
-    """Fake the server start (this process holds the server it starts);
-    return the projects it was started for."""
+    """Fake the server start: this process starts the server unless one
+    answers already; return the projects it was started for."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     calls: list = []
 
     def ensure(config, *, workspace_dir, backend):
         calls.append((workspace_dir, backend))
-        if not manager.is_langgraph_dev_running():
-            monkeypatch.setattr(manager, "_PROCESS", _Started())
-        return True
+        return _result(started=not manager.is_langgraph_dev_running())
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", ensure)
+    monkeypatch.setattr(manager, "ensure_server", ensure)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     monkeypatch.setattr(
         ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
@@ -81,11 +87,32 @@ def test_server_start_running_server_serves_project_too(started, monkeypatch, tm
     assert "already running" in " ".join(result.output.split())
 
 
+def test_server_start_failure_names_log_in_one_line(monkeypatch, tmp_path):
+    """The log's end is in the log, not on the terminal."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    failed = manager.ServerResult(
+        problem="exited",
+        exit_code=1,
+        error="langgraph dev exited immediately with code 1.\nLog tail:\nboom",
+    )
+    monkeypatch.setattr(manager, "ensure_server", lambda *_a, **_k: failed)
+    monkeypatch.setattr(
+        ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
+    )
+
+    result = CliRunner().invoke(app, ["server", "start", "--workdir", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "boom" not in result.output
+    assert "exited immediately with code 1" in " ".join(result.output.split())
+
+
 def test_server_start_refusal_exits(started, monkeypatch, tmp_path):
     def older(*_a, **_k):
         raise OlderServerError()
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", older)
+    monkeypatch.setattr(manager, "ensure_server", older)
 
     result = CliRunner().invoke(app, ["server", "start", "--workdir", str(tmp_path)])
 
@@ -152,10 +179,9 @@ def test_offer_without_default_workdir_starts_nothing(monkeypatch, tmp_path):
     assert starts == []
 
 
-def _running_service(monkeypatch, sidecar, *, jobs=(), busy=False):
+def _running_service(monkeypatch, record, *, jobs=(), busy=False):
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: sidecar)
-    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: True)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: record)
     monkeypatch.setattr(
         "EvoScientist.deploy.busy.running_bg_process_names", lambda url: list(jobs)
     )
@@ -176,18 +202,15 @@ def _record_steps(monkeypatch) -> list:
 
 
 @pytest.mark.parametrize(
-    "sidecar",
-    [
-        None,
-        {"pid": 1, "lasting": False},
-        {"pid": 1, "lasting": True},
-    ],
+    "record",
+    [None, _record(lasting=False), _record(lasting=True)],
+    ids=["unrecorded", "owned", "lasting"],
 )
-def test_offer_leaves_running_service_alone(monkeypatch, sidecar):
+def test_offer_leaves_running_service_alone(monkeypatch, record):
     """It says how to apply the new settings; it restarts nothing."""
     from EvoScientist.cli import commands
 
-    _running_service(monkeypatch, sidecar)
+    _running_service(monkeypatch, record)
     asked = _answer(monkeypatch, True)
     steps = _record_steps(monkeypatch)
 
@@ -196,7 +219,7 @@ def test_offer_leaves_running_service_alone(monkeypatch, sidecar):
 
     assert asked == []
     assert steps == []
-    lasting = bool(sidecar and sidecar.get("lasting"))
+    lasting = record is not None and record.lasting
     hint = "EvoSci service stop" if lasting else "not the background service"
     assert hint in " ".join(captured.get().split())
 
@@ -211,7 +234,7 @@ def test_offer_restart_hint_follows_default_workdir(
 
     if default_workdir:
         _saved(default_workdir=str(tmp_path))
-    _running_service(monkeypatch, {"pid": 1, "lasting": True})
+    _running_service(monkeypatch, _record())
     _answer(monkeypatch, True)
     steps = _record_steps(monkeypatch)
 
@@ -307,7 +330,6 @@ def test_stage_restart_finding_running_server_claims_no_start(started, monkeypat
     """Another server took the port since the update: this process started
     nothing, and says where to look."""
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
-    monkeypatch.setattr(manager, "_PROCESS", None)
     server_stage.remember_for_restart()
     _updated(monkeypatch)
 
@@ -361,7 +383,7 @@ def test_stage_restart_failure_is_reported_not_raised(started, monkeypatch):
     def failed(*_a, **_k):
         raise RuntimeError("ccproxy did not start")
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", failed)
+    monkeypatch.setattr(manager, "ensure_server", failed)
     server_stage.remember_for_restart()
     _updated(monkeypatch)
 
@@ -395,7 +417,7 @@ def test_server_stop_leaves_ccproxy(monkeypatch):
     """Open sessions on the local backend route through it."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
-    monkeypatch.setattr(manager, "stop_recorded_server", lambda **_k: 42)
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: 42)
     stopped = []
     monkeypatch.setattr(ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append(1))
 
@@ -411,7 +433,7 @@ def test_service_stop_stops_server_and_ccproxy(monkeypatch):
     stopped = []
     monkeypatch.setattr(
         manager,
-        "stop_recorded_server",
+        "stop_server",
         lambda **_k: stopped.append("server") or 42,
     )
     monkeypatch.setattr(
@@ -424,25 +446,24 @@ def test_service_stop_stops_server_and_ccproxy(monkeypatch):
     assert stopped == ["server", "ccproxy"]
 
 
+def _recorded_server(monkeypatch, record, stopped: list) -> None:
+    """*record* names the running server; ending it is recorded in
+    *stopped*."""
+    monkeypatch.setattr(manager, "read_record", lambda **_k: record)
+    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
+    monkeypatch.setattr(
+        manager, "_end_server_tree", lambda *a, **k: stopped.append("server")
+    )
+
+
 @pytest.mark.parametrize("ccproxy_pid", [7, None])
-def test_service_stop_leaves_deploy_owned_server(monkeypatch, tmp_path, ccproxy_pid):
+def test_service_stop_leaves_deploy_owned_server(monkeypatch, ccproxy_pid):
     """EvoSci deploy or the desktop app stops its own server; the ccproxy that
     server may route through stays too."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     stopped = []
-    monkeypatch.setattr(
-        manager, "RUNTIME", manager.LanggraphRuntimePaths.for_directory(tmp_path)
-    )
-    monkeypatch.setattr(
-        manager,
-        "_read_workspace_sidecar",
-        lambda: {"pid": 4242, "lasting": False},
-    )
-    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
-    monkeypatch.setattr(
-        manager, "_stop_recorded_server_locked", lambda: stopped.append("server") or 42
-    )
+    _recorded_server(monkeypatch, _record(lasting=False), stopped)
     monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", lambda: ccproxy_pid)
     monkeypatch.setattr(
         ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
@@ -464,7 +485,7 @@ def test_service_stop_leaves_ccproxy_for_unrecorded_server(monkeypatch):
     from EvoScientist.deploy import busy
 
     stopped = []
-    monkeypatch.setattr(manager, "stop_recorded_server", lambda **_k: None)
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: None)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
     monkeypatch.setattr(busy, "backend_has_active_runs", lambda url: False)
     monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", lambda: 7)
@@ -480,30 +501,19 @@ def test_service_stop_leaves_ccproxy_for_unrecorded_server(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("sidecar", "cmdline"),
-    [
-        ({"pid": 4242, "lasting": False}, None),
-        ({"pid": 4242}, ["langgraph"]),
-    ],
-    ids=["server-gone", "older-release"],
+    ("record", "expected"),
+    [(None, ["ccproxy"]), (_record(lasting=None), ["server", "ccproxy"])],
+    ids=["server-gone", "unsaid-owner"],
 )
-def test_service_stop_stops_server_nobody_else_owns(
-    monkeypatch, tmp_path, sidecar, cmdline
-):
-    """A deploy record whose server no longer runs, and an older release's
-    record, which does not say, are the service's to stop."""
+def test_service_stop_stops_server_nobody_else_owns(monkeypatch, record, expected):
+    """A record that does not say who owns its server (a server started by
+    hand, an older release) is the service's to stop; without a server, the
+    service stops its ccproxy."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     stopped = []
-    monkeypatch.setattr(
-        manager, "RUNTIME", manager.LanggraphRuntimePaths.for_directory(tmp_path)
-    )
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: sidecar)
-    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: cmdline)
+    _recorded_server(monkeypatch, record, stopped)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(
-        manager, "_stop_recorded_server_locked", lambda: stopped.append("server") or 42
-    )
     monkeypatch.setattr(
         ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
     )
@@ -511,24 +521,13 @@ def test_service_stop_stops_server_nobody_else_owns(
     result = CliRunner().invoke(app, ["service", "stop"])
 
     assert result.exit_code == 0, result.output
-    assert stopped == ["server", "ccproxy"]
+    assert stopped == expected
 
 
-def test_server_stop_stops_deploy_owned_server(monkeypatch, tmp_path):
+def test_server_stop_stops_deploy_owned_server(monkeypatch):
     """EvoSci server stop is the explicit way to stop any recorded server."""
     stopped = []
-    monkeypatch.setattr(
-        manager, "RUNTIME", manager.LanggraphRuntimePaths.for_directory(tmp_path)
-    )
-    monkeypatch.setattr(
-        manager,
-        "_read_workspace_sidecar",
-        lambda: {"pid": 4242, "lasting": False},
-    )
-    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
-    monkeypatch.setattr(
-        manager, "_stop_recorded_server_locked", lambda: stopped.append("server") or 42
-    )
+    _recorded_server(monkeypatch, _record(lasting=False), stopped)
 
     result = CliRunner().invoke(app, ["server", "stop"])
 
@@ -536,43 +535,14 @@ def test_server_stop_stops_deploy_owned_server(monkeypatch, tmp_path):
     assert stopped == ["server"]
 
 
-def test_service_stop_with_lock_held_stops_nothing(monkeypatch):
-    """A start in progress (deploy --json, the desktop app) holds the lock:
-    the server is left running, and so is the ccproxy it may use."""
-    from filelock import Timeout
-
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    class _Busy:
-        def __init__(self, *_a, **_k):
-            pass
-
-        def __enter__(self):
-            raise Timeout("langgraph_dev.lock")
-
-        def __exit__(self, *_exc):
-            return False
-
-    stopped = []
-    monkeypatch.setattr(manager, "FileLock", _Busy)
-    monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", lambda: 7)
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
-    )
-
-    result = CliRunner().invoke(app, ["service", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == []
-    assert "try again" in " ".join(result.output.split())
-
-
 def test_server_start_that_lost_race_says_it_reused(monkeypatch, tmp_path):
     """Another start took the port first: this one only registered its project."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        manager, "ensure_server", lambda *_a, **_k: _result(started=False)
+    )
     monkeypatch.setattr(
         ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
     )
@@ -585,55 +555,114 @@ def test_server_start_that_lost_race_says_it_reused(monkeypatch, tmp_path):
     assert "started from" not in output
 
 
-def test_server_status_names_server_on_another_port(monkeypatch):
-    """langgraph_dev_port changed while the server ran."""
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": 4242})
-    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
-    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
-    monkeypatch.setattr(registration, "served_projects", lambda _url: [])
-
-    result = CliRunner().invoke(app, ["server", "status"])
-
-    output = " ".join(result.output.split())
-    assert "serves port 7000" in output
-    assert "stale record" not in output
-
-
-@pytest.mark.parametrize(
-    "configured_answers", [False, True], ids=["configured_idle", "configured_busy"]
-)
-def test_server_status_lists_projects_of_server_on_another_port(
-    monkeypatch, configured_answers
+def test_server_status_names_configured_port_of_server_on_another(
+    monkeypatch,
 ):
+    """langgraph_dev_port changed while the server ran."""
+    _status_server(monkeypatch, projects=[], record=_record(port=7000))
+
+    output = _status_output()
+
+    assert "on port 7000" in output
+    assert "configured port is 6174" in output
+
+
+def test_server_status_lists_projects_of_server_on_another_port(monkeypatch):
     """The projects are the recorded server's, whatever answers on the
     configured port."""
     urls = _status_server(
-        monkeypatch, projects=[{"workspace_dir": "/p/a", "missing": False}]
+        monkeypatch,
+        projects=[{"workspace_dir": "/p/a", "missing": False}],
+        record=_record(port=7000, host="192.0.2.10"),
     )
-    monkeypatch.setattr(
-        manager, "is_langgraph_dev_running", lambda **_k: configured_answers
-    )
-    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
-    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "192.0.2.10"))
 
     output = _status_output()
 
     assert [url.rsplit("//", 1)[-1] for url in urls] == ["192.0.2.10:7000"]
-    assert "projects (port 7000):" in output
+    assert "on port 7000" in output
     assert "/p/a" in output
 
 
-def _status_server(monkeypatch, *, projects=None, error=None):
-    """A running server on the configured port, recorded and serving it;
-    *projects* is what it lists, *error* what the read raises instead."""
+@pytest.mark.parametrize(("answer", "flagged"), [("refused", True), ("own", False)])
+def test_server_status_names_server_configured_address_does_not_reach(
+    monkeypatch, answer, flagged
+):
+    """langgraph_dev_host changed while the server ran: the configured
+    address is asked whose server answers."""
+    _status_server(monkeypatch, projects=[], record=_record(host="192.168.1.5"))
+    monkeypatch.setattr(manager, "ask", lambda url: answer)
+
+    output = _status_output()
+
+    assert ("does not reach" in output) is flagged
+
+
+def test_server_status_says_to_restart_older_releases_server(monkeypatch):
+    _status_server(monkeypatch, projects=[], record=_record(older=True))
+
+    output = _status_output()
+
+    assert "older EvoScientist release" in output
+
+
+def test_server_status_names_lock_held_without_record(monkeypatch):
+    from EvoScientist.langgraph_dev import server_home
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
+
+    output = _status_output()
+
+    assert "without a record" in output
+    assert "server.lock" in output
+
+
+def test_server_status_shows_starting_record_as_starting(monkeypatch):
+    from EvoScientist.langgraph_dev import server_record
+
+    _status_server(
+        monkeypatch, projects=[], record=_record(phase=server_record.STARTING)
+    )
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+
+    output = _status_output()
+
+    assert "starting" in output
+    assert "not responding" not in output
+
+
+@pytest.mark.parametrize("group", ["server", "service"])
+def test_stop_names_lock_held_without_record(monkeypatch, group):
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    from EvoScientist.langgraph_dev import server_home
+
+    stopped: list = []
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
+    monkeypatch.setattr(
+        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy")
+    )
+
+    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+
+    assert result.exit_code == 1
+    assert stopped == []
+    output = " ".join(result.output.split())
+    assert "without a record" in output
+    assert "try again" not in output
+
+
+def _status_server(monkeypatch, *, projects=None, error=None, record=None):
+    """A running server, recorded (on the configured port unless *record*
+    says otherwise); *projects* is what it lists, *error* what the read
+    raises instead."""
     from EvoScientist.langgraph_dev import registration
 
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
-    monkeypatch.setattr(
-        manager, "_read_workspace_sidecar", lambda: {"pid": 4242, "lasting": True}
-    )
-    monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: True)
+    record = record or _record()
+    monkeypatch.setattr(manager, "read_record", lambda **_k: record)
     urls: list[str] = []
 
     def served_projects(url):
@@ -704,7 +733,7 @@ def test_server_status_says_why_projects_are_not_listed(monkeypatch, error, said
 def test_server_status_not_running_lists_no_projects(monkeypatch):
     urls = _status_server(monkeypatch, projects=[])
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: None)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
 
     output = _status_output()
 
@@ -798,7 +827,7 @@ def test_update_wait_spares_service_ccproxy(monkeypatch, tmp_path):
     from EvoScientist import updater
 
     monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", os.getpid)
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: None)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
 
     assert os.getpid() in updater._server_tree()
 
@@ -883,14 +912,14 @@ def busy_server(monkeypatch):
     from EvoScientist.deploy import busy
 
     stopped: list = []
-    monkeypatch.setattr(manager, "recorded_address", lambda: (6174, "127.0.0.1"))
+    monkeypatch.setattr(manager, "read_record", lambda **_k: _record())
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
     monkeypatch.setattr(busy, "backend_has_active_runs", lambda url: True)
     monkeypatch.setattr(busy, "running_bg_process_names", lambda url: ["train.py"])
     monkeypatch.setattr(busy, "has_busy_thread", lambda url: False)
     monkeypatch.setattr(
         manager,
-        "stop_recorded_server",
+        "stop_server",
         lambda **_k: stopped.append("server") or 42,
     )
     return stopped
@@ -899,7 +928,7 @@ def busy_server(monkeypatch):
 def test_stop_without_record_asks_nothing(busy_server, monkeypatch):
     """A busy server on the port that no record names is not one the stop
     ends: no question, nor --yes in a script."""
-    monkeypatch.setattr(manager, "recorded_address", lambda: None)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
 
     result = CliRunner().invoke(app, ["server", "stop"])
 
@@ -907,42 +936,15 @@ def test_stop_without_record_asks_nothing(busy_server, monkeypatch):
     assert "--yes" not in result.output
 
 
-@pytest.mark.parametrize(
-    ("cmdline", "address"),
-    [
-        (
-            ["langgraph", "dev", "--host", "0.0.0.0", "--port", "7000"],
-            (7000, "0.0.0.0"),
-        ),
-        # Releases before the bind host was configurable bound loopback.
-        (["langgraph", "dev", "--port", "7000"], (7000, "127.0.0.1")),
-        (["langgraph", "dev"], None),
-    ],
-)
-def test_recorded_address_reads_pid_file_server(
-    monkeypatch, tmp_path, cmdline, address
-):
-    monkeypatch.setattr(
-        manager, "RUNTIME", manager.LanggraphRuntimePaths.for_directory(tmp_path)
-    )
-    manager.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
-    manager.RUNTIME.pid_file.write_text("4242")
-    monkeypatch.setattr(
-        manager, "_langgraph_cmdline", lambda pid: cmdline if pid == 4242 else None
-    )
-
-    assert manager.recorded_address() == address
-
-
 def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch):
     """EvoSci deploy or the desktop app owns it: service stop leaves it
     running, so its work needs no question, nor --yes in a script."""
 
-    def stop(*, keep_owned=False):
+    def stop(*, keep_owned=False, record=None):
         raise manager.ServerKeptError("left running")
 
-    monkeypatch.setattr(manager, "owned_by_its_starter", lambda: True)
-    monkeypatch.setattr(manager, "stop_recorded_server", stop)
+    monkeypatch.setattr(manager, "owned_by_its_starter", lambda _record: True)
+    monkeypatch.setattr(manager, "stop_server", stop)
 
     result = CliRunner().invoke(app, ["service", "stop"])
 
@@ -952,16 +954,16 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
 
 
 def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):
-    """Its records are kept: the stop says so and to try again, not that it
-    has no record, nor how to kill it by hand, and exits 1 for a script."""
+    """The stop says to try again, not that it has no record, nor how to
+    kill it by hand, and exits 1 for a script."""
 
-    def stop(*, keep_owned=False):
+    def stop(*, keep_owned=False, record=None):
         raise manager.ServerStopFailedError(
             "Could not stop langgraph dev (pid 42): out of resources. It keeps "
-            "running and its records are kept; try again."
+            "running; try again."
         )
 
-    monkeypatch.setattr(manager, "stop_recorded_server", stop)
+    monkeypatch.setattr(manager, "stop_server", stop)
 
     result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
@@ -976,7 +978,7 @@ def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monke
 def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):
     """EvoSci server stop ends a server EvoSci deploy or the desktop app owns
     too, so its work is asked about; without a terminal it is refused."""
-    monkeypatch.setattr(manager, "owned_by_its_starter", lambda: True)
+    monkeypatch.setattr(manager, "owned_by_its_starter", lambda _record: True)
 
     result = CliRunner().invoke(app, ["server", "stop"])
 
@@ -991,7 +993,7 @@ def test_stop_asks_recorded_server_on_another_port(busy_server, monkeypatch):
     from EvoScientist.deploy import busy
 
     asked = []
-    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
+    monkeypatch.setattr(manager, "read_record", lambda **_k: _record(port=7000))
     monkeypatch.setattr(
         manager, "is_langgraph_dev_running", lambda *, port, host: port == 7000
     )
@@ -1052,3 +1054,94 @@ def test_stop_idle_server_asks_nothing(busy_server, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert busy_server == ["server"]
+
+
+@pytest.mark.parametrize(
+    ("answer", "said", "unsaid"),
+    [
+        ("silent", "does not answer", "does not reach"),
+        ("older", "older EvoScientist release", "does not reach"),
+        ("other", "does not reach", "does not answer"),
+    ],
+)
+def test_server_status_says_how_configured_address_answers(
+    monkeypatch, answer, said, unsaid
+):
+    _status_server(monkeypatch, projects=[], record=_record(host="192.168.1.5"))
+    monkeypatch.setattr(manager, "ask", lambda url: answer)
+
+    output = _status_output()
+
+    assert said in output
+    assert unsaid not in output
+
+
+def test_server_status_refused_at_records_own_address_is_no_mismatch(
+    monkeypatch,
+):
+    _status_server(monkeypatch, projects=[], record=_record())
+    monkeypatch.setattr(manager, "ask", lambda url: "refused")
+
+    assert "does not reach" not in _status_output()
+
+
+def test_server_stop_stops_nothing_when_another_server_replaced_asked_one(
+    busy_server, monkeypatch
+):
+    """The question may take a while: a server that took the place of the
+    one asked about is not stopped without asking."""
+    from EvoScientist.cli import server_cmd
+
+    records = iter([_record(4242), _record(5151)])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records))
+    monkeypatch.setattr(server_cmd, "_interactive", lambda: True)
+
+    result = CliRunner().invoke(app, ["server", "stop"], input="y\n")
+
+    assert result.exit_code == 1
+    assert busy_server == []
+    assert "5151" in " ".join(result.output.split())
+
+
+def test_server_stop_stops_nothing_that_appeared_after_prompt(busy_server, monkeypatch):
+    """No server when the stop looked; one runs once it would stop: it was
+    never asked about, so it is not stopped."""
+    records = iter([None, _record(6161)])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records))
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 1
+    assert busy_server == []
+    output = " ".join(result.output.split())
+    assert "6161" in output
+    assert "starting now" in output
+    assert "not the one asked about" not in output
+
+
+def test_server_status_names_unreadable_lock(monkeypatch):
+    from EvoScientist.langgraph_dev import server_home
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.UNKNOWN)
+
+    output = _status_output()
+
+    assert "cannot be opened" in output
+    assert "server.lock" in output
+
+
+@pytest.mark.parametrize("group", ["server", "service"])
+def test_stop_names_unreadable_lock(monkeypatch, group):
+    from EvoScientist.langgraph_dev import server_home
+
+    monkeypatch.setattr(manager, "read_record", lambda **_k: None)
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.UNKNOWN)
+
+    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "cannot be opened" in output

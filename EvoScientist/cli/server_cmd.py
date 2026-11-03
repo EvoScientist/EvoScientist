@@ -59,7 +59,6 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
     from ..config import get_effective_config
     from ..langgraph_dev import manager
     from ..langgraph_dev.registration import ServerUnusableError
-    from ..langgraph_dev.sdk import langgraph_dev_url
     from ..paths import command_arg, start_workspace_path
     from .commands import (
         _prepare_workdir_or_exit,
@@ -77,31 +76,31 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
         with console.status(
             "[dim]Starting the background agent server...[/dim]", spinner="dots"
         ):
-            served = manager.serve_project(config, project, with_ccproxy=with_ccproxy)
+            result = manager.serve_project(config, project, with_ccproxy=with_ccproxy)
     except (ServerUnusableError, RuntimeError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
-    if not served:
+    if not result.served:
         console.print(
             "[red]The background agent server did not start or did not register "
             f"{escape(str(project))}; see {escape(str(manager.RUNTIME.log_file))}."
             "[/red]"
         )
+        if result.reason is not None:
+            console.print(f"[dim]{escape(result.reason)}[/dim]")
         raise typer.Exit(1)
     stop = "EvoSci service stop" if with_ccproxy else "EvoSci server stop"
     start_cmd = (
         f"EvoSci {'service' if with_ccproxy else 'server'} start "
         f"--workdir {escape(command_arg(project))}"
     )
-    url = langgraph_dev_url(config)
-    # Of two starts at once, the one that lost the race for the port only
-    # reused the other's server: this process started it only when it holds it.
-    if manager._PROCESS is None:
+    url = result.url
+    if not result.started:
         console.print(
             f"[green]✓[/green] The background agent server at {url} was already "
             f"running; it serves {escape(str(project))} too."
         )
-        if not manager.is_lasting(manager._read_workspace_sidecar()):
+        if not manager.is_lasting(result.record):
             console.print(
                 "[yellow]⚠ It is not the background service: an EvoSci deploy, "
                 "the desktop app, an older release or another program runs it, "
@@ -128,56 +127,106 @@ def server_status() -> None:
     """Show the background langgraph dev server's state and the projects it
     serves."""
     from ..config import get_effective_config
+    from ..langgraph_dev import server_record
     from ..langgraph_dev.manager import (
-        _pid_serves_port,
-        _read_workspace_sidecar,
+        OLDER_SERVER_MESSAGE,
+        _base_url,
         configured_address,
         is_langgraph_dev_running,
-        recorded_address,
+        read_record,
     )
     from ..langgraph_dev.sdk import langgraph_dev_url
 
     config = get_effective_config()
-    port, host = configured_address(config)
+    configured_port, configured_host = configured_address(config)
+    record = read_record(older=True)
+    port, host = configured_port, configured_host
+    if record is not None:
+        port, host = record.port, record.host
     running = is_langgraph_dev_running(port=port, host=host)
-    sidecar = _read_workspace_sidecar()
 
-    if not running and sidecar is None:
+    problem = _lock_problem() if record is None else None
+    if problem is not None:
+        console.print(f"[yellow]⚠ {escape(problem)}[/yellow]")
+        return
+    if not running and record is None:
         console.print("[dim]No background langgraph dev server is running.[/dim]")
         return
-    state = "[green]running[/green]" if running else "[red]not responding[/red]"
+    if running:
+        state = "[green]running[/green]"
+    elif record is not None and record.phase == server_record.STARTING:
+        state = "[yellow]starting[/yellow]"
+    else:
+        state = "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
-    url = langgraph_dev_url(config) if running else None
-    label = "projects:"
-    if sidecar is not None:
-        pid = sidecar.get("pid")
-        if _pid_serves_port(pid, port):
-            console.print(f"  pid:          {pid}")
-        elif (address := recorded_address()) is not None:
+    if record is not None:
+        console.print(f"  pid:          {record.pid}")
+        if record.port != configured_port:
             # langgraph_dev_port changed while it ran.
             console.print(
-                f"  pid:          {pid} [yellow](serves port {address[0]}, not "
-                f"port {port}; EvoSci server stop stops it)[/yellow]"
+                f"  [yellow]The configured port is {configured_port}; sessions "
+                "do not use this server until it runs there (EvoSci server "
+                "stop, and the next session starts it there).[/yellow]"
             )
-            url = langgraph_dev_url(port=address[0], host=address[1])
-            label = f"projects (port {address[0]}):"
-        else:
-            console.print(
-                f"  pid:          {pid} [yellow](stale record — this pid does "
-                f"not serve port {port})[/yellow]"
+        elif running:
+            _print_configured_answer(
+                record, _base_url(configured_port, configured_host)
             )
-    elif running:
+        if record.older:
+            console.print(f"  [yellow]{escape(OLDER_SERVER_MESSAGE)}[/yellow]")
+    else:
         console.print(
             "  [yellow]no ownership record — externally managed or older server"
             "[/yellow]"
         )
-    if url is not None:
-        _print_projects(url, label)
+    if running:
+        _print_projects(langgraph_dev_url(port=port, host=host))
 
 
-def _print_projects(url: str, label: str = "projects:") -> None:
-    """List the projects the server at *url* serves under *label*, or say
-    why they cannot be listed."""
+def _lock_problem() -> str | None:
+    """What to say when the record is missing because of the lock: held
+    without a record, or unreadable; None when it is free."""
+    from ..langgraph_dev import manager, server_home
+
+    state = server_home.lock_state()
+    if state == server_home.HELD:
+        return manager.unrecorded_lock_message()
+    if state == server_home.UNKNOWN:
+        return manager.lock_unreadable_message()
+    return None
+
+
+def _print_configured_answer(record, configured_url: str) -> None:
+    """Say how the recorded server answers at the configured address, the
+    one sessions use, when that is not as this data folder's server."""
+    from ..langgraph_dev.manager import ask
+
+    answer = ask(configured_url)
+    if answer == "own":
+        return
+    if answer == "silent":
+        console.print(
+            f"  [yellow]It does not answer at {escape(configured_url)}.[/yellow]"
+        )
+    elif answer == "older":
+        console.print(
+            f"  [yellow]{escape(configured_url)} answers as an older "
+            "EvoScientist release.[/yellow]"
+        )
+    elif configured_url != record.url:
+        # langgraph_dev_host changed while it ran.
+        console.print(
+            f"  [yellow]It listens on {escape(record.host)}, which the "
+            f"configured {escape(configured_url)} does not reach; "
+            "sessions do not use this server until it runs there "
+            "(EvoSci server stop, and the next session starts it "
+            "there).[/yellow]"
+        )
+
+
+def _print_projects(url: str) -> None:
+    """List the projects the server at *url* serves, or say why they cannot
+    be listed."""
     from ..langgraph_dev.registration import (
         OlderServerError,
         OtherServerError,
@@ -188,17 +237,19 @@ def _print_projects(url: str, label: str = "projects:") -> None:
     try:
         projects = served_projects(url)
     except OtherServerError as exc:
-        console.print(f"  {label:<14}[yellow]not listed. {escape(str(exc))}[/yellow]")
+        console.print(
+            f"  projects:     [yellow]not listed. {escape(str(exc))}[/yellow]"
+        )
         return
     except (OlderServerError, RegistrationError) as exc:
         console.print(
-            f"  {label:<14}[yellow]could not be read. {escape(str(exc))}[/yellow]"
+            f"  projects:     [yellow]could not be read. {escape(str(exc))}[/yellow]"
         )
         return
     if not projects:
-        console.print(f"  {label:<14}none")
+        console.print("  projects:     none")
         return
-    console.print(f"  {label}")
+    console.print("  projects:")
     for project in projects:
         missing = " [yellow](folder missing)[/yellow]" if project.get("missing") else ""
         console.print(f"    {escape(str(project['workspace_dir']))}{missing}")
@@ -238,27 +289,21 @@ def _busy_work(url: str) -> str | None:
     return "; ".join(work) or "work in progress"
 
 
-def _stop_busy_server_anyway() -> bool:
+def _stop_busy_server_anyway(record) -> bool:
     """Whether to go on with a stop: always when it ends no server or an
     idle one; for a busy one, after asking, since it serves every project and
     its runs and background jobs are not kept. Without a terminal to ask in,
     it is refused (exit 1), as ``EvoSci update`` does; ``--yes`` skips the
     question."""
-    from ..langgraph_dev.manager import (
-        _base_url,
-        is_langgraph_dev_running,
-        recorded_address,
-    )
+    from ..langgraph_dev.manager import is_langgraph_dev_running
 
     # The server the stop ends is the recorded one, whatever its port; a
     # server without a record is not touched.
-    address = recorded_address()
-    if address is None:
+    if record is None:
         return True
-    port, host = address
-    if not is_langgraph_dev_running(port=port, host=host):
+    if not is_langgraph_dev_running(port=record.port, host=record.host):
         return True
-    work = _busy_work(_base_url(port, host))
+    work = _busy_work(record.url)
     if work is None:
         return True
     message = (
@@ -278,28 +323,53 @@ def _stop_busy_server_anyway() -> bool:
 
 def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     """``EvoSci server stop``; with *keep_owned* (``EvoSci service stop``), a
-    server that ``EvoSci deploy`` or the desktop app owns, or that another
-    process is starting or stopping, is left running. Either command leaves
-    a server it could not open, for a reason other than access denied,
-    running with its records, says to try again and exits 1. A busy server
-    is stopped only after asking, or with *yes*.
+    server that ``EvoSci deploy`` or the desktop app owns is left running.
+    Either command leaves a server it could not open, for a reason other than
+    access denied, running, says to try again and exits 1. A busy server is
+    stopped only after asking, or with *yes*; a server that took the place
+    of the one asked about, or appeared meanwhile, is not stopped.
     Whether it was left running."""
     from ..config import get_effective_config
+    from ..langgraph_dev import manager
     from ..langgraph_dev.manager import (
         ServerKeptError,
         ServerStopFailedError,
         configured_address,
         is_langgraph_dev_running,
         owned_by_its_starter,
-        stop_recorded_server,
     )
 
+    record = manager.read_record(older=True)
     # A server service stop leaves running needs no question about its work.
-    kept = keep_owned and owned_by_its_starter()
-    if not yes and not kept and not _stop_busy_server_anyway():
-        return True
+    kept = keep_owned and owned_by_its_starter(record)
+    if not yes and not kept:
+        if not _stop_busy_server_anyway(record):
+            return True
+        # The question may have taken a while: stop only the server it was
+        # about, never one that appeared meanwhile.
+        current = manager.read_record(older=True)
+        if current is not None and record is None:
+            console.print(
+                f"[yellow]⚠ A server (pid {current.pid}) is starting now; nothing "
+                "was stopped. Run the stop again once it is up.[/yellow]"
+            )
+            raise typer.Exit(1)
+        if current is not None and not record.same_server(current):
+            console.print(
+                f"[yellow]⚠ A server (pid {current.pid}) that was not the one "
+                "asked about runs now; nothing was stopped. Run the stop "
+                "again.[/yellow]"
+            )
+            raise typer.Exit(1)
+        record = current
+    problem = _lock_problem() if record is None else None
+    if problem is not None:
+        console.print(f"[yellow]⚠ {escape(problem)}[/yellow]")
+        raise typer.Exit(1)
+    config = get_effective_config()
+    port, host = configured_address(config)
     try:
-        pid = stop_recorded_server(keep_owned=keep_owned)
+        pid = manager.stop_server(keep_owned=keep_owned, record=record)
     except ServerKeptError as exc:
         console.print(f"[yellow]⚠ {escape(str(exc))}[/yellow]")
         if isinstance(exc, ServerStopFailedError):
@@ -308,8 +378,6 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     if pid is not None:
         console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")
         return False
-    config = get_effective_config()
-    port, host = configured_address(config)
     left_running = is_langgraph_dev_running(port=port, host=host)
     if left_running:
         # A server without ownership records (crashed session, deleted state
@@ -325,8 +393,5 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
             f"[bold]{manual_stop_command(port)}[/bold][/dim]"
         )
     else:
-        console.print(
-            "[dim]No EvoSci-owned langgraph dev server to stop "
-            "(stale state, if any, was cleaned up).[/dim]"
-        )
+        console.print("[dim]No EvoSci-owned langgraph dev server to stop.[/dim]")
     return left_running

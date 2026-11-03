@@ -119,18 +119,16 @@ def _restart(emit: Emitter) -> tuple[str, bool] | None:
     emit(make_event("server", "running", message="Starting the server again"))
     config = get_effective_config()
     try:
-        served = manager.serve_project(config, None)
+        result = manager.serve_project(config, None)
     except (RuntimeError, ValueError, OSError) as exc:
         return f"Could not start the background agent server again: {exc}", False
-    if not served:
+    if not result.served:
         return (
             "Could not start the background agent server again; it starts with "
             "your next session.",
             False,
         )
-    # This process started it only when it holds it; otherwise a server
-    # already ran on the port.
-    if manager._PROCESS is None:
+    if not result.started:
         return (
             "A server was already running on the port, so the background "
             "agent server was not started again; `EvoSci server status` shows "

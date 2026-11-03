@@ -130,16 +130,25 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     from ..langgraph_dev.registration import exposure_messages
     from .commands import dangerous_flag_note
 
-    unavailable = (
-        lg_manager.SERVER_UNAVAILABLE_MESSAGE if lg_manager.SERVER_UNAVAILABLE else None
-    )
+    unavailable = None
+    if lg_manager.SERVER_UNAVAILABLE:
+        unavailable = " ".join(
+            m
+            for m in (
+                lg_manager.SERVER_UNAVAILABLE_MESSAGE,
+                lg_manager.SERVER_UNAVAILABLE_REASON,
+            )
+            if m
+        )
     drift = (
         lg_manager.CONFIG_DRIFT_MESSAGE
         if lg_manager.CONFIG_DRIFT_SINCE_LAUNCH
         else None
     )
+    older = lg_manager.OLDER_SERVER_MESSAGE if lg_manager.OLDER_SERVER else None
     notices = [
         setup_hint(),
+        older,
         drift,
         lg_manager.AGENT_SHELL_DRIFT,
         unavailable,
