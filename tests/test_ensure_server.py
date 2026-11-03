@@ -1,0 +1,1269 @@
+"""How ``ensure_server`` finds this data folder's server, or starts one.
+
+One test per state and outcome: a record that is serving (asked at the
+caller's address), a record that is starting (waited for), the server lock
+held without a record (a server stopping, waited for), and neither (the port
+asked whose server answers, else a start under the start lock).
+"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from EvoScientist.langgraph_dev import manager, registration, server_record
+from tests.fakes.langgraph_dev import LockHolder, Server, write_record
+
+
+def _config(port: int = 6174):
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    cfg.langgraph_dev_port = port
+    return cfg
+
+
+@pytest.fixture
+def server(monkeypatch, runtime_paths):
+    return Server(monkeypatch)
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    calls: list = []
+
+    def register_folder(workspace, *, url):
+        calls.append((url, workspace))
+        return registration.ServerExposure()
+
+    monkeypatch.setattr(registration, "register_folder", register_folder)
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# A serving record
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_serving_record_answering_as_ours_is_reused_and_never_killed(server):
+    server.run(lasting=True)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.started is False
+    assert result.record.pid == server.pid
+    assert server.spawns == []
+    assert server.stopped == []
+
+
+def test_ensure_serving_record_counts_while_lock_is_held_whatever_its_create_time(
+    server,
+):
+    """The record parses and the server lock is held: that is a valid
+    record, also when its creation time names no live process."""
+    server.answering.add(6174)
+    write_record(9999, created=1.0)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.record.pid == 9999
+
+
+def test_ensure_record_without_server_lock_is_ignored(server, monkeypatch):
+    """A record left behind by a server that is gone: the lock is free."""
+    import json
+
+    from EvoScientist.langgraph_dev import server_home
+
+    write_record(9999)
+
+    def _held(wait=0):
+        record = manager.RUNTIME.record
+        held = record.exists() and json.loads(record.read_text())["pid"] != 9999
+        return server_home.HELD if held else server_home.FREE
+
+    monkeypatch.setattr(server_home, "lock_state", _held)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+
+
+def test_ensure_serving_record_on_another_port_is_refused(server, monkeypatch):
+    server.run(port=16400)
+
+    result = manager.ensure_server(_config(6174))
+
+    assert result.served is False
+    assert result.problem == "other_port"
+    assert "16400" in result.error
+    assert "6174" in result.error
+    assert manager.SERVER_UNAVAILABLE_REASON == result.reason
+    assert server.spawns == []
+
+
+def test_ensure_serving_record_on_another_port_is_used_with_any_port(server):
+    server.run(port=16400)
+
+    result = manager.ensure_server(_config(6174), any_port=True)
+
+    assert result.available is True
+    assert (result.port, result.url) == (16400, "http://127.0.0.1:16400")
+
+
+def test_ensure_serving_record_is_refused_without_reuse(server):
+    server.run(port=16401)
+
+    result = manager.ensure_server(_config(), reuse=False)
+
+    assert result.problem == "running"
+    assert str(server.pid) in result.error
+    assert "16401" in result.error
+    assert server.spawns == []
+
+
+def test_ensure_serving_record_is_asked_at_configured_address(server, monkeypatch):
+    """The session's clients use the configured address: that is the one
+    asked, whatever interface the record names."""
+    server.run(host="0.0.0.0")
+    asked: list = []
+    monkeypatch.setattr(
+        manager, "ask", lambda url: asked.append(url) or server._ask(url)
+    )
+    cfg = _config()
+    cfg.langgraph_dev_host = "192.168.1.5"
+
+    result = manager.ensure_server(cfg)
+
+    assert asked == ["http://192.168.1.5:6174"]
+    assert result.url == "http://192.168.1.5:6174"
+
+
+@pytest.mark.parametrize("answer", ["refused", "other"])
+def test_ensure_serving_record_configured_address_does_not_reach_is_unreachable(
+    server, monkeypatch, answer
+):
+    server.run(host="10.0.0.5")
+    monkeypatch.setattr(manager, "ask", lambda url: answer)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unreachable"
+    assert "http://10.0.0.5:6174" in result.error
+    assert "http://127.0.0.1:6174" in result.error
+    assert server.stopped == []
+
+
+def test_ensure_serving_record_that_misses_one_probe_is_reused(server, monkeypatch):
+    server.run()
+    answers = iter(["silent", "own"])
+    monkeypatch.setattr(manager, "ask", lambda url: next(answers))
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert server.spawns == []
+
+
+def test_ensure_serving_record_that_misses_every_probe_is_unresponsive(
+    server, monkeypatch
+):
+    server.run()
+    asked: list = []
+    monkeypatch.setattr(manager, "ask", lambda url: asked.append(url) or "silent")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unresponsive"
+    assert len(asked) == manager._SERVING_PROBES
+    assert server.stopped == []
+    assert server.spawns == []
+
+
+# ---------------------------------------------------------------------------
+# A starting record
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_starting_record_is_waited_for_until_it_answers(server):
+    server.run(phase=server_record.STARTING)
+    server.answering.clear()
+    server.on_pause = lambda n: server.answering.add(6174) if n == 3 else None
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert server.pauses >= 3
+    assert server.spawns == []
+
+
+def test_ensure_starting_record_that_never_answers_is_unresponsive(server):
+    server.run(phase=server_record.STARTING)
+    server.answering.clear()
+    server.silent.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unresponsive"
+    assert server.stopped == []
+
+
+def test_ensure_record_gone_while_waiting_leads_to_start(server):
+    """A stop during the wait: the record goes away, and the call starts a
+    server instead of timing out."""
+    server.run(pid=7000, phase=server_record.STARTING)
+    server.answering.clear()
+
+    def stopped(n):
+        if n == 2:
+            manager.RUNTIME.record.unlink()
+
+    server.on_pause = stopped
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert len(server.spawns) == 1
+
+
+# ---------------------------------------------------------------------------
+# The server lock held without a record
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_lock_held_without_record_is_waited_for_until_record(server):
+    server.locked = True
+    waits: list = []
+
+    def recorded(n):
+        if n == 3:
+            server.run()
+            server.locked = False
+
+    server.on_pause = recorded
+
+    result = manager.ensure_server(_config(), on_wait=waits.append)
+
+    assert result.available is True
+    assert server.spawns == []
+    assert waits == [True, False]
+
+
+def test_ensure_lock_freed_without_record_leads_to_start(server):
+    """The server that held it stopped."""
+    server.locked = True
+    server.on_pause = lambda n: setattr(server, "locked", n < 3)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+
+
+def test_ensure_lock_held_without_record_past_settle_is_unrecorded_lock(server):
+    """A server that keeps the lock without a record, and does not answer as
+    this data folder's: named, with how to stop it by hand; nothing is
+    started."""
+    server.locked = True
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unrecorded_lock"
+    assert str(manager.RUNTIME.server_lock) in result.error
+    assert "by hand" in result.error
+    assert "try again" not in result.error.lower()
+    assert server.spawns == []
+
+
+def test_ensure_settle_waits_only_briefly_for_record(server, monkeypatch):
+    server.locked = True
+    monkeypatch.setattr(manager, "_SETTLE_WAIT", 0.0)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unrecorded_lock"
+    assert server.pauses == 0
+
+
+def _unreadable_lock(monkeypatch):
+    from EvoScientist.langgraph_dev import server_home
+
+    looks: list = []
+
+    def _unknown(wait=0):
+        looks.append(1)
+        return server_home.UNKNOWN
+
+    monkeypatch.setattr(server_home, "lock_state", _unknown)
+    return looks
+
+
+def test_ensure_unreadable_lock_is_lock_unreadable_without_loop(server, monkeypatch):
+    looks = _unreadable_lock(monkeypatch)
+    server.run()  # its record is not trusted: the lock proves nothing
+
+    server.answering.clear()
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "lock_unreadable"
+    assert str(manager.RUNTIME.server_lock) in result.error
+    assert "chown" in result.error
+    assert len(looks) <= 2
+    assert server.spawns == []
+
+
+def test_ensure_unreadable_lock_reuses_server_answering_as_own(server, monkeypatch):
+    _unreadable_lock(monkeypatch)
+    server.answering.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert server.spawns == []
+
+
+# ---------------------------------------------------------------------------
+# No record, the server lock free: the port
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_free_port_answering_as_ours_is_reused(server):
+    """A server of this data folder started by hand, outside the server
+    home: it holds no lock and keeps no record."""
+    server.answering.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.record is None
+    assert server.spawns == []
+
+
+@pytest.mark.parametrize(
+    ("whose", "problem"),
+    [("other", "other_data_folder"), ("older", "older_server")],
+)
+def test_ensure_free_port_answering_as_another_server_is_conflict(
+    server, whose, problem
+):
+    server.answering.add(6174)
+    server.whose[6174] = whose
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == problem
+    assert server.spawns == []
+
+
+def test_ensure_for_project_server_too_old_to_say_whose_it_is_raises(server, tmp_path):
+    server.answering.add(6174)
+    server.whose[6174] = "older"
+
+    with pytest.raises(registration.OlderServerError):
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+    assert manager.SERVER_UNAVAILABLE is True
+
+
+def test_ensure_port_another_program_holds_is_foreign_after_bind_wait(server):
+    server.occupied.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "foreign"
+    assert result.port == 6174
+    assert server.spawns == []
+
+
+def test_ensure_port_closing_listener_frees_is_started_on(server, monkeypatch):
+    """Something still holds the port but frees it within the bind wait."""
+    server.silent.add(6174)
+    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda port, host: True)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+
+
+def test_ensure_free_port_answering_as_ours_is_refused_without_reuse(server):
+    server.answering.add(6174)
+
+    result = manager.ensure_server(_config(), reuse=False)
+
+    assert result.problem == "running"
+
+
+def test_ask_tells_answers_apart(monkeypatch, runtime_paths):
+    import httpx
+
+    def _get(url, **_kw):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(manager.httpx, "get", _get)
+    assert manager.ask("http://127.0.0.1:1") == "refused"
+
+    def _slow(url, **_kw):
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(manager.httpx, "get", _slow)
+    assert manager.ask("http://127.0.0.1:1") == "silent"
+
+    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(404))
+    assert manager.ask("http://127.0.0.1:1") == "foreign"
+
+    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(200))
+    monkeypatch.setattr(manager, "_whose_server", lambda url: "other")
+    assert manager.ask("http://127.0.0.1:1") == "other"
+
+
+def test_whose_server_tells_this_data_folders_from_another(monkeypatch, runtime_paths):
+    from EvoScientist import local_secret
+
+    monkeypatch.setattr(local_secret, "read_local_secret", lambda: "s3cret")
+    own = local_secret.instance_of("s3cret")
+    monkeypatch.setattr(registration, "server_instance", lambda url, **_k: own)
+    assert manager._whose_server("http://127.0.0.1:6174") == "own"
+
+    monkeypatch.setattr(
+        registration, "server_instance", lambda url, **_k: "someone-else"
+    )
+    assert manager._whose_server("http://127.0.0.1:6174") == "other"
+
+    monkeypatch.setattr(local_secret, "read_local_secret", lambda: None)
+    assert manager._whose_server("http://127.0.0.1:6174") == "other"
+
+    def _older(url, **_k):
+        raise registration.OlderServerError()
+
+    monkeypatch.setattr(registration, "server_instance", _older)
+    assert manager._whose_server("http://127.0.0.1:6174") == "older"
+
+
+# ---------------------------------------------------------------------------
+# The start
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_starts_server_and_owns_its_process(server):
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert result.proc is server.procs[0]
+    assert result.record.pid == server.pid
+    assert result.url == "http://127.0.0.1:6174"
+
+
+def test_ensure_passes_start_what_it_was_asked(server):
+    class _Job:
+        started_with = None
+
+        def started(self, proc):
+            self.started_with = proc
+
+    job = _Job()
+
+    manager.ensure_server(
+        _config(),
+        port=16402,
+        host="0.0.0.0",
+        lasting=False,
+        tunnel=True,
+        job=lambda: job,
+        any_port=True,
+    )
+
+    spawn = server.spawns[0]
+    assert (spawn["port"], spawn["host"]) == (16402, "0.0.0.0")
+    assert spawn["lasting"] is False
+    assert spawn["tunnel"] is True
+    assert spawn["config_fingerprint"] == "fp"
+    assert job.started_with is server.procs[0]
+
+
+def test_ensure_runs_before_start_right_before_start_only(server):
+    calls: list = []
+
+    def before():
+        assert manager.RUNTIME.lock_file.exists()
+        calls.append(len(server.spawns))
+
+    manager.ensure_server(_config(), before_start=before)
+    assert calls == [0]
+
+    manager.ensure_server(_config(), before_start=before)
+    assert calls == [0], "a reuse starts nothing"
+
+
+def test_ensure_reports_exit_of_server_it_started(server, runtime_paths):
+    runtime_paths.log_file.write_text("Traceback: address already in use\n")
+    server.exit_code = 3
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "exited"
+    assert result.exit_code == 3
+    assert "address already in use" in result.error
+    assert result.served is False
+
+
+def test_unavailable_reason_names_log_not_its_end(server, runtime_paths):
+    """The notice is one line; the log's end stays in the error."""
+    runtime_paths.log_file.write_text("Traceback\n  line\naddress in use\n")
+    server.exit_code = 3
+
+    manager.ensure_server(_config())
+
+    reason = manager.SERVER_UNAVAILABLE_REASON
+    assert "\n" not in reason
+    assert "address in use" not in reason
+    assert str(runtime_paths.log_file) in reason
+
+
+def test_ensure_keeps_started_server_whose_serving_rewrite_failed(server, monkeypatch):
+    """Its record stays ``starting``; it answers as ours, so it is started
+    and not stopped."""
+    spawn = server._spawn
+
+    def _stays_starting(**kwargs):
+        proc = spawn(**kwargs)
+        write_record(proc.pid, port=kwargs["port"], phase=server_record.STARTING)
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _stays_starting)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert server.stopped == []
+
+
+def test_ensure_stops_server_whose_first_write_failed(server):
+    """A server that cannot write its record exits; one that does not is
+    stopped once the start budget is spent."""
+    server.records = False
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert server.stopped == [server.pid]
+    assert manager._PROCESS is None
+
+
+def test_ensure_stops_server_it_started_that_never_answers(server, monkeypatch):
+    spawn = server._spawn
+
+    def _silent(**kwargs):
+        proc = spawn(**kwargs)
+        server.answering.clear()
+        server.silent.add(kwargs["port"])
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _silent)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert server.stopped == [server.pid]
+
+
+def test_ensure_reports_start_that_cannot_run(server, monkeypatch):
+    def _missing(**_kw):
+        raise FileNotFoundError("langgraph CLI not found")
+
+    monkeypatch.setattr(manager, "_spawn_server", _missing)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert "langgraph CLI not found" in result.error
+
+
+def test_ensure_reports_start_lock_it_cannot_use(server, monkeypatch, tmp_path):
+    from tests.fakes.langgraph_dev import break_start_lock
+
+    break_start_lock(monkeypatch, tmp_path, "acquire")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert server.spawns == []
+
+
+def test_ensure_waits_for_another_start_and_reuses_its_server(server):
+    holder = LockHolder()
+    waits: list = []
+
+    def other_started():
+        server.run(pid=8000)
+        holder.release.set()
+
+    timer = threading.Timer(0.05, other_started)
+    timer.start()
+    try:
+        result = manager.ensure_server(_config(), on_wait=waits.append)
+    finally:
+        timer.join()
+        holder.done()
+
+    assert result.available is True
+    assert result.record.pid == 8000
+    assert server.spawns == []
+    assert waits[0] is True
+    assert waits[-1] is False
+
+
+def test_ensure_gives_up_on_start_lock_held_too_long(server):
+    holder = LockHolder()
+    try:
+        result = manager.ensure_server(_config())
+    finally:
+        holder.done()
+
+    assert result.problem == "busy"
+    assert server.spawns == []
+
+
+def test_ensure_cancelled_while_waiting_starts_nothing(server):
+    holder = LockHolder()
+    try:
+        result = manager.ensure_server(_config(), cancelled=lambda: True)
+    finally:
+        holder.done()
+
+    assert result.problem == "cancelled"
+    assert server.spawns == []
+
+
+def test_ensure_cancelled_during_start_stops_its_server(server, monkeypatch):
+    server.records = False
+    cancel = {"now": False}
+    server.on_pause = lambda n: cancel.update(now=True)
+
+    result = manager.ensure_server(_config(), cancelled=lambda: cancel["now"])
+
+    assert result.problem == "cancelled"
+    assert server.stopped == [server.pid]
+
+
+def test_ensure_reports_port_that_never_frees_before_start(server):
+    server.unbindable.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "foreign"
+    assert result.port == 6174
+    assert server.spawns == []
+
+
+def test_ensure_runs_nothing_before_start_on_port_that_never_frees(server):
+    server.unbindable.add(6174)
+    calls: list = []
+
+    result = manager.ensure_server(_config(), before_start=lambda: calls.append(1))
+
+    assert result.problem == "foreign"
+    assert calls == []
+
+
+def test_ensure_installs_node_under_start_lock(server, monkeypatch):
+    from tests.fakes.langgraph_dev import start_lock_is_held
+
+    held: list = []
+    monkeypatch.setattr(
+        manager,
+        "_install_node_for_mcp",
+        lambda waits: held.append(start_lock_is_held()),
+    )
+
+    manager.ensure_server(_config())
+
+    assert held == [True]
+
+
+def test_node_install_stops_waiting_on_cancel(monkeypatch):
+    import threading
+
+    from EvoScientist.mcp import client as mcp_client
+
+    release = threading.Event()
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
+    monkeypatch.setattr(
+        mcp_client, "_ensure_node_for_stdio", lambda _c: release.wait(5)
+    )
+    monkeypatch.setattr(manager, "_POLL_INTERVAL", 0.01)
+    try:
+        manager._install_node_for_mcp(manager._Waits(lambda: True, None))
+    finally:
+        release.set()
+
+
+def test_ensure_releases_start_lock(server):
+    from tests.fakes.langgraph_dev import start_lock_is_held
+
+    manager.ensure_server(_config())
+
+    assert not start_lock_is_held()
+
+
+# ---------------------------------------------------------------------------
+# The registration
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_registers_project_with_server_it_found(server, registered, tmp_path):
+    server.run()
+
+    result = manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+    assert result.served is True
+    assert [url for url, _ in registered] == ["http://127.0.0.1:6174"]
+
+
+def test_ensure_without_registration_falls_back(server, monkeypatch, tmp_path):
+    server.run()
+
+    def _fail(workspace, *, url):
+        raise registration.RegistrationError("did not register")
+
+    monkeypatch.setattr(registration, "register_folder", _fail)
+
+    result = manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+    assert result.served is False
+    assert result.problem == "unregistered"
+    assert manager.is_async_subagents_available() is False
+
+
+def test_ensure_leaves_session_as_it_was_for_missing_project(
+    server, monkeypatch, tmp_path
+):
+    server.run()
+    monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
+
+    def _missing(workspace, *, url):
+        raise registration.ProjectFolderMissingError(tmp_path)
+
+    monkeypatch.setattr(registration, "register_folder", _missing)
+
+    with pytest.raises(registration.ProjectFolderMissingError):
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+    assert manager.is_async_subagents_available() is True
+
+
+def test_ensure_does_not_register_without_server(server, registered, tmp_path):
+    server.occupied.add(6174)
+
+    manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+    assert registered == []
+
+
+def test_ensure_record_written_by_hand_counts(server):
+    """Any process can be the recorded server, as long as it is live."""
+    server.processes.add(9100)
+    server.answering.add(6174)
+    write_record(9100)
+
+    result = manager.ensure_server(_config())
+
+    assert result.record.pid == 9100
+
+
+def test_ensure_older_releases_record_kept_across_probes(server, monkeypatch):
+    from tests.fakes.langgraph_dev import write_older_record
+
+    server.processes.add(4141)
+    write_older_record(4141)
+    answers = iter(["silent", "own"])
+    monkeypatch.setattr(manager, "ask", lambda url: next(answers))
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.record.older is True
+
+
+# ---------------------------------------------------------------------------
+# The answers at the record's own address, interruptions
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_serving_record_refused_at_its_own_address_is_probed_again(
+    server, monkeypatch
+):
+    """Marked serving before it binds, or draining before it removes its
+    record: a refusal at its own address is a missed probe."""
+    server.run()
+    answers = iter(["refused", "own"])
+    monkeypatch.setattr(manager, "ask", lambda url: next(answers))
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+
+
+def test_ensure_serving_record_refused_at_its_own_address_every_time_is_stopping(
+    server, monkeypatch
+):
+    """Nothing listens while it holds the lock: waited out as a stop."""
+    server.run()
+    monkeypatch.setattr(manager, "ask", lambda url: "refused")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "stopping"
+    assert server.stopped == []
+
+
+def test_ensure_serving_record_silent_at_another_address_is_unreachable(
+    server, monkeypatch
+):
+    server.run(host="10.0.0.5")
+    monkeypatch.setattr(manager, "ask", lambda url: "silent")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unreachable"
+
+
+def test_ensure_serving_record_answering_as_older_release_is_older_server(
+    server, monkeypatch, tmp_path
+):
+    server.run()
+    monkeypatch.setattr(manager, "ask", lambda url: "older")
+
+    assert manager.ensure_server(_config()).problem == "older_server"
+    with pytest.raises(registration.OlderServerError):
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+
+def test_ensure_interrupt_while_waiting_for_start_stops_child(server):
+    server.records = False
+
+    def _interrupt(n):
+        if server.spawns:
+            raise KeyboardInterrupt
+
+    server.on_pause = _interrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        manager.ensure_server(_config())
+
+    assert server.stopped == [server.pid]
+    assert manager._PROCESS is None
+
+
+def test_ensure_interrupt_leaves_server_started_earlier_alone(server, monkeypatch):
+    """A lasting server this process started in an earlier call is not this
+    call's child."""
+    from tests.fakes.langgraph_dev import FakeProc
+
+    earlier = FakeProc(1234)
+    monkeypatch.setattr(manager, "_PROCESS", earlier)
+    server.locked = True
+
+    def _interrupt(n):
+        raise KeyboardInterrupt
+
+    server.on_pause = _interrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        manager.ensure_server(_config())
+
+    assert server.stopped == []
+    assert manager._PROCESS is earlier
+
+
+def test_ensure_failing_before_start_surfaces_its_own_error(server):
+    def _fails():
+        raise PermissionError(13, "job object refused")
+
+    with pytest.raises(PermissionError, match="job object refused"):
+        manager.ensure_server(_config(), before_start=_fails)
+    assert server.spawns == []
+
+
+def test_ensure_start_that_finds_another_server_pauses_before_looking_again(
+    server, monkeypatch
+):
+    """Another process changed what runs while this one waited for the
+    start lock: the call looks again after a pause, not in a tight loop."""
+    spawn = manager._spawn
+    calls: list = []
+
+    def _changed_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return None
+        return spawn(*a, **k)
+
+    monkeypatch.setattr(manager, "_spawn", _changed_once)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert server.pauses >= 1
+
+
+def test_ensure_draining_server_removing_its_record_leads_to_start(server):
+    """A stopping server closed its listener, then removed its record."""
+    server.run(pid=7000)
+    server.answering.clear()
+
+    def drained(n):
+        if n == 3:
+            manager.RUNTIME.record.unlink()
+
+    server.on_pause = drained
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert server.stopped == []
+
+
+def test_ensure_serving_record_not_bound_yet_is_reused_once_it_answers(server):
+    """Marked serving before it binds: refused, then it answers."""
+    server.run()
+    server.answering.clear()
+    server.on_pause = lambda n: server.answering.add(6174) if n == 2 else None
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert server.spawns == []
+
+
+def test_ensure_silent_serving_record_is_unresponsive_after_three_probes(
+    server, monkeypatch
+):
+    server.run()
+    asked: list = []
+    monkeypatch.setattr(manager, "ask", lambda url: asked.append(url) or "silent")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unresponsive"
+    assert len(asked) == 3
+
+
+def test_ensure_starting_record_waited_for_at_its_own_address(server, monkeypatch):
+    """The configured address does not reach it: the wait is at its own
+    address, and once it serves the configured one is asked."""
+    server.run(host="10.0.0.5", phase=server_record.STARTING)
+    asked: list = []
+    answers = {"http://10.0.0.5:6174": "own", "http://127.0.0.1:6174": "refused"}
+    monkeypatch.setattr(manager, "ask", lambda url: asked.append(url) or answers[url])
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unreachable"
+    # The first look asks the configured address; the record read after it
+    # sends the next look to its own address first.
+    assert asked[-2:] == ["http://10.0.0.5:6174", "http://127.0.0.1:6174"]
+
+
+def test_ensure_starting_record_at_configured_address_reused_once_it_answers(server):
+    server.run(phase=server_record.STARTING)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+
+
+def test_ensure_older_record_gone_after_missed_probe_leads_to_start(
+    server, monkeypatch
+):
+    from tests.fakes.langgraph_dev import write_older_record
+
+    server.processes.add(4141)
+    write_older_record(4141)
+    answers = iter(["silent"])
+
+    def _ask(url):
+        answer = next(answers, None)
+        if answer is None:
+            return server._ask(url)
+        server.processes.end(4141)  # its server is gone
+        return answer
+
+    monkeypatch.setattr(manager, "ask", _ask)
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+
+
+def test_ensure_start_budget_covers_record_and_first_answer(server, monkeypatch):
+    """One budget from the spawn: a record that comes late leaves less time
+    for the first answer, and the failure says how long it took."""
+    import re
+    from types import SimpleNamespace
+
+    clock = {"now": 0.0}
+
+    def _monotonic():
+        clock["now"] += 1.0
+        return clock["now"]
+
+    monkeypatch.setattr(
+        manager, "time", SimpleNamespace(monotonic=_monotonic, sleep=lambda _s: None)
+    )
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
+    server.records = False
+
+    def recorded_late(n):
+        if n == 3 and server.spawns and not manager.RUNTIME.record.exists():
+            write_record(server.pid)
+            server.silent.add(6174)
+
+    server.on_pause = recorded_late
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    elapsed = int(re.search(r"within (\d+) seconds", result.error).group(1))
+    assert elapsed <= 12
+
+
+# ---------------------------------------------------------------------------
+# The started server's process, whatever the outcome
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("whose", "problem"), [("other", "unreachable"), ("older", "older_server")]
+)
+def test_ensure_spawned_child_stopped_when_its_address_answers_otherwise(
+    server, monkeypatch, whose, problem
+):
+    spawn = server._spawn
+
+    def _answered_by_another(**kwargs):
+        proc = spawn(**kwargs)
+        server.whose[kwargs["port"]] = whose
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _answered_by_another)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == problem
+    assert server.stopped == [server.pid]
+    assert manager._PROCESS is None
+
+
+def test_ensure_spawned_child_stopped_on_interrupt_after_its_record(
+    server, monkeypatch
+):
+    spawn = server._spawn
+
+    def _silent(**kwargs):
+        proc = spawn(**kwargs)
+        server.answering.clear()
+        server.silent.add(kwargs["port"])
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _silent)
+
+    def _interrupt(n):
+        if manager.RUNTIME.record.exists():
+            raise KeyboardInterrupt
+
+    server.on_pause = _interrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        manager.ensure_server(_config())
+
+    assert server.stopped == [server.pid]
+
+
+def test_ensure_spawn_accepts_record_of_descendant(server, monkeypatch):
+    """On Windows the server runs below the launcher the starter started."""
+    spawn = server._spawn
+
+    def _child_records(**kwargs):
+        proc = spawn(**kwargs)
+        server.run(5555, port=kwargs["port"])
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _child_records)
+    monkeypatch.setattr(manager, "_spawned_pids", lambda proc: {proc.pid, 5555})
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert result.record.pid == 5555
+
+
+def test_ensure_spawn_never_takes_record_of_another_process(server, monkeypatch):
+    """A record a killed server left, its PID alive again in another process,
+    while the started one has not written its own."""
+    server.records = False
+    spawn = server._spawn
+
+    def _stale(**kwargs):
+        proc = spawn(**kwargs)
+        server.run(7777, port=kwargs["port"])
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _stale)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert server.stopped == [server.pid]
+
+
+# ---------------------------------------------------------------------------
+# What a look sees
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_record_switching_to_another_server_resets_probes(server, monkeypatch):
+    server.run(pid=1001)
+    asked: list = []
+    monkeypatch.setattr(manager, "ask", lambda url: asked.append(url) or "silent")
+    server.on_pause = lambda n: server.run(pid=1002) if n == 2 else None
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unresponsive"
+    assert result.record.pid == 1002
+    # Two misses of the first server, then three of the second.
+    assert len(asked) == 5
+
+
+def test_ensure_reuse_judges_record_read_after_probe(server, monkeypatch):
+    """The answer comes from a server that has marked itself serving: the
+    record read after it carries what the serving rewrite added."""
+    server.run(phase=server_record.STARTING)
+
+    def _serving_then_own(url):
+        write_record(server.pid, agent_python="/env/bin/python")
+        return "own"
+
+    monkeypatch.setattr(manager, "ask", _serving_then_own)
+
+    result = manager.ensure_server(_config())
+
+    assert result.record.phase == server_record.SERVING
+    assert result.record.fields["agent_python"] == "/env/bin/python"
+
+
+def test_ensure_stale_record_with_dead_pid_is_ignored_while_lock_held(server):
+    """A new server holds the lock and has not yet written its record over
+    the one a killed server left."""
+    write_record(9999)
+    server.dead.add(9999)
+    server.locked = True
+    server.on_pause = lambda n: server.run() if n == 2 else None
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.record.pid == server.pid
+
+
+def test_ensure_silent_probes_count_only_in_row(server, monkeypatch):
+    """A refused answer between two silent ones starts the count again."""
+    server.run()
+    answers = iter(["silent", "silent", "refused", "silent", "silent", "silent"])
+    asked: list = []
+
+    def _ask(url):
+        asked.append(url)
+        return next(answers)
+
+    monkeypatch.setattr(manager, "ask", _ask)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unresponsive"
+    assert len(asked) == 6
+
+
+def test_ensure_reads_record_once_per_look(server, monkeypatch):
+    server.run()
+    reads: list = []
+    read = manager.read_record
+
+    def _read(**kwargs):
+        reads.append(kwargs)
+        return read(**kwargs)
+
+    monkeypatch.setattr(manager, "read_record", _read)
+
+    manager.ensure_server(_config())
+
+    assert len(reads) == 1
+    assert reads[0]["older"] is True
+    assert reads[0]["lock"] == "held"
+
+
+def test_ensure_lock_held_without_record_answering_own_is_older_release(server):
+    """An older release's server keeps the lock and no record here: used,
+    with the notice to restart it."""
+    server.locked = True
+    server.answering.add(6174)
+
+    result = manager.ensure_server(_config())
+
+    assert result.available is True
+    assert result.older is True
+    assert manager.OLDER_SERVER is True
+
+
+def test_ensure_foreign_answer_without_record_is_foreign_at_once(server, monkeypatch):
+    server.occupied.add(6174)
+    waited: list = []
+    monkeypatch.setattr(
+        manager, "_wait_for_port_bindable", lambda *a, **k: waited.append(1)
+    )
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "foreign"
+    assert waited == []
+    assert server.spawns == []
+
+
+def test_ensure_silent_port_without_record_waits_for_bind(server, monkeypatch):
+    server.silent.add(6174)
+    waited: list = []
+    monkeypatch.setattr(
+        manager, "_wait_for_port_bindable", lambda *a, **k: waited.append(1) or False
+    )
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "foreign"
+    assert waited == [1]
+
+
+def test_ensure_foreign_answer_at_record_address_is_unreachable(server, monkeypatch):
+    server.run()
+    monkeypatch.setattr(manager, "ask", lambda url: "foreign")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "unreachable"
+
+
+def test_ask_tells_foreign_server_from_silent_one(monkeypatch, runtime_paths):
+    import httpx
+
+    def _not_http(url, **_kw):
+        raise httpx.RemoteProtocolError("not HTTP")
+
+    monkeypatch.setattr(manager.httpx, "get", _not_http)
+    assert manager.ask("http://127.0.0.1:1") == "foreign"
+
+    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(404))
+    assert manager.ask("http://127.0.0.1:1") == "foreign"
+
+    def _slow(url, **_kw):
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(manager.httpx, "get", _slow)
+    assert manager.ask("http://127.0.0.1:1") == "silent"

@@ -166,7 +166,7 @@ def _get(url: str, path: str, *, timeout: float) -> tuple[httpx.Response, object
     return response, body
 
 
-def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
+def server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
     """The instance the server at *url* names (``GET /api/instance``)."""
     response, body = _get(url, "/api/instance", timeout=timeout)
     if response.status_code == 404:
@@ -189,7 +189,7 @@ def _require_own_server(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str:
     from ..local_secret import instance_of, read_local_secret
 
     # First: a server too old to have created the secret has no instance.
-    instance = _server_instance(url, timeout=timeout)
+    instance = server_instance(url, timeout=timeout)
     secret = read_local_secret()
     if secret is None:
         raise RegistrationError(

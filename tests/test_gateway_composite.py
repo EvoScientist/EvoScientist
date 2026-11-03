@@ -541,7 +541,7 @@ def test_gateways_for_config_server_backend_falls_back_when_dev_unavailable(
 ):
     """Server backend + no live dev server -> in-process gateway, not a dead URL.
 
-    ``ensure_langgraph_dev`` soft-fails (leaves the availability flag False) when
+    ``ensure_server`` soft-fails (leaves the availability flag False) when
     the port is held or the subprocess dies; the factory must degrade to local
     rather than build the composite against an unreachable server.
     """

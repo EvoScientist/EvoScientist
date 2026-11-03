@@ -961,7 +961,9 @@ async def test_register_or_keep_session_reports_failed_registration(
     from EvoScientist.cli import commands
     from EvoScientist.langgraph_dev import manager
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", lambda *a, **k: False)
+    monkeypatch.setattr(
+        manager, "ensure_server", lambda *a, **k: manager.ServerResult(served=False)
+    )
 
     registered = await commands._register_or_keep_session(
         MagicMock(),
@@ -974,11 +976,12 @@ async def test_register_or_keep_session_reports_failed_registration(
 
 def test_ensure_async_subagent_server_warns_when_project_not_served(workspace):
     from EvoScientist.cli import commands
+    from EvoScientist.langgraph_dev import manager
 
     with (
         patch(
-            "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
-            lambda *a, **k: False,
+            "EvoScientist.langgraph_dev.manager.ensure_server",
+            lambda *a, **k: manager.ServerResult(served=False),
         ),
         commands.console.capture() as captured,
     ):
@@ -1001,7 +1004,7 @@ def test_ensure_async_subagent_server_refused_removes_run_dir(workspace):
         raise OlderServerError()
 
     with (
-        patch("EvoScientist.langgraph_dev.manager.ensure_langgraph_dev", _refuse),
+        patch("EvoScientist.langgraph_dev.manager.ensure_server", _refuse),
         pytest.raises(typer.Exit),
     ):
         commands._ensure_async_subagent_server(

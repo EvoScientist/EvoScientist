@@ -256,13 +256,15 @@ def _fresh_langgraph_dev_state(monkeypatch):
 
     ``langgraph_dev.manager`` keeps the server it started and what it found
     in module globals; a test that leaves one set (a fake ``Popen`` among
-    them) changes what the next test's ``ensure_langgraph_dev`` does.
+    them) changes what the next test's ``ensure_server`` does.
     """
     from EvoScientist.langgraph_dev import manager
 
     for name, value in {
         "_PROCESS": None,
         "SERVER_UNAVAILABLE": False,
+        "SERVER_UNAVAILABLE_REASON": None,
+        "OLDER_SERVER": False,
         "CONFIG_DRIFT_SINCE_LAUNCH": False,
         "AGENT_SHELL_DRIFT": None,
         "SERVER_EXPOSURE": None,
@@ -351,23 +353,14 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
-def runtime_paths(tmp_path, monkeypatch):
-    """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
+def runtime_paths():
+    """The server's files (``langgraph_dev.manager.RUNTIME``), in the
+    test's server home, created: ``_isolate_user_dirs`` points
+    ``paths.SERVER_HOME`` at a fresh folder, and the files follow it."""
+    from EvoScientist.langgraph_dev import manager, server_home
 
-    Replaces the module-level ``RUNTIME`` with a fully temp-rooted bundle
-    so every path (``pid_dir``, ``pid_file``, ``log_file``,
-    ``workspace_sidecar``, ``lock_file``) is contained under ``tmp_path``.
-
-    Tests that need a variant of a single field can still call
-    ``dataclasses.replace(runtime_paths, log_file=…)`` etc. — the
-    baseline is already isolated, so forgetting a field just keeps it
-    under ``tmp_path``, never ``~/.config/evoscientist``.
-    """
-    from EvoScientist.langgraph_dev import manager
-
-    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
-    monkeypatch.setattr(manager, "RUNTIME", runtime)
-    return runtime
+    server_home.ensure_server_home()
+    return manager.RUNTIME
 
 
 @pytest.fixture(autouse=True)
@@ -406,6 +399,10 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(paths, "GLOBAL_MEMORIES_DIR", data_dir / "memories")
     monkeypatch.setattr(paths, "MEMORIES_DIR", data_dir / "memories")
     monkeypatch.setattr(paths, "SERVER_HOME", data_dir / "server")
+    # Where an older release kept the server's record.
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "OLDER_RUNTIME_DIR", root / "older-runtime")
     monkeypatch.setattr(tui_interactive, "DATA_DIR", data_dir)
     monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(mcp_client, "USER_CONFIG_DIR", config_dir)

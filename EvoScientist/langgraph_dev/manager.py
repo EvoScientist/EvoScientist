@@ -3,10 +3,12 @@
 Provides functions to start/stop/health-check a ``langgraph dev`` subprocess
 that hosts the EvoScientist main agent, async sub-agents (e.g.
 ``writing-agent``), and EvoMemory background workers. The CLI calls
-``ensure_langgraph_dev(config, ...)`` at startup so users can run
+``ensure_server(config, ...)`` at startup so users can run
 ``EvoSci -p "..."`` without manually managing the langgraph dev server.
 
-Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
+One server serves a data folder. It records itself in the server home
+(:mod:`.server_record`), and every client finds it there
+(:func:`read_record`).
 """
 
 from __future__ import annotations
@@ -23,9 +25,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from dataclasses import fields as dataclass_fields
-from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,8 +52,14 @@ from EvoScientist.config.settings import (
     env_origins,
     is_client_only,
 )
-from EvoScientist.langgraph_dev import boundary, registration, server_home
+from EvoScientist.langgraph_dev import (
+    boundary,
+    registration,
+    server_home,
+    server_record,
+)
 from EvoScientist.langgraph_dev.registration import (
+    OlderServerError,
     RegistrationError,
     ServerUnusableError,
 )
@@ -61,55 +70,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
 class LanggraphRuntimePaths:
-    """All on-disk paths the langgraph_dev manager writes to.
+    """The files of this data folder's server, in the server home
+    (``paths.SERVER_HOME``): the server's record, the lock the server holds,
+    the lock a start holds, the server's log and the WebUI's.
 
-    Grouped into a single object (rather than a handful of free-floating
-    module-level constants) so tests can substitute *one* object to
-    redirect every file the manager touches, instead of patching each
-    path constant separately. The previous design — five separate
-    ``_PID_DIR`` / ``_PID_FILE`` / ``_LOG_FILE`` / ``_WORKSPACE_SIDECAR``
-    / ``_FILE_LOCK_PATH`` names — invited inconsistent patches: a test
-    might redirect ``_LOG_FILE`` but leave ``_PID_DIR`` pointing at
-    ``~/.config/evoscientist``, so the function under test still wrote
-    to the user's real home directory. With a single object there's
-    one knob to turn; if you replace it, *every* path moves with it.
-
-    Production code constructs ``RUNTIME`` below with the conventional
-    ``~/.config/evoscientist/`` layout. Tests call
-    :meth:`for_directory` to spin up an isolated instance.
+    Each is read from ``paths.SERVER_HOME`` when used, so the files follow it
+    (tests point it at a temporary folder).
     """
 
-    pid_dir: Path
-    pid_file: Path
-    log_file: Path
-    workspace_sidecar: Path
-    lock_file: Path
+    @property
+    def record(self) -> Path:
+        return server_record.record_path()
 
-    @classmethod
-    def for_directory(cls, pid_dir: Path) -> LanggraphRuntimePaths:
-        """Build a runtime-paths bundle rooted at ``pid_dir``.
+    @property
+    def server_lock(self) -> Path:
+        return server_home.lock_path()
 
-        Used by tests (and any future embedded-deployment override) to
-        spin up an isolated set of paths without spelling out every
-        individual path by hand.
-        """
-        return cls(
-            pid_dir=pid_dir,
-            pid_file=pid_dir / "langgraph_dev.pid",
-            log_file=pid_dir / "langgraph_dev.log",
-            workspace_sidecar=pid_dir / "langgraph_dev.workspace.json",
-            lock_file=pid_dir / "langgraph_dev.lock",
-        )
+    @property
+    def lock_file(self) -> Path:
+        return paths.SERVER_HOME / "langgraph_dev.lock"
+
+    @property
+    def log_file(self) -> Path:
+        return paths.SERVER_HOME / "langgraph_dev.log"
+
+    @property
+    def webui_log(self) -> Path:
+        return paths.SERVER_HOME / "webui.log"
 
 
-# Module-level runtime paths. Defaulted to the conventional
-# ``~/.config/evoscientist/`` layout; tests override ``RUNTIME`` with
-# :meth:`LanggraphRuntimePaths.for_directory` to point at a temp dir
-# without touching the user's real home directory.
-DEFAULT_PID_DIR = Path.home() / ".config" / "evoscientist"
-RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID_DIR)
+RUNTIME = LanggraphRuntimePaths()
+
+# Where releases before the server home kept the record, the PID file, the
+# start lock and the logs, one set for every data folder. A server such a
+# release started is still found there (:func:`read_record`).
+OLDER_RUNTIME_DIR = Path.home() / ".config" / "evoscientist"
+_OLDER_PID_FILE = "langgraph_dev.pid"
 
 
 def needs_langgraph_dev(
@@ -147,28 +144,34 @@ def needs_langgraph_dev(
 
 
 # Reentrant lock guarding ``_PROCESS`` / ``_ASYNC_SUBAGENTS_AVAILABLE``
-# mutations and the ``ensure_langgraph_dev`` decision/start/stop flow.
-# Reentrant because a start that fails inside ``ensure_langgraph_dev``'s
+# mutations and the ``ensure_server`` decision/start/stop flow.
+# Reentrant because a start that fails inside ``ensure_server``'s
 # critical section calls ``stop_langgraph_dev``, which takes it too.
 _LOCK = threading.RLock()
 
 
-# Set by ``ensure_langgraph_dev`` when it reuses a server whose
+# Set by ``ensure_server`` when it reuses a server whose
 # recorded launch-time config fingerprint differs from the current effective
 # config. The CLI reads it after startup to surface a "restart to apply"
 # hint — the server itself is never restarted automatically.
 CONFIG_DRIFT_SINCE_LAUNCH = False
 
-# Set by ``ensure_langgraph_dev`` to the warning text when it reuses a server
+# Set by ``ensure_server`` to the warning text when it reuses a server
 # whose agents got another ``python`` or shell than this session resolves (see
 # ``agent_shell.shell_drift_message``). The CLI prints it after startup.
 AGENT_SHELL_DRIFT: str | None = None
 
-# Set by ``ensure_langgraph_dev``: the session needs the server and does not
+# Set by ``ensure_server`` when it reuses a server an older release started
+# (:data:`OLDER_SERVER_MESSAGE`).
+OLDER_SERVER = False
+
+# Set by ``ensure_server``: the session needs the server and does not
 # have it (it did not start, or did not register the project). The TUI shows
-# :data:`SERVER_UNAVAILABLE_MESSAGE` in the app, where the terminal is hidden.
+# :data:`SERVER_UNAVAILABLE_MESSAGE` in the app, where the terminal is hidden,
+# with :data:`SERVER_UNAVAILABLE_REASON` when there is one.
 SERVER_UNAVAILABLE = False
-# Set by ``ensure_langgraph_dev``: how the server that registered the
+SERVER_UNAVAILABLE_REASON: str | None = None
+# Set by ``ensure_server``: how the server that registered the
 # session's project can be reached from other machines, as it answered;
 # ``None`` when no server registered it.
 SERVER_EXPOSURE: registration.ServerExposure | None = None
@@ -183,21 +186,23 @@ SERVER_UNAVAILABLE_MESSAGE = (
     "The background agent server is unavailable for this project; async "
     "subagents and EvoMemory workers are off for this session."
 )
-
-# Default for sidecar fields that are left out of the record.
-_NOT_RECORDED = object()
+OLDER_SERVER_MESSAGE = (
+    "The background agent server was started by an older EvoScientist "
+    "release; restart it to run this version: EvoSci server stop; it starts "
+    "again with your next session."
+)
 
 
 # Default port (Kaprekar's constant — see config/settings.py for the rationale).
-# Overridable per-call via ``start_langgraph_dev(port=...)`` /
-# ``ensure_langgraph_dev`` (which reads ``config.langgraph_dev_port``) and the
+# Overridable per-call via ``ensure_server(port=...)`` (which by default reads
+# ``config.langgraph_dev_port``) and the
 # corresponding url= field on AsyncSubAgent specs.
 _DEFAULT_PORT = 6174
 
 # Default bind interface — loopback, matching ``config.langgraph_dev_host``.
 # SECURITY: this is the unauthenticated agent API; launchers print a PUBLIC
 # BIND banner while it is exposed.
-_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_HOST = server_record.DEFAULT_HOST
 
 # Wildcard bind addresses: the server listens on every interface, but you
 # cannot meaningfully *connect* to them (0.0.0.0 is routed to loopback on
@@ -232,7 +237,7 @@ def _base_url(port: int = _DEFAULT_PORT, host: str = _DEFAULT_HOST) -> str:
 
 
 # Default rollover threshold for ``RUNTIME.log_file`` — once the log
-# exceeds this size, the next ``start_langgraph_dev`` invocation rotates
+# exceeds this size, the next start (``_spawn_server``) rotates
 # it to ``langgraph_dev.log.1`` (overwriting any existing backup) and
 # starts fresh. Single-backup policy keeps the disk footprint bounded
 # at roughly 2x the threshold even under heavy use (chatty MCP servers,
@@ -249,7 +254,7 @@ def _rotate_log_if_needed(log_path: Path) -> None:
     ``open(log_path, "ab")`` writes at offset 0.
 
     Best-effort: failures are logged and swallowed. A failed rotation
-    must NOT block ``start_langgraph_dev`` — the worst case is the log
+    must NOT block a start — the worst case is the log
     keeps growing for one more session and the next ``start`` try
     rotates it.
     """
@@ -268,132 +273,178 @@ def _rotate_log_if_needed(log_path: Path) -> None:
         )
 
 
-# Ownership record — JSON recording the pid of the running langgraph dev and
-# what it was launched with.
-# Cross-process callers (e.g. a TUI starting while ``EvoSci deploy`` runs)
-# read it on the reuse path to report configuration drift.
+# The server's record (``server_record``): which server serves this data
+# folder, at which address, and what it was launched with. Every reader goes
+# through :func:`read_record`.
 
 
-def _write_workspace_sidecar(
-    pid: int,
-    config_fingerprint: str | None = None,
-    agent_python: str | object | None = _NOT_RECORDED,
-    agent_bash: str | object | None = _NOT_RECORDED,
-    host: str | None = None,
-    lasting: bool | None = None,
-    port: int | None = None,
-    break_group_created: float | None = None,
-) -> None:
-    """Record the pid of the langgraph dev we just started.
+@dataclass(frozen=True)
+class ServerRecord:
+    """This data folder's running server, as its record names it.
 
-    ``config_fingerprint`` (optional) captures the launch-time config subset
-    the server consumed; a reuse compares it to detect drift.
-    ``agent_python`` (optional) is the ``python`` the server's agents got,
-    None when they have none; reuse compares it to warn about a session whose
-    PATH resolves another one. ``agent_bash`` (optional) is the Git Bash
-    their commands run in, None for cmd.exe or a POSIX shell; compared the
-    same way. ``data_dir`` and ``config_dir`` are this process's data and
-    config folders, which the server inherits (``paths.dir_env``), so a
-    client attaching from another environment reads the server's own.
-    ``host`` is the interface the server binds, so a client can tell
-    whether its probe reaches this server. ``port`` is the port it listens
-    on, for a client started apart from it (a WebUI run by hand) that would
-    otherwise only know the configured one. ``lasting`` says
-    whether it outlives the process that started it. ``break_group_created``
-    is the server's ``create_time()`` when it leads its own process group on
-    Windows, so a stop may send it Ctrl+Break; the stop sends it only to a
-    live process with that creation time, not to one that reuses the PID.
-
-    Atomic write via temp-file + ``os.replace``: without this, a concurrent
-    reader could observe a partially-written file, fail JSON parse, and
-    silently downgrade to the "no sidecar" fallback path — which skips the
-    drift checks. ``os.replace`` is atomic on POSIX and on Windows; the temp
-    file lives in the same directory so the rename stays within one filesystem.
-
-    Best-effort: failures are logged and swallowed. Without a sidecar,
-    ``ensure_langgraph_dev`` reuses the server without the drift checks.
+    ``pid`` is the process its starter started (the root of the tree a stop
+    ends); ``created`` its creation time, which a stop checks so it never
+    signals a process that reused the PID (None in a record of an older
+    release). ``phase`` is ``starting`` until the server serves, then
+    ``serving``; a record without one (an older release) counts as serving.
+    ``lasting`` is whether it outlives its starter, None when the record does
+    not say (a server started by hand, an older release). ``fields`` is the
+    record as written, for the drift checks. ``older`` is True for the
+    record an older release kept in :data:`OLDER_RUNTIME_DIR`.
     """
+
+    pid: int
+    port: int
+    host: str
+    created: float | None = None
+    phase: str = server_record.SERVING
+    lasting: bool | None = None
+    break_group: bool = False
+    fields: dict = dataclass_field(default_factory=dict)
+    older: bool = False
+
+    @property
+    def url(self) -> str:
+        return _base_url(self.port, self.host)
+
+    def same_server(self, other: ServerRecord | None) -> bool:
+        """Whether *other* names the same server process."""
+        return other is not None and _identity(other) == _identity(self)
+
+    @property
+    def data_dir(self) -> str:
+        return str(self.fields.get("data_dir") or paths.DATA_DIR)
+
+    @property
+    def config_dir(self) -> str:
+        return str(self.fields.get("config_dir") or paths.CONFIG_DIR)
+
+
+def _load_json(path: Path) -> dict | None:
     try:
-        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
-        tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
-        payload: dict = {
-            "pid": pid,
-            "data_dir": str(paths.DATA_DIR),
-            "config_dir": str(paths.CONFIG_DIR),
-        }
-        if host is not None:
-            payload["host"] = host
-        if port is not None:
-            payload["port"] = port
-        if lasting is not None:
-            payload["lasting"] = lasting
-        if break_group_created is not None:
-            payload[_BREAK_GROUP_CREATED_KEY] = break_group_created
-        if config_fingerprint is not None:
-            payload["config_fingerprint"] = config_fingerprint
-        if agent_python is not _NOT_RECORDED:
-            from EvoScientist.setup.research_env import SIDECAR_KEY
-
-            payload[SIDECAR_KEY] = agent_python
-        if agent_bash is not _NOT_RECORDED:
-            from EvoScientist.agent_shell import SIDECAR_KEY as BASH_KEY
-
-            payload[BASH_KEY] = agent_bash
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, RUNTIME.workspace_sidecar)
-    except OSError as exc:
-        logger.warning(
-            "Failed to write workspace sidecar %s: %s", RUNTIME.workspace_sidecar, exc
-        )
-
-
-def _read_workspace_sidecar() -> dict | None:
-    """Read the workspace sidecar. Returns None if missing, corrupt, or
-    structurally wrong (must be a dict whose ``pid`` is an int of at least 1,
-    not a bool).
-
-    A record written by an older release also carries ``workspace``, the
-    project of the client that started the server; readers ignore it.
-    """
-    if not RUNTIME.workspace_sidecar.exists():
-        return None
-    try:
-        data = json.loads(RUNTIME.workspace_sidecar.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
-        return None
-    pid = data.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
-        return None
-    return data
+    return data if isinstance(data, dict) else None
 
 
-def is_lasting(sidecar: dict | None) -> bool:
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def read_record(*, older: bool = False, lock: str | None = None) -> ServerRecord | None:
+    """The record of this data folder's running server, or None.
+
+    A record counts when it parses, the server lock is held and its PID is
+    alive: the server writes it right after it takes the lock and removes it
+    just before it exits, and a server that cannot write it exits. A record
+    a killed server left is ignored once its lock is free, or, while a new
+    server holds it, once its PID is gone. Without one in the
+    server home, and with *older*, the record an older release kept in
+    :data:`OLDER_RUNTIME_DIR` counts when it names this data folder and a
+    live langgraph dev that serves the port it recorded
+    (:func:`_older_record`). *lock* is what the caller found of the lock
+    (:func:`server_home.lock_state`); checked here when not given. A lock
+    that cannot be checked proves nothing: the record is not trusted.
+    """
+    data = _load_json(RUNTIME.record)
+    if data is not None:
+        record = _current_record(data)
+        if lock is None:
+            lock = server_home.lock_state()
+        if record is not None and lock == server_home.HELD and _pid_alive(record.pid):
+            return record
+    return _older_record() if older else None
+
+
+def _pid_alive(pid: int) -> bool:
+    return psutil.pid_exists(pid)
+
+
+def _current_record(data: dict) -> ServerRecord | None:
+    pid = _positive_int(data.get("pid"))
+    port = _positive_int(data.get("port"))
+    if pid is None or port is None:
+        return None
+    created = data.get(server_record.CREATE_TIME_KEY)
+    if isinstance(created, bool) or not isinstance(created, int | float):
+        created = None
+    phase = data.get(server_record.PHASE_KEY)
+    lasting = data.get("lasting")
+    return ServerRecord(
+        pid=pid,
+        port=port,
+        host=str(data.get("host") or _DEFAULT_HOST),
+        created=float(created) if created is not None else None,
+        phase=phase if phase == server_record.STARTING else server_record.SERVING,
+        lasting=lasting if isinstance(lasting, bool) else None,
+        break_group=data.get(server_record.BREAK_GROUP_KEY) is True,
+        fields=data,
+    )
+
+
+def _same_folder(recorded: object, folder: Path) -> bool:
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    try:
+        return paths.normalize_path(recorded) == paths.normalize_path(folder)
+    except (OSError, ValueError):
+        return False
+
+
+def _older_record() -> ServerRecord | None:
+    """The record an older release kept for this data folder's server, while
+    that server runs. Its PID file and record are deleted once the server
+    they name is gone (no process has its PID, or another one does); a
+    record of another data folder's server is left, and so is one whose
+    process refuses access, which this read then ignores."""
+    data = _load_json(OLDER_RUNTIME_DIR / server_record.RECORD_FILE)
+    if data is None or not _same_folder(data.get("data_dir"), paths.DATA_DIR):
+        return None
+    pid = _positive_int(data.get("pid"))
+    try:
+        cmdline = _process_cmdline(pid) if pid is not None else None
+    except psutil.AccessDenied:
+        return None
+    if cmdline is None or not server_record.is_langgraph_dev(cmdline):
+        _forget_older_record()
+        return None
+    bound_port, bound_host = server_record.address_of(cmdline)
+    port = _positive_int(data.get("port")) or bound_port
+    if port != bound_port:
+        # The PID went to another langgraph dev.
+        _forget_older_record()
+        return None
+    created = data.get("ctrl_break_create_time")
+    lasting = data.get("lasting")
+    return ServerRecord(
+        pid=pid,
+        port=port,
+        # Releases before the bind host was configurable recorded none and
+        # bound loopback.
+        host=str(data.get("host") or bound_host),
+        lasting=lasting if isinstance(lasting, bool) else None,
+        break_group=isinstance(created, float) and _same_process(pid, created),
+        fields=data,
+        older=True,
+    )
+
+
+def _forget_older_record() -> None:
+    """Delete the PID file and record an older release kept."""
+    for name in (_OLDER_PID_FILE, server_record.RECORD_FILE):
+        with contextlib.suppress(OSError):
+            (OLDER_RUNTIME_DIR / name).unlink()
+
+
+def is_lasting(record: ServerRecord | None) -> bool:
     """Whether the recorded server outlives the process that started it,
     shared by every session; not one ``EvoSci deploy`` or the desktop app
-    owns, nor one an older release recorded."""
-    return sidecar is not None and sidecar.get("lasting") is True
+    owns, nor one whose record does not say."""
+    return record is not None and record.lasting is True
 
-
-def _unlink_workspace_sidecar() -> None:
-    """Best-effort sidecar removal — called alongside every ``RUNTIME.pid_file.unlink()``
-    so the workspace fingerprint never outlives the PID file it pairs with."""
-    try:
-        RUNTIME.workspace_sidecar.unlink()
-    except OSError:
-        pass
-
-
-# Cross-process file lock for ``ensure_langgraph_dev``. Without this, two
-# concurrent CLI shells racing on the cold-start window can SIGKILL each
-# other's still-booting subprocesses (Shell B sees Shell A's port-bound but
-# not-yet-/ok subprocess as a "stale process to clean up"). With the lock,
-# Shell B blocks until Shell A's health-check finishes, then sees the
-# healthy server and reuses it. ``threading.RLock`` is process-local and
-# can't coordinate across CLI invocations.
-# Lock path lives on ``RUNTIME.lock_file``; timeout stays module-level.
-_FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 
 # Module-level handle to the langgraph dev subprocess we started, if any.
 # Stays None when we reused an existing process (managed by the user).
@@ -401,12 +452,9 @@ _PROCESS: subprocess.Popen | None = None
 
 # Windows: servers this process spawned as the leader of their own process
 # group, the only PIDs a Ctrl+Break may be sent to (for any other PID Windows
-# sends it to every process on the console). The sidecar records the same for
-# a server another process started, as the server's creation time
-# (``_BREAK_GROUP_CREATED_KEY``): a PID reused by another process must not get
-# the event.
+# sends it to every process on the console). The record says the same for a
+# server another process started (``break_group``).
 _BREAK_GROUP_PIDS: set[int] = set()
-_BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
 _CREATE_TIME_TOLERANCE = 1.0
 
 # Windows: the access right a stop asks for to hold a recorded server's PID
@@ -449,11 +497,11 @@ _TUNNEL_FAILED_RE = re.compile(
 # Whether async sub-agents are usable in this process.
 #
 # - CLI / serve parent process: starts False; flipped True after
-#   ``ensure_langgraph_dev`` confirms the subprocess is healthy. Stays False
+#   ``ensure_server`` confirms the subprocess is healthy. Stays False
 #   on startup failure so ``_maybe_swap_async_subagents`` can fall back to
 #   in-process sync delegation instead of routing tool calls at a dead URL.
 # - langgraph dev subprocess: starts True (``paths.SERVER_PROCESS``, from the
-#   variable ``start_langgraph_dev`` sets). The served main agent runs inside
+#   variable ``_spawn_server`` sets). The served main agent runs inside
 #   the server, so http://localhost:{port} is always reachable for self-loop
 #   async sub-agent dispatch.
 _ASYNC_SUBAGENTS_AVAILABLE: bool = paths.SERVER_PROCESS
@@ -502,8 +550,10 @@ def is_langgraph_dev_running(
     *,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
+    timeout: float = 1.0,
 ) -> bool:
-    """Check whether a langgraph dev API is already serving at ``base_url``.
+    """Check whether a langgraph dev API is already serving at ``base_url``,
+    answering ``/ok`` within *timeout* seconds.
 
     ``base_url`` overrides ``port``/``host`` when given.
     """
@@ -514,39 +564,11 @@ def is_langgraph_dev_running(
         # getproxies() reads the system (registry/IE) proxy even with no *_PROXY
         # env vars set, so a corporate proxy silently swallows the 127.0.0.1
         # request and the health check never sees the healthy server.
-        return httpx.get(f"{url}/ok", timeout=1.0, trust_env=False).status_code == 200
+        return (
+            httpx.get(f"{url}/ok", timeout=timeout, trust_env=False).status_code == 200
+        )
     except (httpx.TransportError, OSError):
         return False
-
-
-def _is_port_occupied(port: int, host: str = _DEFAULT_HOST) -> bool:
-    """Return True if anything is listening on ``host:port`` (TCP)."""
-    import socket as _socket
-
-    probe = _probe_host(host)
-    family = _socket.AF_INET6 if ":" in probe else _socket.AF_INET
-    s = _socket.socket(family, _socket.SOCK_STREAM)
-    try:
-        s.settimeout(0.5)
-        # connect_ex returns 0 on success (something accepted), nonzero otherwise
-        return s.connect_ex((probe, port)) == 0
-    finally:
-        s.close()
-
-
-def _wait_for_port_release(
-    port: int, timeout: float = 10.0, host: str = _DEFAULT_HOST
-) -> bool:
-    """Poll until ``port`` is released or ``timeout`` elapses.
-
-    Used after ``stop_langgraph_dev`` / ``_kill_owned_stale_process`` to
-    wait for the old server to exit and close its listener before we try to
-    bind again. Returns True if the port is free, False on timeout.
-    """
-    deadline = time.monotonic() + timeout
-    while _is_port_occupied(port, host) and time.monotonic() < deadline:
-        time.sleep(0.5)
-    return not _is_port_occupied(port, host)
 
 
 def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
@@ -554,14 +576,12 @@ def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
 
     More reliable than ``_is_port_occupied`` when the previous listener has
     just exited: ``connect_ex`` can already report "free" while ``bind()``
-    still fails because the kernel hasn't fully released the socket. This
-    actually attempts the bind that langgraph dev would attempt, then
-    closes immediately.
+    still fails because the kernel hasn't fully released the socket.
 
     On POSIX it sets ``SO_REUSEADDR`` like uvicorn does, so connections the
-    old server left in TIME_WAIT (60s on Linux) don't make a port look busy
-    that the server could bind. Not on Windows, where the option also allows
-    binding over a live listener.
+    old server left in TIME_WAIT don't make a port look busy that the server
+    could bind. Not on Windows, where the option also allows binding over a
+    live listener.
 
     Binds the *literal* ``host`` — not ``_probe_host(host)`` — because this
     must replicate the server's own bind: a loopback probe can succeed while
@@ -579,142 +599,39 @@ def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
     except OSError:
         return False
     finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+        s.close()
 
 
-def _wait_for_port_bindable(
-    port: int, timeout: float = 60.0, host: str = _DEFAULT_HOST
-) -> bool:
-    """Poll until a real ``bind()`` to ``port`` can succeed, or timeout.
+# How long a start waits for a listener that was just stopped to free the port.
+_BIND_WAIT = 10.0
 
-    Use this immediately before ``subprocess.Popen("langgraph dev")`` —
-    matches the strictness of the bind langgraph dev itself will perform,
-    so we don't pass the lighter ``_is_port_occupied`` gate only to fail
-    on the actual bind a few seconds later.
 
-    The 60s default gives a previous server that is still exiting time to
-    release the port. TIME_WAIT connections it leaves behind don't count:
-    ``_can_bind_port`` binds with ``SO_REUSEADDR`` on POSIX, as the server
-    does.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+def _wait_for_port_bindable(port: int, host: str = _DEFAULT_HOST) -> bool:
+    """Poll until a real ``bind()`` to ``port`` can succeed, for up to
+    :data:`_BIND_WAIT`; right before the spawn, so a server that has just
+    exited does not make the new one fail its bind."""
+    deadline = time.monotonic() + _BIND_WAIT
+    while True:
         if _can_bind_port(port, host):
             return True
-        time.sleep(0.5)
-    return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_POLL_INTERVAL)
 
 
-def _list_pids_on_port(port: int) -> list[int]:
-    """Return list of PIDs bound to ``port``, or empty list on lookup failure.
+def _is_port_occupied(port: int, host: str = _DEFAULT_HOST) -> bool:
+    """Return True if anything is listening on ``host:port`` (TCP)."""
+    import socket as _socket
 
-    Read-only; never sends signals. Use this to *inspect* port state before
-    deciding what (if anything) to clean up.
-
-    Cross-platform via ``psutil.net_connections`` — works on POSIX and Windows
-    without depending on ``lsof`` / ``netstat`` shell tools.
-    """
+    probe = _probe_host(host)
+    family = _socket.AF_INET6 if ":" in probe else _socket.AF_INET
+    s = _socket.socket(family, _socket.SOCK_STREAM)
     try:
-        return list(
-            {
-                conn.pid
-                for conn in psutil.net_connections(kind="inet")
-                if conn.laddr and conn.laddr.port == port and conn.pid is not None
-            }
-        )
-    except (psutil.AccessDenied, psutil.Error):
-        return []
-
-
-def _kill_owned_stale_process(port: int) -> bool:
-    """Kill ONLY a previously-owned langgraph dev process bound to ``port``.
-
-    "Owned" means the PID written to ``RUNTIME.pid_file`` by an earlier
-    ``start_langgraph_dev`` invocation in this user account, AND the live
-    process at that PID still has ``langgraph`` in its command line (defense
-    against PID recycling). Returns True if a stale-but-owned process was
-    cleaned up; returns False (without sending any signals) if the port is
-    occupied by an unowned process or the PID has been recycled — caller
-    should treat that as a hard conflict and refuse to start.
-
-    Why this matters:
-      1. ``net_connections`` may report any process bound to the port,
-         including user-run dev servers that legitimately took 6174.
-         SIGKILL'ing those is a data-loss event.
-      2. Even with PID-file ownership, the OS may have recycled the PID
-         to an unrelated process between sessions (e.g., after a SIGKILL'd
-         CLI left the PID file behind). The cmdline check rules that out.
-    """
-    if not RUNTIME.pid_file.exists():
-        return False
-    try:
-        owned_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-
-    occupiers = _list_pids_on_port(port)
-    if owned_pid not in occupiers:
-        return False  # Port is held by a different process now.
-
-    # Defense-in-depth: PID could have been recycled to an unrelated process.
-    # Verify the live process at that PID still looks like langgraph dev
-    # before sending any signals.
-    try:
-        proc = psutil.Process(owned_pid)
-        cmdline = proc.cmdline()
-    except psutil.NoSuchProcess:
-        # PID file points at a dead process — clean up the file but don't
-        # try to kill anything.
-        try:
-            RUNTIME.pid_file.unlink()
-        except OSError:
-            pass
-        _unlink_workspace_sidecar()
-        return False
-    except psutil.AccessDenied:
-        return False
-
-    # Loose substring match by design: PID-file ownership is the primary
-    # guard; this check only hardens against PID recycling between sessions.
-    # A foreign process happening to have "langgraph" in its argv (e.g., a
-    # text editor with langgraph_dev.py open) would slip through, but the
-    # ownership check above already excluded externally-owned PIDs, so the
-    # window is the narrow case where our exact PID was reused. Keeping the
-    # match loose avoids version skew with langgraph CLI invocation styles.
-    if not any("langgraph" in arg for arg in cmdline):
-        # PID was recycled by an unrelated process. Refuse to kill it, but
-        # still clean up the PID file — our original langgraph dev with that
-        # PID is definitely gone (PIDs are only recycled after the original
-        # process exits), so the file's claim is stale. Mirrors the cleanup
-        # in the NoSuchProcess branch above.
-        logger.warning(
-            "PID file %s claims pid %d for langgraph dev, but that pid now "
-            "points at a different process (cmdline=%s). Refusing to kill, "
-            "removing stale PID file.",
-            RUNTIME.pid_file,
-            owned_pid,
-            cmdline,
-        )
-        try:
-            RUNTIME.pid_file.unlink()
-        except OSError:
-            pass
-        _unlink_workspace_sidecar()
-        return False
-
-    try:
-        proc.kill()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
-    try:
-        RUNTIME.pid_file.unlink()
-    except OSError:
-        pass
-    _unlink_workspace_sidecar()
-    return True
+        s.settimeout(0.5)
+        # connect_ex returns 0 on success (something accepted), nonzero otherwise
+        return s.connect_ex((probe, port)) == 0
+    finally:
+        s.close()
 
 
 # Packaged sub-agent specs — consumed at graph build; module constant so
@@ -799,9 +716,8 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
 
 
 class ServerKeptError(RuntimeError):
-    """The stop left the recorded server running, with its records. ``EvoSci
-    service stop`` keeps a server that ``EvoSci deploy`` or the desktop app
-    owns, or that another EvoSci process is starting or stopping; any stop
+    """The stop left the recorded server running. ``EvoSci service stop``
+    keeps a server that ``EvoSci deploy`` or the desktop app owns; any stop
     raises :class:`ServerStopFailedError` when it could not open the server
     for a reason other than it being gone or refusing access."""
 
@@ -809,19 +725,14 @@ class ServerKeptError(RuntimeError):
 class ServerStopFailedError(ServerKeptError):
     """The stop could not open the recorded server, for a reason other than
     the server being gone or refusing access (on Windows, out of resources),
-    so it stopped nothing. Its records are kept, so a retry finds it."""
+    so it stopped nothing. A retry finds it again."""
 
 
-def owned_by_its_starter() -> bool:
-    """Whether the recorded server is a live one that ``EvoSci deploy`` or
-    the desktop app owns, not the background service: ``EvoSci service
-    stop`` leaves it running. A record of an older release does not say."""
-    sidecar = _read_workspace_sidecar()
-    return (
-        sidecar is not None
-        and sidecar.get("lasting") is False
-        and _langgraph_cmdline(sidecar.get("pid")) is not None
-    )
+def owned_by_its_starter(record: ServerRecord | None) -> bool:
+    """Whether the recorded server is one that ``EvoSci deploy`` or the
+    desktop app owns, not the background service: ``EvoSci service stop``
+    leaves it running. A record that does not say counts as not."""
+    return record is not None and record.lasting is False
 
 
 def _request_clean_stop(pid: int) -> bool:
@@ -1012,176 +923,99 @@ def _hold_pid(pid: int):
         kernel32.CloseHandle(handle)
 
 
-def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
-    """Explicitly stop the langgraph dev recorded in our PID file.
+# What :func:`stop_server` takes when its caller has not read the record.
+_UNREAD = object()
 
-    Backs the user-facing ``EvoSci server stop`` command: a server that
-    outlives its CLI needs a first-class way to stop it. Ownership = our
-    PID file + a live process whose cmdline still contains ``langgraph``
-    (same loose anti-PID-recycling match as ``_kill_owned_stale_process``,
-    with PID-file ownership as the primary guard). Holds the cross-process
-    file lock so a concurrent start can't have its fresh PID/sidecar records
-    wiped by this stop's cleanup. Ends the whole process tree
-    (:func:`_end_server_tree`: on Windows Ctrl+Break first when the record
-    says the server leads its process group), then removes the PID file +
-    sidecar. Returns the stopped pid, or ``None`` when nothing
-    was stopped (stale/corrupt files, if any, are still cleaned up).
 
-    With *keep_owned* (``EvoSci service stop``), a live server that ``EvoSci
-    deploy`` or the desktop app owns is left running, and so is one whose lock
-    another process holds too long: :class:`ServerKeptError`. A record of an
-    older release, which does not say, is stopped. A server that refuses
-    access has its records removed, and nothing is stopped; one the stop could
-    not open for any other reason is left running with its records:
-    :class:`ServerStopFailedError`.
+def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | None:
+    """Stop this data folder's recorded server (``EvoSci server stop``).
+
+    Reads only the record (:func:`read_record`): a server without one is
+    never touched. The PID is held from before the check that it is still
+    the recorded process until the stop is done (:func:`_hold_pid`), and the
+    whole process tree ends (:func:`_end_server_tree`: on Windows Ctrl+Break
+    first when the record says the server leads its process group). Waits
+    for it to exit; the server removes its record itself as it exits, also
+    one that hung in its shutdown. Returns the stopped pid, or ``None`` when
+    nothing was stopped (no record, or a server that is gone or refuses
+    access).
+
+    *record* is what the caller read (``read_record(older=True)``); read here
+    when not given. With *keep_owned* (``EvoSci service stop``), a server
+    that ``EvoSci deploy`` or the desktop app owns is left running:
+    :class:`ServerKeptError`. One the stop could not open for another reason
+    is left running too: :class:`ServerStopFailedError`.
     """
-    try:
-        with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
-            if keep_owned and owned_by_its_starter():
-                raise ServerKeptError(
-                    "The running server is not the background service: an "
-                    "EvoSci deploy or the desktop app owns it, so it was left "
-                    "running (EvoSci server stop stops it anyway)."
-                )
-            return _stop_recorded_server_locked()
-    except FileLockTimeout:
-        if keep_owned:
-            raise ServerKeptError(
-                "Another EvoSci process is starting or stopping the server, so "
-                "it was left running; try again in a moment."
-            ) from None
-        logger.warning(
-            "Timed out waiting for the langgraph dev lock — another EvoSci "
-            "process is mid lifecycle change; not stopping anything."
+    if record is _UNREAD:
+        record = read_record(older=True)
+    if not isinstance(record, ServerRecord):
+        return None
+    if keep_owned and owned_by_its_starter(record):
+        raise ServerKeptError(
+            "The running server is not the background service: an "
+            "EvoSci deploy or the desktop app owns it, so it was left "
+            "running (EvoSci server stop stops it anyway)."
         )
-        return None
-
-
-def stop_inflight_owned_server() -> int | None:
-    """Stop only the langgraph dev *this* process spawned, never one recorded
-    on disk by another process.
-
-    The launcher's mid-start teardown uses this instead of
-    :func:`stop_recorded_server`. Before its own child is spawned, the shared
-    on-disk PID file still names a *different* server — e.g. another
-    session's backend on a different port — so killing the recorded
-    server on a close-during-boot would take down an unrelated session. The
-    in-memory ``_PROCESS`` is set only by this process's ``start_langgraph_dev``
-    (after Popen), so it can only ever name our own in-flight child; a close
-    before Popen finds it ``None`` and stops nothing. Returns the stopped pid,
-    or ``None`` when we had not spawned anything yet.
-    """
     with _LOCK:
-        if _PROCESS is not None and _PROCESS.poll() is None:
-            pid = _PROCESS.pid
-            # Still starting: no run to put back in the queue.
-            stop_langgraph_dev(clean=False)
-            return pid
-    return None
-
-
-def _stop_recorded_server_locked() -> int | None:
-    with _LOCK:
-        if _PROCESS is not None and _PROCESS.poll() is None:
-            pid = _PROCESS.pid
-            stop_langgraph_dev()
-            return pid
-    if not RUNTIME.pid_file.exists():
-        return None
-    try:
-        owned_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
-    except ValueError:
-        stop_langgraph_dev()  # corrupt PID file — clean it up as promised
-        return None
-    except OSError:
-        return None
-    # The PID is held from before the checks until the stop is done, so what
-    # the checks found is what gets the Ctrl+Break and the kills.
+        own = _PROCESS if _PROCESS is not None and _PROCESS.pid == record.pid else None
     with contextlib.ExitStack() as hold:
         try:
-            hold.enter_context(_hold_pid(owned_pid))
-            proc = psutil.Process(owned_pid)
-            cmdline = proc.cmdline()
+            hold.enter_context(_hold_pid(record.pid))
+            if not _still_recorded(record):
+                raise psutil.NoSuchProcess(record.pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            stop_langgraph_dev()  # dead/inaccessible — clean the stale files
+            if record.older:
+                _forget_older_record()
             return None
         except OSError as exc:
             # Neither gone nor refused (the hold, or an OS error psutil passes
-            # through): the server may be running, so it gets no signal and its
-            # records stay for a retry.
+            # through): the server may be running, so it gets no signal.
             raise ServerStopFailedError(
-                f"Could not stop langgraph dev (pid {owned_pid}): "
-                f"{str(exc).rstrip('.')}. It "
-                "keeps running and its records are kept; try again."
+                f"Could not stop langgraph dev (pid {record.pid}): "
+                f"{str(exc).rstrip('.')}. It keeps running; try again."
             ) from exc
-        if not any("langgraph" in arg for arg in cmdline):
-            stop_langgraph_dev()  # pid recycled by a foreign process — files only
-            return None
-        # A record from before the server led its own process group, or from
-        # another release, does not say so: no Ctrl+Break, the stop ends it
-        # hard. Nor for a PID reused since (a langgraph dev in the user's own
-        # terminal passes the check above): the creation time must match the
-        # record's.
-        sidecar = _read_workspace_sidecar()
-        recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
-        break_group = (
-            sidecar is not None
-            and sidecar.get("pid") == owned_pid
-            and isinstance(recorded_created, float)
-            and _same_process(owned_pid, recorded_created)
-        )
         try:
-            _end_server_tree(owned_pid, break_group=break_group)
+            _end_server_tree(record.pid, own, break_group=record.break_group)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    stop_langgraph_dev()
-    return owned_pid
+    if own is not None:
+        stop_langgraph_dev(own)
+    if record.older:
+        _forget_older_record()
+    return record.pid
 
 
-def _pid_serves_port(pid: object, port: int) -> bool:
-    """Best-effort check that ``pid`` is a langgraph dev serving ``port``.
+def _still_recorded(record: ServerRecord) -> bool:
+    """Whether the recorded process is still the one the record names: the
+    same creation time, or for a record without one (an older release's), a
+    langgraph dev."""
+    if record.created is not None:
+        return _same_process(record.pid, record.created)
+    return _langgraph_cmdline(record.pid) is not None
 
-    Used to attribute an occupied port to the sidecar's recorded server
-    before printing its details — avoids blaming a stale record. Relies on
-    ``--port`` always being in ``start_langgraph_dev``'s argv, not on
-    port→PID mapping (root-only on macOS via psutil).
-    """
-    cmdline = _langgraph_cmdline(pid)
-    return cmdline is not None and str(port) in cmdline
+
+def _process_cmdline(pid: int) -> list[str] | None:
+    """The command line of ``pid``, or ``None`` when no process has it.
+    Lets ``psutil.AccessDenied`` through."""
+    try:
+        return psutil.Process(pid).cmdline()
+    except psutil.NoSuchProcess:
+        return None
 
 
 def _langgraph_cmdline(pid: object) -> list[str] | None:
     """The command line of ``pid`` while it is a live langgraph dev, on any
     port; ``None`` otherwise."""
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    pid = _positive_int(pid)
+    if pid is None:
         return None
     try:
-        cmdline = psutil.Process(pid).cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        cmdline = _process_cmdline(pid)
+    except psutil.AccessDenied:
         return None
-    return cmdline if any("langgraph" in arg for arg in cmdline) else None
-
-
-def recorded_address() -> tuple[int, str] | None:
-    """The port and host of the server in the PID file, the one ``EvoSci
-    server stop`` ends, while it is a live langgraph dev, read from its
-    command line (``langgraph_dev_port`` or ``langgraph_dev_host`` may have
-    changed since it started); ``None`` without one."""
-    try:
-        pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    cmdline = _langgraph_cmdline(pid)
     if cmdline is None:
         return None
-    started_with = dict(pairwise(cmdline))
-    try:
-        port = int(started_with["--port"])
-    except (KeyError, ValueError):
-        return None
-    # Releases before the bind host was configurable passed no --host and
-    # bound loopback.
-    return port, started_with.get("--host", _DEFAULT_HOST)
+    return cmdline if server_record.is_langgraph_dev(cmdline) else None
 
 
 def _packaged_langgraph_config() -> Path:
@@ -1235,7 +1069,7 @@ def _passed_to_server(env_key: str, *, lasting: bool) -> bool:
 
 def _server_env_origins(port: str, host: str, *, lasting: bool) -> dict:
     """This process's record of environment origins, plus the port and host
-    :func:`start_langgraph_dev` always sets for the server.
+    :func:`_spawn_server` always sets for the server.
 
     A variable passed on unchanged keeps what is recorded for it, or no record
     for the user's own export; a variable the server does not get
@@ -1257,20 +1091,7 @@ def _server_env_origins(port: str, host: str, *, lasting: bool) -> dict:
     return origins
 
 
-def _refuse_running_server() -> None:
-    """Raise ``RuntimeError`` when another server uses this data folder, after
-    ``server_home.LOCK_WAIT`` for one stopped just before that is exiting."""
-    try:
-        running = server_home.server_running(wait=server_home.LOCK_WAIT)
-    except OSError as exc:
-        raise RuntimeError(
-            f"Could not use the server folder {paths.SERVER_HOME}: {exc}"
-        ) from exc
-    if running:
-        raise server_home.ServerRunningError(server_home.running_server_message())
-
-
-def start_langgraph_dev(
+def _spawn_server(
     *,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
@@ -1282,10 +1103,13 @@ def start_langgraph_dev(
     job: BackendJob | None = None,
     lasting: bool = True,
 ) -> subprocess.Popen:
-    """Start langgraph dev as a background subprocess.
+    """Start langgraph dev as a background subprocess, without waiting for it.
 
     The server works in the server home (``paths.SERVER_HOME``), which holds
-    its runtime store, and serves every registered project.
+    its runtime store, and serves every registered project. It records
+    itself there (``server_record``) with what this process passes it.
+    Only :func:`ensure_server` calls this, holding the start lock, once it
+    created the server home.
 
     Args:
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
@@ -1304,6 +1128,8 @@ def start_langgraph_dev(
             with :func:`read_tunnel_url`. SECURITY: the tunnel has no auth,
             exposes every registered project and the agent can run shell —
             only enable for trusted use.
+        config_fingerprint: The configuration the server is started for,
+            recorded for a later session's drift check.
         job: A Windows job object the server joins before it runs (started
             suspended, then resumed), so it ends with the caller's process.
         lasting: Whether the server outlives its caller, shared by every
@@ -1317,8 +1143,6 @@ def start_langgraph_dev(
     Raises:
         FileNotFoundError: If the langgraph CLI or packaged ``langgraph.json``
             is missing.
-        RuntimeError: If another server uses this data folder, or langgraph
-            dev exits early or never becomes healthy.
     """
     global _PROCESS
 
@@ -1336,70 +1160,6 @@ def start_langgraph_dev(
             "This indicates a broken EvoScientist installation — reinstall."
         )
 
-    # Install Node for npx MCP servers here, where progress is visible and no
-    # health deadline applies; the server itself never downloads it.
-    try:
-        from ..mcp.client import _ensure_node_for_stdio, load_mcp_config
-
-        _ensure_node_for_stdio(load_mcp_config())
-    except Exception:
-        logger.warning("Could not check Node.js for MCP servers", exc_info=True)
-
-    # Defensive: handle a port that's occupied but not serving /ok.
-    # Three cases:
-    #   (a) Our own previous langgraph dev (PID matches RUNTIME.pid_file) — kill it.
-    #   (b) Our own previous langgraph dev is still exiting and its listener
-    #       is still open, but the PID file may already be gone
-    #       (stop_langgraph_dev unlinks it), so there's nothing to match it
-    #       against. The bind poll below waits this out.
-    #   (c) Foreign process legitimately holds the port — we must NOT kill it.
-    #       The bind poll will keep failing and raise an actionable error.
-    # We don't try to disambiguate (b) vs (c) here: ``_kill_owned_stale_process``
-    # only verifies PID-file ownership, so absence of a match conflates "our
-    # server, still exiting" with "foreign process". Falling through to the
-    # bind poll disambiguates by behavior: an exiting server releases the
-    # port, a foreign listener doesn't.
-    if not is_langgraph_dev_running(port=port, host=host) and _is_port_occupied(
-        port, host
-    ):
-        if _kill_owned_stale_process(port):
-            logger.warning(
-                "Cleaned up stale langgraph dev (pid from %s) on port %d",
-                RUNTIME.pid_file,
-                port,
-            )
-            # After SIGKILL the process can take a moment to exit and close
-            # its listener. Poll until the port is free so the upcoming bind()
-            # doesn't race it and crash with "Port already in use".
-            _wait_for_port_release(port, host=host)
-        else:
-            # No owned stale PID — could be foreign or a previous server
-            # that is still exiting. Defer to the bind poll below.
-            logger.info(
-                "Port %d occupied with no owned stale PID — waiting for it "
-                "to be released (or bind-poll timeout if a foreign process "
-                "holds it).",
-                port,
-            )
-
-    # Final defense: poll until a real ``bind()`` to ``port`` succeeds before
-    # spawning langgraph dev. ``_is_port_occupied`` (connect-based) can report
-    # the port as "free" while langgraph dev's stricter bind still fails —
-    # that mismatch is what makes back-to-back CLI exit + restart show
-    # "Port already in use" even though our pre-checks passed. By probing
-    # the same operation langgraph dev will do, we either wait it out or
-    # fail clearly with an actionable message.
-    if not _wait_for_port_bindable(port, host=host):
-        raise RuntimeError(
-            f"{host}:{port} cannot be bound after waiting 60s (another process "
-            f"holds it). Free the port with `lsof -ti:{port}`, "
-            f"or change ports with: `EvoSci config set langgraph_dev_port <other-port>`"
-        )
-    # One server per data folder: the server takes the lock itself, so a
-    # refusal here says why rather than "exited immediately".
-    _refuse_running_server()
-
-    RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
     # Rotate the log if it has grown past the threshold so this session's
     # output starts on a fresh file. Failure is non-fatal (see
     # ``_rotate_log_if_needed``). See #209.
@@ -1486,6 +1246,15 @@ def start_langgraph_dev(
     sub_env[ENV_ORIGINS_VAR] = json.dumps(
         _server_env_origins(str(port), host, lasting=lasting)
     )
+    # What the server records about itself but cannot know: which process
+    # started it, whether it outlives that process, and the configuration it
+    # was started for. It removes the variables once read.
+    sub_env[server_record.SPAWNER_PID_VAR] = str(os.getpid())
+    sub_env[server_record.LASTING_VAR] = "1" if lasting else "0"
+    if config_fingerprint is not None:
+        sub_env[server_record.FINGERPRINT_VAR] = config_fingerprint
+    else:
+        sub_env.pop(server_record.FINGERPRINT_VAR, None)
 
     # POSIX: own session so the child can be group-signalled on cleanup, and
     # outlives the terminal. Windows: own process group, so Ctrl+C in the
@@ -1507,13 +1276,6 @@ def start_langgraph_dev(
         )
 
     try:
-        server_folder = server_home.ensure_server_home()
-    except OSError as exc:
-        log_handle.close()
-        raise RuntimeError(
-            f"Could not create the server folder {paths.SERVER_HOME}: {exc}"
-        ) from exc
-    try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
             [
@@ -1531,7 +1293,7 @@ def start_langgraph_dev(
                 "--no-reload",
                 *(["--tunnel"] if tunnel else []),
             ],
-            cwd=str(server_folder),
+            cwd=str(paths.SERVER_HOME),
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=log_handle,
@@ -1552,58 +1314,8 @@ def start_langgraph_dev(
         _BREAK_GROUP_PIDS.add(proc.pid)
     if job is not None:
         job.started(proc)
-    RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
-    from EvoScientist.agent_shell import sidecar_bash
-    from EvoScientist.setup.research_env import agent_python
-
-    _write_workspace_sidecar(
-        pid=proc.pid,
-        config_fingerprint=config_fingerprint,
-        # The server inherits this process's environment and data dir, so it
-        # resolves the same python and reads the same Git Bash record.
-        agent_python=agent_python(),
-        agent_bash=sidecar_bash(),
-        host=host,
-        lasting=lasting,
-        port=port,
-        break_group_created=_create_time(proc.pid) if os.name == "nt" else None,
-    )
-
-    # langgraph dev cold-starts in ~10-15s normally, so the budget is
-    # generous. MCP servers load later, when a project's graph is first built.
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            tail = ""
-            try:
-                tail = RUNTIME.log_file.read_text(encoding="utf-8", errors="replace")[
-                    -2000:
-                ]
-            except Exception:
-                pass
-            # Subprocess died on its own — clear our module-level bookkeeping
-            # (``_PROCESS``, ``RUNTIME.pid_file``) before raising. Without this,
-            # ``_PROCESS`` would keep pointing at the dead handle and
-            # ``RUNTIME.pid_file`` at a non-existent PID, leading the next
-            # ``ensure_langgraph_dev`` to misjudge state. Pass ``proc`` directly
-            # so ``stop_langgraph_dev`` works against the one we just spawned even
-            # if the global state was overwritten.
-            stop_langgraph_dev(proc)
-            raise RuntimeError(
-                f"langgraph dev exited immediately with code {proc.returncode}.\n"
-                f"Log tail:\n{tail}"
-            )
-        if is_langgraph_dev_running(port=port, host=host):
-            logger.info(
-                "langgraph dev started on %s (pid=%d)", _base_url(port, host), proc.pid
-            )
-            return proc
-        time.sleep(0.5)
-
-    stop_langgraph_dev(proc, clean=False)
-    raise RuntimeError(
-        f"langgraph dev did not become healthy within 60 seconds. Check {RUNTIME.log_file}"
-    )
+    logger.info("Started langgraph dev (pid=%d)", proc.pid)
+    return proc
 
 
 class TunnelFailedError(RuntimeError):
@@ -1655,7 +1367,7 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
 def stop_langgraph_dev(
     proc: subprocess.Popen | None = None, *, clean: bool = True
 ) -> None:
-    """Gracefully stop a langgraph dev process.
+    """Stop a langgraph dev process this process started.
 
     Sends SIGTERM to the process tree (langgraph dev spawns worker children),
     falling back to SIGKILL after 5 seconds. On Windows a server this process
@@ -1663,77 +1375,181 @@ def stop_langgraph_dev(
     exit before that (:func:`_end_server_tree`); ``clean=False``
     skips that for a server that never became ready, which has no run to put
     back in the queue and would only finish loading first. Safe to call with
-    ``None``.
+    ``None``. The server removes its record itself as it exits.
 
     Acquires ``_LOCK`` (reentrant) before mutating ``_PROCESS`` so
-    concurrent ``ensure_langgraph_dev`` callers (which also hold ``_LOCK``)
+    concurrent ``ensure_server`` callers (which also hold ``_LOCK``)
     don't observe partially-cleared state.
+
+    ``.langgraph_api/`` is kept: it holds langgraph dev's persisted
+    async-task / scheduler / Store state for the next server. It lives in the
+    server home; set ``langgraph_dev_file_persistence: false`` in config to
+    suppress writes.
     """
     global _PROCESS
     with _LOCK:
         proc = proc if proc is not None else _PROCESS
         if proc is None:
-            # No live process to stop, but stale PID/sidecar files may still
-            # be on disk from a previous run that died unexpectedly — fall
-            # through to the unconditional file cleanup below so subsequent
-            # ensure_langgraph_dev calls don't read stale workspace info.
-            pass
-        else:
-            if proc.poll() is None:
-                # Walk the tree explicitly: POSIX process groups
-                # (``os.killpg``) don't exist on Windows.
-                _end_server_tree(
-                    proc.pid,
-                    proc,
-                    break_group=clean and proc.pid in _BREAK_GROUP_PIDS,
-                )
-            _BREAK_GROUP_PIDS.discard(proc.pid)
-
-            if proc is _PROCESS:
-                _PROCESS = None
-    if RUNTIME.pid_file.exists():
-        try:
-            RUNTIME.pid_file.unlink()
-        except OSError:
-            pass
-    _unlink_workspace_sidecar()
-
-    # Note: ``.langgraph_api/`` is intentionally NOT removed — it holds
-    # langgraph dev's persisted async-task / scheduler / Store state that
-    # may be useful across CLI restarts. It lives in the server home; set
-    # ``langgraph_dev_file_persistence: false`` in config to suppress writes.
+            return
+        if proc.poll() is None:
+            # Walk the tree explicitly: POSIX process groups
+            # (``os.killpg``) don't exist on Windows.
+            _end_server_tree(
+                proc.pid,
+                proc,
+                break_group=clean and proc.pid in _BREAK_GROUP_PIDS,
+            )
+        _BREAK_GROUP_PIDS.discard(proc.pid)
+        if proc is _PROCESS:
+            _PROCESS = None
 
 
 # =============================================================================
 # High-level orchestration
 # =============================================================================
 
+# How long a start may take; see :func:`start_budget`.
+_START_BUDGET = 120.0
+# How long one probe of a server may take: a busy server answers late, and is
+# not gone for it.
+_PROBE_TIMEOUT = 5.0
+# How many probes in a row a serving server may miss before it counts as not
+# answering.
+_SERVING_PROBES = 3
+# How long a recorded server may hold its lock without listening: a stopping
+# server drains its requests and gives its workers 5 s before it exits.
+_DRAIN_WAIT = 20.0
+# How long the server lock may be held without a record: a server writes it
+# right after it takes the lock.
+_SETTLE_WAIT = 2.0
+_POLL_INTERVAL = 0.5
+_LOG_TAIL_CHARS = 2000
 
-def ensure_langgraph_dev(
+
+def start_budget() -> float:
+    """How long a server's start may take, and so each wait for one: for the
+    start lock, for a started server's record, and for its first answer."""
+    return _START_BUDGET
+
+
+@dataclass(frozen=True)
+class ServerResult:
+    """What :func:`ensure_server` found or started.
+
+    ``available``: a server answers at ``url`` (``port``, ``host``).
+    ``started``: this call started it, and ``proc`` is its handle.
+    ``record``: the server's record, None for a server without one (started
+    by hand outside the server home). ``drift`` and ``shell_drift``: a
+    reused server was launched with another configuration or version, or
+    gives its agents another ``python`` or shell. ``served``: the session has
+    the server it needs, or needs none.
+
+    Without a server, ``error`` says why and ``problem`` names it:
+    ``foreign`` (another program holds the port), ``other_data_folder``
+    (another data folder's server answers on it), ``older_server`` (a server
+    too old to say whose it is answers on it), ``other_port`` (this data
+    folder's server runs on another port than the configured one),
+    ``unreachable`` (the address asked does not reach this data folder's
+    server), ``running`` (this data folder's server runs, and the call does
+    not reuse one), ``busy`` (another process held the start lock longer
+    than :func:`start_budget`), ``stopping`` (the recorded server does not
+    listen, past :data:`_DRAIN_WAIT`), ``unrecorded_lock`` (a server holds
+    the lock without a record), ``lock_unreadable`` (the lock cannot be
+    opened), ``unresponsive`` (the recorded server did not answer), ``start_failed``, ``exited`` (the server this call started exited, with
+    ``exit_code``), ``cancelled`` or ``unregistered`` (the server did not
+    register the project).
+    """
+
+    available: bool = False
+    served: bool = False
+    url: str | None = None
+    port: int | None = None
+    host: str | None = None
+    record: ServerRecord | None = None
+    drift: bool = False
+    shell_drift: str | None = None
+    error: str | None = None
+    problem: str | None = None
+    exit_code: int | None = None
+    proc: subprocess.Popen | None = None
+    # A server an older release started, without a record here.
+    older: bool = False
+
+    @property
+    def started(self) -> bool:
+        """This call started the server."""
+        return self.proc is not None
+
+    @property
+    def reason(self) -> str | None:
+        """``error`` on one line, for a notice: an exit names the log
+        instead of quoting its end."""
+        if not self.error:
+            return None
+        line = self.error.splitlines()[0]
+        if self.problem == "exited":
+            line = f"{line} See {RUNTIME.log_file}."
+        return line
+
+
+def ensure_server(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None = None,
     *,
     backend: str | None = None,
-) -> bool:
-    """Start or reuse langgraph dev for async/background agent work, and
-    register *workspace_dir* with it.
+    port: int | None = None,
+    host: str | None = None,
+    lasting: bool = True,
+    tunnel: bool = False,
+    job: Callable[[], BackendJob | None] | None = None,
+    reuse: bool = True,
+    any_port: bool = False,
+    before_start: Callable[[], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    on_wait: Callable[[bool], None] | None = None,
+) -> ServerResult:
+    """Find this data folder's server, or start one, and register
+    *workspace_dir* with it.
 
-    A server already running on the configured port is reused; otherwise one
-    is started, which outlives this process for every session to share until
-    ``EvoSci server stop``. Either way the server
-    then registers *workspace_dir*, after the locks are released (a
-    registration restores the project's threads).
+    What runs decides, read again at every look:
 
-    Returns whether the session has the server it needs: True when it serves
-    *workspace_dir* (or, without one, runs), or when no server is needed.
-    Errors during startup and a failed registration
-    (:class:`~EvoScientist.langgraph_dev.registration.RegistrationError`) are
-    logged and return False: the user can still chat with sync sub-agents;
-    only async sub-agent calls and EvoMemory background workers will fail.
+    - A record that is ``serving``: the address the caller uses (*port* and
+      *host*, or the record's with *any_port*) is asked whose server answers
+      (``/ok`` and ``GET /api/instance``). This data folder's is reused, and
+      never killed; one that misses :data:`_SERVING_PROBES` probes in a row
+      is ``unresponsive``; any other answer is ``unreachable``. A record on
+      another port than *port* is ``other_port``.
+    - A record that is ``starting``: the call waits up to
+      :func:`start_budget` for the server to answer.
+    - A ``serving`` record whose address refuses: its server has not bound
+      yet, or stops and drains; the call waits up to :data:`_DRAIN_WAIT`
+      (``stopping``). A record names its server until the process exits.
+    - No record while the server lock is held: a server that has only just
+      taken the lock writes it at once; after :data:`_SETTLE_WAIT` the lock
+      is held without one (``unrecorded_lock``).
+    - Neither: a server that answers on the port as this data folder's (one
+      started by hand) is reused, any other is a conflict. Otherwise the call
+      starts one under the start lock, once the port can be bound, which
+      outlives this process for every session to share until ``EvoSci
+      server stop`` (unless *lasting* is False), and waits for its record,
+      then for its answer, or for its exit.
+
+    Then the server registers *workspace_dir*, after the start lock is
+    released (a registration restores the project's threads).
+
+    Returns a :class:`ServerResult`; its ``served`` is whether the session
+    has the server it needs: one serving *workspace_dir* (or, without one,
+    running), or no server when none is needed. A failure to find or start
+    one, and a failed registration
+    (:class:`~EvoScientist.langgraph_dev.registration.RegistrationError`),
+    are logged and leave ``served`` False: the user can still chat with sync
+    sub-agents; only async sub-agent calls and EvoMemory background workers
+    will fail. The module's notices (:data:`CONFIG_DRIFT_SINCE_LAUNCH`,
+    :data:`SERVER_UNAVAILABLE` and the others) follow the result.
 
     Raises a
     :class:`~EvoScientist.langgraph_dev.registration.ServerUnusableError`
-    when the server cannot be used for the project at all. For a known
+    when the server cannot be used for *workspace_dir* at all. For a known
     project whose folder is missing it leaves this process's server state as
     it was, so a session that stays where it is keeps its server; a server
     from an older EvoScientist serves no project of this session.
@@ -1745,77 +1561,90 @@ def ensure_langgraph_dev(
         backend: The calling surface's resolved gateway backend. When ``None``,
             falls back to the global ``config.gateway_backend``. Determines
             whether the server is needed at all.
+        port, host: The address to use, by default the configured one.
+        lasting: Whether a server this call starts outlives this process.
+        tunnel: Start the server with a public tunnel (:func:`_spawn_server`).
+        job: Gives the Windows job object a started server joins; called
+            after *before_start*, only for a start.
+        reuse: False refuses a running server (``running``) instead of
+            reusing it.
+        any_port: Use this data folder's server at the address it records;
+            otherwise *port* and *host*, the address a session's clients use.
+        before_start: Called under the start lock right before the start.
+        cancelled: Checked during every wait; True ends the call
+            (``cancelled``), stopping a server it started.
+        on_wait: Called with True when the call waits for another process's
+            start or stop, and with False once that wait is over.
     """
 
     def settle(
-        found: _Found,
+        result: ServerResult,
         *,
         needed: bool = True,
         exposure: registration.ServerExposure | None = None,
-    ) -> bool:
+    ) -> ServerResult:
         global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
-        global AGENT_SHELL_DRIFT, SERVER_UNAVAILABLE, SERVER_EXPOSURE
-        _ASYNC_SUBAGENTS_AVAILABLE = found.available
-        CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = found.drift, found.shell_drift
-        SERVER_UNAVAILABLE = needed and not found.available
+        global AGENT_SHELL_DRIFT, OLDER_SERVER, SERVER_UNAVAILABLE
+        global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE
+        _ASYNC_SUBAGENTS_AVAILABLE = result.available
+        CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = result.drift, result.shell_drift
+        OLDER_SERVER = result.older or (
+            result.record is not None and result.record.older
+        )
+        SERVER_UNAVAILABLE = needed and not result.available
+        SERVER_UNAVAILABLE_REASON = result.reason if SERVER_UNAVAILABLE else None
         SERVER_EXPOSURE = exposure
-        return not SERVER_UNAVAILABLE
+        return replace(result, served=not SERVER_UNAVAILABLE)
 
     if not needs_langgraph_dev(config, backend=backend):
-        return settle(_Found(), needed=False)
+        return settle(ServerResult(), needed=False)
 
-    # Two layers of locking:
-    #   1. ``FileLock`` — cross-process coordination. Without it, two CLI
-    #      shells (TUI + ``-p`` + ``serve``) racing on the cold-start window
-    #      can SIGKILL each other's still-booting subprocesses via
-    #      ``_kill_owned_stale_process`` (Shell A's PID is in the file and
-    #      bound to the port, but ``/ok`` isn't responding yet, so Shell B
-    #      thinks it's stale).
-    #   2. ``_LOCK`` (in-process RLock) — serializes intra-process callers
-    #      (rapid ``/resume`` in succession, channel threads).
-    lock = FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT)
-    try:
-        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
-        lock.acquire()
-    except FileLockTimeout:
-        logger.warning(
-            "Timed out waiting %.0fs for cross-process langgraph dev lock at %s. "
-            "Another CLI shell may be stuck during cold-start. Falling back to "
-            "sync sub-agent delegation for this session.",
-            _FILE_LOCK_TIMEOUT,
-            RUNTIME.lock_file,
-        )
-        return settle(_Found())
-    except OSError as exc:
-        # The runtime folder or its lock cannot be used: a failed start.
-        logger.warning(
-            "Cannot use the lock %s (%s); falling back to sync sub-agent "
-            "delegation for this session.",
-            RUNTIME.lock_file,
-            exc,
-        )
-        return settle(_Found())
+    configured_port, configured_host = configured_address(config)
+    port = configured_port if port is None else port
+    host = (host or "").strip() or configured_host
+    waits = _Waits(cancelled, on_wait)
     try:
         with _LOCK:
-            found = _ensure_langgraph_dev_locked(config)
+            result = _find_or_start(
+                config,
+                port=port,
+                host=host,
+                lasting=lasting,
+                tunnel=tunnel,
+                job=job,
+                reuse=reuse,
+                any_port=any_port,
+                before_start=before_start,
+                waits=waits,
+            )
     except BaseException:
-        settle(_Found())
+        settle(ServerResult())
         raise
     finally:
-        lock.release()
-    if not found.available or workspace_dir is None:
-        return settle(found)
-
-    from .sdk import langgraph_dev_url
+        waits.report(False)
+    if not result.available:
+        logger.warning(
+            "No background agent server: async sub-agents will fall back to "
+            "in-process delegation, and EvoMemory background workers will not "
+            "run. %s",
+            result.error,
+        )
+        if result.problem == "older_server" and workspace_dir is not None:
+            settle(result)
+            raise registration.OlderServerError()
+        return settle(result)
+    if result.older or (result.record is not None and result.record.older):
+        # INFO: the CLI prints it after startup and the TUI shows it.
+        logger.info(OLDER_SERVER_MESSAGE)
+    if workspace_dir is None:
+        return settle(result)
 
     workspace = paths.Workspace(workspace_dir)
     try:
-        exposure = registration.register_folder(
-            workspace, url=langgraph_dev_url(config)
-        )
+        exposure = registration.register_folder(workspace, url=result.url)
     except registration.OlderServerError:
         # Unusable for any project, the session's current one included.
-        settle(_Found())
+        settle(ServerResult())
         raise
     except ServerUnusableError:
         # The session stays in its project: its state stays as it was.
@@ -1825,11 +1654,13 @@ def ensure_langgraph_dev(
             "%s Falling back to sync sub-agent delegation for this session.",
             exc,
         )
-        return settle(replace(found, available=False))
+        return settle(
+            replace(result, available=False, error=str(exc), problem="unregistered")
+        )
     except BaseException:
-        settle(_Found())
+        settle(ServerResult())
         raise
-    return settle(found, exposure=exposure)
+    return settle(result, exposure=exposure)
 
 
 def serve_project(
@@ -1837,94 +1668,730 @@ def serve_project(
     workspace_dir: Path | None,
     *,
     with_ccproxy: bool = True,
-) -> bool:
+) -> ServerResult:
     """Start the background server, or reuse a running one, and register
     *workspace_dir* with it (``EvoSci service start``, ``EvoSci server
     start``); without one (the restart after an update) nothing is
     registered. With Anthropic OAuth the server routes through
     ccproxy: *with_ccproxy* starts it first, lasting like the server
     (``RuntimeError`` or ``ValueError`` when it cannot start). Returns and
-    raises like :func:`ensure_langgraph_dev`."""
+    raises like :func:`ensure_server`."""
     from ..ccproxy_manager import maybe_start_ccproxy, setup_ccproxy_env, uses_oauth
 
     if with_ccproxy:
         maybe_start_ccproxy(config, lasting=True)
     elif uses_oauth(config):
         setup_ccproxy_env(config.ccproxy_port)
-    return ensure_langgraph_dev(
+    return ensure_server(
         config, workspace_dir=workspace_dir, backend="langgraph_server"
     )
 
 
-@dataclass(frozen=True)
-class _Found:
-    """What the locked section found or started."""
+class _Waits:
+    """The pauses of one :func:`ensure_server` call: each checks for a
+    cancel, and a wait for another process is reported to ``on_wait``."""
 
-    available: bool = False
-    drift: bool = False
-    shell_drift: str | None = None
+    def __init__(
+        self,
+        cancelled: Callable[[], bool] | None,
+        on_wait: Callable[[bool], None] | None,
+    ) -> None:
+        self._cancelled = cancelled
+        self._on_wait = on_wait
+        self._waiting = False
+
+    def cancelled(self) -> bool:
+        return self._cancelled is not None and self._cancelled()
+
+    def report(self, waiting: bool) -> None:
+        if waiting != self._waiting and self._on_wait is not None:
+            self._on_wait(waiting)
+        self._waiting = waiting
+
+    def pause(self, *, for_other: bool = False) -> None:
+        self.report(for_other)
+        time.sleep(_POLL_INTERVAL)
+
+    def acquire(self, lock: FileLock) -> bool | None:
+        """Take *lock* within :func:`start_budget`: True once held, False on
+        a cancel, None when another process kept it longer."""
+        deadline = time.monotonic() + start_budget()
+        while True:
+            if self.cancelled():
+                return False
+            try:
+                lock.acquire(timeout=_POLL_INTERVAL)
+            except FileLockTimeout:
+                if time.monotonic() >= deadline:
+                    return None
+                self.report(True)
+                continue
+            self.report(False)
+            return True
 
 
-def _ensure_langgraph_dev_locked(config: EvoScientistConfig) -> _Found:
-    """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
-    config_fp = _server_config_fingerprint(config)
-    port, host = configured_address(config)
-    file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
-    jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
-
-    if is_langgraph_dev_running(port=port, host=host):
-        # The server serves every registered project, so any EvoScientist
-        # server on the port will do; the registration that follows tells
-        # one from an older release. A server this process did not start
-        # (EvoSci deploy in another terminal, an earlier session) may have
-        # been launched with other settings: its ownership record says.
-        owned_running = _PROCESS is not None and _PROCESS.poll() is None
-        sidecar = None if owned_running else _read_workspace_sidecar()
-        drift, shell_drift = False, None
-        if sidecar is not None:
-            recorded_fp = sidecar.get("config_fingerprint")
-            if isinstance(recorded_fp, str) and recorded_fp != config_fp:
-                drift = True
-                logger.warning(
-                    "Configuration or version changed since the running "
-                    "langgraph dev was launched — it still serves the old "
-                    "settings or version until it is restarted "
-                    "(EvoSci server stop)."
-                )
-            from EvoScientist.agent_shell import shell_drift_message
-
-            shell_drift = shell_drift_message(sidecar)
-            if shell_drift is not None:
-                # INFO: the CLI prints it after startup and the TUI shows
-                # it in the app; a WARNING here would print it twice.
-                logger.info(shell_drift)
-        logger.info(
-            "langgraph dev already running on %s, reusing", _base_url(port, host)
+def _find_or_start(
+    config: EvoScientistConfig,
+    *,
+    port: int,
+    host: str,
+    lasting: bool,
+    tunnel: bool,
+    job: Callable[[], BackendJob | None] | None,
+    reuse: bool,
+    any_port: bool,
+    before_start: Callable[[], None] | None,
+    waits: _Waits,
+) -> ServerResult:
+    """Locked part of :func:`ensure_server` — must hold ``_LOCK``: find the
+    server; when there is none, start one."""
+    fingerprint = _server_config_fingerprint(config)
+    look = _Look(
+        asked_url=_base_url(port, host),
+        port=port,
+        host=host,
+        any_port=any_port,
+        reuse=reuse,
+        fingerprint=fingerprint,
+    )
+    while True:
+        found = _find(look, waits)
+        if found != "free":
+            return found
+        started = _spawn(
+            config,
+            look,
+            lasting=lasting,
+            tunnel=tunnel,
+            job=job,
+            before_start=before_start,
+            waits=waits,
         )
-        return _Found(available=True, drift=drift, shell_drift=shell_drift)
+        if started is not None:
+            return started
+        # Another process changed what runs: look again after a pause.
+        waits.pause(for_other=True)
 
-    try:
-        start_langgraph_dev(
+
+@dataclass(frozen=True)
+class _Look:
+    """What one :func:`ensure_server` call looks for. ``own_url`` is set for
+    the server this call started, which is asked at its own address."""
+
+    asked_url: str
+    port: int
+    host: str
+    any_port: bool
+    reuse: bool
+    fingerprint: str
+    own_url: str | None = None
+
+
+@dataclass(frozen=True)
+class _Seen:
+    """One look: the record read after the probes, whether the server lock
+    is held, and how each address asked answered (:func:`ask`)."""
+
+    record: ServerRecord | None
+    lock: str
+    answers: dict[str, str]
+
+
+class _Clock:
+    """The deadlines and missed probes of one call, keyed by the state and
+    the server they are about, so a record that names another server starts
+    them afresh."""
+
+    def __init__(self) -> None:
+        self._deadlines: dict[tuple, float] = {}
+        self._counts: dict[tuple, int] = {}
+
+    def set(self, key: tuple, deadline: float) -> None:
+        self._deadlines[key] = deadline
+
+    def waited_out(self, key: tuple, seconds: float) -> bool:
+        now = time.monotonic()
+        return now >= self._deadlines.setdefault(key, now + seconds)
+
+    def count(self, key: tuple) -> int:
+        self._counts[key] = self._counts.get(key, 0) + 1
+        return self._counts[key]
+
+    def reset(self, key: tuple) -> None:
+        self._counts.pop(key, None)
+
+
+def _identity(record: ServerRecord) -> tuple:
+    return record.pid, record.created
+
+
+def _find(look: _Look, waits: _Waits, clock: _Clock | None = None) -> object:
+    """Look until the state decides: a :class:`ServerResult`, or ``"free"``
+    when no server runs and the port can be started on."""
+    clock = clock or _Clock()
+    last: ServerRecord | None = None
+    while True:
+        if waits.cancelled():
+            return ServerResult(problem="cancelled", error="Cancelled.")
+        seen = _observe(look, last)
+        last = seen.record
+        decided = _decide(seen, look, clock)
+        if decided != "wait":
+            return decided
+        waits.pause(for_other=look.own_url is None)
+
+
+def _observe(look: _Look, last: ServerRecord | None) -> _Seen:
+    """Probe first and read the record after, so a record that says a
+    server serves was written by the server that answered (it marks itself
+    serving before it answers). Where to ask follows the record of the look
+    before (*last*): a record that asks for another address than the one
+    asked leaves its answer missing, and the next look asks there."""
+    answers: dict[str, str] = {}
+    for url in _urls_to_ask(last, look):
+        answers[url] = ask(url)
+        if answers[url] != "own":
+            break
+    lock = server_home.lock_state()
+    record = read_record(older=True, lock=lock)
+    return _Seen(record=record, lock=lock, answers=answers)
+
+
+def _urls_to_ask(record: ServerRecord | None, look: _Look) -> list[str]:
+    """Where to ask: the record's own address first while its server starts
+    (or for a caller that uses it), then the caller's address."""
+    if look.own_url is not None:
+        return [look.own_url]
+    if record is None:
+        return [look.asked_url]
+    if look.any_port:
+        return [record.url]
+    if record.phase == server_record.STARTING and record.url != look.asked_url:
+        return [record.url, look.asked_url]
+    return [look.asked_url]
+
+
+def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
+    """What one look means: a :class:`ServerResult`, ``"wait"`` to look
+    again, or ``"free"`` when no server runs."""
+    record = seen.record
+    if record is None:
+        if look.own_url is not None:
+            # The started server's record went away: it is exiting.
+            return ServerResult(problem="start_failed", error="Its record went away.")
+        answer = seen.answers.get(look.asked_url)
+        if seen.lock == server_home.UNKNOWN:
+            # Nothing can be told of the lock: only a server that answers as
+            # this data folder's is used, and none is started.
+            if answer == "own":
+                return _no_record(answer, look)
+            return _lock_unreadable()
+        if seen.lock == server_home.HELD:
+            # A server that has only just taken its lock writes its record
+            # at once; one that holds it longer without one keeps none: an
+            # older release's, used when it answers as this data folder's.
+            if not clock.waited_out(("settle",), _SETTLE_WAIT):
+                return "wait"
+            if answer != "own":
+                return _unrecorded_lock()
+            return replace(_no_record(answer, look), older=True)
+        return _no_record(answer, look)
+    key = _identity(record)
+    if look.own_url is None:
+        refusal = _refuse_recorded(
+            record, port=look.port, reuse=look.reuse, any_port=look.any_port
+        )
+        if refusal is not None:
+            return refusal
+    own = record.url
+    target = look.own_url or (own if look.any_port else look.asked_url)
+    starting = look.own_url is not None or record.phase == server_record.STARTING
+    if starting and target != own:
+        # Waited for at its own address; the caller's is asked once it
+        # answers there.
+        at_own = seen.answers.get(own)
+        if at_own == "own":
+            starting = False
+        elif at_own in ("other", "older", "foreign"):
+            return _answered(at_own, record, own, look)
+        elif at_own is None:
+            return "wait"
+        elif clock.waited_out(("starting", key), start_budget()):
+            return _unresponsive(record, own, _NOT_SERVING)
+        else:
+            return "wait"
+    answer = seen.answers.get(target)
+    if answer is None:
+        return "wait"
+    if answer != "silent":
+        # The probes a server missed count in a row.
+        clock.reset(("silent", key))
+    if answer in ("own", "other", "older", "foreign"):
+        return _answered(answer, record, target, look)
+    if target != own:
+        return _unreachable(record, target)
+    if starting:
+        if clock.waited_out(("starting", key), start_budget()):
+            return _unresponsive(record, own, _NOT_SERVING)
+        return "wait"
+    if answer == "silent":
+        # A live server that does not answer in time.
+        missed = clock.count(("silent", key))
+        if missed >= _SERVING_PROBES:
+            return _unresponsive(
+                record, own, f"did not answer {missed} probes in a row"
+            )
+        return "wait"
+    # Nothing listens while it holds the lock and its record: not bound yet,
+    # or stopping, draining its requests before it exits.
+    if clock.waited_out(("drain", key), _DRAIN_WAIT):
+        return _stopping()
+    return "wait"
+
+
+# How a record that still says ``starting`` failed: its server may run but
+# not listen, or answer without having marked itself serving.
+_NOT_SERVING = "did not answer as serving"
+
+
+def _answered(answer: str, record: ServerRecord, url: str, look: _Look) -> ServerResult:
+    """The result of an answer at *url* from a recorded server."""
+    if answer == "own":
+        return _reused(record, url, look.fingerprint)
+    if answer == "older":
+        return ServerResult(
+            record=record, problem="older_server", error=str(OlderServerError())
+        )
+    return _unreachable(record, url)
+
+
+def _no_record(answer: str | None, look: _Look) -> object:
+    """No server recorded: the server that answers on the port, reused when
+    it is this data folder's (one started by hand) and a conflict otherwise;
+    ``"free"`` when nothing answers, for the start."""
+    port, url = look.port, look.asked_url
+    if answer == "foreign":
+        return _foreign(port)
+    if answer == "older":
+        return ServerResult(
+            problem="older_server",
+            port=port,
+            error=(
+                f"The server on port {port} is from an older EvoScientist "
+                "release that left no record EvoSci can stop it by; stop the "
+                f"process that listens on port {port}, then start again."
+            ),
+        )
+    if answer == "other":
+        return ServerResult(
+            problem="other_data_folder",
+            port=port,
+            error=(
+                f"The EvoScientist server on port {port} uses another data "
+                f"folder than {paths.DATA_DIR}. Stop it, or give this data "
+                "folder another port: EvoSci config set langgraph_dev_port "
+                "<port>."
+            ),
+        )
+    if answer != "own":
+        return "free"
+    host = look.host
+    if not look.reuse:
+        return ServerResult(
+            url=url,
             port=port,
             host=host,
-            file_persistence=file_persistence,
-            jobs_per_worker=jobs_per_worker,
-            config_fingerprint=config_fp,
-            allowed_origins=getattr(config, "backend_allowed_origins", ""),
+            problem="running",
+            error=(
+                f"This data folder's background agent server already runs on "
+                f"port {port}. Stop it first with EvoSci server stop."
+            ),
         )
-    except (FileNotFoundError, RuntimeError) as exc:
-        # Startup failed — keep async subagents disabled so the main agent
-        # falls back to in-process sync delegation rather than routing tool
-        # calls at a dead URL. EvoMemory workers will also skip until the
-        # server is reachable.
-        logger.warning(
-            "Failed to start langgraph dev — async sub-agents will fall back "
-            "to in-process delegation, and EvoMemory background workers will "
-            "not run. %s",
-            exc,
-        )
-        return _Found()
+    logger.info("langgraph dev already running on %s, reusing", url)
+    return ServerResult(available=True, url=url, port=port, host=host)
 
-    # The server outlives this session, with its PID file and sidecar, for
-    # every session to share until ``EvoSci server stop``.
-    return _Found(available=True)
+
+def _refuse_recorded(
+    record: ServerRecord, *, port: int, reuse: bool, any_port: bool
+) -> ServerResult | None:
+    """Why the recorded server is not used without asking it, or None."""
+    if not reuse:
+        return ServerResult(
+            record=record,
+            url=record.url,
+            port=record.port,
+            host=record.host,
+            problem="running",
+            error=(
+                f"This data folder's background agent server already runs "
+                f"(pid {record.pid}, port {record.port}). Stop it first with "
+                "EvoSci server stop."
+            ),
+        )
+    if not any_port and record.port != port:
+        return ServerResult(
+            record=record,
+            url=record.url,
+            port=record.port,
+            host=record.host,
+            problem="other_port",
+            error=(
+                f"This data folder's background agent server runs on port "
+                f"{record.port}, not on the configured port {port}. Stop it "
+                "with EvoSci server stop, or use its port: EvoSci config set "
+                f"langgraph_dev_port {record.port}."
+            ),
+        )
+    return None
+
+
+def unrecorded_lock_message() -> str:
+    """What to say of a server lock held without a record, and how to stop
+    its holder by hand."""
+    lock = RUNTIME.server_lock
+    if os.name == "nt":
+        find = (
+            f"find the process that holds {lock} (Resource Monitor, CPU tab, "
+            "Associated Handles) and end it by hand"
+        )
+    else:
+        find = (
+            f"find its process with lsof {lock} (or fuser {lock}) and stop it by hand"
+        )
+    return (
+        f"A server holds this data folder's lock ({lock}) without a record of "
+        "itself, so EvoSci can neither use nor stop it: one an older release "
+        f"started, or one that could not write its record. {find[0].upper()}"
+        f"{find[1:]}, then start again."
+    )
+
+
+def lock_unreadable_message() -> str:
+    """What to say of a server lock that cannot be opened, and the fix."""
+    lock = RUNTIME.server_lock
+    if os.name == "nt":
+        fix = f"give your account access to {lock} (its file properties)"
+    else:
+        fix = f"sudo chown $USER {lock}, or restore its permissions"
+    return (
+        f"This data folder's server lock ({lock}) cannot be opened (another "
+        "user's, as after a sudo EvoSci), so EvoSci cannot tell whether a "
+        f"server runs and starts none: {fix}."
+    )
+
+
+def _lock_unreadable() -> ServerResult:
+    return ServerResult(problem="lock_unreadable", error=lock_unreadable_message())
+
+
+def _unrecorded_lock() -> ServerResult:
+    return ServerResult(problem="unrecorded_lock", error=unrecorded_lock_message())
+
+
+def _stopping() -> ServerResult:
+    return ServerResult(
+        problem="stopping",
+        error=(
+            f"A server of this data folder is stopping, or holds its lock "
+            f"({RUNTIME.server_lock}) without serving; see {RUNTIME.log_file}. "
+            "Try again in a moment."
+        ),
+    )
+
+
+def _unreachable(record: ServerRecord, url: str) -> ServerResult:
+    return ServerResult(
+        record=record,
+        problem="unreachable",
+        error=(
+            f"This data folder's background agent server runs at {record.url}, "
+            f"and {url} does not reach it. Stop it with EvoSci server stop, or "
+            "set langgraph_dev_host to an address that reaches it."
+        ),
+    )
+
+
+def _unresponsive(record: ServerRecord, url: str, what: str) -> ServerResult:
+    return ServerResult(
+        record=record,
+        problem="unresponsive",
+        error=(
+            f"This data folder's background agent server (pid {record.pid}) at "
+            f"{url} {what}; see {RUNTIME.log_file}. EvoSci server stop stops it."
+        ),
+    )
+
+
+def _reused(record: ServerRecord, url: str, fingerprint: str) -> ServerResult:
+    """The recorded server answered at *url* as this data folder's."""
+    port, host = record.port, record.host
+    recorded_fp = record.fields.get("config_fingerprint")
+    drift = isinstance(recorded_fp, str) and recorded_fp != fingerprint
+    if drift:
+        logger.warning(
+            "Configuration or version changed since the running "
+            "langgraph dev was launched — it still serves the old "
+            "settings or version until it is restarted "
+            "(EvoSci server stop)."
+        )
+    from EvoScientist.agent_shell import shell_drift_message
+
+    shell_drift = shell_drift_message(record.fields)
+    if shell_drift is not None:
+        # INFO: the CLI prints it after startup and the TUI shows
+        # it in the app; a WARNING here would print it twice.
+        logger.info(shell_drift)
+    logger.info("langgraph dev already running on %s, reusing", url)
+    return ServerResult(
+        available=True,
+        url=url,
+        port=port,
+        host=host,
+        record=record,
+        drift=drift,
+        shell_drift=shell_drift,
+    )
+
+
+def ask(url: str) -> str:
+    """Whose server answers at *url*: ``own`` (this data folder's local
+    secret), ``other``, ``older`` (too old to say), ``foreign`` (something
+    answered, not as an EvoScientist server), ``silent`` (it took the
+    connection, with no answer within :data:`_PROBE_TIMEOUT`) or
+    ``refused`` (nothing listens there)."""
+    try:
+        response = httpx.get(f"{url}/ok", timeout=_PROBE_TIMEOUT, trust_env=False)
+    except httpx.ConnectError:
+        return "refused"
+    except httpx.TimeoutException:
+        return "silent"
+    except (httpx.TransportError, OSError):
+        return "foreign"
+    if response.status_code != 200:
+        return "foreign"
+    try:
+        return _whose_server(url)
+    except RegistrationError:
+        return "foreign"
+
+
+def _foreign(port: int) -> ServerResult:
+    return ServerResult(
+        problem="foreign",
+        port=port,
+        error=f"Port {port} is occupied by another process.",
+    )
+
+
+def _whose_server(url: str) -> str:
+    """``own`` when the server at *url* holds this data folder's local
+    secret, ``older`` for one too old to say, ``other`` otherwise.
+    ``RegistrationError`` when it cannot be asked."""
+    from EvoScientist.local_secret import instance_of, read_local_secret
+
+    try:
+        instance = registration.server_instance(url, timeout=_PROBE_TIMEOUT)
+    except OlderServerError:
+        return "older"
+    secret = read_local_secret()
+    if secret is not None and instance == instance_of(secret):
+        return "own"
+    return "other"
+
+
+def _install_node_for_mcp(waits: _Waits) -> None:
+    """Install Node for npx MCP servers before a start, where progress is
+    visible; the server itself never downloads it. A cancel stops waiting
+    for it (the download finishes in the background)."""
+
+    def install() -> None:
+        try:
+            from ..mcp.client import _ensure_node_for_stdio, load_mcp_config
+
+            _ensure_node_for_stdio(load_mcp_config())
+        except Exception:
+            logger.warning("Could not check Node.js for MCP servers", exc_info=True)
+
+    worker = threading.Thread(target=install, name="node-install", daemon=True)
+    worker.start()
+    while worker.is_alive() and not waits.cancelled():
+        worker.join(_POLL_INTERVAL)
+
+
+def _spawn(
+    config: EvoScientistConfig,
+    look: _Look,
+    *,
+    lasting: bool,
+    tunnel: bool,
+    job: Callable[[], BackendJob | None] | None,
+    before_start: Callable[[], None] | None,
+    waits: _Waits,
+) -> ServerResult | None:
+    """Start a server under the start lock, once the port can be bound, and
+    find it at its own address. Returns what was found (``started``, with
+    the process, when available), a failure, or None when another process
+    changed what runs while this one waited for the lock. The started
+    process is stopped on any outcome but an available server, an exception
+    included."""
+    port, host = look.port, look.host
+    lock = FileLock(str(RUNTIME.lock_file))
+    try:
+        server_home.ensure_server_home()
+        held = waits.acquire(lock)
+    except OSError as exc:
+        return ServerResult(
+            problem="start_failed",
+            error=f"Cannot use the start lock {RUNTIME.lock_file}: {exc}",
+        )
+    if held is False:
+        return ServerResult(problem="cancelled", error="Cancelled.")
+    if held is None:
+        return ServerResult(
+            problem="busy",
+            error=(
+                f"Another EvoScientist process has been starting a server for "
+                f"over {start_budget():.0f} s; it holds {RUNTIME.lock_file}."
+            ),
+        )
+    try:
+        lock_now = server_home.lock_state()
+        if read_record(older=True, lock=lock_now) is not None:
+            return None
+        if lock_now == server_home.UNKNOWN:
+            return _lock_unreadable()
+        if lock_now == server_home.HELD:
+            # Taken since the look: a new server could not take it.
+            return _unrecorded_lock()
+        if not _wait_for_port_bindable(port, host):
+            return _foreign(port)
+        _install_node_for_mcp(waits)
+        if not waits.cancelled() and before_start is not None:
+            before_start()
+        if waits.cancelled():
+            return ServerResult(problem="cancelled", error="Cancelled.")
+        earlier = _PROCESS
+        spawned_at = time.monotonic()
+        try:
+            proc = _spawn_server(
+                port=port,
+                host=host,
+                file_persistence=bool(
+                    getattr(config, "langgraph_dev_file_persistence", True)
+                ),
+                jobs_per_worker=int(
+                    getattr(config, "langgraph_dev_jobs_per_worker", 10)
+                ),
+                tunnel=tunnel,
+                config_fingerprint=look.fingerprint,
+                allowed_origins=getattr(config, "backend_allowed_origins", ""),
+                job=job() if job is not None else None,
+                lasting=lasting,
+            )
+        except (FileNotFoundError, RuntimeError, OSError) as exc:
+            # A failure after the spawn (joining the job) leaves the handle.
+            spawned = _PROCESS if _PROCESS is not earlier else None
+            return _give_up(spawned, problem="start_failed", error=str(exc))
+        try:
+            record = _record_of(proc, spawned_at, waits)
+        except BaseException:
+            stop_langgraph_dev(proc, clean=False)
+            raise
+    finally:
+        lock.release()
+    if isinstance(record, ServerResult):
+        return record
+    try:
+        clock = _Clock()
+        clock.set(("starting", _identity(record)), spawned_at + start_budget())
+        found = _find(replace(look, own_url=record.url), waits, clock)
+    except BaseException:
+        stop_langgraph_dev(proc, clean=False)
+        raise
+    assert isinstance(found, ServerResult)  # with its own address, never free
+    if found.available:
+        logger.info("langgraph dev started on %s (pid=%d)", found.url, proc.pid)
+        return replace(found, proc=proc, drift=False, shell_drift=None)
+    if proc.poll() is not None:
+        return _exited(proc)
+    if found.problem in ("unresponsive", "start_failed"):
+        return _not_ready(proc, spawned_at)
+    stop_langgraph_dev(proc, clean=False)
+    return found
+
+
+def _record_of(
+    proc: subprocess.Popen, spawned_at: float, waits: _Waits
+) -> ServerRecord | ServerResult:
+    """The started server's record: one whose PID is the process started or
+    one of its children (on Windows the server runs below a launcher), never
+    a record another server left. A failure stops the process."""
+    deadline = spawned_at + start_budget()
+    while True:
+        record = read_record()
+        if record is not None and record.pid in _spawned_pids(proc):
+            return record
+        if proc.poll() is not None:
+            return _exited(proc)
+        if waits.cancelled():
+            return _give_up(proc, problem="cancelled", error="Cancelled.")
+        if time.monotonic() >= deadline:
+            return _not_ready(proc, spawned_at)
+        waits.pause()
+
+
+def _spawned_pids(proc: subprocess.Popen) -> set[int]:
+    """The process started and its descendants."""
+    pids = {proc.pid}
+    try:
+        pids |= {child.pid for child in psutil.Process(proc.pid).children(True)}
+    except psutil.Error:
+        pass
+    return pids
+
+
+def _give_up(
+    proc: subprocess.Popen | None, *, problem: str, error: str
+) -> ServerResult:
+    """A failure; a server this call started is stopped first."""
+    if proc is not None:
+        # Still starting: no run to put back in the queue.
+        stop_langgraph_dev(proc, clean=False)
+    return ServerResult(problem=problem, error=error)
+
+
+def _not_ready(proc: subprocess.Popen, spawned_at: float) -> ServerResult:
+    elapsed = time.monotonic() - spawned_at
+    return _give_up(
+        proc,
+        problem="start_failed",
+        error=(
+            f"langgraph dev did not become healthy within {elapsed:.0f} "
+            f"seconds. Check {RUNTIME.log_file}"
+        ),
+    )
+
+
+def _exited(proc: subprocess.Popen) -> ServerResult:
+    """The server this call started exited: its exit code and the end of
+    what it logged."""
+    stop_langgraph_dev(proc)
+    return ServerResult(
+        problem="exited",
+        exit_code=proc.returncode,
+        error=(
+            f"langgraph dev exited immediately with code {proc.returncode}.\n"
+            f"Log tail:\n{_log_tail()}"
+        ),
+    )
+
+
+def _log_tail() -> str:
+    """The end of what the server this process started last logged."""
+    try:
+        with open(RUNTIME.log_file, "rb") as fh:
+            fh.seek(_LOG_OFFSET_AT_START)
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-_LOG_TAIL_CHARS:]
