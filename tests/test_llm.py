@@ -2905,11 +2905,9 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("configured", "sent"), [("", None), ("low", "low"), ("none", "none")]
+    ("configured", "sent"), [("", "high"), ("low", "low"), ("none", "none")]
 )
-def test_deepseek_sends_only_a_configured_reasoning_effort(
-    monkeypatch, configured, sent
-):
+def test_deepseek_sends_the_configured_reasoning_effort(monkeypatch, configured, sent):
     import json
 
     import httpx
@@ -3559,7 +3557,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_adaptive_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-6 models get adaptive thinking with max effort."""
+        """Anthropic 4-6 models get adaptive thinking with the default effort."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
@@ -3567,11 +3565,11 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_8_adaptive_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-8 models get adaptive thinking with max effort."""
+        """Anthropic 4-8 models get adaptive thinking with the default effort."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
@@ -3579,7 +3577,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
 
     @pytest.mark.parametrize(
         ("model", "max_tokens"),
@@ -3603,7 +3601,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
         assert call_kwargs.get("max_tokens") == max_tokens
 
     @pytest.mark.parametrize(
@@ -3684,6 +3682,18 @@ class TestAutoConfig:
         assert "thinking" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_anthropic_claude_gets_no_effort(self, mock_init, monkeypatch):
+        """A configured level does not reach Anthropic-compatible endpoints."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-5-5", provider="custom-anthropic")
+
+        assert "effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):
         """Anthropic 4-6 models via proxy skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
@@ -3719,11 +3729,11 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
 
     @pytest.mark.parametrize(
         ("configured", "sent"),
-        [("", "max"), ("low", "low"), ("xhigh", "xhigh"), ("none", "low")],
+        [("", "high"), ("low", "low"), ("xhigh", "xhigh"), ("none", "low")],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_native_claude_takes_the_configured_effort(
@@ -3762,34 +3772,29 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == custom_thinking
 
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-6-sol",
+            "gpt-5.4",
+            "gpt-5.3-codex",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+            "gpt-5.2",
+            "gpt-5-nano",
+        ],
+    )
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_reasoning_xhigh(self, mock_init, monkeypatch):
-        """gpt-5.4+ and codex models get xhigh reasoning."""
+    def test_openai_reasoning_defaults_to_high(self, mock_init, model, monkeypatch):
+        """Every OpenAI model runs at the shared default level when none is set."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
-        get_chat_model("gpt-5.4", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
+        get_chat_model(model, provider="openai")
 
-        get_chat_model("gpt-5.3-codex", provider="openai")
         assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.5", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.6-sol", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
+            "effort": "high",
             "summary": "auto",
         }
 
@@ -3798,30 +3803,12 @@ class TestAutoConfig:
         """Native OpenAI reasoning effort should be configurable via env var."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "high")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
 
         get_chat_model("gpt-5.5", provider="openai")
 
         assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
-            "summary": "auto",
-        }
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_reasoning_high_fallback(self, mock_init, monkeypatch):
-        """Other OpenAI models get high reasoning effort."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-
-        get_chat_model("gpt-5-nano")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.2", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
+            "effort": "low",
             "summary": "auto",
         }
 
@@ -4300,6 +4287,13 @@ class TestChatGPTSignIn:
         assert "base_url" not in kwargs
         assert "use_responses_api" not in kwargs
         assert "default_headers" not in kwargs
+
+    def test_sign_in_models_share_the_default_level(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+        get_chat_model("gpt-5.6-sol", provider="openai")
+
+        assert built[0][1]["reasoning"]["effort"] == "high"
 
     def test_caller_reasoning_context_wins(self, built, monkeypatch):
         monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")

@@ -275,6 +275,9 @@ MODELS: dict[str, tuple[str, str]] = {
 }
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
+# The reasoning level native Claude, OpenAI, OpenRouter and DeepSeek run at when
+# none is configured.
+DEFAULT_REASONING_EFFORT = "high"
 
 
 def get_models_for_provider(provider: str) -> list[tuple[str, str]]:

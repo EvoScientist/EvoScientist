@@ -836,20 +836,53 @@ class TestStepReasoningEffort:
         result, values, default = self._run("openai", "", picked="max")
 
         assert result == "max"
-        assert values == ["", "low", "medium", "high", "xhigh", "max"]
-        assert default == ""
+        assert values == ["max", "xhigh", "high", "medium", "low"]
+        assert default == "high"
 
     def test_anthropic_offers_the_levels_current_claude_accepts(self):
         _, values, default = self._run("anthropic", "")
 
-        assert values == ["low", "medium", "high", "xhigh", "max"]
-        assert default == "max"
+        assert values == ["max", "xhigh", "high", "medium", "low"]
+        assert default == "high"
 
     def test_deepseek_offers_its_documented_levels(self):
         _, values, default = self._run("deepseek", "")
 
-        assert values == ["low", "high", "max", "none"]
+        assert values == ["max", "high", "low", "none"]
         assert default == "high"
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_picking_the_default_level_stores_no_level(self, provider):
+        """Routes outside these providers then keep their own default."""
+        assert self._run(provider, "", picked="high")[0] == ""
+        assert self._run(provider, "", picked="low")[0] == "low"
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_every_list_runs_from_the_deepest_level(self, provider):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm.models import _REASONING_SCALE
+
+        levels = [v for v, _ in onboard_steps._REASONING_EFFORT_CHOICES[provider]]
+        ranks = [_REASONING_SCALE.index(level) for level in levels]
+
+        assert ranks == sorted(ranks, reverse=True)
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_the_shared_default_is_offered_and_recommended(self, provider):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm import DEFAULT_REASONING_EFFORT
+
+        levels = dict(onboard_steps._REASONING_EFFORT_CHOICES[provider])
+        recommended = [v for v, title in levels.items() if "(recommended)" in title]
+
+        assert recommended == [DEFAULT_REASONING_EFFORT]
+        assert self._run(provider, "")[2] == DEFAULT_REASONING_EFFORT
 
     def test_openrouter_list_is_unchanged(self):
         _, values, default = self._run("openrouter", "")
@@ -861,11 +894,11 @@ class TestStepReasoningEffort:
         ("provider", "stored", "default"),
         [
             ("openai", "max", "max"),
-            ("openai", "", ""),
-            ("openai", "minimal", ""),  # carried over from another provider
+            ("openai", "", "high"),
+            ("openai", "minimal", "high"),  # carried over from another provider
             ("openrouter", "minimal", "minimal"),
             ("openrouter", "max", "high"),
-            ("anthropic", "minimal", "max"),
+            ("anthropic", "minimal", "high"),
             ("anthropic", "low", "low"),
             ("deepseek", "xhigh", "high"),
             ("deepseek", "none", "none"),
@@ -891,7 +924,7 @@ class TestStepReasoningEffort:
         _, values, _ = self._run(provider, "")
 
         with patch.dict("os.environ"):
-            for value in filter(None, values):
+            for value in values:
                 os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
                 assert _resolve_reasoning_effort("high", route) == value
 
@@ -907,7 +940,7 @@ class TestStepReasoningEffort:
             ("", "api_key", False),
         ],
     )
-    def test_only_providers_that_send_a_level_are_asked(
+    def test_only_providers_with_a_level_list_are_asked(
         self, provider, anthropic_auth_mode, asked
     ):
         from EvoScientist.config.onboard import steps as onboard_steps

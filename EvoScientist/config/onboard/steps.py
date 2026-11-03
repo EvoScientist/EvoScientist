@@ -14,7 +14,7 @@ import questionary
 from prompt_toolkit.formatted_text import FormattedText
 from questionary import Choice
 
-from ...llm import DEFAULT_MODEL, get_models_for_provider
+from ...llm import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, get_models_for_provider
 from ...llm.ollama_discovery import validate_ollama_connection
 from ...paths import Workspace
 from ..settings import EvoScientistConfig
@@ -945,8 +945,9 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
 
 
 # Levels offered per provider, each one a level that provider's route takes (see
-# ``llm.models._ROUTE_REASONING_LEVELS``); a model whose profile lists fewer gets
-# the nearest one. OpenAI's "" stores nothing, so each model keeps its own level.
+# ``llm.models._ROUTE_REASONING_LEVELS``); a native Claude model whose profile lists
+# fewer gets the nearest one. With none stored these providers run at DEFAULT_REASONING_EFFORT.
+# Every list runs from the deepest level to the lightest.
 _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
     # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
     "openrouter": [
@@ -958,31 +959,28 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("none", "none   — disable reasoning entirely"),
     ],
     "openai": [
-        ("", "default — EvoScientist's level for each model (recommended)"),
-        ("low", "low    — fast responses with lighter reasoning"),
-        ("medium", "medium — balances speed and reasoning depth"),
-        ("high", "high   — greater reasoning depth"),
-        ("xhigh", "xhigh  — extra high reasoning depth"),
         ("max", "max    — deepest reasoning; uses your quota fastest"),
+        ("xhigh", "xhigh  — extra high reasoning depth"),
+        ("high", "high   — greater reasoning depth (recommended)"),
+        ("medium", "medium — balances speed and reasoning depth"),
+        ("low", "low    — fast responses with lighter reasoning"),
     ],
     # https://platform.claude.com/docs/en/build-with-claude/effort
     "anthropic": [
-        ("low", "low    — fastest, for simple tasks"),
-        ("medium", "medium — balances speed and depth"),
-        ("high", "high   — thorough reasoning"),
+        ("max", "max    — deepest reasoning; costs the most per request"),
         ("xhigh", "xhigh  — extra depth for coding and agentic work"),
-        ("max", "max    — deepest reasoning (recommended)"),
+        ("high", "high   — thorough reasoning (recommended)"),
+        ("medium", "medium — balances speed and depth"),
+        ("low", "low    — fastest, for simple tasks"),
     ],
     # https://api-docs.deepseek.com/guides/thinking_mode
     "deepseek": [
-        ("low", "low    — lighter reasoning, faster replies"),
-        ("high", "high   — DeepSeek's default depth (recommended)"),
         ("max", "max    — deepest reasoning"),
+        ("high", "high   — DeepSeek's default depth (recommended)"),
+        ("low", "low    — lighter reasoning, faster replies"),
         ("none", "none   — turn thinking off"),
     ],
 }
-# Highlighted when no offered level is stored: the level each provider runs at.
-_REASONING_EFFORT_DEFAULTS: dict[str, str] = {"openai": "", "anthropic": "max"}
 
 
 def _asks_reasoning_effort(config: EvoScientistConfig, provider: str) -> bool:
@@ -1001,7 +999,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
         provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        Selected reasoning effort level.
+        The selected level, or "" for the default level.
     """
     levels = _REASONING_EFFORT_CHOICES[provider]
     effort_choices = [Choice(title=title, value=value) for value, title in levels]
@@ -1010,7 +1008,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     current = config.reasoning_effort
     offered = {value for value, _ in levels}
     if current not in offered:
-        current = _REASONING_EFFORT_DEFAULTS.get(provider, "high")
+        current = DEFAULT_REASONING_EFFORT
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,
@@ -1023,7 +1021,8 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     if effort is None:
         raise KeyboardInterrupt()
 
-    return effort
+    # The default level is stored as "not set", so other routes keep their own.
+    return "" if effort == DEFAULT_REASONING_EFFORT else effort
 
 
 def _step_tavily_key(

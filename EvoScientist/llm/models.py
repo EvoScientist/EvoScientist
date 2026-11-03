@@ -38,6 +38,7 @@ from .registry import (
     _OPENAI_ROUTED_PROVIDERS,
     _THINKING_CAPABLE_PROVIDERS,
     DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
     MODELS,
     UnknownModelError,
     _is_mandatory_thinking_kimi,
@@ -67,7 +68,7 @@ _ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
 
 def _nearest_reasoning_level(effort: str, levels: tuple[str, ...]) -> str:
     """Return ``effort`` if ``levels`` has it, else the nearest level it has
-    (the lower one on a tie, so fitting never raises cost)."""
+    (the lower one on a tie)."""
     known = [level for level in levels if level in _REASONING_SCALE]
     if not known or effort in levels or effort not in _REASONING_SCALE:
         return effort
@@ -407,7 +408,10 @@ def _apply_auto_config(
                 kwargs.setdefault("max_tokens", 16000)
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            kwargs.setdefault("effort", _resolve_reasoning_effort("max", "anthropic"))
+            kwargs.setdefault(
+                "effort",
+                _resolve_reasoning_effort(DEFAULT_REASONING_EFFORT, "anthropic"),
+            )
         elif original_provider == "minimax":
             # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
             kwargs["thinking"] = {"type": "adaptive"}
@@ -416,26 +420,17 @@ def _apply_auto_config(
 
     # OpenAI (native, not third-party routed): reasoning
     if provider == "openai" and not is_third_party and "reasoning" not in kwargs:
-        _default_effort = (
-            "xhigh"
-            if (
-                "5.4" in model_id
-                or "5.5" in model_id
-                or "5.6" in model_id
-                or "codex" in model_id
-            )
-            else "high"
-        )
         _eff = _resolve_reasoning_effort(
-            _default_effort, "chatgpt" if chatgpt_signin else "openai"
+            DEFAULT_REASONING_EFFORT, "chatgpt" if chatgpt_signin else "openai"
         )
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
 
-    # DeepSeek (native): forward an explicit level only; the server's default is high.
+    # DeepSeek (native): the configured level or the default, sent as is (DeepSeek
+    # maps its aliases).
     if provider == "deepseek" and "reasoning_effort" not in kwargs:
-        configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip()
-        if configured:
-            kwargs["reasoning_effort"] = configured
+        kwargs["reasoning_effort"] = _resolve_reasoning_effort(
+            DEFAULT_REASONING_EFFORT, "deepseek"
+        )
 
     # Google GenAI: surface thinking traces
     if provider == "google-genai":
@@ -600,7 +595,7 @@ def get_chat_model(
         # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
         # effort "none" with HTTP 400 — that error is surfaced to the user
         # as-is; pick a real effort (low+) for those models.
-        effort = _resolve_reasoning_effort("high", "openrouter")
+        effort = _resolve_reasoning_effort(DEFAULT_REASONING_EFFORT, "openrouter")
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
         # App attribution (issue #339): identify EvoScientist to OpenRouter so
         # usage is credited to the project (app rankings, model app tabs,
