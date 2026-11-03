@@ -407,9 +407,9 @@ UNTRACKED_HINT: Final = (
     "(untracked: the process that tracked this background process restarted or "
     "cannot be reached, so check_process no longer knows it and its exit will not "
     "be reported. It may still be running. The pid may have been reused: confirm "
-    "it by command and start time. On POSIX the pid leads a session whose child "
-    "processes can outlive it. Its output log is .bg_processes/<task_id>.log in "
-    "the folder it ran in.)"
+    "it by command and start time. The pid is the shell that ran the command; the "
+    "command's own processes have other pids and can outlive it. Its output log is "
+    ".bg_processes/<task_id>.log in the folder it ran in.)"
 )
 """Closing line of a synthetic message that reports an ``untracked`` process."""
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}

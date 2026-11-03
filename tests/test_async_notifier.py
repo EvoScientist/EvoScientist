@@ -352,6 +352,8 @@ def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
     }
     assert lines[2:] == [async_notifier.UNTRACKED_HINT]
     assert ".bg_processes/<task_id>.log" in msg
+    # The recorded pid is the shell on every OS; the command runs as its child.
+    assert "The pid is the shell that ran the command" in msg
     assert "fetch full result" not in msg
 
 
