@@ -386,6 +386,21 @@ def test_format_batch_message_mixed_batch_keeps_the_fetch_hint():
     assert "pid" not in __import__("json").loads(lines[2])
 
 
+def test_format_batch_message_untracked_process_offers_no_check_process():
+    # The fetch hint lists only what can be fetched: a finished sub-agent next
+    # to an untracked process offers check_async_task, not check_process.
+    finished = async_notifier.AsyncTaskNotification(
+        task_id="t1",
+        agent_name="writing-agent",
+        status="success",
+        received_at="2026-11-03T12:00:00Z",
+    )
+    lines = format_batch_message([_untracked(), finished]).splitlines()
+    assert "check_async_task (sub-agents)" in lines[3]
+    assert "check_process" not in lines[3]
+    assert lines[4] == async_notifier.UNTRACKED_HINT
+
+
 def test_format_batch_message_unknown_kind_uses_fallback_hint():
     """A batch with only unrecognized kinds must not emit an empty hint join."""
     notifs = [
@@ -1451,6 +1466,23 @@ async def test_bg_reader_marks_and_reports_an_untracked_process():
     )
     assert gateway.process_status_calls == ["proc-1"]  # not re-polled
     assert drain_notifications("cli-tid") == []
+
+
+async def test_bg_reader_routes_an_untracked_notice_to_the_launching_thread():
+    # The record's origin thread wins over the thread the reader polled, as for
+    # an exit, so the notice reaches the session that launched the process.
+    registry = _bg_running_registry()
+    registry["bg_processes"]["proc-1"]["origin_thread_id"] = "launcher-tid"
+    gateway = FakeGraphGateway(
+        state_values=registry, process_statuses={"proc-1": "unknown"}
+    )
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert [n.status for n in drain_notifications("launcher-tid")] == ["untracked"]
 
 
 def _bg_untracked_registry():
