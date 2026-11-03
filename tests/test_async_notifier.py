@@ -335,12 +335,14 @@ def _untracked(task_id="proc-1", pid=4242):
         prompt="sleep 5",
         kind="bg-process",
         pid=pid,
+        started_at="2026-11-03T11:00:00Z",
     )
 
 
 def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
-    # check_process no longer knows the process, so the message points at the
-    # pid and the log instead of offering a fetch.
+    # check_process no longer knows the process, so the message gives what the
+    # hint asks the agent to check (pid, command, start time) and the log path
+    # instead of offering a fetch.
     msg = format_batch_message([_untracked()])
     lines = msg.splitlines()
     assert __import__("json").loads(lines[1]) == {
@@ -349,12 +351,25 @@ def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
         "status": "untracked",
         "task_id": "proc-1",
         "pid": 4242,
+        "command": "sleep 5",
+        "started_at": "2026-11-03T11:00:00Z",
     }
     assert lines[2:] == [async_notifier.UNTRACKED_HINT]
     assert ".bg_processes/<task_id>.log" in msg
-    # The recorded pid is the shell on every OS; the command runs as its child.
-    assert "The pid is the shell that ran the command" in msg
+    assert "confirm it against the command and started_at" in msg
+    # bash as /bin/sh execs a simple command, so the pid can be the command.
+    assert "the shell that ran the command, or the command itself" in msg
+    assert "On Windows it is a Windows pid" in msg
     assert "fetch full result" not in msg
+
+
+def test_format_batch_message_untracked_without_a_start_time_omits_it():
+    notice = async_notifier.AsyncTaskNotification(
+        "proc-1", "demo", "untracked", "", "sleep 5", kind="bg-process", pid=1
+    )
+    entry = __import__("json").loads(format_batch_message([notice]).splitlines()[1])
+    assert entry["command"] == "sleep 5"
+    assert "started_at" not in entry
 
 
 def test_format_batch_message_mixed_batch_keeps_the_fetch_hint():
@@ -1238,7 +1253,9 @@ def _bg_running_registry(process_id="proc-1", name="demo", command="sleep 5", pi
         "origin_thread_id": "cli-tid",
     }
     if pid is not None:
+        # A record the middleware wrote carries both (``_record_dict``).
         record["pid"] = pid
+        record["started_at"] = "2026-11-03T11:00:00Z"
     return {"bg_processes": {process_id: record}}
 
 
@@ -1426,7 +1443,7 @@ async def test_bg_reader_marks_and_reports_an_untracked_process():
         "untracked",
         4242,
     )
-    assert n.prompt == "sleep 5"
+    assert (n.prompt, n.started_at) == ("sleep 5", "2026-11-03T11:00:00Z")
 
     await async_notifier.enqueue_bg_process_completions_from_state(
         gateway, target, "cli-tid"

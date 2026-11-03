@@ -74,9 +74,10 @@ class AsyncTaskNotification:
     # find the task_id). ``None`` means "unrouted" — the notification
     # drains for any current_thread_id (back-compat for direct callers).
     origin_cli_thread_id: str | None = None
-    # OS pid of a background process, for an ``untracked`` one the agent can
-    # only check from its shell.
+    # OS pid and launch time (ISO-8601 UTC) of a background process, for an
+    # ``untracked`` one the agent can only check from its shell.
     pid: int | None = None
+    started_at: str | None = None
 
 
 # Per-thread routing: notifications with ``origin_cli_thread_id`` land in
@@ -126,6 +127,7 @@ def enqueue_bg_process_notification(
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
     pid: int | None = None,
+    started_at: str | None = None,
 ) -> None:
     """Build and enqueue a background-process completion notification.
 
@@ -144,6 +146,7 @@ def enqueue_bg_process_notification(
             kind="bg-process",
             origin_cli_thread_id=origin_cli_thread_id,
             pid=pid,
+            started_at=started_at,
         )
     )
 
@@ -409,9 +412,11 @@ UNTRACKED_HINT: Final = (
     "(untracked: the process that tracked this background process restarted or "
     "cannot be reached, so check_process no longer knows it and its exit will not "
     "be reported. It may still be running. The pid may have been reused: confirm "
-    "it by command and start time. The pid is the shell that ran the command; the "
-    "command's own processes have other pids and can outlive it. Its output log is "
-    ".bg_processes/<task_id>.log in the folder it ran in.)"
+    "it against the command and started_at above. The pid is the shell that ran "
+    "the command, or the command itself; processes the command started have other "
+    "pids and can outlive it. On Windows it is a Windows pid, which Git Bash's ps "
+    "does not list. Its output log is .bg_processes/<task_id>.log in the folder it "
+    "ran in.)"
 )
 """Closing line of a synthetic message that reports an ``untracked`` process."""
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}
@@ -555,6 +560,7 @@ async def enqueue_bg_process_completions_from_state(
                     prompt=record.get("command", ""),
                     origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
                     pid=record.get("pid"),
+                    started_at=record.get("started_at"),
                 )
                 _reader_enqueued_process_ids.add(process_id)
                 continue
@@ -755,6 +761,11 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
         }
         if n.pid is not None:
             entry["pid"] = n.pid
+        if n.status == UNTRACKED_STATUS:
+            # What the hint asks the agent to confirm the pid against.
+            entry["command"] = n.prompt
+            if n.started_at:
+                entry["started_at"] = n.started_at
         lines.append(json.dumps(entry, ensure_ascii=False))
     # An untracked process has nothing to fetch: check_process no longer knows it.
     fetchable = [n for n in notifs if n.status != UNTRACKED_STATUS]
