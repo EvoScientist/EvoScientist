@@ -300,18 +300,14 @@ def _no_health_server(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_process_workspace():
-    """``process_workspace()`` and ``launcher_workspace()`` are read once per
-    process; tests change env/cwd."""
-    from EvoScientist.paths import (
-        launcher_workspace,
-        process_session_dirs,
-        process_workspace,
-    )
+    """``process_workspace()`` and ``process_session_dirs()`` are read once
+    per process; tests change env/cwd."""
+    from EvoScientist.paths import process_session_dirs, process_workspace
 
-    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+    for cached in (process_workspace, process_session_dirs):
         cached.cache_clear()
     yield
-    for cached in (process_workspace, process_session_dirs, launcher_workspace):
+    for cached in (process_workspace, process_session_dirs):
         cached.cache_clear()
 
 

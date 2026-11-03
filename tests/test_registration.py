@@ -272,6 +272,96 @@ def test_register_folder_without_secret_names_data_folder(monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
+# The projects a server serves (``EvoSci server status``)
+# ---------------------------------------------------------------------------
+
+
+def _listing(monkeypatch, response, *, instance: str = "s3cret") -> list[dict]:
+    """Fake a server holding the secret *instance* that answers the listing
+    with *response* (or raises it); return every GET sent."""
+    sent: list[dict] = []
+
+    def get(url, **kwargs):
+        sent.append({"url": url, **kwargs})
+        if url.endswith("/api/instance"):
+            return httpx.Response(
+                200, json={"instance": local_secret.instance_of(instance)}
+            )
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(registration.httpx, "get", get)
+    return sent
+
+
+def test_served_projects_lists_own_server_without_sending_secret(monkeypatch, secret):
+    projects = [{"workspace_dir": "/p/a", "name": "a", "missing": True}]
+    sent = _listing(monkeypatch, httpx.Response(200, json={"workspaces": projects}))
+
+    assert registration.served_projects(URL) == projects
+    assert [request["url"] for request in sent] == [
+        f"{URL}/api/instance",
+        f"{URL}/api/workspaces",
+    ]
+    for request in sent:
+        assert local_secret.HEADER not in request["headers"]
+        assert request["trust_env"] is False
+        assert request["timeout"] == registration.STATUS_TIMEOUT
+
+
+def test_served_projects_refuses_other_data_folder_server(monkeypatch, secret):
+    sent = _listing(
+        monkeypatch, httpx.Response(200, json={"workspaces": []}), instance="theirs"
+    )
+
+    with pytest.raises(registration.OtherServerError):
+        registration.served_projects(URL)
+    assert [request["url"] for request in sent] == [f"{URL}/api/instance"]
+
+
+def test_served_projects_unreadable_secret_is_not_another_server(monkeypatch, tmp_path):
+    """This data folder's own secret cannot be read: the server is not
+    blamed on another data folder."""
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "server")
+    sent = _listing(monkeypatch, httpx.Response(200, json={"workspaces": []}))
+
+    with pytest.raises(RegistrationError, match="EVOSCIENTIST_DATA_DIR") as raised:
+        registration.served_projects(URL)
+    assert not isinstance(raised.value, registration.OtherServerError)
+    assert [request["url"] for request in sent] == [f"{URL}/api/instance"]
+
+
+def test_served_projects_server_without_instance_is_older(monkeypatch, secret):
+    monkeypatch.setattr(
+        registration.httpx, "get", lambda _url, **_k: httpx.Response(404)
+    )
+
+    with pytest.raises(OlderServerError):
+        registration.served_projects(URL)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, json={"unexpected": True}),
+    ],
+    ids=["timeout", "server_error", "unexpected_body"],
+)
+def test_served_projects_failed_read_is_registration_error(
+    monkeypatch, secret, response
+):
+    """A failed read is not reported as an empty list."""
+    _listing(monkeypatch, response)
+
+    with pytest.raises(RegistrationError) as raised:
+        registration.served_projects(URL)
+    assert not isinstance(raised.value, registration.OtherServerError)
+
+
+# ---------------------------------------------------------------------------
 # Where clients register
 # ---------------------------------------------------------------------------
 

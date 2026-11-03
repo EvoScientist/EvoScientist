@@ -8,7 +8,6 @@ polling.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,17 +69,18 @@ def test_resolve_backend_foreign_occupant_is_port_conflict(monkeypatch):
     assert ei.value.fields == {"reason": "foreign"}
 
 
-def test_resolve_backend_other_project_is_mismatch(monkeypatch):
-    """The front-ends launched here get the backend's default project."""
+def test_resolve_backend_older_record_of_another_project_reuses(monkeypatch):
+    """The backend serves every registered project: the project an older
+    record names does not matter."""
     _patch_backend_probes(
-        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsB", "pid": 1, "config_fingerprint": "fp-now"},
     )
-    with pytest.raises(lm.LauncherError) as ei:
-        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
-    assert ei.value.code == "workspace_mismatch"
-    assert ei.value.fields == {"workspace": "/tmp/wsB"}
-    # The way out, next to what it costs the other sessions.
-    assert "EvoSci server stop" in ei.value.detail
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
 
 
 def test_resolve_backend_older_run_folder_record_reuses(monkeypatch):
@@ -91,7 +91,6 @@ def test_resolve_backend_older_run_folder_record_reuses(monkeypatch):
         occupied=True,
         running=True,
         sidecar={
-            "workspace": "/tmp/wsA",
             "run_dir": "/tmp/wsA/runs/x",
             "config_fingerprint": "fp-now",
         },
@@ -101,15 +100,12 @@ def test_resolve_backend_older_run_folder_record_reuses(monkeypatch):
     )
 
 
-def test_resolve_backend_same_workspace_reuses(monkeypatch):
+def test_resolve_backend_recorded_server_reuses(monkeypatch):
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={
-            "workspace": "/tmp/wsA",
-            "config_fingerprint": "fp-now",
-        },
+        sidecar={"pid": 1, "config_fingerprint": "fp-now"},
     )
     decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert decision.action == "reuse"
@@ -129,7 +125,6 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, lega
         occupied=True,
         running=True,
         sidecar={
-            "workspace": "/tmp/wsA",
             "config_fingerprint": "fp-old",
             **legacy,
         },
@@ -141,7 +136,7 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, lega
 
 
 def test_resolve_backend_reuse_returns_the_record_it_read(monkeypatch):
-    sidecar = {"workspace": "/tmp/wsA", "config_fingerprint": "fp-now"}
+    sidecar = {"config_fingerprint": "fp-now"}
     _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
     decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert decision.sidecar is sidecar
@@ -165,26 +160,18 @@ def test_resolve_backend_record_less_server_is_port_conflict_when_required(
     assert ei.value.fields == {"reason": "no_record"}
 
 
-@pytest.mark.parametrize(
-    ("recorded", "action"), [("/tmp/wsA", "reuse"), ("/tmp/wsB", None)]
-)
-def test_resolve_backend_takes_a_backend_target(monkeypatch, recorded, action):
+def test_resolve_backend_takes_a_backend_target(monkeypatch):
     """A caller without a front-end passes only the backend fields."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": recorded, "config_fingerprint": "fp-now"},
+        sidecar={"pid": 1, "config_fingerprint": "fp-now"},
     )
     target = lm.BackendTarget(
         workspace_dir="/tmp/wsA", backend_host="127.0.0.1", backend_port=6174
     )
-    if action is None:
-        with pytest.raises(lm.LauncherError) as ei:
-            lm._resolve_backend(target, object())
-        assert ei.value.code == "workspace_mismatch"
-    else:
-        assert lm._resolve_backend(target, object()).action == action
+    assert lm._resolve_backend(target, object()).action == "reuse"
 
 
 def test_launcher_error_fields_default_to_empty():
@@ -205,7 +192,7 @@ def test_resolve_backend_no_drift_for_a_session_started_with_auto_flags(monkeypa
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "config_fingerprint": recorded},
+        sidecar={"config_fingerprint": recorded},
     )
     monkeypatch.setattr(lgm, "_server_config_fingerprint", fingerprint)
     decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), EvoScientistConfig())
@@ -221,7 +208,6 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
         occupied=True,
         running=True,
         sidecar={
-            "workspace": "/tmp/wsA",
             "config_fingerprint": "fp-now",
             "agent_python": "/conda/bin/python",
         },
@@ -244,7 +230,7 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
 def test_start_hint_follows_the_reused_server(monkeypatch, recorded, own, hinted):
     from EvoScientist.setup import research_env
 
-    sidecar = {"workspace": "/tmp/wsA", "pid": 1}
+    sidecar = {"pid": 1}
     _patch_for_evosci_occupant(monkeypatch, {**sidecar, "agent_python": recorded})
     monkeypatch.setattr(research_env, "agent_python", lambda: own)
     result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
@@ -261,12 +247,12 @@ def test_resolve_backend_no_sidecar_reuses(monkeypatch):
 
 def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
     """A sidecar whose recorded PID does not serve this port (a launch on another
-    port overwrote the global record) is rejected before its workspace is trusted."""
+    port overwrote the global record) is rejected before it is trusted."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "pid": 12345},
+        sidecar={"pid": 12345},
         pid_serves=False,
     )
     with pytest.raises(lm.LauncherError) as ei:
@@ -300,8 +286,8 @@ def test_resolve_backend_checks_the_recorded_bind_host(
     monkeypatch, recorded, requested, reused
 ):
     """Two servers can share a port on different interfaces: a record for the
-    one the probe did not reach is refused before its workspace is trusted."""
-    sidecar = {"workspace": "/tmp/wsA", "pid": 12345, "config_fingerprint": "fp-now"}
+    one the probe did not reach is refused before it is trusted."""
+    sidecar = {"pid": 12345, "config_fingerprint": "fp-now"}
     if recorded is not None:
         sidecar["host"] = recorded
     _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
@@ -679,7 +665,7 @@ def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
 
 
 def test_stop_after_reuse_leaves_backend_running(monkeypatch):
-    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsA", "pid": 1})
+    _patch_for_evosci_occupant(monkeypatch, sidecar={"pid": 1})
     calls: list = []
     monkeypatch.setattr(lgm, "stop_langgraph_dev", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(lgm, "stop_inflight_owned_server", lambda: calls.append(0))
@@ -697,29 +683,24 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
     monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
     # The sidecar genuinely describes the server on this port; these tests
-    # exercise the workspace checks past the PID-serves-port guard.
+    # exercise what follows the PID-serves-port guard.
     monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: True)
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
-def test_start_refuses_server_started_for_another_project(monkeypatch):
-    """The WebUI shows the project of the client that started the backend;
-    no second backend starts."""
-    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsB"})
-    started: list = []
-    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
-    launcher = lm.WebUILauncher(object(), _cfg(workspace_dir="/tmp/wsA"), _FakeRunner())
-    with pytest.raises(lm.LauncherError) as ei:
-        launcher.start()
-    assert ei.value.code == "workspace_mismatch"
-    assert ei.value.fields == {"workspace": "/tmp/wsB"}
-    assert started == []
-
-
-def test_start_reuses_server_started_from_same_project(monkeypatch):
+@pytest.mark.parametrize(
+    "sidecar",
+    [{"pid": 1}, {"workspace": "/tmp/wsB", "pid": 1}],
+    ids=["current", "older_record_of_another_project"],
+)
+def test_start_reuses_running_server_and_registers_project(monkeypatch, sidecar):
+    """The backend serves every registered project: the launch registers its
+    own and starts no second backend."""
     from EvoScientist.langgraph_dev import registration
 
-    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsA"})
+    _patch_for_evosci_occupant(monkeypatch, sidecar=sidecar)
+    started: list = []
+    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
     registered: list = []
     monkeypatch.setattr(
         registration,
@@ -730,6 +711,7 @@ def test_start_reuses_server_started_from_same_project(monkeypatch):
 
     assert not launcher.start().backend_started
     assert registered == [Path("/tmp/wsA").resolve()]
+    assert started == []
 
 
 def test_start_warns_when_webui_port_occupied(monkeypatch):
@@ -1270,24 +1252,3 @@ def test_wait_ready_opens_no_console_browser_without_a_display(monkeypatch):
     launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
     assert launcher.wait_ready(timeout=1).browser_opened is False
     assert opened == []
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS case-insensitive volume")
-def test_resolve_backend_same_folder_in_other_case_reuses(monkeypatch, tmp_path):
-    """A stored sidecar and typed config can name the same APFS folder."""
-    (tmp_path / "Project").mkdir()
-    if not (tmp_path / "project").exists():
-        pytest.skip("case-sensitive volume")
-    _patch_backend_probes(
-        monkeypatch,
-        occupied=True,
-        running=True,
-        sidecar={
-            "workspace": str(tmp_path / "Project"),
-            "config_fingerprint": "fp-now",
-        },
-    )
-    decision = lm._resolve_backend(
-        _cfg(workspace_dir=str(tmp_path / "project")), object()
-    )
-    assert decision.action == "reuse"

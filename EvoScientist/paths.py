@@ -261,32 +261,9 @@ def process_workspace() -> Workspace:
     ``EVOSCIENTIST_WORKSPACE_DIR`` when set, otherwise the current directory.
     Read once per process, so it does not change with the environment later.
     The langgraph dev server has no workspace of its own:
-    it serves every registered project (see :func:`launcher_workspace`).
+    it serves every registered project.
     """
     return Workspace(_env_path("EVOSCIENTIST_WORKSPACE_DIR") or Path.cwd())
-
-
-# Names the project of the client that started the langgraph dev server.
-LAUNCHER_WORKSPACE_ENV = "EVOSCIENTIST_LAUNCHER_WORKSPACE"
-
-
-@functools.cache
-def launcher_workspace() -> Workspace | None:
-    """In the langgraph dev server: the project of the client that started it
-    (``LAUNCHER_WORKSPACE_ENV``), or ``None`` when it was started without one.
-
-    The server serves every registered project and works in the server home;
-    this is only the project ``GET /api/workspace`` reports once that client
-    registered it. Read once per process.
-    """
-    path = _env_path(LAUNCHER_WORKSPACE_ENV)
-    if path is None:
-        return None
-    try:
-        return Workspace(path)
-    except PATH_ERRORS:
-        logger.warning("Cannot read the launcher's project %s.", path, exc_info=True)
-        return None
 
 
 @functools.cache

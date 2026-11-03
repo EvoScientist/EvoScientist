@@ -12,8 +12,8 @@ The server is the same one ``EvoSci`` / ``EvoSci serve`` start in the
 background.
 
 ``--json`` is for a program that starts the server (the desktop app): JSON
-event lines on stdout, an attach to a running server started from the same
-project, and a stop when stdin closes. :mod:`.json_mode` documents the events.
+event lines on stdout, an attach to a running server, and a stop when stdin
+closes. :mod:`.json_mode` documents the events.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import signal
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
@@ -72,8 +71,8 @@ def deploy(
         bool,
         typer.Option(
             "--json",
-            help="Print one JSON event per line, attach to a running backend "
-            "started from the same project, and stop when stdin closes",
+            help="Print one JSON event per line, attach to a running backend, "
+            "and stop when stdin closes",
         ),
     ] = False,
 ):
@@ -162,22 +161,30 @@ def deploy(
                     # session to share, else another deploy's (or the desktop
                     # app's). Only when the recorded pid verifiably serves THIS
                     # port, so a stale or other-port record is never blamed.
+                    # ``EvoSci server status`` reads the configured port and
+                    # host: it describes this server only without --port or
+                    # --host.
+                    status = (
+                        " [bold]EvoSci server status[/bold] lists the projects "
+                        "it serves."
+                        if port is None and not (host or "").strip()
+                        else ""
+                    )
                     if not is_lasting(sidecar):
                         console.print(
                             f"[dim]It is not the background service: another "
                             f"EvoSci deploy, the desktop app or an older release "
-                            f"runs it, started from "
-                            f"{sidecar.get('workspace')} (pid {sidecar.get('pid')}). "
-                            "Stop that one first.[/dim]"
+                            f"runs it (pid {sidecar.get('pid')}). Stop that one "
+                            f"first.{status}[/dim]"
                         )
                     else:
                         console.print(
-                            f"[dim]It is the background agent server started "
-                            f"from {sidecar.get('workspace')} (pid "
+                            f"[dim]It is the background agent server (pid "
                             f"{sidecar.get('pid')}), which your EvoSci sessions "
-                            "share. Use it as it is, or stop it with [bold]EvoSci "
-                            "server stop[/bold] to deploy here (that ends the "
-                            "background work of the sessions using it).[/dim]"
+                            f"share.{status} Use it as it is, or stop it with "
+                            "[bold]EvoSci server stop[/bold] to deploy here (that "
+                            "ends the background work of the sessions using "
+                            "it).[/dim]"
                         )
                 else:
                     console.print(
@@ -244,7 +251,6 @@ def deploy(
                 spinner="dots",
             ):
                 proc = start_langgraph_dev(
-                    workspace_dir=Path(ws),
                     port=effective_port,
                     host=effective_host,
                     file_persistence=file_persistence,

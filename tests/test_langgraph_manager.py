@@ -788,7 +788,7 @@ class TestStartLanggraphDevRotatesLog:
             ),
         ):
             try:
-                manager.start_langgraph_dev(workspace_dir=tmp_path)
+                manager.start_langgraph_dev()
             except FileNotFoundError:
                 pass  # expected — we just need rotation to have happened
         # After start attempt, the oversize log must have been rotated.
@@ -864,7 +864,7 @@ class TestStartLanggraphDevCapturesLogOffset:
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 10**9)
 
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager.start_langgraph_dev()
         except FileNotFoundError:
             pass
         assert env.captured["offset"] == 512
@@ -879,7 +879,7 @@ class TestStartLanggraphDevCapturesLogOffset:
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
 
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager.start_langgraph_dev()
         except FileNotFoundError:
             pass
         assert (env.tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
@@ -906,7 +906,7 @@ class TestStartLanggraphDevPropagatesPort:
         slip past a pure env-only assertion."""
         env = start_langgraph_dev_capture
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6617)
+            manager.start_langgraph_dev(port=6617)
         except FileNotFoundError:
             pass
         assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6617"
@@ -927,7 +927,7 @@ class TestStartLanggraphDevPropagatesPort:
         monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "9999")
         env = start_langgraph_dev_capture
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6606)
+            manager.start_langgraph_dev(port=6606)
         except FileNotFoundError:
             pass
         # Parent's 9999 replaced; caller's 6606 wins in both env and argv.
@@ -1020,7 +1020,7 @@ class TestStartLanggraphDevSpawnFlags:
             manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
         )
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path, lasting=lasting)
+            manager.start_langgraph_dev(lasting=lasting)
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
@@ -1031,7 +1031,7 @@ class TestStartLanggraphDevSpawnFlags:
         env = start_langgraph_dev_capture
         monkeypatch.setattr(manager.os, "name", "posix", raising=False)
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager.start_langgraph_dev()
         except FileNotFoundError:
             pass
         kw = env.captured["kwargs"]

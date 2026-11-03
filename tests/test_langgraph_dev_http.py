@@ -169,15 +169,17 @@ def test_ollama_discovery_skipped_when_base_url_absent():
 
 
 @pytest.fixture
-def launcher(monkeypatch, tmp_path):
-    """The served project of the client that started the server."""
-    from EvoScientist import paths
+def project(tmp_path):
+    """A served project."""
     from EvoScientist.langgraph_dev import registry
 
     workspace = Workspace(tmp_path)
-    monkeypatch.setattr(paths, "launcher_workspace", lambda: workspace)
     registry.REGISTRY.set_registered(workspace.key, True)
     return workspace
+
+
+def _get_teams(workspace: Workspace):
+    return client.get("/api/teams", params={"workspace_dir": workspace.key})
 
 
 def _expert_info(name: str, *, description: str = ""):
@@ -195,8 +197,7 @@ def _expert_info(name: str, *, description: str = ""):
     )
 
 
-@pytest.mark.usefixtures("launcher")
-def test_get_teams_returns_installed_expert_skills():
+def test_get_teams_returns_installed_expert_skills(project):
     experts = [
         _expert_info("expert-a", description="First expert"),
         _expert_info("expert-b", description="Second expert"),
@@ -205,7 +206,7 @@ def test_get_teams_returns_installed_expert_skills():
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        resp = client.get("/api/teams")
+        resp = _get_teams(project)
     assert resp.status_code == 200
     body = resp.json()
     assert "teams" in body
@@ -213,8 +214,7 @@ def test_get_teams_returns_installed_expert_skills():
     assert names == ["expert-a", "expert-b"]
 
 
-@pytest.mark.usefixtures("launcher")
-def test_get_teams_omits_backend_implementation_fields():
+def test_get_teams_omits_backend_implementation_fields(project):
     """Never leak SKILL.md body / role / dispatch / source / path / etc.
     onto the gallery endpoint — those are backend-only."""
     experts = [_expert_info("expert-a")]
@@ -222,7 +222,7 @@ def test_get_teams_omits_backend_implementation_fields():
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     entry = body["teams"][0]
     forbidden = {
         "system_prompt",
@@ -241,34 +241,32 @@ def test_get_teams_omits_backend_implementation_fields():
     )
 
 
-@pytest.mark.usefixtures("launcher")
-def test_get_teams_entry_is_name_and_description():
+def test_get_teams_entry_is_name_and_description(project):
     """Each gallery card carries name and description only."""
     experts = [_expert_info("minimal-expert", description="Minimal expert")]
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     entry = body["teams"][0]
     assert entry == {"name": "minimal-expert", "description": "Minimal expert"}
 
 
-@pytest.mark.usefixtures("launcher")
-def test_get_teams_returns_empty_list_when_no_experts_installed():
+def test_get_teams_returns_empty_list_when_no_experts_installed(project):
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=[],
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     assert body == {"teams": []}
 
 
-def test_get_teams_calls_loader_with_include_system_true(launcher):
+def test_get_teams_calls_loader_with_include_system_true(project):
     """First-party experts ship as builtin skills; the endpoint must
     include the builtin tier or the gallery will be empty on a fresh
     workspace with no user-installed experts, and it must look in the
-    project of the client that started the server."""
+    named project."""
     calls = []
 
     def spy(include_system=False, *, workspace):
@@ -279,11 +277,11 @@ def test_get_teams_calls_loader_with_include_system_true(launcher):
         "EvoScientist.tools.skills_manager.list_expert_skills",
         new=spy,
     ):
-        client.get("/api/teams")
-    assert calls == [(True, launcher)]
+        _get_teams(project)
+    assert calls == [(True, project)]
 
 
-def test_get_teams_lists_named_project(launcher, tmp_path):
+def test_get_teams_lists_named_project(project, tmp_path):
     from EvoScientist.langgraph_dev import registry
 
     other = Workspace(tmp_path / "other")
@@ -306,7 +304,7 @@ def test_get_teams_lists_named_project(launcher, tmp_path):
     ("workspace_dir", "status", "error"),
     [("relative/ws", 400, "invalid_path"), (None, 404, "not_served")],
 )
-@pytest.mark.usefixtures("launcher")
+@pytest.mark.usefixtures("project")
 def test_get_teams_refuses_unserved_project(workspace_dir, status, error, tmp_path):
     if workspace_dir is None:
         workspace_dir = str(tmp_path / "nonexistent")
@@ -316,53 +314,23 @@ def test_get_teams_refuses_unserved_project(workspace_dir, status, error, tmp_pa
     assert resp.json() == {"error": error}
 
 
-# ---- /api/workspace -------------------------------------------------------
-# The WebUI reads the folder it shows here instead of from a file on its own
-# machine, and uses the string as-is.
+@pytest.mark.usefixtures("project")
+def test_get_teams_requires_workspace_dir():
+    """The server serves every registered project and has no default one."""
+    resp = client.get("/api/teams")
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "workspace_dir_required"
 
 
-def test_get_workspace_returns_launcher_project_key(monkeypatch, tmp_path):
-    from EvoScientist import paths
-    from EvoScientist.langgraph_dev import registry
-
-    (tmp_path / "real").mkdir()
-    (tmp_path / "link").symlink_to(tmp_path / "real")
-    registry.REGISTRY.set_registered(Workspace(tmp_path / "real").key, True)
-    monkeypatch.setattr(
-        paths, "launcher_workspace", lambda: Workspace(tmp_path / "link")
-    )
-
-    resp = client.get("/api/workspace")
-
-    assert resp.json() == {
-        "workspace_dir": Workspace(tmp_path / "real").key,
-        "run_dir": None,
-    }
+def test_get_workspace_route_is_gone(project):
+    """The server reports no project of its own; a client lists the
+    registered ones (``GET /api/workspaces``)."""
+    assert client.get("/api/workspace").status_code == 404
 
 
-@pytest.mark.parametrize("case", ["no launcher", "unregistered", "folder missing"])
-def test_get_workspace_answers_503_without_served_launcher(monkeypatch, tmp_path, case):
-    """Not 404: the WebUI takes that for a server without this route."""
-    from EvoScientist import paths
-    from EvoScientist.langgraph_dev import registry
-
-    workspace = Workspace(tmp_path / "ws")
-    workspace.root.mkdir()
-    if case != "unregistered":
-        registry.REGISTRY.set_registered(workspace.key, True)
-    if case == "folder missing":
-        workspace.root.rmdir()
-    launcher = None if case == "no launcher" else workspace
-    monkeypatch.setattr(paths, "launcher_workspace", lambda: launcher)
-
-    for route in ("/api/workspace", "/api/teams"):
-        resp = client.get(route)
-        assert resp.status_code == 503
-        assert resp.json()["error"] == "no_workspace"
-
-
-def test_get_workspace_refuses_a_foreign_origin():
-    resp = client.get("/api/workspace", headers={"Origin": "https://evil.example"})
+def test_get_workspaces_refuses_a_foreign_origin():
+    resp = client.get("/api/workspaces", headers={"Origin": "https://evil.example"})
 
     assert resp.status_code == 403
 

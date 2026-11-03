@@ -178,7 +178,7 @@ def test_server_env_has_no_run_folder(run_dirs, monkeypatch, tmp_path, runtime_p
     monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=run_dirs.workspace.root, port=16190)
+        manager.start_langgraph_dev(port=16190)
     assert "EVOSCIENTIST_RUN_DIR" not in captured["env"]
 
 

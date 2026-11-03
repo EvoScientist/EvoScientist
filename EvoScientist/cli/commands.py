@@ -34,7 +34,6 @@ from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_contex
 from ..paths import (
     SessionDirs,
     Workspace,
-    command_arg,
     ensure_dirs,
     start_workspace_path,
 )
@@ -325,14 +324,16 @@ def _offer_server_start() -> None:
     if manager.is_langgraph_dev_running(port=port, host=host):
         sidecar = manager._read_workspace_sidecar()
         if manager.is_lasting(sidecar):
-            # From the project it was started from, which the WebUI opens.
-            recorded = sidecar.get("workspace")
-            workspace = escape(command_arg(recorded) if recorded else "<project>")
+            # ``EvoSci service start`` starts it from ``default_workdir``.
+            start_again = (
+                "then [bold]EvoSci service start[/bold]"
+                if config.default_workdir
+                else "and it starts again with your next EvoSci session"
+            )
             console.print(
                 "[dim]The background agent service runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "
-                "service stop[/bold], then [bold]EvoSci service start "
-                f"--workdir {workspace}[/bold] (this ends its running "
+                f"service stop[/bold], {start_again} (this ends its running "
                 "background work).[/dim]"
             )
         else:
@@ -343,9 +344,8 @@ def _offer_server_start() -> None:
             )
         return
     if not config.default_workdir:
-        # Started from the folder onboarding ran in (often the home folder),
-        # it would pin the WebUI and the desktop app to that folder's project;
-        # the first session in a project starts it instead.
+        # A start here would register this folder (often the home folder) as
+        # a project; the first session in a project starts it instead.
         console.print(
             "[dim]The background agent service starts with your next EvoSci "
             "session in a project, and keeps running for every session until "

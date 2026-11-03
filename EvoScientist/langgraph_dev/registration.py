@@ -24,6 +24,8 @@ from .boundary import is_loopback_host
 REGISTRATION_TIMEOUT = 120.0
 # Seconds the read of the server's instance may take.
 INSTANCE_TIMEOUT = 10.0
+# Seconds each read of ``EvoSci server status`` may take.
+STATUS_TIMEOUT = 3.0
 
 
 class _Refusal(RuntimeError):
@@ -75,6 +77,10 @@ class RegistrationError(_Refusal):
     it, as when the server does not start."""
 
     code = "registration_failed"
+
+
+class OtherServerError(RegistrationError):
+    """The running server does not hold this data folder's local secret."""
 
 
 def is_known_project(workspace: Workspace) -> bool:
@@ -135,7 +141,7 @@ def _other_server(url: str) -> str:
     )
 
 
-def _server_instance(url: str) -> str | None:
+def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
     """The instance the server at *url* names (``GET /api/instance``)."""
     from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
 
@@ -143,7 +149,7 @@ def _server_instance(url: str) -> str | None:
         response = httpx.get(
             f"{url}/api/instance",
             headers=LANGGRAPH_DEV_AUTH_HEADERS,
-            timeout=INSTANCE_TIMEOUT,
+            timeout=timeout,
             trust_env=False,
         )
     except httpx.HTTPError as exc:
@@ -164,19 +170,17 @@ def _server_instance(url: str) -> str | None:
     return body.get("instance") if isinstance(body, dict) else None
 
 
-def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Response:
-    """POST *body* to the server at *url* with the local secret, once it
-    answers with the same ``instance``: a different server on the port (another
-    user's, another data folder's) does not get it. The instance is public, so
-    this catches a mix-up, not a process that copied it. ``OlderServerError``
-    for a server too old to have an instance; ``RegistrationError`` when the
-    request cannot be made."""
+def _require_own_server(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str:
+    """The local secret, once the server at *url* answers with its
+    ``instance``. ``OlderServerError`` for a server too old to have an
+    instance; ``RegistrationError`` when the secret cannot be read or the
+    instance cannot be; ``OtherServerError`` for a server that holds another
+    secret."""
     from .. import paths
-    from ..local_secret import HEADER, instance_of, read_local_secret
-    from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
+    from ..local_secret import instance_of, read_local_secret
 
     # First: a server too old to have created the secret has no instance.
-    instance = _server_instance(url)
+    instance = _server_instance(url, timeout=timeout)
     secret = read_local_secret()
     if secret is None:
         raise RegistrationError(
@@ -185,7 +189,21 @@ def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Re
             "system that keeps permissions?"
         )
     if instance != instance_of(secret):
-        raise RegistrationError(_other_server(url))
+        raise OtherServerError(_other_server(url))
+    return secret
+
+
+def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Response:
+    """POST *body* to the server at *url* with the local secret, once it
+    answers with the same ``instance``: a different server on the port (another
+    user's, another data folder's) does not get it. The instance is public, so
+    this catches a mix-up, not a process that copied it. ``OlderServerError``
+    for a server too old to have an instance; ``RegistrationError`` when the
+    request cannot be made."""
+    from ..local_secret import HEADER
+    from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
+
+    secret = _require_own_server(url)
     try:
         return httpx.post(
             f"{url}{path}",
@@ -199,6 +217,48 @@ def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Re
         raise RegistrationError(
             f"Could not {what} the EvoScientist server at {url}: {exc}"
         ) from exc
+
+
+def served_projects(url: str) -> list[dict[str, object]]:
+    """The projects the server at *url* serves (``GET /api/workspaces``),
+    each ``{workspace_dir, name, missing}``, once it answers with this data
+    folder's instance. The local secret is never sent.
+
+    ``OlderServerError`` for a server too old to have an instance,
+    ``OtherServerError`` for another data folder's server, and
+    ``RegistrationError`` when the local secret or a read fails, or a read
+    times out.
+    """
+    from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
+
+    url = url.rstrip("/")
+    _require_own_server(url, timeout=STATUS_TIMEOUT)
+    try:
+        response = httpx.get(
+            f"{url}/api/workspaces",
+            headers=LANGGRAPH_DEV_AUTH_HEADERS,
+            timeout=STATUS_TIMEOUT,
+            trust_env=False,
+        )
+    except httpx.HTTPError as exc:
+        raise RegistrationError(
+            f"Could not reach the EvoScientist server at {url}: {exc}"
+        ) from exc
+    try:
+        body = response.json() if response.status_code == 200 else None
+    except ValueError:
+        body = None
+    projects = body.get("workspaces") if isinstance(body, dict) else None
+    if not isinstance(projects, list):
+        raise RegistrationError(
+            f"The EvoScientist server at {url} did not list its projects "
+            f"(HTTP {response.status_code})."
+        )
+    return [
+        project
+        for project in projects
+        if isinstance(project, dict) and isinstance(project.get("workspace_dir"), str)
+    ]
 
 
 def reconcile_autoskills(*, url: str) -> list[str]:
