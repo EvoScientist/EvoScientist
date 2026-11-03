@@ -439,8 +439,15 @@ _SURVIVOR_GRACE = 2.0
 _LOG_OFFSET_AT_START: int = 0
 
 # Cloudflare quick-tunnel public URL, as printed by cloudflared into the
-# langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
-_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
+# langgraph dev log. Exclude the API endpoint logged when tunnel creation fails.
+_TUNNEL_URL_RE = re.compile(
+    r"https://(?!api\.)[A-Za-z0-9.-]+\.trycloudflare\.com", re.IGNORECASE
+)
+# cloudflared's quick-tunnel creation failures ("failed to request quick
+# Tunnel: ...", "failed to read quick-tunnel response: ..."); it exits after one.
+_TUNNEL_FAILED_RE = re.compile(
+    r"failed to [a-z ]*quick[ -]tunnel[^\r\n]*", re.IGNORECASE
+)
 
 # Whether async sub-agents are usable in this process.
 #
@@ -1612,6 +1619,11 @@ def start_langgraph_dev(
     )
 
 
+class TunnelFailedError(RuntimeError):
+    """cloudflared logged that it could not create the quick tunnel; the
+    message is its log line."""
+
+
 def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | None:
     """Poll the langgraph dev log for the Cloudflare quick-tunnel public URL.
 
@@ -1630,6 +1642,10 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
 
     Returns:
         The public tunnel URL, or ``None`` if it never appeared in time.
+
+    Raises:
+        TunnelFailedError: cloudflared logged a quick-tunnel failure, so no
+            URL will follow.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1642,6 +1658,9 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
         match = _TUNNEL_URL_RE.search(chunk)
         if match:
             return match.group(0)
+        failure = _TUNNEL_FAILED_RE.search(chunk)
+        if failure:
+            raise TunnelFailedError(failure.group(0).strip())
         time.sleep(poll_interval)
     return None
 
