@@ -599,11 +599,20 @@ def test_server_status_names_server_on_another_port(monkeypatch):
     assert "stale record" not in output
 
 
-def test_server_status_lists_projects_of_server_on_another_port(monkeypatch):
+@pytest.mark.parametrize(
+    "configured_answers", [False, True], ids=["configured_idle", "configured_busy"]
+)
+def test_server_status_lists_projects_of_server_on_another_port(
+    monkeypatch, configured_answers
+):
+    """The projects are the recorded server's, whatever answers on the
+    configured port."""
     urls = _status_server(
         monkeypatch, projects=[{"workspace_dir": "/p/a", "missing": False}]
     )
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    monkeypatch.setattr(
+        manager, "is_langgraph_dev_running", lambda **_k: configured_answers
+    )
     monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
     monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
 

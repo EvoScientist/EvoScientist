@@ -158,8 +158,7 @@ def server_status() -> None:
                 f"  pid:          {pid} [yellow](serves port {address[0]}, not "
                 f"port {port}; EvoSci server stop stops it)[/yellow]"
             )
-            if url is None:
-                url = langgraph_dev_url(port=address[0], host=address[1])
+            url = langgraph_dev_url(port=address[0], host=address[1])
         else:
             console.print(
                 f"  pid:          {pid} [yellow](stale record — this pid does "
