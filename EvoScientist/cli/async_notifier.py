@@ -59,11 +59,12 @@ AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
 
 @dataclass(frozen=True)
 class AsyncTaskNotification:
-    """A completed-async-task signal enqueued by the state reader."""
+    """A signal enqueued by a state reader: a finished async task or background
+    process, or a background process that is no longer tracked."""
 
     task_id: str
     agent_name: str
-    status: str  # one of TERMINAL_STATUSES
+    status: str  # one of TERMINAL_STATUSES, or UNTRACKED_STATUS (bg-process)
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
     kind: str = "agent"  # "agent" (sub-agent) | "bg-process" (background shell)
@@ -129,7 +130,8 @@ def enqueue_bg_process_notification(
     pid: int | None = None,
     started_at: str | None = None,
 ) -> None:
-    """Build and enqueue a background-process completion notification.
+    """Build and enqueue a background-process notification (an exit, or an
+    ``untracked`` process).
 
     Called by the ``bg_processes`` state reader
     (:func:`enqueue_bg_process_completions_from_state`) so it never constructs the
@@ -400,6 +402,7 @@ _bg_reader_in_flight: set[str] = set()
 # Process ids whose ``untracked`` mark failed to write at least once.
 _bg_mark_failed_ids: set[str] = set()
 _bg_idle_reader_last_poll: dict[str | None, float] = {}
+_bg_idle_reader_active_seen: dict[str | None, bool] = {}
 
 UNTRACKED_STATUS: Final = "untracked"
 """``bg_processes[*].status`` of a process its registry no longer has.
@@ -421,7 +424,6 @@ UNTRACKED_HINT: Final = (
     "ran in.)"
 )
 """Closing line of a synthetic message that reports an ``untracked`` process."""
-_bg_idle_reader_active_seen: dict[str | None, bool] = {}
 
 
 async def read_bg_processes_from_gateway(
@@ -701,7 +703,7 @@ def _render_notification_group(
             icon, color = "✔", "#e67e22"  # carrot orange (CSS hex; Rich+Textual)
         elif n.status == "error":
             icon, color = "✗", "red"
-        else:  # cancelled, timeout, interrupted
+        else:  # cancelled, timeout, interrupted, untracked
             icon, color = "⚠", "yellow"
         # Collapse newlines, truncate prompt/command preview to 60 chars.
         prompt_preview = (n.prompt or "").replace("\n", " ").strip()

@@ -437,8 +437,9 @@ shell), decide what should happen rather than treating the task as failed:
 
 ASYNC_NOTIFICATIONS = """# Async Task Notifications
 
-A `[Async tasks update]` message is a SIGNAL of background completion, not a
-new request.
+A `[Async tasks update]` message is a SIGNAL about background work (a task
+that finished, or a background process that is no longer tracked), not a new
+request.
 
 ## Hard rules (read these first)
 
