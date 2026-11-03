@@ -9,6 +9,7 @@ says what the server was launched with, for the drift warnings.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import dataclasses
 import json
 import os
@@ -1323,14 +1324,20 @@ def test_hold_pid_keeps_a_handle_open_for_the_block(monkeypatch):
 )
 def test_hold_pid_refused_runs_nothing(monkeypatch, error, raised):
     kernel32 = _windows_kernel32(monkeypatch, handle=None, error=error)
+    # Windows only: an OSError with the system's message for the error.
+    monkeypatch.setattr(
+        ctypes, "WinError", lambda code: OSError(f"system text {code}"), raising=False
+    )
     ran: list = []
 
     def _hold():
         with manager._hold_pid(4242):
             ran.append(True)
 
-    with pytest.raises(raised):
+    with pytest.raises(raised) as refused:
         _hold()
+    if raised is OSError:
+        assert str(refused.value) == f"system text {error}"
     assert ran == []
     assert [call[0] for call in kernel32.calls] == ["open"]
 

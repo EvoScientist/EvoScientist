@@ -244,12 +244,14 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     """``EvoSci server stop``; with *keep_owned* (``EvoSci service stop``), a
     server that ``EvoSci deploy`` or the desktop app owns, or that another
     process is starting or stopping, is left running. Either command leaves
-    a server it could not open running, with its records, and says to try
-    again. A busy server is stopped only after asking, or with *yes*.
+    a server it could not open, for a reason other than access denied,
+    running with its records, says to try again and exits 1. A busy server
+    is stopped only after asking, or with *yes*.
     Whether it was left running."""
     from ..config import get_effective_config
     from ..langgraph_dev.manager import (
         ServerKeptError,
+        ServerStopFailedError,
         configured_address,
         is_langgraph_dev_running,
         owned_by_its_starter,
@@ -264,6 +266,8 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
         pid = stop_recorded_server(keep_owned=keep_owned)
     except ServerKeptError as exc:
         console.print(f"[yellow]⚠ {escape(str(exc))}[/yellow]")
+        if isinstance(exc, ServerStopFailedError):
+            raise typer.Exit(1) from None
         return True
     if pid is not None:
         console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")

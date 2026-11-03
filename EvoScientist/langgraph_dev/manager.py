@@ -798,7 +798,8 @@ class ServerKeptError(RuntimeError):
     """The stop left the recorded server running, with its records. ``EvoSci
     service stop`` keeps a server that ``EvoSci deploy`` or the desktop app
     owns, or that another EvoSci process is starting or stopping; any stop
-    raises :class:`ServerStopFailedError` when it could not open the server."""
+    raises :class:`ServerStopFailedError` when it could not open the server
+    for a reason other than it being gone or refusing access."""
 
 
 class ServerStopFailedError(ServerKeptError):
@@ -985,7 +986,8 @@ def _hold_pid(pid: int):
     even if it exits in between. When the handle is refused, nothing runs:
     ``psutil.NoSuchProcess`` when no process has ``pid``,
     ``psutil.AccessDenied`` for the errors psutil counts as permission
-    errors, ``OSError`` for any other. Off Windows it holds nothing."""
+    errors, ``OSError`` with the system's message for any other. Off Windows
+    it holds nothing."""
     if os.name != "nt":
         yield
         return
@@ -997,7 +999,9 @@ def _hold_pid(pid: int):
             raise psutil.NoSuchProcess(pid)
         if error in (_ERROR_ACCESS_DENIED, _ERROR_PRIVILEGE_NOT_HELD):
             raise psutil.AccessDenied(pid)
-        raise OSError(f"OpenProcess({pid}) failed: Windows error {error}")
+        import ctypes
+
+        raise ctypes.WinError(error)
     try:
         yield
     finally:
@@ -1022,8 +1026,10 @@ def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     With *keep_owned* (``EvoSci service stop``), a live server that ``EvoSci
     deploy`` or the desktop app owns is left running, and so is one whose lock
     another process holds too long: :class:`ServerKeptError`. A record of an
-    older release, which does not say, is stopped. A server the stop could
-    not open is left running with its records: :class:`ServerStopFailedError`.
+    older release, which does not say, is stopped. A server that refuses
+    access has its records removed, and nothing is stopped; one the stop could
+    not open for any other reason is left running with its records:
+    :class:`ServerStopFailedError`.
     """
     try:
         with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
@@ -1100,7 +1106,8 @@ def _stop_recorded_server_locked() -> int | None:
             # through): the server may be running, so it gets no signal and its
             # records stay for a retry.
             raise ServerStopFailedError(
-                f"Could not stop langgraph dev (pid {owned_pid}): {exc}. It "
+                f"Could not stop langgraph dev (pid {owned_pid}): "
+                f"{str(exc).rstrip('.')}. It "
                 "keeps running and its records are kept; try again."
             ) from exc
         if not any("langgraph" in arg for arg in cmdline):

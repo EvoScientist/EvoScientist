@@ -778,7 +778,7 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
 
 def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):
     """Its records are kept: the stop says so and to try again, not that it
-    has no record, nor how to kill it by hand."""
+    has no record, nor how to kill it by hand, and exits 1 for a script."""
 
     def stop(*, keep_owned=False):
         raise manager.ServerStopFailedError(
@@ -790,6 +790,7 @@ def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monke
 
     result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
+    assert result.exit_code == 1
     output = " ".join(result.output.split())
     assert "try again" in output
     assert "ownership record" not in output
