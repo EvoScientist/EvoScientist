@@ -95,6 +95,7 @@ def deploy(
 
     from ..langgraph_dev.manager import (
         RUNTIME,
+        TunnelFailedError,
         _base_url,
         _is_port_occupied,
         _pid_serves_port,
@@ -288,12 +289,22 @@ def deploy(
     # URL into the log. Poll for it so we can surface it in the ready banner.
     public_url: str | None = None
     if tunnel:
+        tunnel_error: str | None = None
         with console.status(
             "[dim]Waiting for Cloudflare tunnel URL...[/dim]", spinner="dots"
         ):
-            public_url = read_tunnel_url()
+            try:
+                public_url = read_tunnel_url()
+            except TunnelFailedError as exc:
+                tunnel_error = str(exc)
         if public_url:
             console.print("[green]✓[/green] tunnel up")
+        elif tunnel_error is not None:
+            console.print(
+                "[yellow]⚠ Cloudflare quick tunnel failed: "
+                f"{escape(tunnel_error)}. Details in the log "
+                f"({_shorten(str(RUNTIME.log_file))}).[/yellow]"
+            )
         else:
             console.print(
                 "[yellow]⚠ Tunnel URL not detected within the wait window. "

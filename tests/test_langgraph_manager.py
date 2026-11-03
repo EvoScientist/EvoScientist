@@ -966,19 +966,87 @@ class TestReadTunnelUrl:
         )
 
     @pytest.mark.parametrize("api_host", ["api", "API"])
-    def test_ignores_api_url_on_tunnel_failure(
-        self, tmp_path, runtime_paths, monkeypatch, api_host
+    def test_ignores_api_url(self, tmp_path, runtime_paths, monkeypatch, api_host):
+        """langgraph-api names cloudflared's API endpoint when no tunnel came up."""
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(f"- API: https://{api_host}.trycloudflare.com\n")
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "failed to build quick tunnel request: net/http: invalid method",
+            "failed to request quick Tunnel: Post "
+            '"https://API.trycloudflare.com/tunnel": i/o timeout',
+            "failed to read quick-tunnel response: unexpected EOF",
+            # HTTP 429 (rate limited): the body is "error code: 1015".
+            "failed to unmarshal quick Tunnel: invalid character 'e' looking "
+            "for beginning of value",
+            "failed to parse quick Tunnel ID: invalid UUID length: 0",
+        ],
+    )
+    def test_raises_at_once_on_tunnel_failure(
+        self, tmp_path, runtime_paths, monkeypatch, failure
     ):
+        prefix = "INFO:langgraph_api.tunneling.cloudflare:[cloudflared]"
         log = tmp_path / "langgraph_dev.log"
         log.write_text(
-            "[cloudflared] failed to request quick Tunnel: Post "
-            f'"https://{api_host}.trycloudflare.com/tunnel": i/o timeout\n'
-            f"- API: https://{api_host}.trycloudflare.com\n"
+            f"{prefix} 2026-10-07T15:39:12Z INF Requesting new quick Tunnel "
+            "on trycloudflare.com...\n"
+            f"{prefix} 2026-10-07T15:39:12Z ERR Error unmarshaling "
+            'QuickTunnel response: error code: 1015 status_code="429"\n'
+            f"{prefix} {failure}\n"
+            "- API: https://api.trycloudflare.com\n"
         )
         monkeypatch.setattr(
             manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
         )
         monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        def _no_wait(_seconds):
+            pytest.fail("read_tunnel_url waited after cloudflared reported a failure")
+
+        monkeypatch.setattr(
+            manager,
+            "time",
+            SimpleNamespace(monotonic=manager.time.monotonic, sleep=_no_wait),
+        )
+        with pytest.raises(manager.TunnelFailedError) as info:
+            manager.read_tunnel_url(timeout=5.0)
+        assert str(info.value) == failure
+
+    def test_connection_errors_are_not_tunnel_failures(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(
+            "[cloudflared] ERR Failed to serve tunnel connection "
+            'error="Application error 0x0 (remote)" connIndex=0\n'
+            '[cloudflared] ERR Serve tunnel error error="Application error 0x0 '
+            '(remote)" connIndex=0\n'
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    def test_ignores_a_failure_before_offset(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        stale = "[cloudflared] failed to request quick Tunnel: i/o timeout\n"
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(stale)
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", len(stale.encode()))
 
         assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
 
