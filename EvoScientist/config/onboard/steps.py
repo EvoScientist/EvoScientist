@@ -965,6 +965,13 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("xhigh", "xhigh  — extra high reasoning depth"),
         ("max", "max    — deepest reasoning; uses your quota fastest"),
     ],
+    # https://api-docs.deepseek.com/guides/thinking_mode
+    "deepseek": [
+        ("low", "low    — lighter reasoning, faster replies"),
+        ("high", "high   — DeepSeek's default depth (recommended)"),
+        ("max", "max    — deepest reasoning"),
+        ("none", "none   — turn thinking off"),
+    ],
 }
 
 
@@ -974,7 +981,7 @@ def _asks_reasoning_effort(provider: str) -> bool:
 
 
 def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
-    """Step 3.5: Pick the reasoning effort level for OpenRouter or OpenAI.
+    """Step 3.5: Pick the reasoning effort level for a provider that takes one.
 
     Args:
         config: Current configuration.

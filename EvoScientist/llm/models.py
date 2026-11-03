@@ -404,6 +404,12 @@ def _apply_auto_config(
         )
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
 
+    # DeepSeek (native): forward an explicit level only; the server's default is high.
+    if provider == "deepseek" and "reasoning_effort" not in kwargs:
+        configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip()
+        if configured:
+            kwargs["reasoning_effort"] = configured
+
     # Google GenAI: surface thinking traces
     if provider == "google-genai":
         kwargs.setdefault("include_thoughts", True)

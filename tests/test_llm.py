@@ -2904,6 +2904,53 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("configured", "sent"), [("", None), ("low", "low"), ("none", "none")]
+)
+def test_deepseek_sends_only_a_configured_reasoning_effort(
+    monkeypatch, configured, sent
+):
+    import json
+
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    if configured:
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+    captured = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        get_chat_model(
+            "deepseek-flash", provider="deepseek", http_client=client
+        ).invoke("hi")
+
+    assert captured.get("reasoning_effort") == sent
+
+
 class TestDeepseekReasoningPassback:
     """Verify reasoning_content is retained in serialized DeepSeek history."""
 

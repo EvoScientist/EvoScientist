@@ -839,6 +839,12 @@ class TestStepReasoningEffort:
         assert values == ["", "low", "medium", "high", "xhigh", "max"]
         assert default == ""
 
+    def test_deepseek_offers_its_documented_levels(self):
+        _, values, default = self._run("deepseek", "")
+
+        assert values == ["low", "high", "max", "none"]
+        assert default == "high"
+
     def test_openrouter_list_is_unchanged(self):
         _, values, default = self._run("openrouter", "")
 
@@ -853,6 +859,8 @@ class TestStepReasoningEffort:
             ("openai", "minimal", ""),  # carried over from another provider
             ("openrouter", "minimal", "minimal"),
             ("openrouter", "max", "high"),
+            ("deepseek", "xhigh", "high"),
+            ("deepseek", "none", "none"),
         ],
     )
     def test_highlights_the_stored_level_only_when_it_is_offered(
@@ -876,7 +884,13 @@ class TestStepReasoningEffort:
 
     @pytest.mark.parametrize(
         ("provider", "asked"),
-        [("openai", True), ("openrouter", True), ("anthropic", False), ("", False)],
+        [
+            ("openai", True),
+            ("openrouter", True),
+            ("deepseek", True),
+            ("anthropic", False),
+            ("", False),
+        ],
     )
     def test_only_providers_with_a_level_list_are_asked(self, provider, asked):
         from EvoScientist.config.onboard import steps as onboard_steps
