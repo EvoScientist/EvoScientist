@@ -1585,6 +1585,59 @@ async def test_bg_reader_reports_nothing_until_the_mark_is_written():
     assert gateway.process_status_calls == ["proc-1", "proc-1"]
 
 
+async def test_bg_reader_does_not_mark_over_an_exit_stored_since_the_read(
+    monkeypatch,
+):
+    # Another EvoSci process that tracks the process stored its exit after this
+    # reader read the registry: the mark would overwrite it, so nothing is
+    # written or reported, and the next poll skips the record as terminal.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(pid=4242),
+        process_statuses={"proc-1": "unknown"},
+    )
+    stored = _bg_running_registry(pid=4242)
+    stored["bg_processes"]["proc-1"].update(status="success", returncode=0)
+
+    async def snapshot(target, thread_id):
+        return SimpleNamespace(next=(), values=stored)
+
+    monkeypatch.setattr(gateway, "get_state_snapshot", snapshot)
+    target = GraphTarget(local_graph=MagicMock())
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert gateway.updated_states == []
+    assert drain_notifications("cli-tid") == []
+
+    gateway.state_values = stored
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert active == 0
+    assert gateway.process_status_calls == ["proc-1"]
+
+
+async def test_bg_reader_forgets_a_failed_mark_once_it_is_written():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    gateway.update_error = RuntimeError("409: thread has in-flight runs")
+    target = GraphTarget(local_graph=MagicMock())
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert async_notifier._bg_mark_failed_ids == {"proc-1"}
+
+    gateway.update_error = None
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert async_notifier._bg_mark_failed_ids == set()
+
+
 async def test_bg_reader_warns_once_when_the_mark_keeps_failing(caplog):
     # A write that never succeeds keeps the notice back; the first failure is
     # a WARNING so there is a trail, the retries are DEBUG.

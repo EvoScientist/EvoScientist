@@ -452,7 +452,6 @@ async def _mark_untracked(
     target: GraphTarget,
     thread_id: str,
     process_id: str,
-    record: dict,
 ) -> bool:
     """Write ``status: "untracked"`` into the thread's record of ``process_id``.
 
@@ -462,8 +461,15 @@ async def _mark_untracked(
     - the thread has pending tasks (``next``): a state write on a thread paused
       at an interrupt drops the interrupt, so the thread is left alone until the
       user answers it;
+    - the record in the snapshot is already terminal (or gone): the next poll
+      skips it, so nothing is retried;
     - the write fails: the server refuses ``update_state`` while a run is in
       flight on the thread (409).
+
+    The mark is built from the snapshot's record, not the one read at the top
+    of the poll, so a terminal status stored since is not overwritten. That
+    narrows the window to the gap between the snapshot and the write; the
+    channel's reducer is last-write-per-key, so there is no compare-and-set.
 
     ``as_node`` is left to the graph to infer: with no pending tasks that is the
     node that ended the last run, and the write leaves ``next`` empty.
@@ -477,10 +483,15 @@ async def _mark_untracked(
         snapshot = await gateway.get_state_snapshot(target, thread_id)
         if snapshot.next:
             return False
+        # The record read at the top of the poll may be stale by now: another
+        # EvoSci process that tracks the process may have stored its exit.
+        current = ((snapshot.values or {}).get("bg_processes") or {}).get(process_id)
+        if not current or current.get("status") in TERMINAL_STATUSES:
+            return False  # the next poll skips it as terminal
         await gateway.update_state_values(
             target,
             thread_id,
-            {"bg_processes": {process_id: {**record, "status": UNTRACKED_STATUS}}},
+            {"bg_processes": {process_id: {**current, "status": UNTRACKED_STATUS}}},
         )
     except Exception:
         # The first failure per process is a WARNING: a write that never
@@ -494,6 +505,7 @@ async def _mark_untracked(
             exc_info=True,
         )
         return False
+    _bg_mark_failed_ids.discard(process_id)
     return True
 
 
@@ -557,9 +569,7 @@ async def enqueue_bg_process_completions_from_state(
                 if record.get("status") == UNTRACKED_STATUS:
                     _reader_enqueued_process_ids.add(process_id)
                     continue
-                if not await _mark_untracked(
-                    gateway, target, thread_id, process_id, record
-                ):
+                if not await _mark_untracked(gateway, target, thread_id, process_id):
                     still_active += 1  # not writable yet — retry next poll
                     continue
                 enqueue_bg_process_notification(
