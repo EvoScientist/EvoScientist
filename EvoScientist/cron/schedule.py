@@ -283,8 +283,16 @@ def delete_schedule(cron: Cron, *, workspace: Workspace) -> None:
 
 
 def set_enabled(cron: Cron, enabled: bool, *, workspace: Workspace) -> Cron:
-    """Enable or disable *cron*, one of *workspace*'s scheduled tasks."""
-    return _client().crons.update(_require_own(cron, workspace), enabled=enabled)
+    """Enable or disable *cron*, one of *workspace*'s scheduled tasks.
+
+    Resuming resends the stored schedule: the server recomputes the next run
+    from now only when an update carries a schedule or timezone, so a task
+    resumed after its run time would otherwise fire right away.
+    """
+    cron_id = _require_own(cron, workspace)
+    if enabled:
+        return _client().crons.update(cron_id, enabled=True, schedule=cron["schedule"])
+    return _client().crons.update(cron_id, enabled=False)
 
 
 def run_now(prompt: str, *, workspace: Workspace, rubric: str | None = None) -> Run:
