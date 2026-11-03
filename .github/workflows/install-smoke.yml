@@ -351,7 +351,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.os }}${{ matrix.cn && '-cn' || '' }}
-          path: ${{ runner.temp }}/home/.config/evoscientist/*.log
+          path: ${{ runner.temp }}/home/.evoscientist/server/*.log
           if-no-files-found: ignore
 
       - name: Upload the EvoScientist logs (Windows)
@@ -359,5 +359,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.os }}
-          path: ~/.config/evoscientist/*.log
+          path: ~/.evoscientist/server/*.log
           if-no-files-found: ignore

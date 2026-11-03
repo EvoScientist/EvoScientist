@@ -80,7 +80,7 @@ function Test-Answers([string]$Url, [int]$Below = 500) {
 function Show-Logs([string]$Log) {
     Write-Host '--- EvoSci output'
     Get-Content -Encoding UTF8 -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
-    foreach ($file in @("$UserHome\.config\evoscientist\langgraph_dev.log", "$UserHome\.config\evoscientist\webui.log")) {
+    foreach ($file in @("$DataDir\server\langgraph_dev.log", "$DataDir\server\webui.log")) {
         Write-Host "--- $file"
         Get-Content -Encoding UTF8 -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
     }

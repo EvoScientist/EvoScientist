@@ -1,17 +1,16 @@
-"""Tests for the server's ownership record (the workspace sidecar) and the
-reuse of a running server.
+"""Tests for the server's record (``read_record``), the reuse of a recorded
+server, and the stop of the recorded one.
 
-The server serves every registered project, so a client reuses any
-EvoScientist server on the port and registers its own project; the record
-says what the server was launched with, for the drift warnings.
+The server records itself in the server home; clients read the record, never
+write or delete it. A record counts while its process is the live langgraph
+dev it names, created when it says. A record an older release kept in the
+shared folder still counts, for this data folder only.
 """
 
 from __future__ import annotations
 
 import contextlib
 import ctypes
-import dataclasses
-import json
 import os
 import subprocess
 import sys
@@ -22,7 +21,21 @@ import psutil
 import pytest
 
 from EvoScientist import paths
-from EvoScientist.langgraph_dev import manager
+from EvoScientist.langgraph_dev import manager, registration, server_record
+from tests.fakes.langgraph_dev import (
+    CREATED,
+    Processes,
+    Server,
+    lock_follows_record,
+    write_older_record,
+    write_record,
+)
+
+
+@pytest.fixture(autouse=True)
+def _server_lock(monkeypatch):
+    """A written record holds the server lock, as the server does."""
+    lock_follows_record(monkeypatch)
 
 
 def _wait_for_child_argv(pid: int, needle: str, timeout: float = 5.0) -> bool:
@@ -43,295 +56,392 @@ def _wait_for_child_argv(pid: int, needle: str, timeout: float = 5.0) -> bool:
         time.sleep(0.01)
 
 
-def test_sidecar_path_is_next_to_pid_file():
-    """Sidecar JSON lives at ``pid_dir / 'langgraph_dev.workspace.json'``."""
-    assert (
-        manager.RUNTIME.workspace_sidecar
-        == manager.RUNTIME.pid_dir / "langgraph_dev.workspace.json"
-    )
+# ---------------------------------------------------------------------------
+# read_record
+# ---------------------------------------------------------------------------
 
 
-def test_write_workspace_sidecar_records_pid_without_project(
-    tmp_path, monkeypatch, runtime_paths
+def test_runtime_files_follow_server_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "home")
+
+    for path in (
+        manager.RUNTIME.record,
+        manager.RUNTIME.lock_file,
+        manager.RUNTIME.log_file,
+        manager.RUNTIME.webui_log,
+    ):
+        assert path.parent == tmp_path / "home"
+    assert manager.RUNTIME.record.name == server_record.RECORD_FILE
+
+
+def test_read_record_none_without_record(runtime_paths):
+    assert manager.read_record() is None
+
+
+def test_read_record_reads_record(monkeypatch, runtime_paths):
+    write_record(4242, port=16300, host="0.0.0.0", lasting=True)
+
+    record = manager.read_record()
+
+    assert (record.pid, record.port, record.host) == (4242, 16300, "0.0.0.0")
+    assert record.created == CREATED
+    assert record.lasting is True
+    assert record.older is False
+    assert record.url == "http://127.0.0.1:16300"
+
+
+def test_read_record_ignores_record_without_server_lock(monkeypatch, runtime_paths):
+    """Its server is gone: the lock it held is free."""
+    from EvoScientist.langgraph_dev import server_home
+
+    write_record(4242)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.FREE)
+
+    assert manager.read_record() is None
+    assert runtime_paths.record.exists(), "a client never deletes the record"
+
+
+def test_read_record_counts_while_lock_is_held_whatever_pid(runtime_paths):
+    """The lock proves the server runs: no process check, so a server whose
+    process cannot be read (an elevated one on Windows), or whose creation
+    time does not match, still counts."""
+    write_record(4242, created=1.0)
+
+    record = manager.read_record()
+
+    assert record.pid == 4242
+    assert record.created == 1.0
+
+
+def test_read_record_distrusts_record_when_lock_cannot_be_opened(
+    monkeypatch, runtime_paths
 ):
-    """The record names the server's pid; the server serves every
-    registered project, so it names none."""
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=12345)
-    data = json.loads((tmp_path / "ws.json").read_text())
-    assert data["pid"] == 12345
-    assert "workspace" not in data
+    from EvoScientist.langgraph_dev import server_home
+
+    write_record(4242)
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.UNKNOWN)
+
+    assert manager.read_record() is None
 
 
-def test_read_workspace_sidecar_returns_none_when_missing(
-    tmp_path, monkeypatch, runtime_paths
-):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "absent.json"),
-    )
-    assert manager._read_workspace_sidecar() is None
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        (server_record.STARTING, server_record.STARTING),
+        (server_record.SERVING, server_record.SERVING),
+        (None, server_record.SERVING),
+    ],
+)
+def test_read_record_reads_phase(runtime_paths, phase, expected):
+    """A record without a phase (an older release's) counts as serving."""
+    write_record(4242, phase=phase)
+
+    assert manager.read_record().phase == expected
 
 
-def test_read_workspace_sidecar_returns_none_on_corrupt_json(
-    tmp_path, monkeypatch, runtime_paths
-):
-    sidecar = tmp_path / "bad.json"
-    sidecar.write_text("not json at all")
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
-    )
-    assert manager._read_workspace_sidecar() is None
+def test_read_record_reads_older_place_only_when_asked(monkeypatch, runtime_paths):
+    Processes(monkeypatch).add(4141)
+    write_older_record(4141)
+
+    assert manager.read_record() is None
+    assert manager.read_record(older=True).older is True
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        "[]",  # valid JSON, wrong top-level type
-        "{}",  # valid JSON dict but missing "pid"
-        '{"workspace": "/a"}',  # an older record without its pid
-        '"just a string"',  # valid JSON scalar
-        "null",  # valid JSON null
-        '{"pid": null}',
-        '{"pid": "12345"}',
-        '{"pid": 12.0}',
-        '{"pid": true}',  # a bool is an int in Python
-        '{"pid": 0}',
-        '{"pid": -1}',
+        "not json at all",
+        "[]",
+        "{}",
+        '"just a string"',
+        "null",
+        '{"pid": null, "port": 6174, "create_time": 1.0}',
+        '{"pid": "4242", "port": 6174, "create_time": 1.0}',
+        '{"pid": true, "port": 6174, "create_time": 1.0}',
+        '{"pid": 0, "port": 6174, "create_time": 1.0}',
+        '{"pid": 4242, "create_time": 1.0}',
     ],
 )
-def test_read_workspace_sidecar_returns_none_on_wrong_schema(
-    payload, tmp_path, monkeypatch, runtime_paths
+def test_read_record_ignores_malformed_record(payload, monkeypatch, runtime_paths):
+    Processes(monkeypatch).add(4242, created=1.0)
+    runtime_paths.record.write_text(payload)
+
+    assert manager.read_record() is None
+
+
+def test_read_record_names_folders_server_uses(monkeypatch, runtime_paths):
+    Processes(monkeypatch).add(4242)
+    write_record(4242, data_dir="/srv/data", config_dir="/srv/config")
+
+    record = manager.read_record()
+
+    assert (record.data_dir, record.config_dir) == ("/srv/data", "/srv/config")
+
+
+def test_read_record_trusts_record_for_process_group(monkeypatch, runtime_paths):
+    Processes(monkeypatch).add(4242)
+    write_record(4242, **{server_record.BREAK_GROUP_KEY: True})
+
+    assert manager.read_record().break_group is True
+
+
+# ---------------------------------------------------------------------------
+# The record an older release kept
+# ---------------------------------------------------------------------------
+
+
+def test_read_record_falls_back_to_older_releases_record(monkeypatch, runtime_paths):
+    Processes(monkeypatch).add(4141, port=6174)
+    write_older_record(4141, port=6174, lasting=True, host="0.0.0.0")
+
+    record = manager.read_record(older=True)
+
+    assert record.older is True
+    assert (record.pid, record.port, record.host) == (4141, 6174, "0.0.0.0")
+    assert record.lasting is True
+
+
+def test_read_record_prefers_server_homes_record(monkeypatch, runtime_paths):
+    processes = Processes(monkeypatch)
+    processes.add(4242)
+    processes.add(4141)
+    write_record(4242)
+    write_older_record(4141)
+
+    assert manager.read_record(older=True).pid == 4242
+
+
+def test_read_record_leaves_another_data_folders_older_record(
+    monkeypatch, runtime_paths
 ):
-    """JSON that parses but doesn't match the expected schema degrades to
-    None: readers use ``pid`` as a process id."""
-    sidecar = tmp_path / "schema.json"
-    sidecar.write_text(payload)
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
-    )
-    assert manager._read_workspace_sidecar() is None
+    Processes(monkeypatch).add(4141)
+    folder = write_older_record(4141, data_dir="/another/data")
+
+    assert manager.read_record(older=True) is None
+    assert (folder / server_record.RECORD_FILE).exists()
+    assert (folder / "langgraph_dev.pid").exists()
 
 
-def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch, runtime_paths):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "rt.json"),
-    )
-    manager._write_workspace_sidecar(pid=42)
-    data = manager._read_workspace_sidecar()
-    assert data == {
-        "pid": 42,
-        "data_dir": str(paths.DATA_DIR),
-        "config_dir": str(paths.CONFIG_DIR),
-    }
-
-
-def test_read_workspace_sidecar_reads_older_record_with_project(
-    tmp_path, monkeypatch, runtime_paths
+def test_read_record_matches_data_folder_by_another_spelling(
+    monkeypatch, runtime_paths, tmp_path
 ):
-    """A record an older release wrote also names the project of the client
-    that started the server; it still reads."""
-    sidecar = tmp_path / "old.json"
-    sidecar.write_text(
-        json.dumps({"workspace": str(tmp_path / "proj"), "pid": 42, "lasting": True})
-    )
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
-    )
-    data = manager._read_workspace_sidecar()
-    assert data is not None
-    assert data["pid"] == 42
-    assert manager.is_lasting(data)
+    """A symlink to the data folder names the same folder."""
+    link = tmp_path / "data-link"
+    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(paths.DATA_DIR, target_is_directory=True)
+    Processes(monkeypatch).add(4141)
+    write_older_record(4141, data_dir=str(link))
+
+    assert manager.read_record(older=True).pid == 4141
 
 
-def test_write_workspace_sidecar_records_the_bind_host(
-    tmp_path, monkeypatch, runtime_paths
+def test_read_record_ignores_older_record_without_data_folder(
+    monkeypatch, runtime_paths
 ):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=7, host="0.0.0.0")
-    assert manager._read_workspace_sidecar()["host"] == "0.0.0.0"
+    """Releases before the data folder was recorded."""
+    Processes(monkeypatch).add(4141)
+    write_older_record(4141, data_dir=None)
+
+    assert manager.read_record(older=True) is None
 
 
-def test_write_workspace_sidecar_records_the_port(tmp_path, monkeypatch, runtime_paths):
-    """A WebUI started apart from the server reads the port it listens on
-    from the record, not only the configured one."""
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=7, port=16409)
-    assert manager._read_workspace_sidecar()["port"] == 16409
-
-
-def test_write_workspace_sidecar_records_the_data_and_config_folders(
-    tmp_path, monkeypatch, runtime_paths
+def test_read_record_deletes_older_record_whose_server_is_gone(
+    monkeypatch, runtime_paths
 ):
-    """The server inherits this process's folders, so the record names them
-    for a client that attaches from another environment."""
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data dir é")
-    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "config" / "evoscientist")
-    manager._write_workspace_sidecar(pid=7)
-    data = manager._read_workspace_sidecar()
-    assert data["data_dir"] == str(tmp_path / "data dir é")
-    assert data["config_dir"] == str(tmp_path / "config" / "evoscientist")
+    Processes(monkeypatch)
+    folder = write_older_record(4141)
+
+    assert manager.read_record(older=True) is None
+    assert not (folder / server_record.RECORD_FILE).exists()
+    assert not (folder / "langgraph_dev.pid").exists()
 
 
-def test_ensure_langgraph_dev_serves_another_project_from_running_server(
-    tmp_path, monkeypatch, runtime_paths
+def test_read_record_keeps_older_record_whose_server_refuses_access(
+    monkeypatch, runtime_paths
 ):
-    """A running server serves another project once it is registered."""
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=99999)
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    from EvoScientist.langgraph_dev import registration
+    """The server may still run: this read ignores the record, a later one
+    with access finds it."""
+    processes = Processes(monkeypatch)
+    processes.add(4141)
+    processes.denied.add(4141)
+    folder = write_older_record(4141)
 
-    registered: list[paths.Workspace] = []
+    assert manager.read_record(older=True) is None
+    assert (folder / server_record.RECORD_FILE).exists()
+    assert (folder / "langgraph_dev.pid").exists()
+
+
+def test_read_record_deletes_older_record_whose_pid_went_elsewhere(
+    monkeypatch, runtime_paths
+):
+    Processes(monkeypatch).add(4141, cmdline=["python", "editor.py"])
+    folder = write_older_record(4141)
+
+    assert manager.read_record(older=True) is None
+    assert not (folder / server_record.RECORD_FILE).exists()
+
+
+def test_read_record_deletes_older_record_whose_pid_serves_another_port(
+    monkeypatch, runtime_paths
+):
+    """The PID went to another langgraph dev."""
+    Processes(monkeypatch).add(4141, port=16500)
+    folder = write_older_record(4141, port=6174)
+
+    assert manager.read_record(older=True) is None
+    assert not (folder / server_record.RECORD_FILE).exists()
+
+
+def test_read_record_takes_older_records_port_from_command_line(
+    monkeypatch, runtime_paths
+):
+    """Releases before the port was recorded."""
+    Processes(monkeypatch).add(4141, port=16501)
+    write_older_record(4141, port=None)
+
+    assert manager.read_record(older=True).port == 16501
+
+
+@pytest.mark.parametrize(("offset", "expected"), [(0.0, True), (-60.0, False)])
+def test_read_record_trusts_older_record_for_process_group_while_pid_is_its(
+    monkeypatch, runtime_paths, offset, expected
+):
+    Processes(monkeypatch).add(4141)
+    write_older_record(4141, ctrl_break_create_time=CREATED + offset)
+
+    assert manager.read_record(older=True).break_group is expected
+
+
+def test_is_lasting_only_when_record_says_so(monkeypatch, runtime_paths):
+    assert manager.is_lasting(None) is False
+    assert manager.is_lasting(manager.ServerRecord(1, 6174, "h")) is False
+    assert (
+        manager.is_lasting(manager.ServerRecord(1, 6174, "h", lasting=False)) is False
+    )
+    assert manager.is_lasting(manager.ServerRecord(1, 6174, "h", lasting=True)) is True
+
+
+# ---------------------------------------------------------------------------
+# Reuse of the recorded server
+# ---------------------------------------------------------------------------
+
+
+def _config():
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    return cfg
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    """The registrations the server answered, by URL and project."""
+    calls: list = []
 
     def register_folder(workspace, *, url):
-        registered.append(workspace)
+        calls.append((url, workspace))
         return registration.ServerExposure()
 
     monkeypatch.setattr(registration, "register_folder", register_folder)
-
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B") is True
-
-    assert registered == [paths.Workspace(tmp_path / "B")]
-    assert manager.is_async_subagents_available()
+    return calls
 
 
-def test_ensure_langgraph_dev_reuses_when_sidecar_missing(
-    tmp_path, monkeypatch, runtime_paths
+def test_ensure_serves_another_project_from_recorded_server(
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
-    """A server without an ownership record is reused without the drift
-    checks; the registration tells an older release apart."""
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "absent.json"),
-    )
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
-    monkeypatch.setattr(manager, "_PROCESS", None)
+    server = Server(monkeypatch)
+    server.run(fingerprint="fp")
 
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B")
+    result = manager.ensure_server(_config(), workspace_dir=tmp_path / "B")
+
+    assert result.served is True
+    assert result.started is False
+    assert registered == [("http://127.0.0.1:6174", paths.Workspace(tmp_path / "B"))]
+    assert manager.is_async_subagents_available()
+    assert server.spawns == []
+
+
+def test_ensure_with_any_port_reuses_recorded_server_at_its_host(
+    tmp_path, monkeypatch, runtime_paths, registered
+):
+    Server(monkeypatch).run(host="10.0.0.5")
+
+    result = manager.ensure_server(
+        _config(), workspace_dir=tmp_path / "B", any_port=True
+    )
+
+    assert result.url == "http://10.0.0.5:6174"
+
+
+def test_started_server_outlives_session(
+    tmp_path, monkeypatch, runtime_paths, registered
+):
+    """Every session shares it until ``EvoSci server stop``."""
+    import atexit
+
+    server = Server(monkeypatch)
+    exits = []
+    monkeypatch.setattr(atexit, "register", lambda *a, **kw: exits.append(a))
+
+    result = manager.ensure_server(_config(), workspace_dir=tmp_path / "A")
+
+    assert result.started is True
+    assert exits == []
+    assert server.spawns[0]["lasting"] is True
+
+
+def _reuse(tmp_path, monkeypatch, fingerprint, **fields):
+    """Reuse a recorded server launched with *fingerprint*."""
+    fingerprint_of = manager._server_config_fingerprint
+    server = Server(monkeypatch)
+    monkeypatch.setattr(manager, "_server_config_fingerprint", fingerprint_of)
+    server.run(config_fingerprint=fingerprint, **fields)
+    return manager.ensure_server(_config(), workspace_dir=tmp_path / "A")
+
+
+def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
+    tmp_path, monkeypatch, runtime_paths, registered
+):
+    result = _reuse(tmp_path, monkeypatch, "stale-fingerprint")
+
+    assert result.drift is True
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
+def test_reuse_clears_drift_flag_on_matching_fingerprint(
+    tmp_path, monkeypatch, runtime_paths, registered
+):
+    _reuse(tmp_path, monkeypatch, manager._server_config_fingerprint(_config()))
 
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
-def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths):
-    """``stop_langgraph_dev`` should unlink the sidecar alongside the PID file."""
-    sidecar = tmp_path / "ws.json"
-    pid_file = tmp_path / "pid.txt"
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(
-            runtime_paths, workspace_sidecar=sidecar, pid_file=pid_file
-        ),
-    )
-    manager._write_workspace_sidecar(pid=42)
-    assert sidecar.exists()
-
-    # _PROCESS is None so stop_langgraph_dev shouldn't try to kill anything;
-    # we're only verifying the sidecar cleanup path here.
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    manager.stop_langgraph_dev()
-    assert not sidecar.exists()
-
-
-def test_started_server_outlives_session(tmp_path, monkeypatch, runtime_paths):
-    """Every session shares it until ``EvoSci server stop``."""
-    import atexit
-
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    started: list = []
-    monkeypatch.setattr(
-        manager, "start_langgraph_dev", lambda **kw: started.append(kw) or object()
-    )
-    registered = []
-    monkeypatch.setattr(atexit, "register", lambda *a, **kw: registered.append(a))
-
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
-    assert registered == []
-    assert started[0].get("lasting", True) is True
-
-
-def test_sidecar_records_whether_server_lasts(tmp_path, monkeypatch, runtime_paths):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=1, lasting=False)
-    assert manager._read_workspace_sidecar()["lasting"] is False
-
-
-# ---------------------------------------------------------------------------
-# Config fingerprint + drift detection + explicit server stop
-# ---------------------------------------------------------------------------
-
-
-def _dead_pid() -> int:
-    """Spawn-and-reap a process so its pid is reliably dead."""
-    import subprocess
-    import sys
-
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    proc.wait()
-    return proc.pid
-
-
-def test_sidecar_records_config_fingerprint_when_passed(
-    tmp_path, monkeypatch, runtime_paths
+def test_reuse_sets_drift_flag_on_version_change(
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=1, config_fingerprint="abc123")
-    assert json.loads((tmp_path / "ws.json").read_text())["config_fingerprint"] == (
-        "abc123"
-    )
+    """A server left running across an upgrade counts as drift: the session
+    reuses it and warns, and the server is not stopped."""
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.4")
+    old_fp = manager._server_config_fingerprint(_config())
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
+
+    result = _reuse(tmp_path, monkeypatch, old_fp)
+
+    assert result.served is True
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert manager.is_async_subagents_available() is True
+
+
+def test_reuse_without_fingerprint_sets_no_drift(
+    tmp_path, monkeypatch, runtime_paths, registered
+):
+    """A server started by hand records no configuration."""
+    Server(monkeypatch).run()
+
+    manager.ensure_server(_config(), workspace_dir=tmp_path / "A")
+
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
 def test_server_config_fingerprint_tracks_relevant_fields():
@@ -340,124 +450,6 @@ def test_server_config_fingerprint_tracks_relevant_fields():
     assert base == manager._server_config_fingerprint(cfg), "must be deterministic"
     cfg.model = "some-other-model"
     assert manager._server_config_fingerprint(cfg) != base
-
-
-def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=99999, config_fingerprint=fingerprint)
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    return cfg
-
-
-def test_reuse_serves_registered_project(tmp_path, monkeypatch, runtime_paths):
-    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "fp")
-    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
-
-
-def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
-    tmp_path, monkeypatch, runtime_paths
-):
-    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "stale-fingerprint")
-    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
-
-
-def test_reuse_sets_drift_flag_for_older_stripped_server(
-    tmp_path, monkeypatch, runtime_paths
-):
-    """A server an older version started without MCP (``deploy_mode: false``)
-    is reused with the drift warning, also by a server-backend session."""
-    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "old-version-fingerprint")
-    sidecar = tmp_path / "ws.json"
-    sidecar.write_text(
-        json.dumps({**json.loads(sidecar.read_text()), "deploy_mode": False})
-    )
-
-    reused = manager.ensure_langgraph_dev(
-        cfg, workspace_dir=tmp_path / "A", backend="langgraph_server"
-    )
-
-    assert reused is True
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
-    assert manager.is_async_subagents_available() is True
-
-
-def test_reuse_sets_drift_flag_on_version_change(tmp_path, monkeypatch, runtime_paths):
-    """A server left running across an upgrade counts as drift: the session
-    reuses it and warns, and the server is not stopped."""
-    import importlib.metadata
-
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.4")
-    old_fp = manager._server_config_fingerprint(cfg)
-    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, old_fp)
-    stopped = []
-    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *a: stopped.append(a))
-
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
-    assert manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A") is True
-
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
-    assert manager.is_async_subagents_available() is True
-    assert stopped == []
-
-
-def test_started_server_recorded_for_next_version(tmp_path, monkeypatch, runtime_paths):
-    """A server the CLI starts records what the next version compares: the
-    marker, the PID file for ``EvoSci server stop`` and the fingerprint."""
-    import importlib.metadata
-    import subprocess
-    from types import SimpleNamespace
-
-    from EvoScientist.mcp import client as mcp_client
-
-    up = {"running": False}
-    spawned = []
-
-    def _popen(*_a, **kw):
-        spawned.append(kw["env"])
-        up["running"] = True
-        return SimpleNamespace(pid=4242, poll=lambda: None)
-
-    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
-    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: up["running"])
-    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
-    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda *_a, **_kw: True)
-    monkeypatch.setattr(subprocess, "Popen", _popen)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
-    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
-    assert spawned[0]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
-    assert runtime_paths.pid_file.read_text() == "4242"
-
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.6")
-    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is True
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
-    assert len(spawned) == 1
-
-
-def test_reuse_clears_drift_flag_on_matching_fingerprint(
-    tmp_path, monkeypatch, runtime_paths
-):
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    fp = manager._server_config_fingerprint(cfg)
-    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
-    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
 def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
@@ -472,254 +464,200 @@ def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
     assert manager._server_config_fingerprint(cfg) == base
 
 
-def test_sidecar_records_the_agent_python_only_when_passed(
-    tmp_path, monkeypatch, runtime_paths
-):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=1, agent_python=None)
-    assert json.loads((tmp_path / "ws.json").read_text())["agent_python"] is None
-    manager._write_workspace_sidecar(pid=1)
-    assert "agent_python" not in json.loads((tmp_path / "ws.json").read_text())
-
-
-def test_sidecar_records_the_agent_bash_only_when_passed(
-    tmp_path, monkeypatch, runtime_paths
-):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    bash = r"C:\Program Files\Git\bin\bash.exe"
-    manager._write_workspace_sidecar(pid=1, agent_bash=bash)
-    assert json.loads((tmp_path / "ws.json").read_text())["agent_bash"] == bash
-    manager._write_workspace_sidecar(pid=1)
-    assert "agent_bash" not in json.loads((tmp_path / "ws.json").read_text())
-
-
 def test_reuse_warns_when_the_server_shell_differs(
-    tmp_path, monkeypatch, runtime_paths
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
     """A server started before `EvoSci setup` recorded Git Bash keeps cmd.exe
     for its agents; this session runs bash."""
-    from types import SimpleNamespace
-
     from EvoScientist import agent_shell
     from EvoScientist.setup import research_env
 
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    fp = manager._server_config_fingerprint(cfg)
-    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
-    manager._write_workspace_sidecar(
-        pid=99999,
-        config_fingerprint=fp,
-        agent_python="/env/bin/python",
-        agent_bash=None,
-    )
     monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
     bash = r"C:\Git\bin\bash.exe"
     monkeypatch.setattr(agent_shell, "agent_bash", lambda: SimpleNamespace(bash=bash))
-    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+
+    _reuse(tmp_path, monkeypatch, "fp", agent_python="/env/bin/python", agent_bash=None)
+
     assert "cmd.exe" in manager.AGENT_SHELL_DRIFT
     assert bash in manager.AGENT_SHELL_DRIFT
     assert "python" not in manager.AGENT_SHELL_DRIFT
 
 
-def _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, recorded):
-    """Reuse a server whose sidecar records ``recorded`` (or nothing, when
+def _reuse_with_agent_python(tmp_path, monkeypatch, recorded):
+    """Reuse a server whose record holds ``recorded`` (or nothing, when
     ``recorded`` is ``...``) from a session that resolves the research env."""
     from EvoScientist.setup import research_env
 
-    cfg = manager.EvoScientistConfig()
-    cfg.enable_async_subagents = True
-    fp = manager._server_config_fingerprint(cfg)
-    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
-    if recorded is not ...:
-        manager._write_workspace_sidecar(
-            pid=99999,
-            config_fingerprint=fp,
-            agent_python=recorded,
-        )
     monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
-    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+    fields = {} if recorded is ... else {"agent_python": recorded}
+    _reuse(tmp_path, monkeypatch, "fp", **fields)
 
 
 def test_reuse_warns_when_the_server_python_differs(
-    tmp_path, monkeypatch, runtime_paths
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
     """A server launched from a shell with conda active, reused from one
     without: its agents keep conda's python."""
-    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/conda/bin/python")
+    _reuse_with_agent_python(tmp_path, monkeypatch, "/conda/bin/python")
     assert "/conda/bin/python" in manager.AGENT_SHELL_DRIFT
     assert "/env/bin/python" in manager.AGENT_SHELL_DRIFT
-    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
 def test_reuse_does_not_warn_when_the_server_python_matches(
-    tmp_path, monkeypatch, runtime_paths
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
-    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/env/bin/python")
+    _reuse_with_agent_python(tmp_path, monkeypatch, "/env/bin/python")
     assert manager.AGENT_SHELL_DRIFT is None
 
 
 def test_reuse_does_not_warn_without_a_recorded_python(
-    tmp_path, monkeypatch, runtime_paths
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
-    """A server started by an older version has no record."""
-    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, ...)
+    """A server started by hand has no record of it."""
+    _reuse_with_agent_python(tmp_path, monkeypatch, ...)
     assert manager.AGENT_SHELL_DRIFT is None
 
 
-def test_stop_recorded_server_none_when_no_pid_file(
-    tmp_path, monkeypatch, runtime_paths
+def test_reuse_of_older_releases_server_says_to_restart_it(
+    tmp_path, monkeypatch, runtime_paths, registered
 ):
-    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    assert manager.stop_recorded_server() is None
+    server = Server(monkeypatch)
+    server.processes.add(4141)
+    server.answering.add(6174)
+    write_older_record(4141, lasting=True)
+
+    result = manager.ensure_server(_config(), workspace_dir=tmp_path / "A")
+
+    assert result.served is True
+    assert result.record.older is True
+    assert manager.OLDER_SERVER is True
+    assert server.spawns == []
 
 
-def test_stop_recorded_server_cleans_stale_files_for_dead_pid(
-    tmp_path, monkeypatch, runtime_paths
-):
-    pid_file = tmp_path / "pid.txt"
-    sidecar = tmp_path / "ws.json"
-    pid_file.write_text(str(_dead_pid()))
-    sidecar.write_text(json.dumps({"pid": 1}))
+# ---------------------------------------------------------------------------
+# stop_server
+# ---------------------------------------------------------------------------
+
+
+def test_stop_server_none_without_record(runtime_paths):
+    assert manager.stop_server() is None
+
+
+def test_stop_server_never_signals_reused_pid(monkeypatch, runtime_paths):
+    """The record's PID went to a process started later."""
+    Processes(monkeypatch).add(4242, created=CREATED + 60)
+    write_record(4242)
+    ended: list = []
     monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(
-            runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
-        ),
+        manager, "_end_server_tree", lambda pid, *a, **k: ended.append(pid)
     )
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    assert manager.stop_recorded_server() is None
-    assert not pid_file.exists()
-    assert not sidecar.exists()
+
+    assert manager.stop_server() is None
+    assert ended == []
 
 
-def test_stop_recorded_server_refuses_foreign_process(
-    tmp_path, monkeypatch, runtime_paths
-):
-    import subprocess
-    import sys
+def _record_live(pid: int, **fields) -> None:
+    """Record the live process ``pid`` as the server, as the server does."""
+    write_record(pid, created=psutil.Process(pid).create_time(), **fields)
 
-    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+def test_stop_server_refuses_process_created_after_record(runtime_paths):
+    """The record's PID went to another process: it is not killed."""
+    victim = _sleeper("langgraph")
     try:
-        pid_file = tmp_path / "pid.txt"
-        pid_file.write_text(str(victim.pid))
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(runtime_paths, pid_file=pid_file),
-        )
-        monkeypatch.setattr(manager, "_PROCESS", None)
-        assert manager.stop_recorded_server() is None
-        assert victim.poll() is None, "foreign process must not be killed"
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        write_record(victim.pid, created=psutil.Process(victim.pid).create_time() - 60)
+        assert manager.stop_server() is None
+        assert victim.poll() is None, "a reused PID must not be killed"
     finally:
         victim.kill()
         victim.wait()
 
 
-def test_stop_recorded_server_kills_owned_langgraph_process(
-    tmp_path, monkeypatch, runtime_paths
-):
-    import subprocess
-    import sys
-
-    victim = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
-    )
+def test_stop_server_stops_recorded_server(runtime_paths):
+    victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph"), (
             "child never reported its own argv"
         )
-        pid_file = tmp_path / "pid.txt"
-        sidecar = tmp_path / "ws.json"
-        pid_file.write_text(str(victim.pid))
-        sidecar.write_text(json.dumps({"pid": victim.pid}))
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(
-                runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
-            ),
-        )
-        monkeypatch.setattr(manager, "_PROCESS", None)
-        assert manager.stop_recorded_server() == victim.pid
-        assert victim.poll() is not None, "owned langgraph process must be stopped"
-        assert not pid_file.exists()
-        assert not sidecar.exists()
+        _record_live(victim.pid)
+        assert manager.stop_server() == victim.pid
+        assert victim.poll() is not None, "the recorded server must be stopped"
+        assert runtime_paths.record.exists(), "the server removes its record itself"
     finally:
         if victim.poll() is None:
             victim.kill()
         victim.wait()
 
 
-def test_stop_inflight_owned_server_ignores_disk_record(
-    tmp_path, monkeypatch, runtime_paths
+@pytest.mark.parametrize("lasting", [True, None])
+def test_stop_server_keep_owned_stops_background_service(
+    monkeypatch, runtime_paths, lasting
 ):
-    """The launcher's mid-start fallback stops only the in-memory owned process.
-    With nothing spawned yet (pre-Popen), the on-disk PID file still names a
-    different session's backend — it must be left untouched, not killed."""
-    import subprocess
-    import sys
+    Processes(monkeypatch).add(4242)
+    write_record(4242, **({} if lasting is None else {"lasting": lasting}))
+    monkeypatch.setattr(manager, "_end_server_tree", lambda *a, **k: None)
 
-    victim = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
+    assert manager.stop_server(keep_owned=True) == 4242
+
+
+def test_stop_server_keep_owned_leaves_server_its_starter_owns(
+    monkeypatch, runtime_paths
+):
+    Processes(monkeypatch).add(4242)
+    write_record(4242, lasting=False)
+    ended: list = []
+    monkeypatch.setattr(
+        manager, "_end_server_tree", lambda pid, *a, **k: ended.append(pid)
     )
-    try:
-        pid_file = tmp_path / "pid.txt"
-        pid_file.write_text(str(victim.pid))
-        monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
-        )
-        monkeypatch.setattr(manager, "_PROCESS", None)  # nothing spawned yet
-        assert manager.stop_inflight_owned_server() is None
-        assert victim.poll() is None, "disk-recorded server must not be killed"
-    finally:
-        victim.kill()
-        victim.wait()
+
+    with pytest.raises(manager.ServerKeptError, match="left running"):
+        manager.stop_server(keep_owned=True)
+    assert ended == []
+    assert manager.owned_by_its_starter(manager.read_record()) is True
 
 
-def test_stop_inflight_owned_server_stops_the_owned_process(monkeypatch, runtime_paths):
-    """Once our own child is spawned (``_PROCESS`` set), a mid-start stop still
-    tears it down, so the close-during-boot orphan is cleaned up."""
-    import subprocess
-    import sys
-
-    owned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
-        monkeypatch.setattr(manager, "_PROCESS", owned)
-        assert manager.stop_inflight_owned_server() == owned.pid
-        owned.wait(timeout=5)
-        assert owned.poll() is not None, "owned in-flight process must be stopped"
-    finally:
-        if owned.poll() is None:
-            owned.kill()
-            owned.wait()
-
-
-def test_stop_recorded_server_cleans_corrupt_pid_file(
-    tmp_path, monkeypatch, runtime_paths
-):
-    """A corrupt PID file is cleaned up, matching the docstring's promise."""
-    pid_file = tmp_path / "pid.txt"
-    pid_file.write_text("not-a-pid")
+def test_stop_server_reaps_server_this_process_started(monkeypatch, runtime_paths):
+    proc = SimpleNamespace(pid=4242, returncode=None, poll=lambda: None)
+    Processes(monkeypatch).add(4242)
+    write_record(4242)
+    monkeypatch.setattr(manager, "_PROCESS", proc)
+    seen: list = []
     monkeypatch.setattr(
         manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, pid_file=pid_file),
+        "_end_server_tree",
+        lambda pid, popen=None, *, break_group=False: seen.append(popen),
     )
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    assert manager.stop_recorded_server() is None
-    assert not pid_file.exists()
+
+    assert manager.stop_server() == 4242
+    assert seen[0] is proc
+    assert manager._PROCESS is None
+
+
+def test_stop_server_stops_older_releases_server_and_forgets_it(
+    monkeypatch, runtime_paths
+):
+    Processes(monkeypatch).add(4141)
+    folder = write_older_record(4141)
+    ended: list = []
+    monkeypatch.setattr(
+        manager, "_end_server_tree", lambda pid, *a, **k: ended.append(pid)
+    )
+
+    assert manager.stop_server() == 4141
+    assert ended == [4141]
+    assert not (folder / server_record.RECORD_FILE).exists()
+    assert not (folder / "langgraph_dev.pid").exists()
+
+
+def test_stop_langgraph_dev_leaves_record(monkeypatch, runtime_paths):
+    """The server removes its record itself as it exits."""
+    write_record(4242)
+    proc = SimpleNamespace(pid=4242, poll=lambda: 0)
+
+    manager.stop_langgraph_dev(proc)
+
+    assert runtime_paths.record.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +979,6 @@ def test_request_clean_stop_warns_when_the_helper_fails(
 def test_stop_langgraph_dev_sends_ctrl_break_only_to_its_own_group(
     monkeypatch, runtime_paths, spawned_here, clean, expected
 ):
-    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
     monkeypatch.setattr(manager, "_PROCESS", None)
     proc = SimpleNamespace(pid=4242, poll=lambda: None)
     seen: list = []
@@ -1058,54 +995,14 @@ def test_stop_langgraph_dev_sends_ctrl_break_only_to_its_own_group(
     assert proc.pid not in manager._BREAK_GROUP_PIDS
 
 
-def test_stop_inflight_owned_server_skips_the_clean_stop(monkeypatch, runtime_paths):
-    """A server still starting has no run to put back in the queue."""
-    owned = SimpleNamespace(pid=4242, poll=lambda: None)
-    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
-    monkeypatch.setattr(manager, "_PROCESS", owned)
-    monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", {owned.pid})
-    seen: list = []
-    monkeypatch.setattr(
-        manager,
-        "_end_server_tree",
-        lambda pid, popen=None, *, break_group=False: seen.append((pid, break_group)),
-    )
-    assert manager.stop_inflight_owned_server() == owned.pid
-    assert seen == [(owned.pid, False)]
-    assert manager._PROCESS is None
-
-
-@pytest.mark.parametrize(
-    ("record", "created_offset", "expected"),
-    [
-        ({}, 0.0, True),
-        ({}, None, False),  # a record from before this release
-        ({"pid": 1}, 0.0, False),  # another server
-        # The PID was reused by a process started later: no Ctrl+Break, which
-        # would reach every process on that process's console.
-        ({}, -60.0, False),
-    ],
-)
-def test_stop_recorded_server_trusts_the_record_for_the_process_group(
-    tmp_path, monkeypatch, runtime_paths, record, created_offset, expected
+@pytest.mark.parametrize("break_group", [True, False])
+def test_stop_server_trusts_record_for_process_group(
+    runtime_paths, monkeypatch, break_group
 ):
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
-        pid_file, sidecar = tmp_path / "pid.txt", tmp_path / "ws.json"
-        pid_file.write_text(str(victim.pid))
-        if created_offset is not None:
-            created = psutil.Process(victim.pid).create_time() + created_offset
-            record = {**record, "ctrl_break_create_time": created}
-        sidecar.write_text(json.dumps({"pid": victim.pid, **record}))
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(
-                runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
-            ),
-        )
-        monkeypatch.setattr(manager, "_PROCESS", None)
+        _record_live(victim.pid, **{server_record.BREAK_GROUP_KEY: break_group})
         seen: list = []
 
         def _end(pid, popen=None, *, break_group=False):
@@ -1114,32 +1011,12 @@ def test_stop_recorded_server_trusts_the_record_for_the_process_group(
             victim.wait()
 
         monkeypatch.setattr(manager, "_end_server_tree", _end)
-        assert manager.stop_recorded_server() == victim.pid
-        assert seen == [(victim.pid, expected)]
+        assert manager.stop_server() == victim.pid
+        assert seen == [(victim.pid, break_group)]
     finally:
         if victim.poll() is None:
             victim.kill()
             victim.wait()
-
-
-def _record_server(tmp_path, monkeypatch, runtime_paths, pid: int):
-    """Record ``pid`` as the server, with its creation time, as a start on
-    Windows does."""
-    pid_file, sidecar = tmp_path / "pid.txt", tmp_path / "ws.json"
-    pid_file.write_text(str(pid))
-    created = psutil.Process(pid).create_time()
-    sidecar.write_text(
-        json.dumps({"workspace": "/a", "pid": pid, "ctrl_break_create_time": created})
-    )
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(
-            runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
-        ),
-    )
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    return pid_file, sidecar
 
 
 def _fake_hold(monkeypatch, steps: list, refused=None):
@@ -1159,24 +1036,23 @@ def _fake_hold(monkeypatch, steps: list, refused=None):
     monkeypatch.setattr(manager, "_hold_pid", _hold)
 
 
-def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
-    tmp_path, monkeypatch, runtime_paths
-):
+def test_stop_server_holds_pid_until_server_is_stopped(monkeypatch, runtime_paths):
     """A process given the server's PID during the stop gets neither the
-    Ctrl+Break nor the kills."""
+    Ctrl+Break nor the kills: the check that it is still the recorded
+    process runs while the PID is held."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
-        _record_server(tmp_path, monkeypatch, runtime_paths, victim.pid)
+        _record_live(victim.pid, **{server_record.BREAK_GROUP_KEY: True})
         steps: list = []
         _fake_hold(monkeypatch, steps)
+        real_same = manager._same_process
 
-        class _Process(psutil.Process):
-            def cmdline(self):
-                steps.append(("cmdline", self.pid))
-                return super().cmdline()
+        def _same(pid, created):
+            steps.append(("check", pid))
+            return real_same(pid, created)
 
-        monkeypatch.setattr(manager.psutil, "Process", _Process)
+        monkeypatch.setattr(manager, "_same_process", _same)
 
         def _end(pid, popen=None, *, break_group=False):
             steps.append(("end", pid, break_group))
@@ -1184,10 +1060,11 @@ def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
             victim.wait()
 
         monkeypatch.setattr(manager, "_end_server_tree", _end)
-        assert manager.stop_recorded_server() == victim.pid
-        assert steps == [
+        assert manager.stop_server() == victim.pid
+        held = steps[steps.index(("hold", victim.pid)) :]
+        assert held == [
             ("hold", victim.pid),
-            ("cmdline", victim.pid),
+            ("check", victim.pid),
             ("end", victim.pid, True),
             ("release", victim.pid),
         ]
@@ -1197,13 +1074,11 @@ def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
             victim.wait()
 
 
-def test_stop_recorded_server_releases_the_pid_when_the_stop_fails(
-    tmp_path, monkeypatch, runtime_paths
-):
+def test_stop_server_releases_pid_when_stop_fails(monkeypatch, runtime_paths):
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
-        _record_server(tmp_path, monkeypatch, runtime_paths, victim.pid)
+        _record_live(victim.pid)
         steps: list = []
         _fake_hold(monkeypatch, steps)
 
@@ -1212,7 +1087,7 @@ def test_stop_recorded_server_releases_the_pid_when_the_stop_fails(
 
         monkeypatch.setattr(manager, "_end_server_tree", _end)
         with pytest.raises(RuntimeError, match="stop failed"):
-            manager.stop_recorded_server()
+            manager.stop_server()
         assert steps == [("hold", victim.pid), ("release", victim.pid)]
     finally:
         if victim.poll() is None:
@@ -1220,80 +1095,46 @@ def test_stop_recorded_server_releases_the_pid_when_the_stop_fails(
             victim.wait()
 
 
-def test_stop_recorded_server_treats_a_pid_it_cannot_find_as_dead(
-    tmp_path, monkeypatch, runtime_paths
+@pytest.mark.parametrize("refused", [psutil.NoSuchProcess, psutil.AccessDenied])
+def test_stop_server_stops_nothing_it_cannot_find_or_may_not_open(
+    monkeypatch, runtime_paths, refused
 ):
-    """``OpenProcess`` says no process has the PID: the files are cleaned up and
-    nothing is stopped, as for a PID psutil cannot find."""
+    """``OpenProcess`` says no process has the PID, or refuses access:
+    nothing is stopped, and the record stays."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
-        pid_file, sidecar = _record_server(
-            tmp_path, monkeypatch, runtime_paths, victim.pid
-        )
-        _fake_hold(monkeypatch, [], refused=psutil.NoSuchProcess)
+        _record_live(victim.pid)
+        _fake_hold(monkeypatch, [], refused=refused)
         ended: list = []
         monkeypatch.setattr(
             manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
         )
-        assert manager.stop_recorded_server() is None
+        assert manager.stop_server() is None
         assert ended == []
-        assert not pid_file.exists()
-        assert not sidecar.exists()
-    finally:
-        victim.kill()
-        victim.wait()
-
-
-def test_stop_recorded_server_only_cleans_up_a_server_it_may_not_open(
-    tmp_path, monkeypatch, runtime_paths
-):
-    """Access denied: reading the command line needs at least the hold's
-    query-limited access, so it is refused too, and the stop removes the files
-    and leaves the server alone, as ``main`` does for a server it may not read."""
-    victim = _sleeper("langgraph")
-    try:
-        assert _wait_for_child_argv(victim.pid, "langgraph")
-        pid_file, sidecar = _record_server(
-            tmp_path, monkeypatch, runtime_paths, victim.pid
-        )
-        _fake_hold(monkeypatch, [], refused=psutil.AccessDenied)
-        ended: list = []
-        monkeypatch.setattr(
-            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
-        )
-        assert manager.stop_recorded_server() is None
-        assert ended == []
-        assert not pid_file.exists()
-        assert not sidecar.exists()
+        assert runtime_paths.record.exists()
         assert victim.poll() is None
     finally:
         victim.kill()
         victim.wait()
 
 
-def test_stop_recorded_server_keeps_a_server_it_could_not_open(
-    tmp_path, monkeypatch, runtime_paths
-):
+def test_stop_server_keeps_server_it_could_not_open(monkeypatch, runtime_paths):
     """Any other refusal (on Windows, out of resources): the server may be
-    running and is not held, so it gets no signal, and its records stay so a
-    retry finds it."""
+    running and is not held, so it gets no signal, and a retry finds it."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
-        pid_file, sidecar = _record_server(
-            tmp_path, monkeypatch, runtime_paths, victim.pid
-        )
+        _record_live(victim.pid)
         _fake_hold(monkeypatch, [], refused=OSError)
         ended: list = []
         monkeypatch.setattr(
             manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
         )
         with pytest.raises(manager.ServerStopFailedError, match="try again"):
-            manager.stop_recorded_server()
+            manager.stop_server()
         assert ended == []
-        assert pid_file.exists()
-        assert sidecar.exists()
+        assert runtime_paths.record.exists()
         assert victim.poll() is None
     finally:
         victim.kill()
@@ -1391,52 +1232,11 @@ def test_hold_pid_on_windows():
         proc.wait()
 
 
-def test_sidecar_records_the_process_group_only_when_asked(
-    tmp_path, monkeypatch, runtime_paths
-):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(pid=1)
-    record = manager._read_workspace_sidecar()
-    assert "ctrl_break_create_time" not in record
-    manager._write_workspace_sidecar(pid=1, break_group_created=1234.5)
-    record = manager._read_workspace_sidecar()
-    assert record["ctrl_break_create_time"] == 1234.5
-
-
 def test_server_config_fingerprint_tracks_dangerous_mode():
     cfg = manager.EvoScientistConfig()
     base = manager._server_config_fingerprint(cfg)
     cfg.dangerous_mode = True
     assert manager._server_config_fingerprint(cfg) != base
-
-
-def test_pid_serves_port_matrix():
-    import subprocess
-    import sys
-
-    assert manager._pid_serves_port(None, 6174) is False
-    assert manager._pid_serves_port(True, 6174) is False
-    assert manager._pid_serves_port(-1, 6174) is False
-
-    victim = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph", "6174"]
-    )
-    try:
-        assert _wait_for_child_argv(victim.pid, "6174"), (
-            "child never reported its own argv"
-        )
-        assert manager._pid_serves_port(victim.pid, 6174) is True
-        assert manager._pid_serves_port(victim.pid, 9999) is False, (
-            "must not attribute a server bound to a different port"
-        )
-    finally:
-        victim.kill()
-        victim.wait()
-    assert manager._pid_serves_port(victim.pid, 6174) is False, "dead pid"
 
 
 def test_server_config_fingerprint_covers_new_fields_by_default():
@@ -1563,3 +1363,28 @@ def test_server_config_fingerprint_keeps_flagged_auth_mode():
     assert manager._server_config_fingerprint(flagged) != (
         manager._server_config_fingerprint(plain)
     )
+
+
+def test_read_record_ignores_dead_pid_while_lock_is_held(monkeypatch, runtime_paths):
+    """A killed server's record, read while a new server holds the lock
+    before it wrote its own."""
+    dead = {4242}
+    lock_follows_record(monkeypatch, {True}, dead)
+    write_record(4242)
+
+    assert manager.read_record() is None
+
+
+def test_stop_server_stops_server_hung_in_its_shutdown(runtime_paths):
+    """It keeps its record until it exits, so a stop finds it by pid even
+    though it no longer listens."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        _record_live(victim.pid)
+        assert manager.stop_server() == victim.pid
+        assert victim.poll() is not None
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+        victim.wait()

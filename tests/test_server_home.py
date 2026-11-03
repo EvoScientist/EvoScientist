@@ -35,7 +35,7 @@ def test_server_lock_is_held_once(home):
     server_home.hold_server_lock()
     server_home.hold_server_lock()  # already held: nothing more
 
-    assert server_home.server_running()
+    assert server_home.lock_state() == server_home.HELD
     if os.name == "posix":
         assert home.stat().st_mode & 0o777 == 0o700
 
@@ -45,16 +45,16 @@ def test_server_lock_refuses_second_server(home):
     try:
         with pytest.raises(server_home.ServerRunningError, match="already uses"):
             server_home.hold_server_lock()
-        assert server_home.server_running()
+        assert server_home.lock_state() == server_home.HELD
     finally:
         lock.release()
 
-    assert not server_home.server_running()
+    assert server_home.lock_state() == server_home.FREE
     server_home.hold_server_lock()
 
 
 def test_server_running_is_false_without_server_home(home):
-    assert not server_home.server_running()
+    assert server_home.lock_state() == server_home.FREE
     assert not home.exists()
 
 
@@ -130,3 +130,38 @@ def test_failed_backup_leaves_none(served_from_home, monkeypatch):
     server_home.back_up_store()
 
     assert sorted(p.name for p in store.parent.iterdir()) == [store.name]
+
+
+def test_server_running_counts_lock_another_prober_holds_briefly_as_free(home):
+    """Another client checking holds the lock for an instant: not a server."""
+    import threading
+
+    from filelock import FileLock
+
+    home.mkdir(mode=0o700)
+    held = threading.Event()
+
+    def _probe():
+        with FileLock(str(server_home.lock_path())):
+            held.set()
+            threading.Event().wait(0.05)
+
+    prober = threading.Thread(target=_probe)
+    prober.start()
+    assert held.wait(5)
+    try:
+        assert server_home.lock_state() == server_home.FREE
+    finally:
+        prober.join(5)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX modes")
+def test_lock_state_unreadable_lock_is_unknown(home):
+    home.mkdir(mode=0o700)
+    lock = server_home.lock_path()
+    lock.touch()
+    lock.chmod(0)
+    try:
+        assert server_home.lock_state() == server_home.UNKNOWN
+    finally:
+        lock.chmod(0o600)
