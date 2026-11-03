@@ -572,6 +572,7 @@ def _reset_notifier_state(an_mod):
     an_mod._idle_reader_active_seen.clear()
     an_mod._reader_enqueued_process_ids.clear()
     an_mod._bg_reader_in_flight.clear()
+    an_mod._bg_mark_failed_ids.clear()
     an_mod._bg_idle_reader_last_poll.clear()
     an_mod._bg_idle_reader_active_seen.clear()
 
@@ -1550,6 +1551,27 @@ async def test_bg_reader_reports_nothing_until_the_mark_is_written():
     )
     assert [n.status for n in drain_notifications("cli-tid")] == ["untracked"]
     assert gateway.process_status_calls == ["proc-1", "proc-1"]
+
+
+async def test_bg_reader_warns_once_when_the_mark_keeps_failing(caplog):
+    # A write that never succeeds keeps the notice back; the first failure is
+    # a WARNING so there is a trail, the retries are DEBUG.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    gateway.update_error = RuntimeError("Ambiguous update, specify as_node")
+    target = GraphTarget(local_graph=MagicMock())
+
+    with caplog.at_level("DEBUG", logger=async_notifier.logger.name):
+        for _ in range(3):
+            await async_notifier.enqueue_bg_process_completions_from_state(
+                gateway, target, "cli-tid"
+            )
+
+    levels = [r.levelname for r in caplog.records if "Could not mark" in r.getMessage()]
+    assert levels == ["WARNING", "DEBUG", "DEBUG"]
+    assert drain_notifications("cli-tid") == []
 
 
 @pytest.mark.usefixtures("no_mcp")

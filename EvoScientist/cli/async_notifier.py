@@ -397,6 +397,8 @@ _reader_enqueued_process_ids: set[str] = set()
 # without this reservation both would observe the same terminal status and
 # enqueue the completion twice.
 _bg_reader_in_flight: set[str] = set()
+# Process ids whose ``untracked`` mark failed to write at least once.
+_bg_mark_failed_ids: set[str] = set()
 _bg_idle_reader_last_poll: dict[str | None, float] = {}
 
 UNTRACKED_STATUS: Final = "untracked"
@@ -479,8 +481,13 @@ async def _mark_untracked(
             {"bg_processes": {process_id: {**record, "status": UNTRACKED_STATUS}}},
         )
     except Exception:
-        logger.debug(
-            "Could not mark background process %s untracked; retrying next poll",
+        # The first failure per process is a WARNING: a write that never
+        # succeeds would otherwise keep the notice back with no trail.
+        log = logger.debug if process_id in _bg_mark_failed_ids else logger.warning
+        _bg_mark_failed_ids.add(process_id)
+        log(
+            "Could not mark background process %s untracked; it is reported "
+            "once a later poll writes the mark",
             process_id,
             exc_info=True,
         )
