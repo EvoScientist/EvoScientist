@@ -210,6 +210,20 @@ def test_format_notification_lines_timeout_uses_warning_icon():
         assert status in body_text
 
 
+def test_format_notification_lines_untracked_process_uses_warning_icon():
+    notifs = [
+        async_notifier.AsyncTaskNotification(
+            "proc-1", "demo", "untracked", "", "sleep 5", kind="bg-process", pid=4242
+        )
+    ]
+    [top, (body_text, body_style), _] = format_notification_lines(notifs)
+    assert "Background" in top[0]
+    assert "⚠" in body_text
+    assert body_style == "yellow"
+    assert "sleep 5" in body_text
+    assert "untracked" in body_text
+
+
 def test_drain_returns_all_pending_and_empties_queue():
     """drain_notifications pulls every pending notification and empties queue."""
     # Add three notifications
@@ -310,6 +324,49 @@ def test_format_batch_message_multiple():
         "task_id": "t2",
     }
     assert "check_async_task" in msg.lower()  # hint to LLM
+
+
+def _untracked(task_id="proc-1", pid=4242):
+    return async_notifier.AsyncTaskNotification(
+        task_id=task_id,
+        agent_name="demo",
+        status="untracked",
+        received_at="2026-11-03T12:00:00Z",
+        prompt="sleep 5",
+        kind="bg-process",
+        pid=pid,
+    )
+
+
+def test_format_batch_message_untracked_process_gets_pid_and_its_own_hint():
+    # check_process no longer knows the process, so the message points at the
+    # pid and the log instead of offering a fetch.
+    msg = format_batch_message([_untracked()])
+    lines = msg.splitlines()
+    assert __import__("json").loads(lines[1]) == {
+        "agent": "demo",
+        "kind": "bg-process",
+        "status": "untracked",
+        "task_id": "proc-1",
+        "pid": 4242,
+    }
+    assert lines[2:] == [async_notifier.UNTRACKED_HINT]
+    assert ".bg_processes/<task_id>.log" in msg
+    assert "fetch full result" not in msg
+
+
+def test_format_batch_message_mixed_batch_keeps_the_fetch_hint():
+    exited = async_notifier.AsyncTaskNotification(
+        task_id="proc-2",
+        agent_name="other",
+        status="success",
+        received_at="2026-11-03T12:00:00Z",
+        kind="bg-process",
+    )
+    lines = format_batch_message([_untracked(), exited]).splitlines()
+    assert "check_process (background processes)" in lines[3]
+    assert lines[4] == async_notifier.UNTRACKED_HINT
+    assert "pid" not in __import__("json").loads(lines[2])
 
 
 def test_format_batch_message_unknown_kind_uses_fallback_hint():

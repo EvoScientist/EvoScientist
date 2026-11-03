@@ -402,6 +402,16 @@ UNTRACKED_STATUS: Final = "untracked"
 The reader writes it into thread state when it reports the process, so a later
 EvoSci process that resumes the thread does not report it again.
 """
+
+UNTRACKED_HINT: Final = (
+    "(untracked: the process that tracked this background process restarted or "
+    "cannot be reached, so check_process no longer knows it and its exit will not "
+    "be reported. It may still be running. The pid may have been reused: confirm "
+    "it by command and start time. On POSIX the pid leads a session whose child "
+    "processes can outlive it. Its output log is .bg_processes/<task_id>.log in "
+    "the folder it ran in.)"
+)
+"""Closing line of a synthetic message that reports an ``untracked`` process."""
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}
 
 
@@ -729,29 +739,32 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
         return ""
     lines = ["[Async tasks update]"]
     for n in notifs:
+        entry = {
+            "agent": n.agent_name,
+            "kind": n.kind,
+            "status": n.status,
+            "task_id": n.task_id,
+        }
+        if n.pid is not None:
+            entry["pid"] = n.pid
+        lines.append(json.dumps(entry, ensure_ascii=False))
+    # An untracked process has nothing to fetch: check_process no longer knows it.
+    fetchable = [n for n in notifs if n.status != UNTRACKED_STATUS]
+    if fetchable:
+        # bg-process is inspected with check_process; sub-agents with check_async_task.
+        hints: list[str] = []
+        if any(n.kind == "agent" for n in fetchable):
+            hints.append("check_async_task (sub-agents)")
+        if any(n.kind == "bg-process" for n in fetchable):
+            hints.append("check_process (background processes)")
+        # Fallback when a batch has only unrecognized kinds (hints empty).
+        hint_text = " or ".join(hints) if hints else "the appropriate status tool"
         lines.append(
-            json.dumps(
-                {
-                    "agent": n.agent_name,
-                    "kind": n.kind,
-                    "status": n.status,
-                    "task_id": n.task_id,
-                },
-                ensure_ascii=False,
-            )
+            f"(Signal only — fetch full result via {hint_text} if relevant to "
+            "the current step, else acknowledge & continue.)"
         )
-    # bg-process is inspected with check_process; sub-agents with check_async_task.
-    hints: list[str] = []
-    if any(n.kind == "agent" for n in notifs):
-        hints.append("check_async_task (sub-agents)")
-    if any(n.kind == "bg-process" for n in notifs):
-        hints.append("check_process (background processes)")
-    # Fallback when a batch has only unrecognized kinds (hints empty).
-    hint_text = " or ".join(hints) if hints else "the appropriate status tool"
-    lines.append(
-        f"(Signal only — fetch full result via {hint_text} if relevant to "
-        "the current step, else acknowledge & continue.)"
-    )
+    if len(fetchable) < len(notifs):
+        lines.append(UNTRACKED_HINT)
     return "\n".join(lines)
 
 
