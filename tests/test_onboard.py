@@ -839,6 +839,12 @@ class TestStepReasoningEffort:
         assert values == ["", "low", "medium", "high", "xhigh", "max"]
         assert default == ""
 
+    def test_anthropic_offers_the_levels_current_claude_accepts(self):
+        _, values, default = self._run("anthropic", "")
+
+        assert values == ["low", "medium", "high", "xhigh", "max"]
+        assert default == "max"
+
     def test_deepseek_offers_its_documented_levels(self):
         _, values, default = self._run("deepseek", "")
 
@@ -859,6 +865,8 @@ class TestStepReasoningEffort:
             ("openai", "minimal", ""),  # carried over from another provider
             ("openrouter", "minimal", "minimal"),
             ("openrouter", "max", "high"),
+            ("anthropic", "minimal", "max"),
+            ("anthropic", "low", "low"),
             ("deepseek", "xhigh", "high"),
             ("deepseek", "none", "none"),
         ],
@@ -870,7 +878,12 @@ class TestStepReasoningEffort:
 
     @pytest.mark.parametrize(
         ("provider", "route"),
-        [("openai", "openai"), ("openai", "chatgpt"), ("openrouter", "openrouter")],
+        [
+            ("openai", "openai"),
+            ("openai", "chatgpt"),
+            ("openrouter", "openrouter"),
+            ("anthropic", "anthropic"),
+        ],
     )
     def test_every_offered_level_is_sent_unchanged(self, provider, route):
         from EvoScientist.llm.models import _resolve_reasoning_effort
@@ -883,19 +896,24 @@ class TestStepReasoningEffort:
                 assert _resolve_reasoning_effort("high", route) == value
 
     @pytest.mark.parametrize(
-        ("provider", "asked"),
+        ("provider", "anthropic_auth_mode", "asked"),
         [
-            ("openai", True),
-            ("openrouter", True),
-            ("deepseek", True),
-            ("anthropic", False),
-            ("", False),
+            ("openai", "api_key", True),
+            ("openrouter", "api_key", True),
+            ("anthropic", "api_key", True),
+            ("anthropic", "oauth", False),
+            ("deepseek", "api_key", True),
+            ("siliconflow", "api_key", False),
+            ("", "api_key", False),
         ],
     )
-    def test_only_providers_with_a_level_list_are_asked(self, provider, asked):
+    def test_only_providers_that_send_a_level_are_asked(
+        self, provider, anthropic_auth_mode, asked
+    ):
         from EvoScientist.config.onboard import steps as onboard_steps
 
-        assert onboard_steps._asks_reasoning_effort(provider) is asked
+        config = EvoScientistConfig(anthropic_auth_mode=anthropic_auth_mode)
+        assert onboard_steps._asks_reasoning_effort(config, provider) is asked
 
     def test_model_section_asks_openai_users_for_a_level(self):
         from EvoScientist.config.onboard.wizard import run_onboard
@@ -1924,6 +1942,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode (API key, not OAuth)
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -1978,6 +1997,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
                 "api_key",  # Auxiliary OpenAI auth mode
@@ -2264,6 +2284,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -2335,6 +2356,7 @@ class TestRunOnboard:
                     "anthropic",
                     "api_key",
                     "claude-sonnet-4-6",
+                    "max",  # Reasoning effort
                     "skip",  # Auxiliary: Skip (single driver)
                     "daemon",
                     True,
@@ -2385,6 +2407,7 @@ class TestRunOnboard:
                 "anthropic",
                 "api_key",
                 "claude-sonnet-4-6",
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",
                 True,

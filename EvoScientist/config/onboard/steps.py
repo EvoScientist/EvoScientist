@@ -944,9 +944,9 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-# Levels offered per provider; each one is sent unchanged on every route of
-# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``). "" stores nothing,
-# so each model keeps its own default.
+# Levels offered per provider, each one a level that provider's route takes (see
+# ``llm.models._ROUTE_REASONING_LEVELS``); a model whose profile lists fewer gets
+# the nearest one. OpenAI's "" stores nothing, so each model keeps its own level.
 _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
     # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
     "openrouter": [
@@ -965,6 +965,14 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("xhigh", "xhigh  — extra high reasoning depth"),
         ("max", "max    — deepest reasoning; uses your quota fastest"),
     ],
+    # https://platform.claude.com/docs/en/build-with-claude/effort
+    "anthropic": [
+        ("low", "low    — fastest, for simple tasks"),
+        ("medium", "medium — balances speed and depth"),
+        ("high", "high   — thorough reasoning"),
+        ("xhigh", "xhigh  — extra depth for coding and agentic work"),
+        ("max", "max    — deepest reasoning (recommended)"),
+    ],
     # https://api-docs.deepseek.com/guides/thinking_mode
     "deepseek": [
         ("low", "low    — lighter reasoning, faster replies"),
@@ -973,10 +981,15 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("none", "none   — turn thinking off"),
     ],
 }
+# Highlighted when no offered level is stored: the level each provider runs at.
+_REASONING_EFFORT_DEFAULTS: dict[str, str] = {"openai": "", "anthropic": "max"}
 
 
-def _asks_reasoning_effort(provider: str) -> bool:
+def _asks_reasoning_effort(config: EvoScientistConfig, provider: str) -> bool:
     """Whether onboarding offers a reasoning level for ``provider``."""
+    # Claude Pro/Max sign-in runs through the local ccproxy, where no effort is sent.
+    if provider == "anthropic" and config.anthropic_auth_mode == "oauth":
+        return False
     return provider in _REASONING_EFFORT_CHOICES
 
 
@@ -997,7 +1010,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     current = config.reasoning_effort
     offered = {value for value, _ in levels}
     if current not in offered:
-        current = "" if "" in offered else "high"
+        current = _REASONING_EFFORT_DEFAULTS.get(provider, "high")
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,

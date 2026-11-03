@@ -61,17 +61,30 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 _REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 _ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "chatgpt": ("low", "medium", "high", "xhigh", "max"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
+
+
+def _nearest_reasoning_level(effort: str, levels: tuple[str, ...]) -> str:
+    """Return ``effort`` if ``levels`` has it, else the nearest level it has
+    (the lower one on a tie, so fitting never raises cost)."""
+    known = [level for level in levels if level in _REASONING_SCALE]
+    if not known or effort in levels or effort not in _REASONING_SCALE:
+        return effort
+    rank = _REASONING_SCALE.index(effort)
+    return min(
+        known,
+        key=lambda level: (
+            abs(_REASONING_SCALE.index(level) - rank),
+            _REASONING_SCALE.index(level),
+        ),
+    )
 
 
 def _resolve_reasoning_effort(default: str, route: str) -> str:
     """Return the configured reasoning effort (or ``default``) as ``route`` takes it."""
     effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
-    levels = _ROUTE_REASONING_LEVELS.get(route)
-    if not levels or effort in levels or effort not in _REASONING_SCALE:
-        return effort
-    rank = _REASONING_SCALE.index(effort)
-    return min(levels, key=lambda level: abs(_REASONING_SCALE.index(level) - rank))
+    return _nearest_reasoning_level(effort, _ROUTE_REASONING_LEVELS.get(route, ()))
 
 
 # Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
@@ -341,6 +354,20 @@ def _fill_claude_structured_output(chat_model: Any, model_id: str) -> None:
         pass
 
 
+def _fit_claude_effort(chat_model: Any) -> None:
+    """Send the effort as a level the model's profile lists (Claude 4.6 has no xhigh)."""
+    profile = getattr(chat_model, "profile", None)
+    levels = (
+        profile.get("reasoning_effort_levels") if isinstance(profile, dict) else None
+    )
+    effort = getattr(chat_model, "reasoning_effort", None)
+    if not isinstance(levels, (list, tuple)) or not isinstance(effort, str):
+        return
+    fitted = _nearest_reasoning_level(effort, tuple(levels))
+    if fitted != effort:
+        chat_model.reasoning_effort = fitted
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -380,7 +407,7 @@ def _apply_auto_config(
                 kwargs.setdefault("max_tokens", 16000)
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            kwargs.setdefault("effort", "max")
+            kwargs.setdefault("effort", _resolve_reasoning_effort("max", "anthropic"))
         elif original_provider == "minimax":
             # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
             kwargs["thinking"] = {"type": "adaptive"}
@@ -752,6 +779,7 @@ def get_chat_model(
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
         _fill_claude_structured_output(chat_model, model_id)
+        _fit_claude_effort(chat_model)
 
     apply_known_context_window(chat_model)
 

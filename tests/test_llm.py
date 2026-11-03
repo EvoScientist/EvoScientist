@@ -2951,6 +2951,62 @@ def test_deepseek_sends_only_a_configured_reasoning_effort(
     assert captured.get("reasoning_effort") == sent
 
 
+def test_a_tie_between_two_levels_picks_the_lower_one():
+    from EvoScientist.llm.models import _nearest_reasoning_level
+
+    assert _nearest_reasoning_level("xhigh", ("max", "high", "medium", "low")) == "high"
+
+
+@pytest.mark.parametrize(
+    ("model_name", "configured", "sent"),
+    [
+        ("claude-sonnet-5-5", "medium", "medium"),
+        # Claude 4.6 lists no xhigh, so it gets the nearest level it lists.
+        ("claude-sonnet-4-6", "xhigh", "high"),
+        # No level list in the profile: sent as configured.
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+    ],
+)
+def test_native_claude_effort_reaches_the_wire(
+    monkeypatch, model_name, configured, sent
+):
+    import json
+
+    import anthropic
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+    captured = {}
+
+    def handler(request) -> object:
+        captured.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": model_name,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # A small max_tokens keeps the SDK from requiring streaming.
+    model = get_chat_model(model_name, provider="anthropic", max_tokens=1024)
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    model.invoke("hi")
+
+    assert captured["output_config"]["effort"] == sent
+    assert captured["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
 class TestDeepseekReasoningPassback:
     """Verify reasoning_content is retained in serialized DeepSeek history."""
 
@@ -3664,6 +3720,36 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
+
+    @pytest.mark.parametrize(
+        ("configured", "sent"),
+        [("", "max"), ("low", "low"), ("xhigh", "xhigh"), ("none", "low")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_native_claude_takes_the_configured_effort(
+        self, mock_init, configured, sent, monkeypatch
+    ):
+        """A level Claude does not take is sent as the nearest one it does."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        if configured:
+            monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+
+        get_chat_model("claude-sonnet-5-5", provider="anthropic")
+
+        assert mock_init.call_args[1]["effort"] == sent
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_claude_through_ccproxy_gets_no_effort(self, mock_init, monkeypatch):
+        """Pro/Max sign-in sends no effort, so onboarding does not ask for one."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-5-5", provider="anthropic")
+
+        assert "effort" not in mock_init.call_args[1]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_thinking_not_overridden(self, mock_init):
