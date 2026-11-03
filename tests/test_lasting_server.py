@@ -206,7 +206,7 @@ def test_offer_restart_hint_follows_default_workdir(
     monkeypatch, tmp_path, default_workdir
 ):
     """With a ``default_workdir`` a plain service start restarts it; without
-    one the next session does."""
+    one a session that needs it does."""
     from EvoScientist.cli import commands
 
     if default_workdir:
@@ -222,7 +222,7 @@ def test_offer_restart_hint_follows_default_workdir(
     assert steps == []
     assert "EvoSci service stop" in output
     assert ("EvoSci service start" in output) is default_workdir
-    assert ("next EvoSci session" in output) is not default_workdir
+    assert ("EvoSci session" in output) is not default_workdir
     assert "--workdir" not in output
 
 

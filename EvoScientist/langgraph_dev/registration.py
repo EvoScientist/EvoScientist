@@ -141,21 +141,34 @@ def _other_server(url: str) -> str:
     )
 
 
-def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
-    """The instance the server at *url* names (``GET /api/instance``)."""
+def _get(url: str, path: str, *, timeout: float) -> tuple[httpx.Response, object]:
+    """GET *path* from the server at *url*, without the local secret: the
+    response and its JSON body (``None`` when it has none).
+    ``RegistrationError`` when the request cannot be made."""
     from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
 
     try:
         response = httpx.get(
-            f"{url}/api/instance",
+            f"{url}{path}",
             headers=LANGGRAPH_DEV_AUTH_HEADERS,
             timeout=timeout,
+            # Loopback: a system proxy must not intercept it.
             trust_env=False,
         )
     except httpx.HTTPError as exc:
         raise RegistrationError(
             f"Could not reach the EvoScientist server at {url}: {exc}"
         ) from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    return response, body
+
+
+def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
+    """The instance the server at *url* names (``GET /api/instance``)."""
+    response, body = _get(url, "/api/instance", timeout=timeout)
     if response.status_code == 404:
         raise OlderServerError()
     if response.status_code != 200:
@@ -163,10 +176,6 @@ def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | No
             f"The EvoScientist server at {url} did not answer GET /api/instance "
             f"(HTTP {response.status_code})."
         )
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
     return body.get("instance") if isinstance(body, dict) else None
 
 
@@ -229,26 +238,14 @@ def served_projects(url: str) -> list[dict[str, object]]:
     ``RegistrationError`` when the local secret or a read fails, or a read
     times out.
     """
-    from .sdk import LANGGRAPH_DEV_AUTH_HEADERS
-
     url = url.rstrip("/")
     _require_own_server(url, timeout=STATUS_TIMEOUT)
-    try:
-        response = httpx.get(
-            f"{url}/api/workspaces",
-            headers=LANGGRAPH_DEV_AUTH_HEADERS,
-            timeout=STATUS_TIMEOUT,
-            trust_env=False,
-        )
-    except httpx.HTTPError as exc:
-        raise RegistrationError(
-            f"Could not reach the EvoScientist server at {url}: {exc}"
-        ) from exc
-    try:
-        body = response.json() if response.status_code == 200 else None
-    except ValueError:
-        body = None
-    projects = body.get("workspaces") if isinstance(body, dict) else None
+    response, body = _get(url, "/api/workspaces", timeout=STATUS_TIMEOUT)
+    projects = (
+        body.get("workspaces")
+        if response.status_code == 200 and isinstance(body, dict)
+        else None
+    )
     if not isinstance(projects, list):
         raise RegistrationError(
             f"The EvoScientist server at {url} did not list its projects "

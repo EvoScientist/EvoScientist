@@ -328,7 +328,7 @@ def _offer_server_start() -> None:
             start_again = (
                 "then [bold]EvoSci service start[/bold]"
                 if config.default_workdir
-                else "and it starts again with your next EvoSci session"
+                else "and it starts again once an EvoSci session needs it"
             )
             console.print(
                 "[dim]The background agent service runs with your previous "
