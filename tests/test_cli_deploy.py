@@ -86,6 +86,7 @@ def _run_deploy_once(
     langgraph_dev_running: bool = True,  # health-check passes after start
     tunnel: bool = False,
     tunnel_url: str | None = None,
+    tunnel_error: str | None = None,
     on_port_check: Callable[[], None] | None = None,
     printed: list | None = None,
 ):
@@ -168,10 +169,14 @@ def _run_deploy_once(
         )
 
     monkeypatch.setattr(registration, "register_folder", _fake_register_folder)
+
     # Never poll a real log for the tunnel URL in tests.
-    monkeypatch.setattr(
-        lgm, "read_tunnel_url", lambda *a, **k: tunnel_url, raising=False
-    )
+    def _fake_read_tunnel_url(*_a, **_k):
+        if tunnel_error is not None:
+            raise lgm.TunnelFailedError(tunnel_error)
+        return tunnel_url
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _fake_read_tunnel_url, raising=False)
 
     # ccproxy mocks
     from EvoScientist import ccproxy_manager as ccp
@@ -293,6 +298,35 @@ def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
 
     assert captured["tunnel_passed"] is True
     assert any("PUBLIC TUNNEL" in line for line in captured["printed"])
+
+
+def test_deploy_reports_a_tunnel_failure(monkeypatch, tmp_path):
+    """A failure cloudflared logged is reported with its reason, not as a URL
+    the user should look for in the log."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(
+        monkeypatch,
+        config,
+        tunnel=True,
+        tunnel_error="failed to request quick Tunnel: i/o timeout",
+    )
+
+    printed = "\n".join(captured["printed"])
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in printed
+    )
+    assert "tunnel up" not in printed
+    assert "not detected" not in printed
+
+
+def test_deploy_reports_a_tunnel_url_that_never_came(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, tunnel=True)
+
+    printed = "\n".join(captured["printed"])
+    assert "Tunnel URL not detected" in printed
+    assert "quick tunnel failed" not in printed
 
 
 def test_deploy_workdir_cli_arg_beats_config(monkeypatch, tmp_path):

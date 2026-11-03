@@ -10,7 +10,8 @@ Events:
 - ``starting``: ``workspace``, ``host``, ``port``.
 - ``ready``: ``url``, ``owned``, ``workspace``, ``assistant_id``, ``data_dir``,
   ``config_dir``, ``log_file``, ``warnings`` (a list of strings), and with
-  ``--tunnel`` also ``public_url`` (null when no URL was reported in time).
+  ``--tunnel`` also ``public_url`` (null when no URL was reported in time,
+  or when cloudflared could not create the tunnel, which adds a warning).
   ``owned`` is true when this command started the backend and stops it on
   exit, false when it attached to a running one and leaves it running.
   ``workspace`` is the project this command registered, and
@@ -351,7 +352,10 @@ class _Run:
                 warnings.append(self.job.warning)
             hint = setup_hint()
             if tunnel:
-                public_url = self._wait_for_tunnel_url()
+                try:
+                    public_url = self._wait_for_tunnel_url()
+                except lgm.TunnelFailedError as exc:
+                    warnings.append(f"Cloudflare quick tunnel failed: {exc}")
                 if self.stop.is_set():
                     return
         if hint is not None:
@@ -478,7 +482,8 @@ class _Run:
 
     def _wait_for_tunnel_url(self) -> str | None:
         """The tunnel URL, in short waits that check for a stop between them;
-        each read scans the log from this server's start."""
+        each read scans the log from this server's start, and a cloudflared
+        failure raises :class:`TunnelFailedError` at once."""
         from ..langgraph_dev import manager as lgm
 
         deadline = time.monotonic() + _TUNNEL_WAIT

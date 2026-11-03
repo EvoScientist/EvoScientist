@@ -359,6 +359,28 @@ def test_tunnel_without_url_reports_null(h, capsys):
     assert _by_event(lines, "ready")["public_url"] is None
 
 
+def test_tunnel_failure_reports_null_and_the_reason(h, capsys, monkeypatch):
+    """cloudflared could not create the tunnel: ``ready`` follows the first
+    read, with no URL and cloudflared's reason among the warnings."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    reads: list[float] = []
+
+    def _read(timeout=35.0, **_k):
+        reads.append(timeout)
+        raise lgm.TunnelFailedError("failed to request quick Tunnel: i/o timeout")
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _read)
+    _, lines = h.run(capsys, tunnel=True)
+    ready = _by_event(lines, "ready")
+    assert ready["public_url"] is None
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in ready["warnings"]
+    )
+    assert reads == [json_mode._TICK]
+
+
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5"])
 def test_public_bind_warns_in_ready(h, capsys, exposed):
     _, lines = h.run(capsys, host=exposed)
