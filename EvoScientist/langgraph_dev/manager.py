@@ -11,6 +11,7 @@ Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -408,6 +409,16 @@ _BREAK_GROUP_PIDS: set[int] = set()
 _BREAK_GROUP_CREATED_KEY = "ctrl_break_create_time"
 _CREATE_TIME_TOLERANCE = 1.0
 
+# Windows: the access right a stop asks for to hold a recorded server's PID
+# (:func:`_hold_pid`), and the error ``OpenProcess`` gives for a PID no process
+# has. Query-limited access is enough, as nothing waits on the handle, and an
+# elevated process grants it to a non-elevated caller, where it refuses
+# ``PROCESS_QUERY_INFORMATION``.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_ACCESS_DENIED = 5
+_ERROR_PRIVILEGE_NOT_HELD = 1314
+
 # How long a stop on Windows waits for the server to exit after Ctrl+Break
 # before it ends the process tree hard, and how long the helper that sends it
 # may take.
@@ -781,9 +792,17 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
 
 
 class ServerKeptError(RuntimeError):
-    """``EvoSci service stop`` left the recorded server running: ``EvoSci
-    deploy`` or the desktop app owns it, or another EvoSci process is starting
-    or stopping it."""
+    """The stop left the recorded server running, with its records. ``EvoSci
+    service stop`` keeps a server that ``EvoSci deploy`` or the desktop app
+    owns, or that another EvoSci process is starting or stopping; any stop
+    raises :class:`ServerStopFailedError` when it could not open the server
+    for a reason other than it being gone or refusing access."""
+
+
+class ServerStopFailedError(ServerKeptError):
+    """The stop could not open the recorded server, for a reason other than
+    the server being gone or refusing access (on Windows, out of resources),
+    so it stopped nothing. Its records are kept, so a retry finds it."""
 
 
 def owned_by_its_starter() -> bool:
@@ -945,6 +964,47 @@ def _same_process(pid: int, created: float) -> bool:
     return now is not None and abs(now - created) <= _CREATE_TIME_TOLERANCE
 
 
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32, ctypes.get_last_error
+
+
+@contextlib.contextmanager
+def _hold_pid(pid: int):
+    """Windows: hold a handle to ``pid`` for the block. While it is open,
+    Windows does not give the PID to another process, so the checks of a
+    stop and the Ctrl+Break and kills that follow reach the same process,
+    even if it exits in between. When the handle is refused, nothing runs:
+    ``psutil.NoSuchProcess`` when no process has ``pid``,
+    ``psutil.AccessDenied`` for the errors psutil counts as permission
+    errors, ``OSError`` with the system's message for any other. Off Windows
+    it holds nothing."""
+    if os.name != "nt":
+        yield
+        return
+    kernel32, get_last_error = _kernel32()
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        error = get_last_error()
+        if error == _ERROR_INVALID_PARAMETER:
+            raise psutil.NoSuchProcess(pid)
+        if error in (_ERROR_ACCESS_DENIED, _ERROR_PRIVILEGE_NOT_HELD):
+            raise psutil.AccessDenied(pid)
+        import ctypes
+
+        raise ctypes.WinError(error)
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     """Explicitly stop the langgraph dev recorded in our PID file.
 
@@ -963,7 +1023,10 @@ def stop_recorded_server(*, keep_owned: bool = False) -> int | None:
     With *keep_owned* (``EvoSci service stop``), a live server that ``EvoSci
     deploy`` or the desktop app owns is left running, and so is one whose lock
     another process holds too long: :class:`ServerKeptError`. A record of an
-    older release, which does not say, is stopped.
+    older release, which does not say, is stopped. A server that refuses
+    access has its records removed, and nothing is stopped; one the stop could
+    not open for any other reason is left running with its records:
+    :class:`ServerStopFailedError`.
     """
     try:
         with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
@@ -1025,31 +1088,45 @@ def _stop_recorded_server_locked() -> int | None:
         return None
     except OSError:
         return None
-    try:
-        proc = psutil.Process(owned_pid)
-        cmdline = proc.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        stop_langgraph_dev()  # dead/inaccessible — clean the stale files
-        return None
-    if not any("langgraph" in arg for arg in cmdline):
-        stop_langgraph_dev()  # pid recycled by a foreign process — files only
-        return None
-    # A record from before the server led its own process group, or from
-    # another release, does not say so: no Ctrl+Break, the stop ends it hard.
-    # Nor for a PID reused since (a langgraph dev in the user's own terminal
-    # passes the check above): the creation time must match the record's.
-    sidecar = _read_workspace_sidecar()
-    recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
-    break_group = (
-        sidecar is not None
-        and sidecar.get("pid") == owned_pid
-        and isinstance(recorded_created, float)
-        and _same_process(owned_pid, recorded_created)
-    )
-    try:
-        _end_server_tree(owned_pid, break_group=break_group)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
+    # The PID is held from before the checks until the stop is done, so what
+    # the checks found is what gets the Ctrl+Break and the kills.
+    with contextlib.ExitStack() as hold:
+        try:
+            hold.enter_context(_hold_pid(owned_pid))
+            proc = psutil.Process(owned_pid)
+            cmdline = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            stop_langgraph_dev()  # dead/inaccessible — clean the stale files
+            return None
+        except OSError as exc:
+            # Neither gone nor refused (the hold, or an OS error psutil passes
+            # through): the server may be running, so it gets no signal and its
+            # records stay for a retry.
+            raise ServerStopFailedError(
+                f"Could not stop langgraph dev (pid {owned_pid}): "
+                f"{str(exc).rstrip('.')}. It "
+                "keeps running and its records are kept; try again."
+            ) from exc
+        if not any("langgraph" in arg for arg in cmdline):
+            stop_langgraph_dev()  # pid recycled by a foreign process — files only
+            return None
+        # A record from before the server led its own process group, or from
+        # another release, does not say so: no Ctrl+Break, the stop ends it
+        # hard. Nor for a PID reused since (a langgraph dev in the user's own
+        # terminal passes the check above): the creation time must match the
+        # record's.
+        sidecar = _read_workspace_sidecar()
+        recorded_created = sidecar.get(_BREAK_GROUP_CREATED_KEY) if sidecar else None
+        break_group = (
+            sidecar is not None
+            and sidecar.get("pid") == owned_pid
+            and isinstance(recorded_created, float)
+            and _same_process(owned_pid, recorded_created)
+        )
+        try:
+            _end_server_tree(owned_pid, break_group=break_group)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     stop_langgraph_dev()
     return owned_pid
 

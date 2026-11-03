@@ -264,6 +264,7 @@ def check_server(
     from .config import get_effective_config
     from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
+        ServerStopFailedError,
         _base_url,
         _pid_serves_port,
         _read_workspace_sidecar,
@@ -315,18 +316,23 @@ def check_server(
             from .setup.server import remember_for_restart
 
             remember_for_restart()
-        pid = stop_recorded_server()
+        try:
+            pid = stop_recorded_server()
+        except ServerStopFailedError as exc:
+            # The records are kept, so running the update again retries.
+            pid, failed = None, f"{exc} Nothing was changed."
+        else:
+            failed = (
+                f"Could not stop the EvoScientist server on port {port}; nothing "
+                f"was changed. Stop it with EvoSci server stop, then run EvoSci "
+                f"update again."
+            )
         if pid is None:
             if restart:
                 from .setup.server import forget_restart
 
                 forget_restart()
-            raise UpdateError(
-                "server_running",
-                f"Could not stop the EvoScientist server on port {port}; nothing "
-                f"was changed. Stop it with EvoSci server stop, then run EvoSci "
-                f"update again.",
-            )
+            raise UpdateError("server_running", failed)
         emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
         _stop_service_ccproxy(emit)
         return

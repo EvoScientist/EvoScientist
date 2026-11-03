@@ -948,6 +948,28 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
     assert "left running" in result.output
 
 
+def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):
+    """Its records are kept: the stop says so and to try again, not that it
+    has no record, nor how to kill it by hand, and exits 1 for a script."""
+
+    def stop(*, keep_owned=False):
+        raise manager.ServerStopFailedError(
+            "Could not stop langgraph dev (pid 42): out of resources. It keeps "
+            "running and its records are kept; try again."
+        )
+
+    monkeypatch.setattr(manager, "stop_recorded_server", stop)
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "try again" in output
+    assert "ownership record" not in output
+    assert "kill" not in output
+    assert "Stop-Process" not in output
+
+
 def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):
     """EvoSci server stop ends a server EvoSci deploy or the desktop app owns
     too, so its work is asked about; without a terminal it is refused."""
