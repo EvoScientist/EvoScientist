@@ -614,11 +614,11 @@ def test_server_status_lists_projects_of_server_on_another_port(
         manager, "is_langgraph_dev_running", lambda **_k: configured_answers
     )
     monkeypatch.setattr(manager, "_pid_serves_port", lambda *_a: False)
-    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "127.0.0.1"))
+    monkeypatch.setattr(manager, "recorded_address", lambda: (7000, "192.0.2.10"))
 
     output = _status_output()
 
-    assert [url.rsplit(":", 1)[-1] for url in urls] == ["7000"]
+    assert [url.rsplit("//", 1)[-1] for url in urls] == ["192.0.2.10:7000"]
     assert "/p/a" in output
 
 
