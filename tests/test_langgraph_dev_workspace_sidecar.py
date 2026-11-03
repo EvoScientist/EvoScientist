@@ -8,6 +8,8 @@ says what the server was launched with, for the drift warnings.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import dataclasses
 import json
 import os
@@ -1094,6 +1096,275 @@ def test_stop_recorded_server_trusts_the_record_for_the_process_group(
         if victim.poll() is None:
             victim.kill()
             victim.wait()
+
+
+def _record_server(tmp_path, monkeypatch, runtime_paths, pid: int):
+    """Record ``pid`` as the server, with its creation time, as a start on
+    Windows does."""
+    pid_file, sidecar = tmp_path / "pid.txt", tmp_path / "ws.json"
+    pid_file.write_text(str(pid))
+    created = psutil.Process(pid).create_time()
+    sidecar.write_text(
+        json.dumps({"workspace": "/a", "pid": pid, "ctrl_break_create_time": created})
+    )
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+        ),
+    )
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    return pid_file, sidecar
+
+
+def _fake_hold(monkeypatch, steps: list, refused=None):
+    """``_hold_pid`` recording its hold and release, or raising *refused*
+    (an exception class, given the PID) as a refused ``OpenProcess`` does."""
+
+    @contextlib.contextmanager
+    def _hold(pid):
+        if refused is not None:
+            raise refused(pid)
+        steps.append(("hold", pid))
+        try:
+            yield
+        finally:
+            steps.append(("release", pid))
+
+    monkeypatch.setattr(manager, "_hold_pid", _hold)
+
+
+def test_stop_recorded_server_holds_the_pid_until_the_server_is_stopped(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A process given the server's PID during the stop gets neither the
+    Ctrl+Break nor the kills."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        _record_server(tmp_path, monkeypatch, runtime_paths, victim.pid)
+        steps: list = []
+        _fake_hold(monkeypatch, steps)
+
+        class _Process(psutil.Process):
+            def cmdline(self):
+                steps.append(("cmdline", self.pid))
+                return super().cmdline()
+
+        monkeypatch.setattr(manager.psutil, "Process", _Process)
+
+        def _end(pid, popen=None, *, break_group=False):
+            steps.append(("end", pid, break_group))
+            victim.kill()
+            victim.wait()
+
+        monkeypatch.setattr(manager, "_end_server_tree", _end)
+        assert manager.stop_recorded_server() == victim.pid
+        assert steps == [
+            ("hold", victim.pid),
+            ("cmdline", victim.pid),
+            ("end", victim.pid, True),
+            ("release", victim.pid),
+        ]
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait()
+
+
+def test_stop_recorded_server_releases_the_pid_when_the_stop_fails(
+    tmp_path, monkeypatch, runtime_paths
+):
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        _record_server(tmp_path, monkeypatch, runtime_paths, victim.pid)
+        steps: list = []
+        _fake_hold(monkeypatch, steps)
+
+        def _end(pid, popen=None, *, break_group=False):
+            raise RuntimeError("stop failed")
+
+        monkeypatch.setattr(manager, "_end_server_tree", _end)
+        with pytest.raises(RuntimeError, match="stop failed"):
+            manager.stop_recorded_server()
+        assert steps == [("hold", victim.pid), ("release", victim.pid)]
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait()
+
+
+def test_stop_recorded_server_treats_a_pid_it_cannot_find_as_dead(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """``OpenProcess`` says no process has the PID: the files are cleaned up and
+    nothing is stopped, as for a PID psutil cannot find."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        pid_file, sidecar = _record_server(
+            tmp_path, monkeypatch, runtime_paths, victim.pid
+        )
+        _fake_hold(monkeypatch, [], refused=psutil.NoSuchProcess)
+        ended: list = []
+        monkeypatch.setattr(
+            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
+        )
+        assert manager.stop_recorded_server() is None
+        assert ended == []
+        assert not pid_file.exists()
+        assert not sidecar.exists()
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_only_cleans_up_a_server_it_may_not_open(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """Access denied: reading the command line needs at least the hold's
+    query-limited access, so it is refused too, and the stop removes the files
+    and leaves the server alone, as ``main`` does for a server it may not read."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        pid_file, sidecar = _record_server(
+            tmp_path, monkeypatch, runtime_paths, victim.pid
+        )
+        _fake_hold(monkeypatch, [], refused=psutil.AccessDenied)
+        ended: list = []
+        monkeypatch.setattr(
+            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
+        )
+        assert manager.stop_recorded_server() is None
+        assert ended == []
+        assert not pid_file.exists()
+        assert not sidecar.exists()
+        assert victim.poll() is None
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_keeps_a_server_it_could_not_open(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """Any other refusal (on Windows, out of resources): the server may be
+    running and is not held, so it gets no signal, and its records stay so a
+    retry finds it."""
+    victim = _sleeper("langgraph")
+    try:
+        assert _wait_for_child_argv(victim.pid, "langgraph")
+        pid_file, sidecar = _record_server(
+            tmp_path, monkeypatch, runtime_paths, victim.pid
+        )
+        _fake_hold(monkeypatch, [], refused=OSError)
+        ended: list = []
+        monkeypatch.setattr(
+            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
+        )
+        with pytest.raises(manager.ServerStopFailedError, match="try again"):
+            manager.stop_recorded_server()
+        assert ended == []
+        assert pid_file.exists()
+        assert sidecar.exists()
+        assert victim.poll() is None
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+class _FakeKernel32:
+    def __init__(self, handle):
+        self.handle = handle
+        self.calls: list = []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.calls.append(("open", access, inherit, pid))
+        return self.handle
+
+    def CloseHandle(self, handle):
+        self.calls.append(("close", handle))
+        return True
+
+
+def _windows_kernel32(monkeypatch, handle, error=0) -> _FakeKernel32:
+    kernel32 = _FakeKernel32(handle)
+    monkeypatch.setattr(manager.os, "name", "nt")
+    monkeypatch.setattr(manager, "_kernel32", lambda: (kernel32, lambda: error))
+    return kernel32
+
+
+def test_hold_pid_keeps_a_handle_open_for_the_block(monkeypatch):
+    """Query-limited access only: Windows grants it for an elevated server too,
+    and any open handle keeps the PID from being given to another process."""
+    kernel32 = _windows_kernel32(monkeypatch, handle=1234)
+
+    def _fail_while_held():
+        with manager._hold_pid(4242):
+            assert kernel32.calls == [("open", 0x1000, False, 4242)]
+            raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        _fail_while_held()
+    assert kernel32.calls[-1] == ("close", 1234)
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (87, psutil.NoSuchProcess),  # ERROR_INVALID_PARAMETER: no such PID
+        # The two errors psutil counts as permission errors.
+        (5, psutil.AccessDenied),  # ERROR_ACCESS_DENIED
+        (1314, psutil.AccessDenied),  # ERROR_PRIVILEGE_NOT_HELD
+        (8, OSError),  # ERROR_NOT_ENOUGH_MEMORY, or any other
+    ],
+)
+def test_hold_pid_refused_runs_nothing(monkeypatch, error, raised):
+    kernel32 = _windows_kernel32(monkeypatch, handle=None, error=error)
+    # Windows only: an OSError with the system's message for the error.
+    monkeypatch.setattr(
+        ctypes, "WinError", lambda code: OSError(f"system text {code}"), raising=False
+    )
+    ran: list = []
+
+    def _hold():
+        with manager._hold_pid(4242):
+            ran.append(True)
+
+    with pytest.raises(raised) as refused:
+        _hold()
+    if raised is OSError:
+        assert str(refused.value) == f"system text {error}"
+    assert ran == []
+    assert [call[0] for call in kernel32.calls] == ["open"]
+
+
+def test_hold_pid_holds_nothing_off_windows(monkeypatch):
+    monkeypatch.setattr(manager.os, "name", "posix")
+    monkeypatch.setattr(manager, "_kernel32", lambda: pytest.fail("kernel32 loaded"))
+    ran: list = []
+    with manager._hold_pid(4242):
+        ran.append(True)
+    assert ran == [True]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process handles")
+def test_hold_pid_on_windows():
+    proc = _sleeper()
+    try:
+        with manager._hold_pid(proc.pid):
+            assert proc.poll() is None
+        # OpenProcess refuses the System Idle Process with the error it gives
+        # for a PID no process has.
+        with pytest.raises(psutil.NoSuchProcess):
+            with manager._hold_pid(0):
+                pass
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_sidecar_records_the_process_group_only_when_asked(

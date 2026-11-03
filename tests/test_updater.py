@@ -723,6 +723,11 @@ def server(monkeypatch):
     monkeypatch.setattr(manager, "_pid_serves_port", lambda pid, port: state["owned"])
 
     def stop():
+        if state["stop_fails"] == "unopened":
+            raise manager.ServerStopFailedError(
+                "Could not stop langgraph dev (pid 42): out of resources. It "
+                "keeps running and its records are kept; try again."
+            )
         if state["stop_fails"] or not state["owned"]:
             return None
         state["stopped"] += 1
@@ -852,7 +857,20 @@ def test_owned_server_that_does_not_stop(server):
     assert "ownership record" not in exc.value.message
 
 
-@pytest.mark.parametrize("stop_fails", [False, True])
+def test_owned_server_the_stop_could_not_open(server):
+    """Its records are kept, so running the update again retries: the error
+    says that, not to stop the server by hand first."""
+    server["stop_fails"] = "unopened"
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+    assert exc.value.code == "server_running"
+    assert "out of resources" in exc.value.message
+    assert "try again" in exc.value.message
+    assert "Nothing was changed" in exc.value.message
+    assert "EvoSci server stop" not in exc.value.message
+
+
+@pytest.mark.parametrize("stop_fails", [False, True, "unopened"])
 def test_lasting_server_is_recorded_for_restart(server, monkeypatch, stop_fails):
     """The setup after the update starts it again, from the same project;
     a server that did not stop leaves no record."""
