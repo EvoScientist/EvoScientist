@@ -22,7 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
@@ -452,11 +452,16 @@ async def _mark_untracked(
     target: GraphTarget,
     thread_id: str,
     process_id: str,
-) -> bool:
+) -> Literal["marked", "retry", "never"]:
     """Write ``status: "untracked"`` into the thread's record of ``process_id``.
 
-    Returns False when the mark cannot be written yet, so the caller retries on
-    a later poll and reports the process only once the mark is in state:
+    Returns ``"never"`` for a legacy (non-UUID) thread on the server backend:
+    the gateway refuses every write and every run on it, so neither the mark
+    nor the agent turn a notice starts can happen.
+
+    Returns ``"retry"`` when the mark cannot be written yet, so the caller
+    retries on a later poll and reports the process only once the mark is in
+    state:
 
     - the thread has pending tasks (``next``): a state write on a thread paused
       at an interrupt drops the interrupt, so the thread is left alone until the
@@ -479,20 +484,30 @@ async def _mark_untracked(
     its next checkpoint without the mark, so a later EvoSci process reports the
     process once more.
     """
+    from ..gateway.composite import LegacyThreadServerExecutionError
+
     try:
         snapshot = await gateway.get_state_snapshot(target, thread_id)
         if snapshot.next:
-            return False
+            return "retry"
         # The record read at the top of the poll may be stale by now: another
         # EvoSci process that tracks the process may have stored its exit.
         current = ((snapshot.values or {}).get("bg_processes") or {}).get(process_id)
         if not current or current.get("status") in TERMINAL_STATUSES:
-            return False  # the next poll skips it as terminal
+            return "retry"  # the next poll skips it as terminal
         await gateway.update_state_values(
             target,
             thread_id,
             {"bg_processes": {process_id: {**current, "status": UNTRACKED_STATUS}}},
         )
+    except LegacyThreadServerExecutionError:
+        logger.debug(
+            "Background process %s is not tracked, but thread %s is a legacy "
+            "thread the server backend cannot write; not reporting it",
+            process_id,
+            thread_id,
+        )
+        return "never"
     except Exception:
         # The first failure per process is a WARNING: a write that never
         # succeeds would otherwise keep the notice back with no trail.
@@ -504,9 +519,9 @@ async def _mark_untracked(
             process_id,
             exc_info=True,
         )
-        return False
+        return "retry"
     _bg_mark_failed_ids.discard(process_id)
-    return True
+    return "marked"
 
 
 async def enqueue_bg_process_completions_from_state(
@@ -569,7 +584,11 @@ async def enqueue_bg_process_completions_from_state(
                 if record.get("status") == UNTRACKED_STATUS:
                     _reader_enqueued_process_ids.add(process_id)
                     continue
-                if not await _mark_untracked(gateway, target, thread_id, process_id):
+                result = await _mark_untracked(gateway, target, thread_id, process_id)
+                if result == "never":
+                    _reader_enqueued_process_ids.add(process_id)  # silent drop
+                    continue
+                if result == "retry":
                     still_active += 1  # not writable yet — retry next poll
                     continue
                 enqueue_bg_process_notification(

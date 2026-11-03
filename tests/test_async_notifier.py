@@ -1638,6 +1638,32 @@ async def test_bg_reader_forgets_a_failed_mark_once_it_is_written():
     assert async_notifier._bg_mark_failed_ids == set()
 
 
+async def test_bg_reader_drops_an_untracked_process_on_a_legacy_server_thread(caplog):
+    # The server backend refuses every write and every run on a legacy
+    # (non-UUID) thread, so the mark can never land and a notice would start a
+    # turn that fails: drop the process silently and stop polling it.
+    from EvoScientist.gateway.composite import LegacyThreadServerExecutionError
+
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    gateway.update_error = LegacyThreadServerExecutionError("abcd1234")
+    target = GraphTarget(local_graph=MagicMock())
+
+    with caplog.at_level("DEBUG", logger=async_notifier.logger.name):
+        for _ in range(2):
+            active = await async_notifier.enqueue_bg_process_completions_from_state(
+                gateway, target, "abcd1234"
+            )
+            assert active == 0
+
+    assert drain_notifications("cli-tid") == []
+    assert drain_notifications("abcd1234") == []
+    assert gateway.process_status_calls == ["proc-1"]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 async def test_bg_reader_warns_once_when_the_mark_keeps_failing(caplog):
     # A write that never succeeds keeps the notice back; the first failure is
     # a WARNING so there is a trail, the retries are DEBUG.
