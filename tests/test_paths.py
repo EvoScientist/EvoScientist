@@ -485,15 +485,6 @@ class TestSharedDirFromEnv:
         assert env["EVOSCIENTIST_MEMORIES_DIR"] == str(tmp_path / "memories")
         assert "EVOSCIENTIST_MEMORY_DIR" not in env
 
-    def test_launcher_workspace_unreadable_is_none(self, monkeypatch):
-        def unreadable(_path):
-            raise OSError("loop")
-
-        monkeypatch.setenv(paths.LAUNCHER_WORKSPACE_ENV, "/proj")
-        monkeypatch.setattr(paths, "Workspace", unreadable)
-        paths.launcher_workspace.cache_clear()
-        assert paths.launcher_workspace() is None
-
 
 def test_server_marker_read_once_and_removed(tmp_path):
     """The agent's commands and MCP servers must not take themselves for the

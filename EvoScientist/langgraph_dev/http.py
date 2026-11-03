@@ -127,24 +127,20 @@ async def get_teams(request: Request) -> JSONResponse:
     consumes these.
 
     The ``workspace_dir`` query parameter names the project whose installs
-    count (``400`` when it is not a readable absolute path, ``404`` when that
-    project is not served); without it, the project ``GET /api/workspace``
-    reports, with the same ``503`` when there is none.
+    count: ``400`` without it or when it is not a readable absolute path,
+    ``404`` when that project is not served.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
     from EvoScientist.tools.skills_manager import list_expert_skills
 
     requested = request.query_params.get("workspace_dir")
     if requested is None:
-        workspace = await asyncio.to_thread(_launcher_project)
-        if workspace is None:
-            return _no_project()
-    else:
-        workspace = await asyncio.to_thread(read_workspace_or_none, requested)
-        if workspace is None:
-            return JSONResponse({"error": "invalid_path"}, status_code=400)
-        if not await asyncio.to_thread(_served, workspace):
-            return JSONResponse({"error": "not_served"}, status_code=404)
+        return JSONResponse({"error": "workspace_dir_required"}, status_code=400)
+    workspace = await asyncio.to_thread(read_workspace_or_none, requested)
+    if workspace is None:
+        return JSONResponse({"error": "invalid_path"}, status_code=400)
+    if not await asyncio.to_thread(_served, workspace):
+        return JSONResponse({"error": "not_served"}, status_code=404)
 
     experts = await asyncio.to_thread(list_expert_skills, True, workspace=workspace)
     teams = [{"name": info.name, "description": info.description} for info in experts]
@@ -258,51 +254,6 @@ def _served(workspace: Workspace) -> bool:
     from EvoScientist.langgraph_dev.registry import REGISTRY
 
     return is_served(workspace, REGISTRY)
-
-
-def _launcher_project() -> Workspace | None:
-    """The project of the client that started this server, when it is served.
-    Blocking."""
-    from EvoScientist.paths import launcher_workspace
-
-    launcher = launcher_workspace()
-    return launcher if launcher is not None and _served(launcher) else None
-
-
-def _no_project() -> JSONResponse:
-    return JSONResponse(
-        {
-            "error": "no_workspace",
-            "detail": "No folder is selected: this server was started without "
-            "a project, or that project is not registered or its folder is "
-            "missing.",
-        },
-        status_code=503,
-    )
-
-
-async def get_workspace(_request: Request) -> JSONResponse:
-    """Return the project of the client that started this server as
-    ``{workspace_dir, run_dir}``, while it is served.
-
-    ``workspace_dir`` is the project root in the form thread and checkpoint
-    metadata use (:attr:`~EvoScientist.paths.Workspace.key`), so a client
-    can compare it with them and derive the folder's assistant IDs without
-    resolving paths itself; ``run_dir`` is always ``null``. ``503`` (not
-    ``404``, which a client takes for a server without this route) when
-    there is no such project, or it is not registered or its folder is
-    missing.
-
-    Offloaded to a thread because resolving the folders touches the
-    filesystem, which blockbuster refuses on the event loop.
-    """
-    from EvoScientist.paths import SessionDirs
-
-    workspace = await asyncio.to_thread(_launcher_project)
-    if workspace is None:
-        return _no_project()
-    # The same serialisation as thread and checkpoint stamps.
-    return JSONResponse({"run_dir": None} | SessionDirs(workspace).metadata())
 
 
 def _registered_projects() -> list[dict[str, object]]:
@@ -559,7 +510,6 @@ def _build_app() -> Starlette:
                 "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
             ),
             Route("/api/policy", post_policy, methods=["POST"]),
-            Route("/api/workspace", get_workspace, methods=["GET"]),
             Route("/api/workspaces", list_workspaces, methods=["GET"]),
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),

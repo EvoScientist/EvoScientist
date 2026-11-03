@@ -268,14 +268,13 @@ def _rotate_log_if_needed(log_path: Path) -> None:
         )
 
 
-# Ownership record — JSON recording the pid of the running langgraph dev, the
-# project of the client that started it, and what it was launched with.
+# Ownership record — JSON recording the pid of the running langgraph dev and
+# what it was launched with.
 # Cross-process callers (e.g. a TUI starting while ``EvoSci deploy`` runs)
 # read it on the reuse path to report configuration drift.
 
 
 def _write_workspace_sidecar(
-    workspace_dir: Path,
     pid: int,
     config_fingerprint: str | None = None,
     agent_python: str | object | None = _NOT_RECORDED,
@@ -285,8 +284,7 @@ def _write_workspace_sidecar(
     port: int | None = None,
     break_group_created: float | None = None,
 ) -> None:
-    """Record the pid of the langgraph dev we just started, and the project
-    of the client that started it.
+    """Record the pid of the langgraph dev we just started.
 
     ``config_fingerprint`` (optional) captures the launch-time config subset
     the server consumed; a reuse compares it to detect drift.
@@ -319,7 +317,6 @@ def _write_workspace_sidecar(
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
         payload: dict = {
-            "workspace": str(workspace_dir),
             "pid": pid,
             "data_dir": str(paths.DATA_DIR),
             "config_dir": str(paths.CONFIG_DIR),
@@ -352,11 +349,11 @@ def _write_workspace_sidecar(
 
 def _read_workspace_sidecar() -> dict | None:
     """Read the workspace sidecar. Returns None if missing, corrupt, or
-    structurally wrong (must be a dict whose ``workspace`` value is a
-    non-empty string).
+    structurally wrong (must be a dict whose ``pid`` is an int of at least 1,
+    not a bool).
 
-    Readers show ``workspace`` as a path, so a payload like
-    ``{"workspace": null}`` counts as no record.
+    A record written by an older release also carries ``workspace``, the
+    project of the client that started the server; readers ignore it.
     """
     if not RUNTIME.workspace_sidecar.exists():
         return None
@@ -366,8 +363,8 @@ def _read_workspace_sidecar() -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    workspace = data.get("workspace")
-    if not isinstance(workspace, str) or not workspace:
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
         return None
     return data
 
@@ -1274,7 +1271,6 @@ def _refuse_running_server() -> None:
 
 
 def start_langgraph_dev(
-    workspace_dir: Path | None = None,
     *,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
@@ -1292,10 +1288,6 @@ def start_langgraph_dev(
     its runtime store, and serves every registered project.
 
     Args:
-        workspace_dir: The project of the client starting the server, passed
-            as ``paths.LAUNCHER_WORKSPACE_ENV``: ``GET /api/workspace``
-            reports it once the client registered it. Defaults to
-            ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
         host: Network interface to bind. Defaults to loopback. SECURITY:
             widening this exposes an unauthenticated API that serves every
@@ -1343,8 +1335,6 @@ def start_langgraph_dev(
             f"Packaged langgraph.json not found at {config_file}. "
             "This indicates a broken EvoScientist installation — reinstall."
         )
-
-    workspace_dir = workspace_dir or Path.cwd()
 
     # Install Node for npx MCP servers here, where progress is visible and no
     # health deadline applies; the server itself never downloads it.
@@ -1431,11 +1421,10 @@ def start_langgraph_dev(
         _LOG_OFFSET_AT_START = 0
 
     # The server serves every registered project from the server home, so it
-    # gets no workspace of its own; it is told the launcher's project, as an
-    # absolute path since it works in another folder. A run names its run
-    # folder itself. ``EVOSCIENTIST_WORKSPACE_DIR`` passes as inherited: it is
-    # the user's ``default_workdir`` override (Docker sets it), which the
-    # settings API reports. A project ``.env`` sets only this command's own
+    # gets no workspace of its own. A run names its run folder itself.
+    # ``EVOSCIENTIST_WORKSPACE_DIR`` passes as inherited: it is the user's
+    # ``default_workdir`` override (Docker sets it), which the settings API
+    # reports. A project ``.env`` sets only this command's own
     # settings, each only where the environment had none, so the server gets
     # the environment without them. A lasting server, which serves later
     # sessions too, gets none of this session's flags (``--dangerous``,
@@ -1450,7 +1439,6 @@ def start_langgraph_dev(
         }
     )
     sub_env.pop("EVOSCIENTIST_RUN_DIR", None)
-    sub_env[paths.LAUNCHER_WORKSPACE_ENV] = os.path.abspath(workspace_dir)
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
 
@@ -1569,7 +1557,6 @@ def start_langgraph_dev(
     from EvoScientist.setup.research_env import agent_python
 
     _write_workspace_sidecar(
-        workspace_dir=workspace_dir,
         pid=proc.pid,
         config_fingerprint=config_fingerprint,
         # The server inherits this process's environment and data dir, so it
@@ -1753,8 +1740,7 @@ def ensure_langgraph_dev(
 
     Args:
         config: Active EvoScientistConfig.
-        workspace_dir: The project root to register. A server this call
-            starts reports it at ``GET /api/workspace``. If None, nothing is
+        workspace_dir: The project root to register. If None, nothing is
             registered.
         backend: The calling surface's resolved gateway backend. When ``None``,
             falls back to the global ``config.gateway_backend``. Determines
@@ -1811,7 +1797,7 @@ def ensure_langgraph_dev(
         return settle(_Found())
     try:
         with _LOCK:
-            found = _ensure_langgraph_dev_locked(config, workspace_dir)
+            found = _ensure_langgraph_dev_locked(config)
     except BaseException:
         settle(_Found())
         raise
@@ -1847,11 +1833,15 @@ def ensure_langgraph_dev(
 
 
 def serve_project(
-    config: EvoScientistConfig, workspace_dir: Path, *, with_ccproxy: bool = True
+    config: EvoScientistConfig,
+    workspace_dir: Path | None,
+    *,
+    with_ccproxy: bool = True,
 ) -> bool:
-    """Start the background server, or reuse a running one, for
-    *workspace_dir* (``EvoSci service start``, ``EvoSci server start``, the
-    restart after an update). With Anthropic OAuth the server routes through
+    """Start the background server, or reuse a running one, and register
+    *workspace_dir* with it (``EvoSci service start``, ``EvoSci server
+    start``); without one (the restart after an update) nothing is
+    registered. With Anthropic OAuth the server routes through
     ccproxy: *with_ccproxy* starts it first, lasting like the server
     (``RuntimeError`` or ``ValueError`` when it cannot start). Returns and
     raises like :func:`ensure_langgraph_dev`."""
@@ -1875,16 +1865,12 @@ class _Found:
     shell_drift: str | None = None
 
 
-def _ensure_langgraph_dev_locked(
-    config: EvoScientistConfig,
-    workspace_dir: Path | str | None,
-) -> _Found:
+def _ensure_langgraph_dev_locked(config: EvoScientistConfig) -> _Found:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     config_fp = _server_config_fingerprint(config)
     port, host = configured_address(config)
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
-    ws_path = Path(workspace_dir) if workspace_dir is not None else None
 
     if is_langgraph_dev_running(port=port, host=host):
         # The server serves every registered project, so any EvoScientist
@@ -1919,7 +1905,6 @@ def _ensure_langgraph_dev_locked(
 
     try:
         start_langgraph_dev(
-            workspace_dir=ws_path,
             port=port,
             host=host,
             file_persistence=file_persistence,

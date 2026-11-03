@@ -51,20 +51,20 @@ def test_sidecar_path_is_next_to_pid_file():
     )
 
 
-def test_write_workspace_sidecar_records_workspace_and_pid(
+def test_write_workspace_sidecar_records_pid_without_project(
     tmp_path, monkeypatch, runtime_paths
 ):
-    """``_write_workspace_sidecar`` writes JSON with workspace + pid."""
+    """The record names the server's pid; the server serves every
+    registered project, so it names none."""
     monkeypatch.setattr(
         manager,
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    workspace = tmp_path / "some" / "ws"
-    manager._write_workspace_sidecar(workspace_dir=workspace, pid=12345)
+    manager._write_workspace_sidecar(pid=12345)
     data = json.loads((tmp_path / "ws.json").read_text())
-    assert data["workspace"] == str(workspace)
     assert data["pid"] == 12345
+    assert "workspace" not in data
 
 
 def test_read_workspace_sidecar_returns_none_when_missing(
@@ -95,21 +95,23 @@ def test_read_workspace_sidecar_returns_none_on_corrupt_json(
     "payload",
     [
         "[]",  # valid JSON, wrong top-level type
-        "{}",  # valid JSON dict but missing "workspace"
-        '{"pid": 12345}',  # valid JSON dict but missing "workspace"
+        "{}",  # valid JSON dict but missing "pid"
+        '{"workspace": "/a"}',  # an older record without its pid
         '"just a string"',  # valid JSON scalar
         "null",  # valid JSON null
-        '{"workspace": null}',  # workspace present but null → Path(None) TypeError
-        '{"workspace": []}',  # workspace present but list → Path([]) TypeError
-        '{"workspace": 12345}',  # workspace present but int → Path(int) TypeError
-        '{"workspace": ""}',  # workspace present but empty string → resolves to cwd
+        '{"pid": null}',
+        '{"pid": "12345"}',
+        '{"pid": 12.0}',
+        '{"pid": true}',  # a bool is an int in Python
+        '{"pid": 0}',
+        '{"pid": -1}',
     ],
 )
 def test_read_workspace_sidecar_returns_none_on_wrong_schema(
     payload, tmp_path, monkeypatch, runtime_paths
 ):
     """JSON that parses but doesn't match the expected schema degrades to
-    None: readers show ``workspace`` as a path."""
+    None: readers use ``pid`` as a process id."""
     sidecar = tmp_path / "schema.json"
     sidecar.write_text(payload)
     monkeypatch.setattr(
@@ -126,15 +128,33 @@ def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch, runtime_paths)
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "rt.json"),
     )
-    workspace = tmp_path / "x" / "y"
-    manager._write_workspace_sidecar(workspace_dir=workspace, pid=42)
+    manager._write_workspace_sidecar(pid=42)
     data = manager._read_workspace_sidecar()
     assert data == {
-        "workspace": str(workspace),
         "pid": 42,
         "data_dir": str(paths.DATA_DIR),
         "config_dir": str(paths.CONFIG_DIR),
     }
+
+
+def test_read_workspace_sidecar_reads_older_record_with_project(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A record an older release wrote also names the project of the client
+    that started the server; it still reads."""
+    sidecar = tmp_path / "old.json"
+    sidecar.write_text(
+        json.dumps({"workspace": str(tmp_path / "proj"), "pid": 42, "lasting": True})
+    )
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
+    )
+    data = manager._read_workspace_sidecar()
+    assert data is not None
+    assert data["pid"] == 42
+    assert manager.is_lasting(data)
 
 
 def test_write_workspace_sidecar_records_the_bind_host(
@@ -145,7 +165,7 @@ def test_write_workspace_sidecar_records_the_bind_host(
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=7, host="0.0.0.0")
+    manager._write_workspace_sidecar(pid=7, host="0.0.0.0")
     assert manager._read_workspace_sidecar()["host"] == "0.0.0.0"
 
 
@@ -157,7 +177,7 @@ def test_write_workspace_sidecar_records_the_port(tmp_path, monkeypatch, runtime
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=7, port=16409)
+    manager._write_workspace_sidecar(pid=7, port=16409)
     assert manager._read_workspace_sidecar()["port"] == 16409
 
 
@@ -173,7 +193,7 @@ def test_write_workspace_sidecar_records_the_data_and_config_folders(
     )
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data dir é")
     monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "config" / "evoscientist")
-    manager._write_workspace_sidecar(workspace_dir=tmp_path / "ws", pid=7)
+    manager._write_workspace_sidecar(pid=7)
     data = manager._read_workspace_sidecar()
     assert data["data_dir"] == str(tmp_path / "data dir é")
     assert data["config_dir"] == str(tmp_path / "config" / "evoscientist")
@@ -182,20 +202,30 @@ def test_write_workspace_sidecar_records_the_data_and_config_folders(
 def test_ensure_langgraph_dev_serves_another_project_from_running_server(
     tmp_path, monkeypatch, runtime_paths
 ):
-    """A server started from A serves B once B is registered."""
+    """A running server serves another project once it is registered."""
     monkeypatch.setattr(
         manager,
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path / "A", pid=99999)
+    manager._write_workspace_sidecar(pid=99999)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
+    from EvoScientist.langgraph_dev import registration
+
+    registered: list[paths.Workspace] = []
+
+    def register_folder(workspace, *, url):
+        registered.append(workspace)
+        return registration.ServerExposure()
+
+    monkeypatch.setattr(registration, "register_folder", register_folder)
 
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B") is True
 
+    assert registered == [paths.Workspace(tmp_path / "B")]
     assert manager.is_async_subagents_available()
 
 
@@ -230,7 +260,7 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths
             runtime_paths, workspace_sidecar=sidecar, pid_file=pid_file
         ),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path / "x", pid=42)
+    manager._write_workspace_sidecar(pid=42)
     assert sidecar.exists()
 
     # _PROCESS is None so stop_langgraph_dev shouldn't try to kill anything;
@@ -271,7 +301,7 @@ def test_sidecar_records_whether_server_lasts(tmp_path, monkeypatch, runtime_pat
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, lasting=False)
+    manager._write_workspace_sidecar(pid=1, lasting=False)
     assert manager._read_workspace_sidecar()["lasting"] is False
 
 
@@ -298,9 +328,7 @@ def test_sidecar_records_config_fingerprint_when_passed(
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(
-        workspace_dir=tmp_path / "ws", pid=1, config_fingerprint="abc123"
-    )
+    manager._write_workspace_sidecar(pid=1, config_fingerprint="abc123")
     assert json.loads((tmp_path / "ws.json").read_text())["config_fingerprint"] == (
         "abc123"
     )
@@ -320,9 +348,7 @@ def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(
-        workspace_dir=tmp_path / "A", pid=99999, config_fingerprint=fingerprint
-    )
+    manager._write_workspace_sidecar(pid=99999, config_fingerprint=fingerprint)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
     monkeypatch.setattr(manager, "_PROCESS", None)
     cfg = manager.EvoScientistConfig()
@@ -454,9 +480,9 @@ def test_sidecar_records_the_agent_python_only_when_passed(
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, agent_python=None)
+    manager._write_workspace_sidecar(pid=1, agent_python=None)
     assert json.loads((tmp_path / "ws.json").read_text())["agent_python"] is None
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    manager._write_workspace_sidecar(pid=1)
     assert "agent_python" not in json.loads((tmp_path / "ws.json").read_text())
 
 
@@ -469,9 +495,9 @@ def test_sidecar_records_the_agent_bash_only_when_passed(
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
     bash = r"C:\Program Files\Git\bin\bash.exe"
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, agent_bash=bash)
+    manager._write_workspace_sidecar(pid=1, agent_bash=bash)
     assert json.loads((tmp_path / "ws.json").read_text())["agent_bash"] == bash
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    manager._write_workspace_sidecar(pid=1)
     assert "agent_bash" not in json.loads((tmp_path / "ws.json").read_text())
 
 
@@ -490,7 +516,6 @@ def test_reuse_warns_when_the_server_shell_differs(
     fp = manager._server_config_fingerprint(cfg)
     cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
     manager._write_workspace_sidecar(
-        workspace_dir=tmp_path / "A",
         pid=99999,
         config_fingerprint=fp,
         agent_python="/env/bin/python",
@@ -516,7 +541,6 @@ def _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, recorded):
     cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
     if recorded is not ...:
         manager._write_workspace_sidecar(
-            workspace_dir=tmp_path / "A",
             pid=99999,
             config_fingerprint=fp,
             agent_python=recorded,
@@ -565,7 +589,7 @@ def test_stop_recorded_server_cleans_stale_files_for_dead_pid(
     pid_file = tmp_path / "pid.txt"
     sidecar = tmp_path / "ws.json"
     pid_file.write_text(str(_dead_pid()))
-    sidecar.write_text(json.dumps({"workspace": "/a", "pid": 1}))
+    sidecar.write_text(json.dumps({"pid": 1}))
     monkeypatch.setattr(
         manager,
         "RUNTIME",
@@ -618,7 +642,7 @@ def test_stop_recorded_server_kills_owned_langgraph_process(
         pid_file = tmp_path / "pid.txt"
         sidecar = tmp_path / "ws.json"
         pid_file.write_text(str(victim.pid))
-        sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid}))
+        sidecar.write_text(json.dumps({"pid": victim.pid}))
         monkeypatch.setattr(
             manager,
             "RUNTIME",
@@ -1073,7 +1097,7 @@ def test_stop_recorded_server_trusts_the_record_for_the_process_group(
         if created_offset is not None:
             created = psutil.Process(victim.pid).create_time() + created_offset
             record = {**record, "ctrl_break_create_time": created}
-        sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid, **record}))
+        sidecar.write_text(json.dumps({"pid": victim.pid, **record}))
         monkeypatch.setattr(
             manager,
             "RUNTIME",
@@ -1375,12 +1399,10 @@ def test_sidecar_records_the_process_group_only_when_asked(
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
     )
-    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    manager._write_workspace_sidecar(pid=1)
     record = manager._read_workspace_sidecar()
     assert "ctrl_break_create_time" not in record
-    manager._write_workspace_sidecar(
-        workspace_dir=tmp_path, pid=1, break_group_created=1234.5
-    )
+    manager._write_workspace_sidecar(pid=1, break_group_created=1234.5)
     record = manager._read_workspace_sidecar()
     assert record["ctrl_break_create_time"] == 1234.5
 

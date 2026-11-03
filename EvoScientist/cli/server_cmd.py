@@ -41,7 +41,7 @@ def server_start(
     workdir: str | None = typer.Option(
         None,
         "--workdir",
-        help="The project to start it from (default: default_workdir, else "
+        help="The project it registers (default: default_workdir, else "
         "the current folder)",
     ),
 ) -> None:
@@ -110,9 +110,9 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
             )
     else:
         console.print(
-            f"[green]✓[/green] Background agent server running at {url}, started "
-            f"from {escape(str(project))}. It keeps running for every EvoSci "
-            f"session until [bold]{stop}[/bold]."
+            f"[green]✓[/green] Background agent server running at {url}; it "
+            f"serves {escape(str(project))} and every other registered project, "
+            f"and keeps running for every EvoSci session until [bold]{stop}[/bold]."
         )
     if oauth and not with_ccproxy and not is_ccproxy_running(config.ccproxy_port):
         console.print(
@@ -125,7 +125,8 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
 
 @server_app.command("status")
 def server_status() -> None:
-    """Show the background langgraph dev server's state."""
+    """Show the background langgraph dev server's state and the projects it
+    serves."""
     from ..config import get_effective_config
     from ..langgraph_dev.manager import (
         _pid_serves_port,
@@ -134,6 +135,7 @@ def server_status() -> None:
         is_langgraph_dev_running,
         recorded_address,
     )
+    from ..langgraph_dev.sdk import langgraph_dev_url
 
     config = get_effective_config()
     port, host = configured_address(config)
@@ -145,8 +147,9 @@ def server_status() -> None:
         return
     state = "[green]running[/green]" if running else "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
+    url = langgraph_dev_url(config) if running else None
+    label = "projects:"
     if sidecar is not None:
-        console.print(f"  started from: {sidecar.get('workspace')}")
         pid = sidecar.get("pid")
         if _pid_serves_port(pid, port):
             console.print(f"  pid:          {pid}")
@@ -156,6 +159,8 @@ def server_status() -> None:
                 f"  pid:          {pid} [yellow](serves port {address[0]}, not "
                 f"port {port}; EvoSci server stop stops it)[/yellow]"
             )
+            url = langgraph_dev_url(port=address[0], host=address[1])
+            label = f"projects (port {address[0]}):"
         else:
             console.print(
                 f"  pid:          {pid} [yellow](stale record — this pid does "
@@ -166,6 +171,37 @@ def server_status() -> None:
             "  [yellow]no ownership record — externally managed or older server"
             "[/yellow]"
         )
+    if url is not None:
+        _print_projects(url, label)
+
+
+def _print_projects(url: str, label: str = "projects:") -> None:
+    """List the projects the server at *url* serves under *label*, or say
+    why they cannot be listed."""
+    from ..langgraph_dev.registration import (
+        OlderServerError,
+        OtherServerError,
+        RegistrationError,
+        served_projects,
+    )
+
+    try:
+        projects = served_projects(url)
+    except OtherServerError as exc:
+        console.print(f"  {label:<14}[yellow]not listed. {escape(str(exc))}[/yellow]")
+        return
+    except (OlderServerError, RegistrationError) as exc:
+        console.print(
+            f"  {label:<14}[yellow]could not be read. {escape(str(exc))}[/yellow]"
+        )
+        return
+    if not projects:
+        console.print(f"  {label:<14}none")
+        return
+    console.print(f"  {label}")
+    for project in projects:
+        missing = " [yellow](folder missing)[/yellow]" if project.get("missing") else ""
+        console.print(f"    {escape(str(project['workspace_dir']))}{missing}")
 
 
 @server_app.command("stop")

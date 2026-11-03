@@ -13,9 +13,9 @@ Events:
   ``--tunnel`` also ``public_url`` (null when no URL was reported in time,
   or when cloudflared could not create the tunnel, which adds a warning).
   ``owned`` is true when this command started the backend and stops it on
-  exit, false when it attached to a running one started from the same
-  project and leaves it running. ``workspace`` is that project, which this
-  command registered, and ``assistant_id`` its chat assistant. When
+  exit, false when it attached to a running one and leaves it running.
+  ``workspace`` is the project this command registered, and
+  ``assistant_id`` its chat assistant. When
   attached, ``data_dir`` and ``config_dir`` are the running backend's, from
   its ownership record (or this command's own when an older release wrote the
   record without them).
@@ -31,9 +31,6 @@ Events:
     or ``record_mismatch`` (the ownership record
     names a process that does not serve this port, or one bound to another
     interface).
-  - ``workspace_conflict``: ``workspace``, the project of the client that
-    started the running backend: the app gets that project from calls that
-    name none (``GET /api/workspace``), so it does not attach.
   - ``ccproxy_failed``: empty.
   - ``backend_start_failed``: ``log_file`` when the start failed, or
     ``lock_file`` when another EvoScientist process held the start lock too
@@ -51,8 +48,10 @@ Events:
   - ``internal_error``: ``type``, the exception's class; or ``launcher_code``
     for a backend-decision error this mode has no code for.
 
-  ``port_conflict`` and ``workspace_conflict`` also carry ``hint``, the line
-  the human mode prints.
+  ``port_conflict`` also carries ``hint``, the line the human mode prints.
+  ``workspace_conflict`` is not sent any more; older releases send it, with
+  ``workspace`` and ``hint``, when the backend was started from another
+  project.
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
@@ -110,7 +109,6 @@ ERROR_CODES = frozenset(
     {
         "invalid_port",
         "port_conflict",
-        "workspace_conflict",
         "ccproxy_failed",
         "backend_start_failed",
         "sign_in_required",
@@ -125,7 +123,6 @@ ERROR_CODES = frozenset(
 _LAUNCHER_CODES = {
     "port_conflict": "port_conflict",
     "sidecar_port_mismatch": "port_conflict",
-    "workspace_mismatch": "workspace_conflict",
     "folder_missing": "folder_missing",
     "server_outdated": "server_outdated",
     "registration_failed": "registration_failed",
@@ -317,7 +314,7 @@ class _Run:
         target = BackendTarget(
             workspace_dir=ws, backend_host=self.host, backend_port=self.port
         )
-        decision = self._decide_and_start(target, config, ws, tunnel)
+        decision = self._decide_and_start(target, config, tunnel)
         # A stop asked for while waiting for the lock, during the decision or
         # during the start: stop now, without the tunnel wait or ready.
         if decision is None or self.stop.is_set():
@@ -387,7 +384,7 @@ class _Run:
         with _launcher_failures():
             return register_launch_folder(ws, url=lgm._base_url(self.port, self.host))
 
-    def _decide_and_start(self, target: Any, config: Any, ws: str, tunnel: bool) -> Any:
+    def _decide_and_start(self, target: Any, config: Any, tunnel: bool) -> Any:
         """The backend decision, and the start it calls for, under the lock
         the TUI's ``ensure_langgraph_dev()`` takes.
 
@@ -409,7 +406,7 @@ class _Run:
             with _launcher_failures():
                 decision = _resolve_backend(target, config, require_record=True)
             if decision.action == "start" and not self.stop.is_set():
-                self._start_backend(config, ws, tunnel)
+                self._start_backend(config, tunnel)
             return decision
         finally:
             lock.release()
@@ -435,9 +432,7 @@ class _Run:
                     ) from None
         return False
 
-    def _start_backend(self, config: Any, ws: str, tunnel: bool) -> None:
-        from pathlib import Path
-
+    def _start_backend(self, config: Any, tunnel: bool) -> None:
         from ..langgraph_dev import manager as lgm
         from .backend_job import backend_job
 
@@ -463,7 +458,6 @@ class _Run:
         self.starting = True
         try:
             self.proc = lgm.start_langgraph_dev(
-                workspace_dir=Path(ws),
                 port=self.port,
                 host=self.host,
                 file_persistence=bool(

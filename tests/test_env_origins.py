@@ -157,7 +157,7 @@ class TestSources:
             "shadowed": True,
         }
 
-    def test_launcher_workspace_is_not_shadowed(self, monkeypatch):
+    def test_workspace_dir_env_is_not_shadowed(self, monkeypatch):
         settings.record_env_origin("EVOSCIENTIST_WORKSPACE_DIR", "default")
         monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", os.getcwd())
         sources = settings_api.read_settings()["sources"]
@@ -208,7 +208,7 @@ class TestServerRecord:
         from EvoScientist.langgraph_dev import manager
 
         with pytest.raises(PopenAbort):
-            manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+            manager.start_langgraph_dev(port=16178)
 
         assert "EVOSCIENTIST_UI_BACKEND" not in captured["env"]
         assert "EVOSCIENTIST_UI_BACKEND" not in _server_env_origins(

@@ -309,14 +309,13 @@ def check_server(
                 )
         go_on()
         # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
-        # is started again by the setup after the update, from the project it
-        # was started from.
-        recorded = sidecar.get("workspace")
-        restart = is_lasting(sidecar) and isinstance(recorded, str)
+        # is started again by the setup after the update, and serves every
+        # registered project again.
+        restart = is_lasting(sidecar)
         if restart:
             from .setup.server import remember_for_restart
 
-            remember_for_restart(recorded)
+            remember_for_restart()
         try:
             pid = stop_recorded_server()
         except ServerStopFailedError as exc:
