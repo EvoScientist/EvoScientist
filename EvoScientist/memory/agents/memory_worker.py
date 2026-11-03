@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Annotated, Any
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ToolCallRequest,
+    hook_config,
+)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field
+from langgraph.types import Command
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 
 from ...config import (
     MemoryControls,
@@ -25,6 +33,7 @@ from ...config import (
     get_effective_config,
 )
 from ...paths import Workspace
+from ..observations.store import write_text_atomically
 from ..types import MemorySourceType
 from ._factory import (
     build_memory_agent_graph,
@@ -37,6 +46,17 @@ logger = logging.getLogger(__name__)
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset(
     {"delete", "execute", "task", "write_file", "write_todos"}
 )
+MEMORY_WORKER_OBSERVATION_LIMIT = 3
+MEMORY_WORKER_RECORD_CALL_LIMIT = 6
+MEMORY_WORKER_MODEL_CALL_BUDGET = 20
+_RECORD_OBSERVATION_TOOL = "record_observation"
+_EXECUTION_SUMMARY_TOOL = "record_execution_summary"
+_SUMMARY_SAVED = "Execution summary saved. Finish the run now."
+_WRAP_UP_INSTRUCTION = (
+    "This is your last model call in this run. Call record_execution_summary "
+    "now; no other tool is available."
+)
+_WRAP_UP_RETRY = "Call record_execution_summary now; no other tool is available."
 
 
 def _memory_worker_observation_target(
@@ -64,12 +84,16 @@ class _SummaryWriteArgs:
     trajectory_digest: str
 
 
-class SubagentMemoryDecision(BaseModel):
-    """Structured result from the subagent memory worker."""
+_NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-    summary: str = Field(
-        min_length=1,
-        description="Concise factual summary of the completed subagent run.",
+
+class _ExecutionSummaryArgs(BaseModel):
+    """Arguments of the subagent worker's ``record_execution_summary`` tool."""
+
+    summary: _NonBlank = Field(
+        description=(
+            "What the subagent did, what failed, and any blocker that still matters."
+        ),
     )
 
 
@@ -240,7 +264,14 @@ class _MemoryWorkerPromptBuilder:
             "Use the optional evidence field for source-backed or time-sensitive "
             "claims. Prefer durable source identifiers, exact commands, or "
             "artifact paths. Do not store unsupported claims or internally "
-            "inconsistent dates."
+            "inconsistent dates.\n\n"
+            f"Record at most {MEMORY_WORKER_OBSERVATION_LIMIT} observations in "
+            "this run; most runs need none or one. Decide which candidates "
+            "matter most and record them in order of importance, highest "
+            "first, then drop the rest. If an earlier entry turns out to be a "
+            "duplicate or a mistake, do not record a correction or placeholder "
+            "entry. Do not record the per-chunk results of a batch job; the "
+            "job's output files already hold them."
         )
 
     def _subagent_guardrail(self) -> str:
@@ -283,8 +314,9 @@ class _MemoryWorkerPromptBuilder:
         match self.source_type:
             case MemorySourceType.SUBAGENT:
                 return (
-                    "Return a short execution summary: what the subagent did, "
-                    "what failed, and any blocker that still matters."
+                    "Finish by calling `record_execution_summary` once with a "
+                    "short execution summary: what the subagent did, what "
+                    "failed, and any blocker that still matters."
                 )
             case MemorySourceType.TURN:
                 if self._can_write_observations and not self._can_write_profile:
@@ -323,22 +355,6 @@ def _memory_worker_system_prompt(
         enable_profile_memory=enable_profile_memory,
         enable_observation_tool=enable_observation_tool,
     ).build()
-
-
-T = TypeVar("T", bound=BaseModel)
-
-
-def _agent_result_model(result: Mapping[str, object], model_type: type[T]) -> T | None:
-    """Extract a DeepAgents/LangChain structured response from agent state."""
-    value = result.get("structured_response")
-    if isinstance(value, model_type):
-        return value
-    if isinstance(value, dict):
-        try:
-            return model_type.model_validate(value)
-        except Exception:
-            return None
-    return None
 
 
 def _short_hash(text: str) -> str:
@@ -415,8 +431,298 @@ def _write_subagent_summary(
         f"{summary.strip()}\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Two summary calls in one step run in parallel on the same file.
+    write_text_atomically(path, content)
     return f"/memories{memory_path}"
+
+
+def _observations_written(messages: Sequence[object]) -> int:
+    """Count the ``record_observation`` results in *messages* that created a file."""
+    return sum(payload.get("created") is True for payload in _record_results(messages))
+
+
+def _record_attempts(messages: Sequence[object]) -> int:
+    """Count every ``record_observation`` result in *messages*, created or not.
+
+    An error result is plain text, so this counts by tool name only.
+    """
+    return sum(
+        isinstance(message, ToolMessage) and message.name == _RECORD_OBSERVATION_TOOL
+        for message in messages
+    )
+
+
+def _record_results(messages: Sequence[object]) -> Iterator[Mapping[str, object]]:
+    for message in messages:
+        if (
+            not isinstance(message, ToolMessage)
+            or message.name != _RECORD_OBSERVATION_TOOL
+            or not isinstance(message.content, str)
+        ):
+            continue
+        try:
+            payload = json.loads(message.content)
+        except ValueError:
+            continue
+        if isinstance(payload, Mapping):
+            yield payload
+
+
+def _record_calls_ahead(messages: Sequence[object], tool_call_id: object) -> int:
+    """Count ``record_observation`` calls queued before *tool_call_id* in the
+    same model step; parallel calls all see the state from before the step."""
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        ahead = 0
+        for call in message.tool_calls:
+            if call.get("id") == tool_call_id:
+                return ahead
+            if call.get("name") == _RECORD_OBSERVATION_TOOL:
+                ahead += 1
+        return 0
+    return 0
+
+
+def _model_calls(messages: Sequence[object]) -> int:
+    return sum(isinstance(message, AIMessage) for message in messages)
+
+
+def _summary_saved(messages: Sequence[object]) -> bool:
+    """Whether a ``record_execution_summary`` call succeeded; read off the
+    tool status, which survives a rewrite of the reply text."""
+    return any(
+        isinstance(message, ToolMessage)
+        and message.name == _EXECUTION_SUMMARY_TOOL
+        and message.status != "error"
+        for message in messages
+    )
+
+
+def _hands_in_summary(response: Any) -> bool:
+    """Whether the model response calls ``record_execution_summary`` with
+    arguments the tool accepts."""
+    for message in getattr(response, "result", []):
+        if not isinstance(message, AIMessage):
+            continue
+        for call in message.tool_calls:
+            if call.get("name") != _EXECUTION_SUMMARY_TOOL:
+                continue
+            try:
+                _ExecutionSummaryArgs.model_validate(call.get("args") or {})
+            except ValidationError:
+                continue
+            return True
+    return False
+
+
+class _MemoryWorkerGuardrailMiddleware(AgentMiddleware):
+    """Bound what one worker run writes and how long it may loop.
+
+    Every limit is read off the run's own messages, so parallel tool calls
+    need no shared counter and nothing is kept between runs.
+    """
+
+    name = "evomemory_worker_guardrail"
+
+    def __init__(
+        self,
+        *,
+        agent_name: str,
+        summary_tool: str | None = None,
+        observation_limit: int = MEMORY_WORKER_OBSERVATION_LIMIT,
+        record_call_limit: int = MEMORY_WORKER_RECORD_CALL_LIMIT,
+        model_call_budget: int = MEMORY_WORKER_MODEL_CALL_BUDGET,
+    ) -> None:
+        self._agent_name = agent_name
+        self._summary_tool = summary_tool
+        self.observation_limit = observation_limit
+        self.record_call_limit = record_call_limit
+        self.model_call_budget = model_call_budget
+
+    def _budget_used(self, messages: Sequence[object], *, ahead: int = 0) -> bool:
+        return (
+            _observations_written(messages) + ahead >= self.observation_limit
+            or _record_attempts(messages) + ahead >= self.record_call_limit
+        )
+
+    def _over_limit(self, request: ToolCallRequest) -> bool:
+        call = request.tool_call
+        if call.get("name") != _RECORD_OBSERVATION_TOOL:
+            return False
+        messages = request.state.get("messages", [])
+        return self._budget_used(
+            messages, ahead=_record_calls_ahead(messages, call.get("id"))
+        )
+
+    def _budget_reply(self, request: ToolCallRequest) -> ToolMessage:
+        payload = {
+            "created": False,
+            "note": (
+                "This run's observation budget is used up "
+                f"({self.observation_limit} written or {self.record_call_limit} "
+                "calls). Do not record more; finish the run."
+            ),
+        }
+        return ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            tool_call_id=request.tool_call["id"],
+            name=_RECORD_OBSERVATION_TOOL,
+        )
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        if self._over_limit(request):
+            return self._budget_reply(request)
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        if self._over_limit(request):
+            return self._budget_reply(request)
+        return await handler(request)
+
+    def _model_request(self, request: ModelRequest) -> tuple[ModelRequest, bool]:
+        """Narrow the tools of one model call; the flag marks the wrap-up call.
+
+        The last budgeted call of a subagent worker offers only its summary
+        tool, so a looping run still ends with an execution summary. A turn
+        worker has nothing to hand in and keeps its tools until the stop.
+        """
+        messages = request.state.get("messages", [])
+        # Also after a saved summary: the later one has seen more of the run
+        # and replaces it.
+        if (
+            self._summary_tool is not None
+            and _model_calls(messages) == self.model_call_budget - 1
+        ):
+            from ...middleware.utils import (
+                append_to_system_message,
+                request_with_only_tool,
+            )
+
+            narrowed = request_with_only_tool(request, self._summary_tool)
+            if narrowed is not request:
+                self._log_budget("is making the last of", messages)
+                return narrowed.override(
+                    system_message=append_to_system_message(
+                        request.system_message, _WRAP_UP_INSTRUCTION
+                    )
+                ), True
+        if not self._budget_used(messages):
+            return request, False
+        from ...middleware.utils import request_without_tool
+
+        return request_without_tool(request, _RECORD_OBSERVATION_TOOL), False
+
+    @staticmethod
+    def _retry_request(request: ModelRequest) -> ModelRequest:
+        """One more try when the wrap-up call did not hand in the summary."""
+        return request.override(
+            messages=[*request.messages, HumanMessage(_WRAP_UP_RETRY)]
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> Any:
+        request, wrap_up = self._model_request(request)
+        response = handler(request)
+        if wrap_up and not _hands_in_summary(response):
+            response = handler(self._retry_request(request))
+        return response
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[Any]],
+    ) -> Any:
+        request, wrap_up = self._model_request(request)
+        response = await handler(request)
+        if wrap_up and not _hands_in_summary(response):
+            response = await handler(self._retry_request(request))
+        return response
+
+    def _log_budget(self, event: str, messages: Sequence[object]) -> None:
+        configurable = _current_configurable()
+        logger.warning(
+            "%s %s its %d model calls with %d observations written "
+            "(source %s, session %s)",
+            self._agent_name,
+            event,
+            self.model_call_budget,
+            _observations_written(messages),
+            _config_str(configurable, "evomemory_source_agent"),
+            _config_str(configurable, "evomemory_source_session_id"),
+        )
+
+    def _stop_update(self, state: AgentState[object]) -> dict[str, object] | None:
+        messages = state.get("messages", [])
+        if _model_calls(messages) < self.model_call_budget:
+            return None
+        if not _summary_saved(messages):
+            self._log_budget("stopped at the budget of", messages)
+        return {"jump_to": "end"}
+
+    @hook_config(can_jump_to=["end"])
+    def before_model(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        return self._stop_update(state)
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        return self._stop_update(state)
+
+    def _warn_missing_summary(self, state: AgentState[object]) -> None:
+        """One WARNING, with the last failed attempt, for a run that ended on
+        its own without a summary. A run cut off at the budget, logged by the
+        stop, is the only one whose last model reply still asked for tools."""
+        messages = state.get("messages", [])
+        last_reply = next(
+            (m for m in reversed(messages) if isinstance(m, AIMessage)), None
+        )
+        if (
+            self._summary_tool is None
+            or _summary_saved(messages)
+            or (last_reply is not None and last_reply.tool_calls)
+        ):
+            return
+        attempts = [
+            message
+            for message in messages
+            if isinstance(message, ToolMessage)
+            and message.name == _EXECUTION_SUMMARY_TOOL
+        ]
+        reason = (
+            f" (last attempt: {' '.join(str(attempts[-1].text).split())[:200]})"
+            if attempts
+            else ""
+        )
+        logger.warning(
+            "Subagent memory worker ended without an execution summary%s", reason
+        )
+
+    def after_agent(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        self._warn_missing_summary(state)
+        return None
+
+    async def aafter_agent(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        self._warn_missing_summary(state)
+        return None
 
 
 def _memory_worker_middleware(
@@ -429,7 +735,6 @@ def _memory_worker_middleware(
     enable_observation_memory: bool = True,
 ):
     """Build middleware for memory workers, excluding task execution tools."""
-    from ...middleware.error_normalization import ErrorNormalizationMiddleware
     from ...middleware.memory import create_memory_middleware
 
     memory_controls = MemoryControls(
@@ -442,9 +747,6 @@ def _memory_worker_middleware(
         _memory_worker_observation_target(source_type)
     )
     return [
-        # Outermost — normalize provider-SDK exceptions from the
-        # auxiliary model call before any inner middleware sees them.
-        ErrorNormalizationMiddleware(),
         *memory_agent_middleware(
             create_memory_middleware(
                 str(memory_dir),
@@ -454,8 +756,20 @@ def _memory_worker_middleware(
                 enable_profile_memory=enable_profile_memory,
                 enable_observation_memory=enable_observation_memory,
                 enable_observation_tool=enable_observation_tool,
+                # The worker checks what its own, newest session already
+                # recorded, so its index fills by time alone.
+                inline_rows_per_session=None,
             ),
             excluded_tools=_MEMORY_WORKER_EXCLUDED_TOOLS,
+        ),
+        # Innermost on the tool path, so the exclusion check runs first.
+        _MemoryWorkerGuardrailMiddleware(
+            agent_name=_memory_worker_agent_name(source_type),
+            summary_tool=(
+                _EXECUTION_SUMMARY_TOOL
+                if source_type == MemorySourceType.SUBAGENT
+                else None
+            ),
         ),
     ]
 
@@ -464,13 +778,12 @@ def _build_memory_worker_agent(
     *,
     source_type: MemorySourceType,
     system_prompt: str,
-    response_format: type[BaseModel] | None,
+    tools: Sequence[BaseTool],
     memory_dir: str | Path,
     workspace_dir: str | Path,
     observation_writer: MemoryObservationWriter,
     enable_profile_memory: bool = True,
     enable_observation_memory: bool = True,
-    middleware: list[AgentMiddleware] | None = None,
 ) -> CompiledStateGraph:
     """Create a background memory worker agent for one lifecycle hook."""
     from ...backends import build_memory_worker_backend
@@ -478,21 +791,17 @@ def _build_memory_worker_agent(
     return build_memory_agent_graph(
         name=_memory_worker_agent_name(source_type),
         system_prompt=system_prompt,
-        tools=[],
+        tools=tools,
         memory_dir=memory_dir,
         workspace_dir=workspace_dir,
-        middleware=[
-            *_memory_worker_middleware(
-                memory_dir=memory_dir,
-                workspace_dir=workspace_dir,
-                source_type=source_type,
-                enable_profile_memory=enable_profile_memory,
-                enable_observation_memory=enable_observation_memory,
-                observation_writer=observation_writer,
-            ),
-            *(middleware or []),
-        ],
-        response_format=response_format,
+        middleware=_memory_worker_middleware(
+            memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
+            source_type=source_type,
+            enable_profile_memory=enable_profile_memory,
+            enable_observation_memory=enable_observation_memory,
+            observation_writer=observation_writer,
+        ),
         backend=build_memory_worker_backend(
             workspace_dir=workspace_dir,
             memory_dir=memory_dir,
@@ -500,80 +809,56 @@ def _build_memory_worker_agent(
     )
 
 
-class _SubagentSummaryWriterMiddleware(AgentMiddleware):
-    """Write subagent execution summaries from inside the worker graph."""
+def _summary_args(summary: str) -> _SummaryWriteArgs | None:
+    """Pair *summary* with the source metadata of the running worker."""
+    configurable = _current_configurable()
+    session_id = _config_str(configurable, "evomemory_source_session_id")
+    source_agent = _config_str(configurable, "evomemory_source_agent")
+    project_id = _config_str(configurable, "evomemory_project_id")
+    trajectory_digest = _config_str(configurable, "evomemory_trajectory_digest")
+    if not session_id or not source_agent or not trajectory_digest:
+        return None
+    return _SummaryWriteArgs(
+        session_id=session_id,
+        source_agent=source_agent,
+        project_id=project_id,
+        summary=summary,
+        trajectory_digest=trajectory_digest,
+    )
 
-    name = "evomemory_summary_writer"
 
-    def __init__(self, *, memory_dir: str | Path) -> None:
-        self._memory_dir = Path(memory_dir).expanduser()
+def _execution_summary_tool(memory_dir: str | Path) -> BaseTool:
+    """The subagent worker hands its execution summary in through a plain
+    tool: the tool strategy of structured output forces a tool choice, which
+    some models reject."""
+    folder = Path(memory_dir).expanduser()
 
-    def _summary_write_args(
-        self, state: AgentState[object]
-    ) -> _SummaryWriteArgs | None:
-        decision = _agent_result_model(state, SubagentMemoryDecision)
-        if decision is None:
-            logger.warning("Subagent memory worker returned no structured summary")
-            return None
-
-        configurable = _current_configurable()
-        session_id = _config_str(configurable, "evomemory_source_session_id")
-        source_agent = _config_str(configurable, "evomemory_source_agent")
-        project_id = _config_str(configurable, "evomemory_project_id")
-        trajectory_digest = _config_str(configurable, "evomemory_trajectory_digest")
-        if not session_id or not source_agent or not trajectory_digest:
-            logger.warning("Subagent memory worker missing summary metadata")
-            return None
-        return _SummaryWriteArgs(
-            session_id=session_id,
-            source_agent=source_agent,
-            project_id=project_id,
-            summary=decision.summary,
-            trajectory_digest=trajectory_digest,
-        )
-
-    def _write_summary(self, state: AgentState[object]) -> None:
-        args = self._summary_write_args(state)
+    def record_execution_summary(summary: str) -> str:
+        args = _summary_args(summary)
         if args is None:
-            return
+            raise ToolException(
+                "The execution summary was not saved: the run has no source."
+            )
         _write_subagent_summary(
-            memory_dir=self._memory_dir,
+            memory_dir=folder,
             session_id=args.session_id,
             source_agent=args.source_agent,
             project_id=args.project_id,
             summary=args.summary,
             trajectory_digest=args.trajectory_digest,
         )
+        return _SUMMARY_SAVED
 
-    async def _awrite_summary(self, state: AgentState[object]) -> None:
-        args = self._summary_write_args(state)
-        if args is None:
-            return
-        await asyncio.to_thread(
-            _write_subagent_summary,
-            memory_dir=self._memory_dir,
-            session_id=args.session_id,
-            source_agent=args.source_agent,
-            project_id=args.project_id,
-            summary=args.summary,
-            trajectory_digest=args.trajectory_digest,
-        )
-
-    def after_agent(
-        self,
-        state: AgentState[object],
-        runtime: Runtime,
-    ) -> dict[str, object] | None:
-        self._write_summary(state)
-        return None
-
-    async def aafter_agent(
-        self,
-        state: AgentState[object],
-        runtime: Runtime,
-    ) -> dict[str, object] | None:
-        await self._awrite_summary(state)
-        return None
+    return StructuredTool.from_function(
+        func=record_execution_summary,
+        name=_EXECUTION_SUMMARY_TOOL,
+        description=(
+            "Save the execution summary of the subagent run: what it did, what "
+            "failed, and any blocker that still matters. Call it once, last."
+        ),
+        args_schema=_ExecutionSummaryArgs,
+        handle_tool_error=True,
+    )
 
 
 def build_memory_worker_graph(
@@ -592,13 +877,9 @@ def build_memory_worker_graph(
         workspace=workspace,
         memory_dir=memory_dir,
     )
-    middleware: list[AgentMiddleware] = []
-    response_format: type[BaseModel] | None = None
+    tools: list[BaseTool] = []
     if source_type == MemorySourceType.SUBAGENT:
-        middleware.append(
-            _SubagentSummaryWriterMiddleware(memory_dir=agent_paths.memory_dir)
-        )
-        response_format = SubagentMemoryDecision
+        tools.append(_execution_summary_tool(agent_paths.memory_dir))
     return _build_memory_worker_agent(
         source_type=source_type,
         system_prompt=_memory_worker_system_prompt(
@@ -606,13 +887,12 @@ def build_memory_worker_graph(
             enable_profile_memory=memory_controls.profile_enabled,
             enable_observation_tool=enable_observation_tool,
         ),
-        response_format=response_format,
+        tools=tools,
         memory_dir=agent_paths.memory_dir,
         workspace_dir=agent_paths.workspace_dir,
         enable_profile_memory=memory_controls.profile_enabled,
         enable_observation_memory=memory_controls.observations_enabled,
         observation_writer=memory_controls.observation_writer,
-        middleware=middleware,
     )
 
 

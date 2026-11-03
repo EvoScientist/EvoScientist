@@ -49,6 +49,7 @@ from .utils import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..backends import ParkedCloseReason
     from ..channels.interaction import ApprovalOutcome
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ if TYPE_CHECKING:
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
 _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
+
+
+class _ApprovalUnanswered(Exception):
+    """The approval prompt could not be read (no terminal), so nobody declined."""
 
 
 class _StreamPromptCancelled(Exception):
@@ -653,6 +658,180 @@ def _render_todo_panel(todo_items: list[dict]) -> Panel:
 # ---------------------------------------------------------------------------
 
 
+_RUBRIC_RESULT_LINES = {
+    "satisfied": ("Acceptance criteria satisfied", "green"),
+    "needs_revision": ("Acceptance criteria not yet satisfied", "yellow"),
+    "max_iterations_reached": (
+        "Acceptance criteria not satisfied (pass limit reached)",
+        "yellow",
+    ),
+    "failed": ("Rubric cannot be evaluated", "red"),
+    "grader_error": ("Acceptance criteria check failed", "red"),
+}
+
+
+_GOAL_LINES: dict[str, tuple[str, str]] = {
+    "drafting": ("Drafting acceptance criteria...", "dim"),
+    "accepted": ("Goal accepted.", "green"),
+    "amended": ("Goal amended.", "green"),
+    "cancelled": ("Goal proposal cancelled.", "yellow"),
+    "failed": ("Goal request failed", "red"),
+    "paused": ("Goal paused.", "yellow"),
+    "resumed": ("Goal resumed.", "green"),
+    "cleared": ("Goal cleared.", "yellow"),
+    "ignored": ("Nothing was changed", "yellow"),
+    "blocked": ("Goal blocked", "yellow"),
+    "unblocked": ("Goal unblocked.", "dim"),
+    "unmet": (
+        "The goal stays active: send a message to continue, "
+        "/goal amend to change it, /goal clear to drop it.",
+        "dim",
+    ),
+    "complete": ("Goal complete.", "green"),
+}
+# A draft adopted with nobody to review it: the user reads what was accepted
+# for them as a warning.
+_GOAL_UNREVIEWED_LINES: dict[str, str] = {
+    "accepted": "Goal accepted without review (auto mode).",
+    "amended": "Goal amended without review (auto mode).",
+}
+# Changes whose note is the point of the line.
+_GOAL_NOTE_AFTER_COLON = frozenset({"failed", "ignored", "blocked"})
+# A note can be 4,000 characters; a status line shows its start.
+_GOAL_NOTE_SHOWN = 240
+
+
+def goal_event_lines(event: dict) -> list[tuple[str, str]]:
+    """``(text, style)`` lines for one goal event; shared by the Rich CLI and the TUI."""
+    change = str(event.get("change") or "")
+    label, style = _GOAL_LINES.get(change, (f"Goal: {change}", "dim"))
+    note = " ".join(str(event.get("note") or "").split())
+    if len(note) > _GOAL_NOTE_SHOWN:
+        # ``/goal`` shows the whole note.
+        note = note[: _GOAL_NOTE_SHOWN - 3].rstrip() + "..."
+    if note and change in _GOAL_NOTE_AFTER_COLON:
+        label = f"{label}: {note}"
+    elif note and change in ("complete", "cleared"):
+        label = f"{label} {note}"
+    elif change in _GOAL_NOTE_AFTER_COLON:
+        label = f"{label}."
+    detail = "dim"
+    if event.get("unreviewed") and change in _GOAL_UNREVIEWED_LINES:
+        label, style, detail = _GOAL_UNREVIEWED_LINES[change], "yellow", "yellow"
+    lines = [(label, style)]
+    if change in ("accepted", "amended"):
+        if change == "amended" and event.get("objective"):
+            lines.append((f"  {event['objective']}", detail))
+        lines.extend(
+            (f"  {line}", detail)
+            for line in str(event.get("criteria") or "").splitlines()
+            if line.strip()
+        )
+    return lines
+
+
+# Changes that follow the grader's verdict; the others open the turn.
+_GOAL_CLOSING_CHANGES = frozenset({"unmet", "complete"})
+
+
+def visible_goal_events(goal_events: list, *, closing: bool) -> list:
+    """This turn's goal events for one side of the verdict lines.
+
+    ``drafting`` is shown only while it is the latest event: the next one
+    says how the draft ended.
+    """
+    last = len(goal_events) - 1
+    return [
+        event
+        for index, event in enumerate(goal_events)
+        if (event.get("change") in _GOAL_CLOSING_CHANGES) is closing
+        and (event.get("change") != "drafting" or index == last)
+    ]
+
+
+def _render_goal_lines(goal_events: list, *, closing: bool) -> list:
+    """Lines for this turn's goal events, as plain ``Text`` (never markup)."""
+    return [
+        Text(text, style=style)
+        for event in visible_goal_events(goal_events, closing=closing)
+        for text, style in goal_event_lines(event)
+    ]
+
+
+def rubric_deferred_text(tasks: int, processes: int) -> str:
+    """One line saying what grading waits for; shared by the Rich CLI and the TUI."""
+    parts: list[str] = []
+    if tasks:
+        parts.append(f"{tasks} background task{'s' if tasks != 1 else ''}")
+    if processes:
+        noun = "process" if tasks else "background process"
+        parts.append(f"{processes} {noun}{'es' if processes != 1 else ''}")
+    what = " and ".join(parts) if parts else "background work"
+    return f"Acceptance check deferred: {what} still running"
+
+
+def model_retry_text(event: dict) -> str:
+    """One line per retry; shared by the Rich CLI and the TUI."""
+    wait = float(event.get("wait_seconds") or 0.0)
+    wait_text = f"{wait:.0f}" if wait >= 1 else f"{wait:.1f}"
+    # A sub-agent's or the grader's retry is named; the main agent's is not.
+    who = str(event.get("subagent") or "")
+    return (
+        f"{who + ': ' if who else ''}"
+        f"Model request failed ({event.get('reason') or 'transient error'}); "
+        f"retrying in {wait_text} s (attempt {event.get('attempt') or '?'})"
+    )
+
+
+def _render_model_retry_lines(retries: list) -> list:
+    return [Text(model_retry_text(event), style="yellow") for event in retries]
+
+
+def rubric_result_lines(evaluation: dict) -> list[tuple[str, str]]:
+    """``(text, style)`` lines for one grading pass; shared by the Rich CLI and the TUI."""
+    result = str(evaluation.get("result") or "")
+    label, style = _RUBRIC_RESULT_LINES.get(
+        result, ("Acceptance criteria check ended", "yellow")
+    )
+    explanation = str(evaluation.get("explanation") or "").strip()
+    if explanation and result != "satisfied":
+        label = f"{label}: {explanation}"
+    lines = [(label, style)]
+    if result in ("needs_revision", "max_iterations_reached"):
+        for criterion in evaluation.get("criteria") or []:
+            if not isinstance(criterion, dict) or criterion.get("passed", True):
+                continue
+            name = str(criterion.get("name") or "criterion")
+            gap = str(criterion.get("gap") or "").strip()
+            lines.append((f"  - {name}: {gap}" if gap else f"  - {name}", style))
+    return lines
+
+
+def _render_rubric_lines(
+    evaluations: list, checking: bool, deferred: dict | None = None
+) -> list:
+    """Lines for the grading passes so far, as plain ``Text`` (never markup)."""
+    lines: list = []
+    for evaluation in evaluations:
+        for text, style in rubric_result_lines(evaluation):
+            lines.append(Text(text, style=style))
+    if deferred:
+        lines.append(
+            Text(
+                rubric_deferred_text(
+                    int(deferred.get("tasks") or 0),
+                    int(deferred.get("processes") or 0),
+                ),
+                style="yellow",
+            )
+        )
+    if checking:
+        lines.append(
+            Spinner("dots", text=" Checking acceptance criteria...", style="cyan")
+        )
+    return lines
+
+
 def create_streaming_display(
     thinking_text: str = "",
     response_text: str = "",
@@ -678,6 +857,11 @@ def create_streaming_display(
     is_summarizing: bool = False,
     selected_tools: list | None = None,
     status_footer: Any | None = None,
+    rubric_evaluations: list | None = None,
+    rubric_checking: bool = False,
+    rubric_deferred: dict | None = None,
+    model_retries: list | None = None,
+    goal_events: list | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -947,6 +1131,27 @@ def create_streaming_display(
 
             # Remaining sub-agent sections are rendered below.
 
+    retry_lines = _render_model_retry_lines(model_retries or [])
+    if retry_lines:
+        elements.append(Text(""))  # blank separator
+        elements.extend(retry_lines)
+
+    goal_lines = _render_goal_lines(goal_events or [], closing=False)
+    if goal_lines:
+        if elements:
+            elements.append(Text(""))  # blank separator
+        elements.extend(goal_lines)
+
+    rubric_lines = _render_rubric_lines(
+        rubric_evaluations or [], rubric_checking and not is_final, rubric_deferred
+    )
+    if rubric_lines:
+        elements.append(Text(""))  # blank separator
+        elements.extend(rubric_lines)
+
+    # What the verdict did to the goal reads after the verdict.
+    elements.extend(_render_goal_lines(goal_events or [], closing=True))
+
     if is_final:
         # Final frame: render todo panel + response (tools/subagents handled above).
         # Skip narration, spinners — but KEEP response so it persists on screen
@@ -1009,7 +1214,9 @@ def create_streaming_display(
                 elements.append(Text(""))  # blank separator
                 elements.append(answer_markdown)
 
-    if not elements:
+    # A turn can end with nothing to show (a /goal request that changed
+    # nothing visible); the final frame stays on screen, so no spinner there.
+    if not elements and not is_final:
         elements.append(Spinner("dots", text=" Processing...", style="cyan"))
     if status_footer is not None:
         elements.append(status_footer)
@@ -1163,12 +1370,18 @@ class _HitlResolution:
     human budget is spent). ``human_prompted`` says whether a human was
     asked this round. ``budget_exhausted`` is set only when a human prompt
     was skipped because the human-round budget was already spent; auto
-    fast paths never set it (issue #469).
+    fast paths never set it (issue #469). ``session_granted`` is True only
+    when the decisions came from a session "approve all" already in force;
+    ``grant_in_force`` also covers the channel reply that grants. ``rejected``
+    is True when a human declined; a decline without it was left unanswered.
     """
 
     decisions: list[dict] | None
     human_prompted: bool
     budget_exhausted: bool = False
+    session_granted: bool = False
+    grant_in_force: bool = False
+    rejected: bool = False
 
 
 def _resolve_hitl_approval(
@@ -1204,9 +1417,13 @@ def _resolve_hitl_approval(
 
     # Session "approve all" is an explicit human opt-in → blanket-approve
     # everything (dangerous set included), unlike unattended auto_approve below.
+    # Read here, before any prompt: the prompt is where the grant gets set.
     if _session_auto_approve:
         return _HitlResolution(
-            [{"type": "approve"} for _ in action_requests], human_prompted=False
+            [{"type": "approve"} for _ in action_requests],
+            human_prompted=False,
+            session_granted=True,
+            grant_in_force=True,
         )
 
     # Config-rule fast path (shared with the TUI). Returns full decisions when
@@ -1223,20 +1440,29 @@ def _resolve_hitl_approval(
         outcome = outcome_fn(action_requests, human_budget_exhausted)
         if outcome.budget_exhausted:
             return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
-        return _HitlResolution(outcome.decisions, human_prompted=outcome.prompted)
+        return _HitlResolution(
+            outcome.decisions,
+            human_prompted=outcome.prompted,
+            session_granted=outcome.session_granted,
+            grant_in_force=outcome.grant_in_force,
+            rejected=outcome.rejected,
+        )
 
     # After the auto fast paths: a spent human budget must not prompt, but
     # it also must not have blocked the session grant / allow-list above.
     if human_budget_exhausted:
         return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
 
-    human = (
-        prompt_fn(action_requests)
-        if prompt_fn is not None
-        else _prompt_hitl_approval(action_requests, question_runner=question_runner)
-    )
+    try:
+        human = (
+            prompt_fn(action_requests)
+            if prompt_fn is not None
+            else _prompt_hitl_approval(action_requests, question_runner=question_runner)
+        )
+    except _ApprovalUnanswered:
+        return _HitlResolution(None, human_prompted=True)
     if human is None or any(d.get("type") != "approve" for d in human):
-        return _HitlResolution(human, human_prompted=True)
+        return _HitlResolution(human, human_prompted=True, rejected=human is None)
     return _HitlResolution(
         decisions_after_human_approval(action_requests, rejections),
         human_prompted=True,
@@ -1300,7 +1526,11 @@ def _prompt_hitl_approval(
         selected = (
             question_runner(question) if question_runner is not None else question.ask()
         )
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        # No terminal to read from: nobody declined.
+        console.print("[dim]  Left unanswered.[/dim]")
+        raise _ApprovalUnanswered from None
+    except KeyboardInterrupt:
         console.print("[dim]  Rejected.[/dim]")
         return None
 
@@ -1355,7 +1585,13 @@ def _resolve_ask_user_prompt(
             q_type = q.get("type", "text")
             required = q.get("required", True)
             optional_suffix = " (optional)" if not required else ""
-            prompt_text = f"({i + 1}/{total}) {q_text}{optional_suffix}"
+            # The prompt is redrawn in place and silently cut when it is
+            # taller than the terminal, so a long question is printed above
+            # it and only its last line stays in the prompt.
+            body, _, last_line = str(q_text).rstrip().rpartition("\n")
+            if body:
+                console.print(Text(body))
+            prompt_text = f"({i + 1}/{total}) {last_line}{optional_suffix}"
 
             def _make_validator(is_required: bool):
                 def _validate(v: str) -> bool | str:
@@ -1456,6 +1692,9 @@ def _run_streaming(
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
+    rubric: str | None = None,
+    approve_all_at_start: bool = False,
+    goal_request: dict[str, Any] | None = None,
     _state: StreamState | None = None,
     _media_sent: set[str] | None = None,
     _sent_thinking_text: str | None = None,
@@ -1484,6 +1723,8 @@ def _run_streaming(
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
+        approve_all_at_start: The channel this turn came from already holds an
+            "approve all" grant, so the turn's first call carries it.
 
     Returns:
         The final response text.
@@ -1510,6 +1751,9 @@ def _run_streaming(
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
                 runtime=owned_runtime,
+                rubric=rubric,
+                approve_all_at_start=approve_all_at_start,
+                goal_request=goal_request,
                 _state=_state,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
@@ -1531,6 +1775,14 @@ def _run_streaming(
         state.response_text = final_text
         return final_text
 
+    from ..backends import approve_all_configurable_extra
+    from ..rubric_session import merge_configurable_extra
+
+    # Which calls carry the session grant: see ``_hitl_when``. Decided where
+    # each answer is built, never from the flag at a round's top.
+    turn_granted = approve_all_at_start
+    approve_all_carry = turn_granted or _session_auto_approve
+
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
         event_stream = gateway.stream_events(
@@ -1538,8 +1790,14 @@ def _run_streaming(
                 message=message,
                 thread_id=thread_id,
                 metadata=metadata,
-                configurable_extra=configurable_extra,
+                configurable_extra=merge_configurable_extra(
+                    configurable_extra,
+                    approve_all_configurable_extra(approve_all_carry),
+                ),
                 target=_graph_target_for_local_agent(agent, metadata),
+                rubric=rubric,
+                # Read only with the turn's first input; a resume ignores it.
+                goal_request=goal_request,
             )
         )
         try:
@@ -1647,28 +1905,38 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
-    def _stop_on_hitl_round_limit() -> str:
-        """Stop an exhausted HITL resume loop visibly (issue #469).
+    def _stopped_at_approval() -> str:
+        """End a stopped turn that leaves an approval open.
 
-        Prints a notice, closes the parked interrupt without resuming the
-        agent (a rejecting resume would run another invisible model step),
-        and returns the partial response gathered so far. Channel callers
-        (``hitl_outcome_fn``) also get the notice in the returned text,
-        because the console line never reaches the channel user.
+        Such a stop is a refusal, as Ctrl+C on the prompt is: the next message must not land on it.
         """
-        from ..channels.hitl_budget import (
-            HITL_BUDGET_STOP_NOTICE,
-            MAX_HITL_TOTAL_ROUNDS,
-            MAX_HUMAN_HITL_ROUNDS,
-        )
+        _close_parked_turn("rejected")
+        return _stopped_response()
 
-        limit = (
-            MAX_HITL_TOTAL_ROUNDS
-            if total_rounds >= MAX_HITL_TOTAL_ROUNDS
-            else MAX_HUMAN_HITL_ROUNDS
-        )
-        console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
-        _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
+    def _close_parked_turn(reason: "ParkedCloseReason") -> str:
+        """End the turn at a pause that will not be answered.
+
+        Closes the parked interrupt without resuming the agent (a rejecting
+        resume would run another invisible model step) and returns the
+        partial response gathered so far. At the round limit (issue #469) a
+        notice is printed, and channel callers (``hitl_outcome_fn``) also get
+        it in the returned text, because the console line never reaches them.
+        """
+        at_limit = reason == "round_limit"
+        if at_limit:
+            from ..channels.hitl_budget import (
+                HITL_BUDGET_STOP_NOTICE,
+                MAX_HITL_TOTAL_ROUNDS,
+                MAX_HUMAN_HITL_ROUNDS,
+            )
+
+            limit = (
+                MAX_HITL_TOTAL_ROUNDS
+                if total_rounds >= MAX_HITL_TOTAL_ROUNDS
+                else MAX_HUMAN_HITL_ROUNDS
+            )
+            console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
+            _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
         state.pending_interrupt = None
         state.pending_ask_user = None
 
@@ -1679,6 +1947,7 @@ def _run_streaming(
                 gateway,
                 _graph_target_for_local_agent(agent, metadata),
                 thread_id,
+                reason=reason,
             )
 
         try:
@@ -1688,13 +1957,14 @@ def _run_streaming(
                 raise
             _stopped_response()
         except Exception:
-            _logger.warning(
-                "Failed to close parked HITL checkpoint on thread %s",
+            # The close has logged why; the turn ends either way.
+            _logger.debug(
+                "Parked HITL checkpoint close failed on thread %s",
                 thread_id,
                 exc_info=True,
             )
         text = (state.response_text or "").strip()
-        if hitl_outcome_fn is None:
+        if not at_limit or hitl_outcome_fn is None:
             return text
         from ..channels.hitl_budget import channel_response_with_budget_stop
 
@@ -1827,7 +2097,7 @@ def _run_streaming(
                 total_rounds=total_rounds,
                 needs_human=False,
             ):
-                return _stop_on_hitl_round_limit()
+                return _close_parked_turn("round_limit")
 
             # ask_user: check before HITL (ask_user uses the same resume loop)
             if state.pending_ask_user is not None:
@@ -1836,7 +2106,7 @@ def _run_streaming(
                     total_rounds=total_rounds,
                     needs_human=True,
                 ):
-                    return _stop_on_hitl_round_limit()
+                    return _close_parked_turn("round_limit")
                 human_rounds += 1  # ask_user always prompts a human
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
@@ -1863,12 +2133,13 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
                 message = Command(resume=result)
+                approve_all_carry = turn_granted or _session_auto_approve
                 continue
 
             # HITL: check for pending interrupt and handle approval
             if state.pending_interrupt is not None:
                 if is_stream_cancel_requested(cancel_scope):
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 try:
                     resolution = _resolve_hitl_approval(
                         state.pending_interrupt,
@@ -1890,23 +2161,29 @@ def _run_streaming(
                         ),
                     )
                 except _StreamPromptCancelled:
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 if resolution.budget_exhausted:
-                    return _stop_on_hitl_round_limit()
+                    return _close_parked_turn("round_limit")
                 if resolution.human_prompted:
                     human_rounds += 1
+                # Whatever the answer was, a stopped turn does not resume.
                 if is_stream_cancel_requested(cancel_scope):
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 if resolution.decisions is not None:
-                    from ..backends import build_hitl_resume
+                    from ..backends import answer_keeps_grant, build_hitl_resume
 
                     interrupt_id = state.pending_interrupt.get("interrupt_id")
                     state.pending_interrupt = None
                     state.thinking_text = ""  # reset accumulation for fresh round
-                    if is_stream_cancel_requested(cancel_scope):
-                        return _stopped_response()
                     message = build_hitl_resume(interrupt_id, resolution.decisions)
+                    turn_granted = turn_granted or resolution.grant_in_force
+                    approve_all_carry = answer_keeps_grant(
+                        resolution.session_granted, resolution.decisions
+                    )
                     continue
+                return _close_parked_turn(
+                    "rejected" if resolution.rejected else "unanswered"
+                )
 
             # Everything (tools, thinking, todos, response) is already on screen
             # from Live's final frame (transient=False). No need to re-print.

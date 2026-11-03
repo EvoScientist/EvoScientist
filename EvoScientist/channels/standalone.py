@@ -16,6 +16,7 @@ Usage from a channel's ``main()``::
 import asyncio
 import logging
 import signal
+import threading
 from typing import Any
 
 from ..paths import Workspace
@@ -98,8 +99,11 @@ async def _async_main(
     backend: str | None = None,
     *,
     workspace: Workspace,
-) -> None:
-    """Async entry point — gather channel, dispatcher and optional consumer."""
+) -> bool:
+    """Async entry point — gather channel, dispatcher and optional consumer.
+
+    Returns ``True`` when the channel worker stopped on its own.
+    """
     from .channel_manager import ChannelManager
 
     channel.set_bus(bus)
@@ -112,6 +116,13 @@ async def _async_main(
     manager._channels[channel.name] = channel
 
     await manager.start_health()
+
+    # Bound into the consumer task's context so blocking sync tools (shell)
+    # see it via current_cancel_event() — the same mechanism serve's
+    # run_streaming uses. Set on shutdown so in-flight tool subprocesses die
+    # and asyncio.run's executor join cannot hang. Only takes effect when
+    # the agent runs in-process with the `local` backend.
+    turn_cancel = threading.Event()
 
     tasks = [channel.run()]
 
@@ -135,46 +146,125 @@ async def _async_main(
             manager=manager,
             agent=agent,
             thread_id="",
+            workspace=workspace,
             graph_gateway=runtime_gateways.graph_gateway,
             send_thinking=send_thinking,
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
-        tasks.append(consumer.run())
+
+        async def _run_consumer() -> None:
+            from ..cancellation import bind_cancel_event
+
+            with bind_cancel_event(turn_cancel):
+                await consumer.run()
+
+        tasks.append(_run_consumer())
         if send_thinking:
             logger.info("Thinking messages enabled")
+
+    # Wrap the coroutines in Task objects once, after agent init (so the
+    # channel still only starts when the agent is ready) and before the
+    # signal handlers go in. Everything below operates on `workers`.
+    workers: list[asyncio.Task] = [asyncio.create_task(coro) for coro in tasks]
 
     async def _graceful_shutdown() -> None:
         """Graceful shutdown: drain consumer, flush outbound, stop channel."""
         logger.info("Graceful shutdown initiated...")
-        if consumer is not None:
-            await consumer.stop()
-        # Drain outbound queue before stopping the channel
-        drained = 0
-        while True:
-            try:
-                msg = bus.outbound.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
-                if msg.content or msg.media:
-                    drained += 1
-            except Exception:
-                pass
-        if drained:
-            logger.info(f"Outbound drain: {drained} sent")
-        channel._running = False
-        await channel.stop()
-        await manager.stop_health()
+        turn_cancel.set()
+        try:
+            if consumer is not None:
+                from ..backends import cancel_active_shell_processes
+
+                cancel_active_shell_processes(turn_cancel)
+                await consumer.stop()
+            # Drain outbound queue before stopping the channel
+            drained = 0
+            while True:
+                try:
+                    msg = bus.outbound.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
+                    if msg.content or msg.media:
+                        drained += 1
+                except Exception:
+                    pass
+            if drained:
+                logger.info(f"Outbound drain: {drained} sent")
+            channel._running = False
+            await channel.stop()
+            await manager.stop_health()
+        except Exception:
+            # A failing stop step must never skip worker cancellation — that
+            # path leaves the first gather waiting forever (hung process).
+            logger.exception("Graceful shutdown failed")
+        finally:
+            for t in workers:
+                t.cancel()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(_graceful_shutdown()),
-        )
+    shutdown_task: asyncio.Task[None] | None = None
+    channel_exited = False
 
-    await asyncio.gather(*tasks)
+    def _request_shutdown() -> None:
+        nonlocal shutdown_task
+        if shutdown_task is None:
+            shutdown_task = asyncio.create_task(_graceful_shutdown())
+            return
+        # A signal during shutdown forces the exit: cancel the graceful path, whose
+        # `finally` then cancels the workers. Deferred one step so a task
+        # created by a signal handled in the same loop pass enters its `try`.
+        logger.warning("Signal received during shutdown, forcing exit")
+        loop.call_soon(shutdown_task.cancel)
+
+    owner = asyncio.current_task()
+
+    def _channel_finished(_worker: asyncio.Task[None]) -> None:
+        nonlocal channel_exited
+        # Worker completion is not a second signal, and outer cancellation
+        # must not start another shutdown task while the runner is exiting.
+        if shutdown_task is None and not owner.cancelling():
+            channel_exited = True
+            logger.error("Channel %s stopped; shutting down", channel.name)
+            _request_shutdown()
+
+    workers[0].add_done_callback(_channel_finished)
+
+    # Windows event loops have no add_signal_handler. A plain handler runs on
+    # the main thread between bytecodes and hands the request to the loop; it
+    # is removed on the way out so a later Ctrl+C never reaches a closed loop.
+    previous_handlers: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            previous_handlers[sig] = signal.signal(
+                sig, lambda *_: loop.call_soon_threadsafe(_request_shutdown)
+            )
+
+    try:
+        await asyncio.gather(*workers, return_exceptions=True)
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+    finally:
+        for sig, previous in previous_handlers.items():
+            if previous is not None:
+                signal.signal(sig, previous)
+        if consumer is not None:
+            from ..middleware.code_interpreter import aclose_code_interpreters
+
+            # A forced exit leaves the consumer's turns running; settle them
+            # first so none reopens an interpreter after the close.
+            current = asyncio.current_task()
+            leftover = [t for t in asyncio.all_tasks() if t is not current]
+            try:
+                for t in leftover:
+                    t.cancel()
+                await asyncio.gather(*leftover, return_exceptions=True)
+            finally:
+                await aclose_code_interpreters()
+    return channel_exited
 
 
 def _ensure_standalone_dev_server(
@@ -190,32 +280,54 @@ def _ensure_standalone_dev_server(
     console/typer UI, progress goes to the log.
 
     Called synchronously before the asyncio loop starts (like serve), so the
-    cold-start poll never blocks the channel event loop. Unlike serve, there is
-    no console to render serve's red mismatch banner + ``typer.Exit``: a
-    workspace mismatch from :func:`ensure_langgraph_dev` is logged as
-    a single error line and re-raised to abort startup; a generic start failure
-    does not raise here — ``ensure_langgraph_dev`` leaves the dev server
-    unavailable, and ``create_runtime_gateways_for_config`` then falls back to the
-    in-process gateway for the run. serve's autoskill-schedule reconciliation and
-    config-drift hint are intentionally not mirrored here (no console, and
-    channels do not reconcile schedules).
+    cold-start poll never blocks the channel event loop. A server this runner
+    cannot use (:class:`ServerUnusableError`) is logged as one error line and
+    stops startup with exit code 1; a generic start failure does not raise
+    here — ``ensure_langgraph_dev`` leaves the dev server unavailable, and
+    ``create_runtime_gateways_for_config`` then falls back to the in-process
+    gateway for the run. serve's config-drift hint is not mirrored here (no
+    console); the server reconciles the project's AutoSkills schedule as it
+    registers it.
     """
     if backend != "langgraph_server":
         return
 
-    import os
-
-    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..langgraph_dev import manager
+    from ..langgraph_dev.registration import ServerUnusableError, exposure_messages
     from ..paths import ensure_dirs
 
-    os.makedirs(workspace_dir, exist_ok=True)
     ensure_dirs()
     logger.info("Starting background agent server (langgraph dev)...")
     try:
-        ensure_langgraph_dev(config, workspace_dir=workspace_dir, backend=backend)
-    except WorkspaceMismatchError as exc:
+        manager.ensure_langgraph_dev(
+            config, workspace_dir=workspace_dir, backend=backend
+        )
+    except ServerUnusableError as exc:
         logger.error("Cannot start server-backed standalone channel: %s", exc)
-        raise
+        raise SystemExit(1) from exc
+    # The server serves every project: a public bind or tunnel exposes this
+    # one too.
+    for message in exposure_messages(manager.SERVER_EXPOSURE):
+        logger.warning(message)
+
+
+def _ensure_ccproxy(config: Any) -> None:
+    """Start ccproxy, or reuse a running one, when Anthropic uses OAuth. It
+    outlives this runner, for every session and the background server to
+    share.
+
+    Must run before the dev server spawns: its env is copied from ``os.environ``.
+    """
+    from ..ccproxy_manager import maybe_start_ccproxy, uses_oauth
+
+    if not uses_oauth(config):
+        return
+
+    try:
+        maybe_start_ccproxy(config, lasting=True)
+    except RuntimeError as exc:
+        logger.error("ccproxy startup failed: %s", exc)
+        raise SystemExit(1) from exc
 
 
 def run_standalone(
@@ -239,8 +351,25 @@ def run_standalone(
     send_thinking:
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
+
+    Raises
+    ------
+    SystemExit
+        Exit status 1 if the channel stops on its own (for example, a fatal
+        start error). A signal-initiated shutdown returns normally.
     """
     from ..paths import process_workspace
+
+    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
+    # API puts the bot token in the URL path), and httpx logs every request
+    # URL at INFO. A standalone channel started with DEBUG logging (each
+    # serve.py) would therefore write secrets to stdout and any redirected
+    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
+    # has. Keep this in run_standalone (shared by every channel), not in a
+    # single channel's serve.py.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.INFO)
 
     config = None
     backend = None
@@ -250,13 +379,33 @@ def run_standalone(
             get_effective_config,
             resolve_gateway_backend,
         )
-        from ..paths import reload_env_dirs, start_workspace_path
+        from ..langgraph_dev.registration import (
+            ServerUnusableError,
+            prepare_workdir,
+        )
+        from ..paths import start_workspace_path
 
         config = get_effective_config()
-        reload_env_dirs()
+        if getattr(config, "openai_auth_mode", "api_key") == "oauth":
+            # Nobody is at a terminal here, so there is no sign-in to offer.
+            from ..llm import chatgpt_oauth
+
+            state = chatgpt_oauth.status()
+            if not state.signed_in:
+                if state.problem:
+                    logger.error("ChatGPT: %s", state.problem)
+                logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
+                raise SystemExit(1)
+        # ccproxy starts after the sign-in check, like the other entry points.
+        _ensure_ccproxy(config)
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.
         ws_path = start_workspace_path(default_workdir=config.default_workdir)
+        try:
+            prepare_workdir(ws_path)
+        except ServerUnusableError as exc:
+            logger.error("%s", exc)
+            raise SystemExit(1) from exc
         workspace = Workspace(ws_path)
         _ensure_standalone_dev_server(
             config, workspace_dir=str(workspace.root), backend=backend
@@ -265,7 +414,7 @@ def run_standalone(
         # Without an agent there is no config to read; attachments go to the
         # process workspace's ``media`` folder.
         workspace = process_workspace()
-    asyncio.run(
+    if asyncio.run(
         _async_main(
             channel,
             bus,
@@ -275,4 +424,5 @@ def run_standalone(
             backend,
             workspace=workspace,
         )
-    )
+    ):
+        raise SystemExit(1)

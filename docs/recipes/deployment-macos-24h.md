@@ -12,7 +12,7 @@ This guide covers deploying EvoScientist as a fully automated 24/7 service on ma
 
 ## Prerequisites
 
-- macOS 13+ (Apple Silicon or Intel)
+- macOS 13+ on Apple silicon
 - [Claude Code](https://claude.ai/code) installed and subscription active
 - [uv](https://astral.sh/uv) installed
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
@@ -109,7 +109,7 @@ cd ~/Dev/tools/EvoScientist
 
 EvoSci config set anthropic_base_url "http://localhost:8000/claude"
 EvoSci config set anthropic_api_key  "sk-dummy"
-EvoSci config set model              "claude-sonnet-4-6"
+EvoSci config set model              "claude-sonnet-5-5"
 
 # Telegram
 EvoSci config set telegram_bot_token      "YOUR_BOT_TOKEN"
@@ -229,6 +229,8 @@ tail -f /tmp/ccproxy.log
 | Restart ccproxy | `launchctl kickstart -k gui/$(id -u)/com.evosci.ccproxy` |
 | Stop EvoSci | `launchctl unload ~/Library/LaunchAgents/com.evosci.serve.plist` |
 | Stop ccproxy | `launchctl unload ~/Library/LaunchAgents/com.evosci.ccproxy.plist` |
+| Stop the agent server (it outlives `EvoSci serve`) | `EvoSci server stop` |
+| After updating EvoScientist | `EvoSci server stop`, then restart EvoSci |
 | Reload after plist edit | `launchctl unload <plist> && launchctl load <plist>` |
 
 ---

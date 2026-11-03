@@ -102,12 +102,12 @@ async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch, tmp
         ),
     ],
 )
-def test_agent_python_notices(monkeypatch, hint, drift, expected):
+def test_agent_shell_notices(monkeypatch, hint, drift, expected):
     """The TUI hides terminal output while it runs, so the hint and the
     server-python warning become in-app notices."""
+    from EvoScientist import agent_shell
     from EvoScientist.langgraph_dev import manager
-    from EvoScientist.setup import research_env
 
-    monkeypatch.setattr(research_env, "missing_python_hint", lambda: hint)
-    monkeypatch.setattr(manager, "AGENT_PYTHON_DRIFT", drift)
-    assert tui_mod._agent_python_notices() == expected
+    monkeypatch.setattr(agent_shell, "setup_hint", lambda: hint)
+    monkeypatch.setattr(manager, "AGENT_SHELL_DRIFT", drift)
+    assert tui_mod._agent_shell_notices() == expected

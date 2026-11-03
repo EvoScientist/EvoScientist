@@ -100,6 +100,21 @@ def _has_answer_content(content: object) -> bool:
     return False
 
 
+def _error_finished_message(response: ModelResponse):
+    """Return the last AI message when the provider ended it with ``finish_reason == "error"``."""
+    from langchain_core.messages import AIMessage
+
+    messages = getattr(response, "result", None) or []
+    message = next(
+        (item for item in reversed(messages) if isinstance(item, AIMessage)), None
+    )
+    if message is None:
+        return None
+    metadata = message.response_metadata or {}
+    reason = str(metadata.get("finish_reason", "")).strip().lower()
+    return message if reason == "error" else None
+
+
 def _truncated_empty_message(response: ModelResponse):
     """Return the empty truncated AI message in *response*, if present."""
     from langchain_core.messages import AIMessage
@@ -132,6 +147,13 @@ def _truncated_empty_message(response: ModelResponse):
 
 def _check_truncated_output(response: ModelResponse) -> ModelResponse:
     """Raise a visible error instead of silently accepting an empty answer."""
+    from ..llm.errors import ModelErrorFinishError
+
+    # Checked first and regardless of content or tool calls: the error finish
+    # is a failure even when the provider sent half an answer with it.
+    errored = _error_finished_message(response)
+    if errored is not None:
+        raise ModelErrorFinishError(errored)
     message = _truncated_empty_message(response)
     if message is None:
         return response
@@ -218,7 +240,9 @@ def _is_provider_error(exc: BaseException) -> bool:
     return any(module.startswith(p) for p in _PROVIDER_EXC_MODULE_PREFIXES)
 
 
-def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError | None:
+def _normalize(
+    request: ModelRequest | None, exc: BaseException
+) -> ProviderStreamError | None:
     """Return a :class:`ProviderStreamError` wrapping *exc* if the model
     on *request* comes from a recognized provider SDK, or ``None`` if
     the caller should re-raise *exc* unchanged.
@@ -301,9 +325,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
     """Wrap the model call in try/except and normalize provider SDK
     exceptions into a non-dataclass envelope wrapper.
 
-    Place this middleware **outermost** in the chain (first in the
-    middleware list) so it catches exceptions raised by inner
-    middlewares as well as the model handler itself.
+    Place this middleware right inside the retry layer, ahead of everything
+    else in the list, so it catches exceptions raised by inner middlewares
+    as well as the model handler itself.
     """
 
     name = "error_normalization"

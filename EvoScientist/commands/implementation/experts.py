@@ -30,6 +30,12 @@ if TYPE_CHECKING:
     from ...paths import Workspace
     from ...tools.skills_manager import SkillInfo
 
+NEW_EXPERT_DISPATCH_HINT = (
+    "Newly installed experts: background dispatch is available "
+    "immediately; in-turn task dispatch needs /new."
+)
+REMOVED_EXPERT_DISPATCH_HINT = "Removed experts stay dispatchable in-turn until /new."
+
 # Dispatchable experts per workspace, keyed by ``Workspace.key``.
 _dispatchable_experts_cache: dict[str, list[SkillInfo]] = {}
 
@@ -105,13 +111,13 @@ class ExpertsCommand(Command):
 
         table = Table(title=f"Expert Skills ({len(experts)})", show_header=True)
         table.add_column("Name", style="cyan")
-        table.add_column("Role", style="dim")
+        table.add_column("Description", style="dim")
         table.add_column("Active", style="green")
         for skill in experts:
             marker = "*" if skill.name in active else ""
             table.add_row(
                 skill.name,
-                skill.role or skill.description,
+                skill.description,
                 marker,
             )
         ctx.ui.mount_renderable(table)
@@ -148,9 +154,7 @@ class ExpertCommand(Command):
     ]
 
     def _get_expert_candidates(self, workspace: Workspace) -> list[tuple[str, str]]:
-        return [
-            (s.name, s.role or s.description) for s in _dispatchable_experts(workspace)
-        ]
+        return [(s.name, s.description) for s in _dispatchable_experts(workspace)]
 
     def get_completions(
         self, tokens: list[str], *, workspace: Workspace | None = None
@@ -245,11 +249,7 @@ class ExpertCommand(Command):
             # works without a rebuild — so the hint scopes the /new boundary
             # to newly installed experts instead of stating it
             # unconditionally.
-            ctx.ui.append_system(
-                "Newly installed experts: background dispatch is available "
-                "immediately; in-turn task dispatch needs /new.",
-                style="dim",
-            )
+            ctx.ui.append_system(NEW_EXPERT_DISPATCH_HINT, style="dim")
         if runtime.active_teams:
             ctx.ui.append_system(
                 f"Active: {', '.join(runtime.active_teams)}", style="dim"

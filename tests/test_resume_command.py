@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from EvoScientist.paths import SessionDirs, Workspace, normalize_path
-from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", run_dir=None, thread_store=None):

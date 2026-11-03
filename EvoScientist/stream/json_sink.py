@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable
 from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 async def write_events_as_json(
     events: AsyncIterable[dict[str, Any]],
     out: TextIO,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Serialize an async stream of event dicts to ``out`` as JSONL.
 
@@ -35,13 +36,16 @@ async def write_events_as_json(
     to its string form instead of raising and tearing down the stream.
 
     Returns the final response text carried by the terminal ``done`` event
-    (empty string if the stream ends without one).
+    (empty string if the stream ends without one). ``on_event`` sees each
+    event after it is written.
     """
     final = ""
     async for event in events:
         out.write(json.dumps(event, default=str))
         out.write("\n")
         out.flush()
+        if on_event is not None:
+            on_event(event)
         if event.get("type") == "done":
             final = event.get("response", "") or ""
     return final
@@ -52,13 +56,16 @@ def redirect_console_to_stderr() -> None:
 
     In stream-json mode stdout must carry only JSONL event lines, but the shared
     ``console`` singleton (used everywhere for status lines, separators, resume
-    hints, error panels) writes to stdout by default. Reassigning its ``file``
-    once moves every existing ``console.print`` call to stderr without touching
-    individual call sites.
+    hints, error panels) writes to stdout by default. Switching it to stderr
+    once moves every existing ``console.print`` call there without touching
+    individual call sites. It follows ``sys.stderr`` as it is at each print,
+    so a later replacement (a test's capture) is not left pointing at a closed
+    stream.
     """
     from .console import console
 
-    console.file = sys.stderr
+    console.file = None
+    console.stderr = True
 
 
 async def stream_json(
@@ -66,6 +73,7 @@ async def stream_json(
     request: RunRequest,
     *,
     out: TextIO | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Run a graph turn through the gateway and emit its event stream as JSONL.
 
@@ -74,4 +82,4 @@ async def stream_json(
     langgraph-server execution. ``out`` defaults to stdout.
     """
     sink = out if out is not None else sys.stdout
-    return await write_events_as_json(gateway.stream_events(request), sink)
+    return await write_events_as_json(gateway.stream_events(request), sink, on_event)

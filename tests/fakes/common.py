@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Iterable
+import re
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 from langgraph_sdk.client import LangGraphClient
@@ -552,10 +554,15 @@ class FakeCheckpointAgent:
                 self.next = ()
                 self.tasks = ()
                 self.interrupts = ()
-        elif as_node == "tools" and isinstance(values, dict):
+        elif isinstance(values, dict):
+            # Results are written as the node the graph was parked at.
             messages = list(self.values.get("messages") or [])
             messages.extend(values.get("messages") or [])
             self.values = {**self.values, "messages": messages}
+
+
+FAKE_THREAD_RUN_ID = "run-1"
+FAKE_THREAD_RUN_COMPLETED_EVENT_ID = f"synth:{FAKE_THREAD_RUN_ID}:lc::completed"
 
 
 class FakeLangGraphRunModule:
@@ -564,6 +571,7 @@ class FakeLangGraphRunModule:
     def __init__(self) -> None:
         self.starts: list[dict[str, Any]] = []
         self.responses: list[dict[str, Any]] = []
+        self.started = asyncio.Event()
 
     async def start(
         self,
@@ -579,7 +587,8 @@ class FakeLangGraphRunModule:
                 "metadata": metadata,
             }
         )
-        return {"run_id": "run-1"}
+        self.started.set()
+        return {"run_id": FAKE_THREAD_RUN_ID}
 
     async def respond(
         self,
@@ -593,7 +602,21 @@ class FakeLangGraphRunModule:
                 "interrupt_id": interrupt_id,
             }
         )
-        return {"run_id": "run-1"}
+        return {}
+
+
+def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
+    if event.get("method") != "lifecycle":
+        return False
+    params = event.get("params") or {}
+    if not isinstance(params, Mapping) or params.get("namespace"):
+        return False
+    data = params.get("data")
+    return isinstance(data, Mapping) and data.get("event") in {
+        "completed",
+        "failed",
+        "interrupted",
+    }
 
 
 class FakeLangGraphThreadStream:
@@ -606,15 +629,23 @@ class FakeLangGraphThreadStream:
         *,
         interrupts: list[dict[str, Any]] | None = None,
         interrupted: bool = False,
+        replay: Iterable[dict[str, Any]] | None = None,
+        stay_open: bool = False,
     ) -> None:
         self.thread_id = thread_id
-        self.events = list(events or [])
+        self.queued_events = list(events or [])
         self.interrupts = interrupts or []
         self.interrupted = interrupted
         self.run = FakeLangGraphRunModule()
         self.subscribed_channels: list[list[str]] = []
         self.entered = False
         self.exited = False
+        # ``events`` only: earlier runs' envelopes sent first on every new
+        # connection, and whether the SSE stays open after the queued run.
+        self.replay = list(replay or [])
+        self.stay_open = stay_open
+        self.event_streams_opened = 0
+        self.lost_live_events = False
 
     async def __aenter__(self) -> FakeLangGraphThreadStream:
         self.entered = True
@@ -624,8 +655,54 @@ class FakeLangGraphThreadStream:
         self.exited = True
 
     async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
-        for event in self.events:
+        for event in self.queued_events:
             yield event
+
+    @property
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        """All-channel thread SSE, shaped like langgraph-api's inmem runtime.
+
+        It replays ``replay`` first and registers for live envelopes only
+        after that, so a run started before the replay ends loses its
+        envelopes (and, with ``stay_open``, the stream never ends).
+        """
+        self.event_streams_opened += 1
+        # langgraph_sdk/_async/stream.py ``_ALL_CHANNELS``
+        self.subscribed_channels.append(
+            [
+                "values",
+                "updates",
+                "messages",
+                "tools",
+                "lifecycle",
+                "input",
+                "checkpoints",
+                "tasks",
+                "custom",
+            ]
+        )
+        return self._thread_events()
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        for event in self.replay:
+            yield event
+        if self.replay and self.run.started.is_set():
+            self.lost_live_events = True
+        else:
+            await self.run.started.wait()
+            last: dict[str, Any] | None = None
+            async for event in self._iter_events():
+                last = event
+                yield event
+            if last is None or not _is_root_lifecycle_stop(last):
+                # The server always ends a run with a root lifecycle event.
+                yield {
+                    "method": "lifecycle",
+                    "params": {"namespace": [], "data": {"event": "completed"}},
+                    "event_id": FAKE_THREAD_RUN_COMPLETED_EVENT_ID,
+                }
+        if self.stay_open:
+            await asyncio.Event().wait()
 
     def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
         self.subscribed_channels.append(channels)
@@ -821,3 +898,112 @@ def deepseek_tool_call_response(name: str, args: dict[str, Any]) -> dict[str, An
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
+
+
+# -- a closed approval or question ----------------------------------------------
+
+
+def close_result(text: str) -> tuple[str, str, bool]:
+    """What a closed call's result says: what happened, why, and the retry ban.
+
+    ``asked``: the user was asked and the call did not run. ``not executed``:
+    nobody was asked. ``did not finish``: the call had started. The reason is
+    a ``ParkedCloseReason``. Read off the sentences in ``backends``, so a test
+    states the facts without repeating the wording.
+    """
+    from EvoScientist import backends
+
+    banned = backends._NO_RETRY in text
+    for reason, template in backends._ASKED_RESULT.items():
+        # A name has no backtick and an id no blank, so one reason's sentence
+        # cannot swallow the extra clause of another.
+        pattern = re.escape(template)
+        pattern = pattern.replace(re.escape("{name}"), "[^`]+")
+        pattern = pattern.replace(re.escape("{call_id}"), r"\S+")
+        if re.fullmatch(pattern, text):
+            return "asked", reason, banned
+    if "did not finish" in text:
+        what = "did not finish"
+    elif "was not executed" in text:
+        what = "not executed"
+    else:
+        return "", "", banned
+    clauses = backends._TURN_ENDED
+    reason = next((r for r, clause in clauses.items() if clause in text), "")
+    return what, reason, banned
+
+
+# -- an approval in the Rich loop ------------------------------------------------
+
+
+def interrupt_event(n: int) -> dict:
+    """The stream event for the *n*-th parked approval of a turn."""
+    return {
+        "type": "interrupt",
+        "interrupt_id": f"i{n}",
+        "action_requests": [{"name": "execute", "args": {"command": f"echo step-{n}"}}],
+    }
+
+
+def attended_config(monkeypatch) -> None:
+    """A session in which no config rule answers an approval."""
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config",
+        lambda: SimpleNamespace(
+            auto_approve=False, dangerous_mode=False, shell_allow_list=""
+        ),
+    )
+
+
+def no_config_rule(monkeypatch) -> None:
+    """The config policy leaves every approval to a human."""
+    import EvoScientist.channels.interaction as interaction_mod
+
+    monkeypatch.setattr(
+        interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+    )
+
+
+def _mock_config():
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    cfg.code_interpreter_timeout = 60
+    cfg.code_interpreter_max_result_chars = 6000
+    return cfg
+
+
+def build_default_middleware(workspace, *, for_async_subagent: bool):
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    with (
+        patch(
+            "EvoScientist.middleware.create_tool_selector_middleware",
+            return_value=[MagicMock()],
+        ),
+        patch(
+            "EvoScientist.EvoScientist._ensure_chat_model",
+            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+        ),
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=_mock_config()),
+    ):
+        return _get_default_middleware(
+            workspace=workspace, for_async_subagent=for_async_subagent
+        )
+
+
+def status_snapshot():
+    """A status bar snapshot with a model and a little context in use."""
+    from EvoScientist.cli.status_bar import SessionStatusSnapshot
+
+    return SessionStatusSnapshot(
+        model_full="claude-sonnet-4-6",
+        model_short="sonnet-4-6",
+        context_tokens=1000,
+        context_window=200000,
+        context_percent=1,
+    )

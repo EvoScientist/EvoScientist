@@ -5,15 +5,20 @@ Holds everything needed to run the EvoScientist agent ecosystem on a local
 
 - ``manager`` — subprocess lifecycle (auto-start, port management, cleanup).
 - ``langgraph.json`` — graph manifest consumed by ``langgraph dev --config``.
-- ``main_graph`` — re-export of the lazy-loaded ``EvoScientist_agent``.
-- ``graphs`` — module-level bindings for every yaml-flagged async sub-agent
-  (``async: true`` in ``EvoScientist/subagents/<name>.yaml``).
+- ``factories`` — builds each served graph per project and run folder, and
+  caches it.
+- ``main_graph`` — the main agent's factory and its stream transformers.
+- ``graphs`` — the factories of the other served graphs.
 
-The graphs themselves are built by ``EvoScientist.subagents._factory.
-build_async_subagent_graph`` from the canonical yaml definitions, so this
-package only owns the *deployment* concern. Adding a new async sub-agent
-takes three steps: flip the yaml flag, add a one-line binding in
-``graphs.py``, and register it in ``langgraph.json``.
+The graphs themselves are built from the canonical definitions (the main
+agent, the yaml-defined sub-agents, the memory and proactive graphs), so this
+package only owns the *deployment* concern. Adding a new async sub-agent is
+described in ``graphs``.
+
+``langgraph.json`` turns off langgraph-api's ``/mcp`` endpoint: listing its
+tools reads the schema of every assistant, which builds a graph per workspace
+assistant, and it would offer every internal graph (the memory workers
+included) as a tool.
 """
 
 # ``langgraph dev`` imports this package (to resolve the graphs listed in

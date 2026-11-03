@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from ..message_meta import harness_label
 from .base import CommandUI
 
 if TYPE_CHECKING:
@@ -236,6 +237,10 @@ class ChannelCommandUI(CommandUI):
             lines.append("Conversation history:")
 
         for message in display:
+            label = harness_label(message)
+            if label is not None:
+                lines.append(label)
+                continue
             text = self._extract_message_text(message)
             if not text:
                 continue

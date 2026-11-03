@@ -17,18 +17,17 @@ import pytest
 
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.langgraph_dev import manager
+from EvoScientist.langgraph_dev.boundary import is_loopback_host
 
 
 @pytest.fixture(autouse=True)
 def reset_module_state():
     """Reset manager module globals before each test for isolation."""
     manager._PROCESS = None
-    manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
     yield
     manager._PROCESS = None
-    manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
 
@@ -61,13 +60,17 @@ class TestIsLoopbackHost:
     """Drives the public-bind warning, so it must be conservative: only
     provable loopback suppresses the banner."""
 
-    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "  LOCALHOST  "])
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "::1", "[::1]", "localhost", "  LOCALHOST  "]
+    )
     def test_loopback_recognized(self, host):
-        assert manager._is_loopback_host(host) is True
+        assert is_loopback_host(host) is True
 
-    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "example.test"])
+    @pytest.mark.parametrize(
+        "host", ["0.0.0.0", "::", "192.168.1.5", "example.test", "[::1", "::1]"]
+    )
     def test_exposed_hosts_rejected(self, host):
-        assert manager._is_loopback_host(host) is False
+        assert is_loopback_host(host) is False
 
 
 class TestBaseUrl:
@@ -98,6 +101,9 @@ class TestCanBindPort:
             def __init__(self, family, type_):
                 self.family = family
 
+            def setsockopt(self, *args):
+                pass
+
             def bind(self, addr):
                 bound.append((self.family, addr))
 
@@ -118,6 +124,9 @@ class TestCanBindPort:
             def __init__(self, family, type_):
                 self.family = family
 
+            def setsockopt(self, *args):
+                pass
+
             def bind(self, addr):
                 bound.append((self.family, addr))
 
@@ -128,6 +137,77 @@ class TestCanBindPort:
 
         assert manager._can_bind_port(6174, "::1") is True
         assert bound == [(_socket.AF_INET6, ("::1", 6174))]
+
+    @pytest.mark.parametrize(("os_name", "reuses"), [("posix", True), ("nt", False)])
+    def test_reuseaddr_only_on_posix(self, monkeypatch, os_name, reuses):
+        """uvicorn binds with ``SO_REUSEADDR``, so the probe must too, or
+        TIME_WAIT connections block a bind the server could make (#589). On
+        Windows the option also allows binding over a live listener."""
+        import socket as _socket
+
+        calls: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                pass
+
+            def setsockopt(self, level, option, value):
+                calls.append(("setsockopt", level, option, value))
+
+            def bind(self, addr):
+                calls.append(("bind", addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+        monkeypatch.setattr(manager.os, "name", os_name)
+
+        assert manager._can_bind_port(6174) is True
+        reuse = ("setsockopt", _socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        bind = ("bind", ("127.0.0.1", 6174))
+        assert calls == ([reuse, bind] if reuses else [bind])
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX TIME_WAIT rules")
+    def test_time_wait_connections_do_not_block_the_probe(self):
+        """End to end: the old server closed an accepted connection first, so
+        that connection sits in TIME_WAIT on the port after the server is
+        gone. A plain bind fails then, but the server's own bind would not."""
+        import socket as _socket
+
+        listener = _socket.socket()
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = _socket.create_connection(("127.0.0.1", port))
+        accepted, _ = listener.accept()
+        accepted.close()  # The server side closes first and keeps TIME_WAIT.
+        client.close()
+        listener.close()
+
+        plain = _socket.socket()
+        try:
+            plain.bind(("127.0.0.1", port))
+        except OSError:
+            pass
+        else:
+            pytest.skip("this kernel left no TIME_WAIT entry to test against")
+        finally:
+            plain.close()
+
+        assert manager._can_bind_port(port) is True
+
+    def test_live_listener_still_blocks_the_probe(self):
+        import socket as _socket
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        try:
+            assert manager._can_bind_port(listener.getsockname()[1]) is False
+        finally:
+            listener.close()
 
 
 # =============================================================================
@@ -428,10 +508,6 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running", return_value=False),
             patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
-            # Intercept the real atexit hook: letting it register means the
-            # callback fires at interpreter exit AFTER patches are restored,
-            # deleting the REAL ~/.config/evoscientist pid/sidecar files.
-            patch.object(manager.atexit, "register") as atexit_register,
             patch.object(
                 manager,
                 "RUNTIME",
@@ -443,9 +519,8 @@ class TestEnsureLanggraphDev:
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
-        assert result is proc
+        assert result is True
         start.assert_called_once()
-        atexit_register.assert_called_once_with(manager.stop_langgraph_dev, proc)
         assert manager.is_async_subagents_available() is True
 
     def test_skips_when_async_and_memory_workers_disabled(
@@ -473,7 +548,8 @@ class TestEnsureLanggraphDev:
         ):
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
 
-        assert result is None
+        # No server is needed, so the session has what it needs.
+        assert result is True
         mock_running.assert_not_called()
         start.assert_not_called()
         assert manager.is_async_subagents_available() is False
@@ -542,8 +618,7 @@ class TestEnsureLanggraphDev:
             result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
             # We didn't spawn anything — there's already a healthy server.
             mock_start.assert_not_called()
-            # Reuse path returns None (we don't own the existing process).
-            assert result is None
+            assert result is True
             # is_async_subagents_available was flipped True.
             assert manager.is_async_subagents_available() is True
             # Health check was called at least once.
@@ -961,25 +1036,30 @@ class TestReadTunnelUrl:
 
 class TestStartLanggraphDevSpawnFlags:
     """On Windows the langgraph dev child gets its own process group (Ctrl+C
-    does not reach it) but keeps the parent's console, so closing the console
-    ends it. On POSIX it gets its own session."""
+    does not reach it); a lasting one also gets a console of its own, so
+    closing the terminal does not end it, while one a session owns keeps the
+    terminal's console. On POSIX it gets its own session."""
 
+    @pytest.mark.parametrize(
+        ("lasting", "flags"), [(True, 0x08000200), (False, 0x00000200)]
+    )
     def test_windows_uses_new_process_group(
-        self, start_langgraph_dev_capture, monkeypatch
+        self, start_langgraph_dev_capture, monkeypatch, lasting, flags
     ):
         env = start_langgraph_dev_capture
         monkeypatch.setattr(manager.os, "name", "nt", raising=False)
         monkeypatch.setattr(
             manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
         )
+        monkeypatch.setattr(
+            manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+        )
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path, lasting=lasting)
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
-        # Exactly the process-group flag: no CREATE_NO_WINDOW, which would
-        # detach the server from the console and let it outlive a closed one.
-        assert kw.get("creationflags") == 0x00000200
+        assert kw.get("creationflags") == flags
         assert "start_new_session" not in kw
 
     def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):

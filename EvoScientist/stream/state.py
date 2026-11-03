@@ -73,6 +73,13 @@ class SubAgentState:
         """Get matched result for a tool call."""
         return self._result_map.get(tc["id"])
 
+    def discard_tool_calls(self, tool_call_ids: list[str]) -> None:
+        """Drop the tool calls a failed model attempt emitted."""
+        gone = set(tool_call_ids)
+        self.tool_calls = [tc for tc in self.tool_calls if tc["id"] not in gone]
+        for tool_call_id in gone:
+            self._result_map.pop(tool_call_id, None)
+
 
 class StreamState:
     """Accumulates stream state for display updates."""
@@ -107,6 +114,14 @@ class StreamState:
         self.pending_interrupt: dict | None = None
         # ask_user interrupt tracking
         self.pending_ask_user: dict | None = None
+        # Acceptance grading: a pass in progress and the verdicts so far
+        self.rubric_checking = False
+        self.rubric_evaluations: list[dict] = []
+        # {"tasks": n, "processes": n} while grading waits for background work.
+        self.rubric_deferred: dict | None = None
+        self.model_retries: list[dict] = []
+        # What happened to the thread's goal during this turn, in order.
+        self.goal_events: list[dict] = []
         # Cached Markdown object for Rich CLI display (avoids O(n²) re-parsing)
         self._cached_md_text: str = ""
         self._cached_md: object | None = None
@@ -306,7 +321,97 @@ class StreamState:
             error_msg = event.get("message", "Unknown error")
             self.response_text += f"\n\n[Error] {error_msg}"
 
+        elif event_type == "model_retry":
+            self.apply_discard(event)
+            self.model_retries.append(event)
+        elif event_type == "model_output_discarded":
+            self.apply_discard(event)
+        elif event_type == "goal_state":
+            self.goal_events.append(event)
+
+        elif event_type == "rubric_evaluation_start":
+            self.rubric_checking = True
+            self.rubric_deferred = None
+
+        elif event_type == "rubric_evaluation_deferred":
+            self.rubric_checking = False
+            self.rubric_deferred = {
+                "tasks": event.get("tasks", 0),
+                "processes": event.get("processes", 0),
+            }
+
+        elif event_type == "rubric_evaluation":
+            self.rubric_checking = False
+            self.rubric_evaluations.append(event)
+            if (
+                event.get("result") == "needs_revision"
+                and self.response_text.strip()
+                and not self.response_text.endswith("\n\n")
+            ):
+                # A revision is often a short addendum: keep the draft and
+                # start what follows on its own paragraph.
+                self.response_text += "\n\n"
+                if self.latest_text:
+                    self.latest_text += "\n\n"
+
         return event_type
+
+    def apply_discard(self, event: dict) -> None:
+        """Roll back what the decoder discarded: a failed attempt's text, thinking and tool calls."""
+        discarded = event.get("discarded") or {}
+        instance_id = event.get("instance_id") or ""
+        ids = [str(i) for i in discarded.get("tool_call_ids") or []]
+        if instance_id:
+            sa = self._subagent_map.get(instance_id)
+            if sa is not None:
+                sa.discard_tool_calls(ids)
+            return
+        text_chars = int(discarded.get("text_chars") or 0)
+        thinking_chars = int(discarded.get("thinking_chars") or 0)
+        gone = set(ids)
+        removed = [i for i, tc in enumerate(self.tool_calls) if tc["id"] in gone]
+        if removed:
+            # A narration segment is closed by the tool call at its index:
+            # without that call its text is the current segment again.
+            kept: list[tuple[int, str]] = []
+            returned = ""
+            for index, text in self.narration_segments:
+                if index in removed:
+                    returned += text
+                else:
+                    kept.append((index - sum(1 for i in removed if i < index), text))
+            self.narration_segments = kept
+            self.latest_text = returned + self.latest_text
+            self.tool_calls = [tc for tc in self.tool_calls if tc["id"] not in gone]
+        if text_chars:
+            self.response_text = self.response_text[
+                : max(0, len(self.response_text) - text_chars)
+            ]
+            self.latest_text = self.latest_text[
+                : max(0, len(self.latest_text) - text_chars)
+            ]
+        if removed:
+            self.narrated_response_end = max(
+                0, len(self.response_text) - len(self.latest_text)
+            )
+        else:
+            self.narrated_response_end = min(
+                self.narrated_response_end, len(self.response_text)
+            )
+        if thinking_chars:
+            self.thinking_text = self.thinking_text[
+                : max(0, len(self.thinking_text) - thinking_chars)
+            ]
+        self.is_thinking = False
+        self.is_responding = False
+
+    @property
+    def rubric_result(self) -> str | None:
+        """Verdict of the latest grading pass, or ``None`` when nothing was graded."""
+        if not self.rubric_evaluations:
+            return None
+        result = self.rubric_evaluations[-1].get("result")
+        return result if isinstance(result, str) else None
 
     def visible_tool_counts(self) -> tuple[int, int]:
         """Return (completed, total) counts for tool calls."""
@@ -326,6 +431,9 @@ class StreamState:
         Returns:
             A ``ResearchPhase`` enum member.
         """
+        if self.rubric_checking:
+            # The grader works unseen, after the agent's own thinking ended.
+            return ResearchPhase.RESEARCHING
         if self.is_thinking:
             return ResearchPhase.THINKING
         if self.has_pending_work():
@@ -358,6 +466,11 @@ class StreamState:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "selected_tools": self.selected_tools,
+            "rubric_evaluations": self.rubric_evaluations,
+            "rubric_checking": self.rubric_checking,
+            "rubric_deferred": self.rubric_deferred,
+            "model_retries": self.model_retries,
+            "goal_events": self.goal_events,
         }
 
 

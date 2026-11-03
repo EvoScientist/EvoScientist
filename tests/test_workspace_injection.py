@@ -8,7 +8,7 @@ import pytest
 
 from EvoScientist.paths import Workspace
 from EvoScientist.tools.skills_manager import list_skills
-from tests.fakes import StubChannel
+from tests.fakes.common import StubChannel
 
 
 def _write_skill(skills_dir: Path, name: str) -> None:
@@ -185,7 +185,7 @@ def test_compact_offloads_into_the_work_dir(two_workspaces, tmp_path, monkeypatc
 
     from EvoScientist.cli.commands import compact_conversation
     from EvoScientist.gateway import GraphTarget
-    from tests.fakes import FakeGraphGateway
+    from tests.fakes.common import FakeGraphGateway
 
     gateway = FakeGraphGateway()
 

@@ -11,6 +11,11 @@ Excluded from PTC by design:
     - ``task`` (sub-agent dispatch) — reserved by langchain-quickjs >=0.3; it
       is always the top-level ``task()`` REPL global (with ``responseSchema``),
       so a ``tools.task`` variant would be a conflicting, degraded duplicate
+    - ``start_async_task`` / ``update_async_task`` / ``cancel_async_task`` —
+      they record the task in state through a ``Command``, which the REPL
+      drops (langchain-ai/deepagents#5652), so a task started there is never
+      tracked; ``check_async_task`` / ``list_async_tasks`` read tracked tasks
+      and stay
     - ``execute`` (shell) — would bypass ``HumanInTheLoopMiddleware`` approval
     - ``write_file`` / ``edit_file`` — side-effectful, no batch benefit
     - ``think_tool`` — reflection is not batchable
@@ -32,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import weakref
 
 from langchain.agents.middleware.types import ModelRequest
@@ -57,7 +63,8 @@ _live_interpreters: weakref.WeakSet[EvoCodeInterpreterMiddleware]
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     """Code interpreter middleware with EvoScientist's memory preflight hint.
 
-    ``after_agent`` / ``aafter_agent`` are intentionally NOT overridden. An
+    ``after_agent`` / ``aafter_agent`` only skip a run that ended before
+    ``before_agent`` ran. They are otherwise NOT gated. An
     earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
     where ``code_interpreter`` wasn't called saved ~50 ms/turn of
     ``create_snapshot()`` work, but also skipped the slot eviction upstream
@@ -74,6 +81,18 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
 
+    # A run that ends in the first start hook skips before_agent; on a thread's
+    # first run there is no slot yet and upstream would raise.
+    def after_agent(self, state, runtime):
+        if not state.get("_quickjs_slot_id"):
+            return None
+        return super().after_agent(state, runtime)
+
+    async def aafter_agent(self, state, runtime):
+        if not state.get("_quickjs_slot_id"):
+            return None
+        return await super().aafter_agent(state, runtime)
+
     async def aclose(self) -> None:
         """Evict active REPLs on their worker loops before event-loop shutdown."""
         registry = self._registry
@@ -83,6 +102,13 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             with contextlib.suppress(Exception):
                 await registry.aevict(slot_id)
         self._ptc_tools_by_slot.clear()
+
+    # Upstream's close blocks on each slot's worker thread, and those threads
+    # can no longer run once the interpreter is finalizing.
+    def __del__(self) -> None:
+        if sys.is_finalizing():
+            return
+        super().__del__()
 
 
 _live_interpreters = weakref.WeakSet()
@@ -118,21 +144,18 @@ async def aclose_code_interpreters(
             )
 
 
-# Read-only, batchable tools that benefit from being callable inside JS.
-# Multi-agent orchestration is the killer use case: ``Promise.all`` over
-# ``start_async_task`` fans out experiments / writing / data-analysis in
-# parallel without each dispatch costing a separate LLM round-trip. Names
-# that don't exist at runtime (e.g. async tools when langgraph dev isn't
-# reachable) are silently skipped by ``filter_tools_for_ptc``.
+# Read-only, batchable tools that benefit from being callable inside JS:
+# ``Promise.all`` checks several async tasks, or reads several files, without
+# each call costing a separate LLM round-trip. Names that don't exist at
+# runtime (e.g. async tools when langgraph dev isn't reachable) are silently
+# skipped by ``filter_tools_for_ptc``.
 _DEFAULT_PTC_ALLOWLIST: list[str] = [
     # Memory lookup (read-only, should precede workspace inspection)
     "search_observations",
     "read_memory",
-    # Async sub-agent dispatch (langgraph dev). `task` is excluded — see docstring.
-    "start_async_task",
+    # Async sub-agent status (langgraph dev); start / update / cancel are
+    # excluded — see docstring.
     "check_async_task",
-    "update_async_task",
-    "cancel_async_task",
     "list_async_tasks",
     # Workspace inspection (read-only, batchable)
     "read_file",
@@ -151,8 +174,8 @@ def create_code_interpreter_middleware(
 
     Args:
         timeout: Per-eval timeout in seconds. Defaults to 60s — long enough
-            for LLM-authored algorithms that touch async sub-agent dispatch
-            (``start_async_task`` + ``check_async_task`` polling).
+            for LLM-authored algorithms that dispatch ``task()`` sub-agents or
+            poll ``check_async_task``.
         max_result_chars: Maximum characters of JS eval output passed back
             to the LLM. Defaults to 10k — fits structured JSON aggregations
             of file reads / sub-agent results without truncating useful

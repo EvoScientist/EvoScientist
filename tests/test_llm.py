@@ -29,6 +29,38 @@ class TestModelsRegistry:
         """Test that MODELS is a dictionary."""
         assert isinstance(MODELS, dict)
 
+    @pytest.mark.parametrize(
+        ("custom", "native"),
+        [("custom-openai", "openai"), ("custom-anthropic", "anthropic")],
+    )
+    def test_custom_endpoint_defaults_are_names_the_native_provider_lists(
+        self, custom, native
+    ):
+        """Otherwise a bare name would move a native user onto a custom endpoint."""
+        native_names = {name for name, _ in get_models_for_provider(native)}
+
+        assert {name for name, _ in get_models_for_provider(custom)} <= native_names
+
+    def test_a_native_user_is_never_moved_to_a_provider_picked_on_purpose(self):
+        from EvoScientist.llm.registry import (
+            _ANTHROPIC_ROUTED_PROVIDERS,
+            _OPENAI_ROUTED_PROVIDERS,
+            resolve_provider,
+        )
+
+        chosen_on_purpose = set(_OPENAI_ROUTED_PROVIDERS) | set(
+            _ANTHROPIC_ROUTED_PROVIDERS
+        )
+        moved = {
+            name: resolve_provider(name, native)
+            for name in MODELS
+            for native in ("openai", "anthropic", "google-genai")
+            if name.startswith(("gpt-", "claude-", "gemini-"))
+            and resolve_provider(name, native) in chosen_on_purpose
+        }
+
+        assert moved == {}
+
     def test_entries_has_all_providers(self):
         """Test that _MODEL_ENTRIES covers all registered providers."""
         providers = {p for _, _, p in _MODEL_ENTRIES}
@@ -64,6 +96,7 @@ class TestModelsRegistry:
             "siliconflow",
             "openrouter",
             "requesty",
+            "opper",
             "zhipu",
             "zhipu-code",
             "volcengine",
@@ -154,7 +187,7 @@ class TestListModels:
 class TestGetModelInfo:
     def test_returns_tuple_for_valid_model(self):
         """Test that get_model_info returns tuple for valid model."""
-        result = get_model_info("claude-sonnet-4-6")
+        result = get_model_info("claude-sonnet-5-5")
         assert result is not None
         assert isinstance(result, tuple)
         assert len(result) == 2
@@ -166,9 +199,9 @@ class TestGetModelInfo:
 
     def test_returns_correct_info(self):
         """Test that get_model_info returns correct info."""
-        model_id, provider = get_model_info("gpt-5-nano")
-        assert model_id == "gpt-5-nano"
-        assert provider == "openai"
+        model_id, provider = get_model_info("claude-haiku-5-5")
+        assert model_id == "claude-haiku-5-5"
+        assert provider == "anthropic"
 
 
 # =============================================================================
@@ -196,10 +229,10 @@ class TestGetChatModel:
         """Test that get_chat_model resolves short names correctly."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("claude-opus-4-8")
+        get_chat_model("claude-opus-5-5")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "claude-opus-4-8"
+        assert call_kwargs["model"] == "claude-opus-5-5"
         assert call_kwargs["model_provider"] == "anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -207,10 +240,10 @@ class TestGetChatModel:
         """Test that get_chat_model resolves OpenAI short names."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("gpt-5-mini")
+        get_chat_model("gpt-6-luna", provider="openai")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "gpt-5-mini"
+        assert call_kwargs["model"] == "gpt-6-luna"
         assert call_kwargs["model_provider"] == "openai"
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -528,12 +561,122 @@ class TestThirdPartyRouting:
         assert "cache_control" not in call_kwargs.get("model_kwargs", {})
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_routes_through_openai(self, mock_init, monkeypatch):
+        """The short name resolves through the registry to Opper's pool id."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key-123")
+
+        # Short name is dotted (``claude-sonnet-5.5``); the pool id Opper
+        # serves is dashed (``claude-sonnet-5-5``). Go through the short name
+        # so the registry lookup is actually exercised.
+        get_chat_model("claude-sonnet-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-5-5"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+        assert call_kwargs["api_key"] == "op-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_accepts_route_pinned_model_ids(self, mock_init, monkeypatch):
+        """A provider/model id pins one route and is passed through unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+
+        get_chat_model("azure/gpt-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "azure/gpt-5.5"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_forwards_explicit_reasoning_effort(self, mock_init, monkeypatch):
+        """An explicit effort reaches Opper's compat request unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+        assert call_kwargs["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_omits_unconfigured_reasoning_effort(self, mock_init, monkeypatch):
+        """Opper's pools mix reasoning and non-reasoning models, so no default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("claude-sonnet-5.5", provider="opper")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_enabled_by_default(
+        self, mock_init, monkeypatch
+    ):
+        """Opper takes the same top-level cache_control for Claude pool ids."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("claude-sonnet-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-5-5"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_covers_route_pinned_claude(
+        self, mock_init, monkeypatch
+    ):
+        """A provider/claude-... id pins a route and is still a Claude model."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("aws/claude-sonnet-4-6-eu", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "aws/claude-sonnet-4-6-eu"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
+        """The opt-out flag should skip caching for Opper Claude models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", "false")
+
+        get_chat_model("claude-sonnet-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_skips_non_claude(self, mock_init, monkeypatch):
+        """Opper caching should not touch non-Claude pools."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("gpt-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_deepseek_uses_copy_safe_native_model(self, mock_init, monkeypatch):
         from EvoScientist.llm.deepseek import EvoChatDeepSeek
 
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
-        model = get_chat_model("deepseek-v4-flash", provider="deepseek")
+        model = get_chat_model("deepseek-flash", provider="deepseek")
 
         mock_init.assert_not_called()
         assert isinstance(model, EvoChatDeepSeek)
@@ -740,8 +883,12 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        # The dated canonical_slug is routable too and must be equally covered.
-        for model_name in ("moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"):
+        # The rule covers the K3 family: dated slugs and point releases too.
+        for model_name in (
+            "moonshotai/kimi-k3",
+            "moonshotai/kimi-k3-20260715",
+            "moonshotai/kimi-k3.1-pro",
+        ):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -759,8 +906,8 @@ class TestThirdPartyRouting:
         """Non-Moonshot models keep the function_calling default.
 
         Includes always-thinking models like grok-4.5 — the forced tool_choice
-        restriction is Moonshot-specific, so the json_schema rerouting must
-        stay limited to _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS.
+        restriction is Moonshot-specific — and Moonshot models outside the
+        always-thinking K3 family.
         """
         from pydantic import BaseModel
 
@@ -769,7 +916,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5"):
+        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5", "moonshotai/kimi-k2.6"):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -930,7 +1077,7 @@ class TestThirdPartyRouting:
         for _env in self._APP_ATTR_ENV:
             monkeypatch.delenv(_env, raising=False)
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         # Existing behavior intact.
@@ -1029,12 +1176,48 @@ class TestThirdPartyRouting:
             "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", raising=False
         )
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openrouter"
-        assert call_kwargs["model"] == "anthropic/claude-sonnet-4.6"
+        assert call_kwargs["model"] == "anthropic/claude-sonnet-5.5"
         assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @pytest.mark.parametrize(
+        "model",
+        # A short name the registry no longer lists, and one that resolves to
+        # another provider's bare id (native Google's ``gemini-3.1-pro-preview``).
+        ["claude-sonnet-4.6", "gemini-3.1-pro"],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_rejects_a_bare_model_id(self, mock_init, provider, model):
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model(model, provider=provider)
+
+        mock_init.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_does_not_borrow_another_providers_id(
+        self, mock_init, monkeypatch, provider
+    ):
+        # A vendor/model id from another provider's entry can be routable too
+        # and would silently run an older snapshot.
+        monkeypatch.setitem(MODELS, "listed-elsewhere", ("vendor/model-0731", "novita"))
+
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model("listed-elsewhere", provider=provider)
+
+        mock_init.assert_not_called()
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_accepts_a_full_model_id(self, mock_init, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        get_chat_model("anthropic/claude-sonnet-4.6", provider="openrouter")
+
+        assert mock_init.call_args[1]["model"] == "anthropic/claude-sonnet-4.6"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
@@ -1043,7 +1226,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
         monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "false")
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
@@ -1075,7 +1258,7 @@ class TestThirdPartyRouting:
         override = {"type": "ephemeral", "ttl": "1h"}
 
         get_chat_model(
-            "claude-sonnet-4.6",
+            "claude-sonnet-5.5",
             provider="openrouter",
             cache_control=override,
         )
@@ -1095,7 +1278,7 @@ class TestThirdPartyRouting:
         override = {"type": "ephemeral", "ttl": "1h"}
 
         get_chat_model(
-            "claude-sonnet-4.6",
+            "claude-sonnet-5.5",
             provider="openrouter",
             model_kwargs={"cache_control": override},
         )
@@ -1115,7 +1298,7 @@ class TestThirdPartyRouting:
 
         with pytest.warns(UserWarning, match="model_kwargs` is not a dict"):
             get_chat_model(
-                "claude-sonnet-4.6",
+                "claude-sonnet-5.5",
                 provider="openrouter",
                 model_kwargs="bad",
             )
@@ -1220,7 +1403,7 @@ class TestThirdPartyRouting:
 
     @pytest.mark.parametrize(
         ("configured_model", "api_model"),
-        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
+        [("glm-5.2", "glm-5-2")],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_volcengine_code_routes_through_openai(
@@ -1361,7 +1544,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "anthropic"
@@ -1435,6 +1618,12 @@ class TestThirdPartyRouting:
         """A blank override must not drop base_url and route the key to api.anthropic.com."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv(env, "  ")
+        # Provide the routed provider's own key so the test isolates the
+        # base_url fallback; it does not test the missing-key check.
+        from EvoScientist.llm.registry import _ANTHROPIC_ROUTED_PROVIDERS
+
+        _, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS[provider]
+        monkeypatch.setenv(api_key_env, "test-key")
 
         get_chat_model(model, provider=provider)
 
@@ -1466,21 +1655,23 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
         monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
-        """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
+        """MiniMax gets the only thinking shape its API takes and its documented
+        output limit (no langchain profile, so the fallback would be 4096)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert "thinking" in call_kwargs
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["max_tokens"] == 131072
         assert "reasoning" not in call_kwargs
 
     @patch("EvoScientist.llm.models._patch_openai_compat_content")
@@ -1517,6 +1708,7 @@ class TestThirdPartyRouting:
         model._client = anthropic.Anthropic(
             api_key="mm-key",
             base_url="https://api.minimaxi.com/anthropic",
+            timeout=None,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 
@@ -1598,22 +1790,10 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("minimax-m2.5", provider="minimax")
+        get_chat_model("minimax-m3.1-flash", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5"
-        assert call_kwargs["model_provider"] == "anthropic"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_minimax_highspeed_model(self, mock_init, monkeypatch):
-        """MiniMax M2.5-highspeed model should resolve correctly."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
-
-        get_chat_model("minimax-m2.5-highspeed", provider="minimax")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
+        assert call_kwargs["model"] == "MiniMax-M3.1-Flash"
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
 
@@ -1656,28 +1836,20 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
-        minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 5
-        model_names = {name for name, _ in minimax_models}
-        assert "minimax-m3" in model_names
-        assert "minimax-m2.7" in model_names
-        assert "minimax-m2.7-highspeed" in model_names
-        assert "minimax-m2.5" in model_names
-        assert "minimax-m2.5-highspeed" in model_names
+        """MiniMax lists the two models its API serves."""
+        model_names = {name for name, _ in get_models_for_provider("minimax")}
+        assert model_names == {"minimax-m3.1-flash", "minimax-m3"}
 
     def test_minimax_model_ids_correct(self):
         """MiniMax model IDs should match the official API model names."""
-        minimax_models = get_models_for_provider("minimax")
-        model_dict = dict(minimax_models)
-        assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
-        assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
-        assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"
+        model_dict = dict(get_models_for_provider("minimax"))
+        assert model_dict["minimax-m3.1-flash"] == "MiniMax-M3.1-Flash"
+        assert model_dict["minimax-m3"] == "MiniMax-M3"
 
     def test_minimax_short_name_in_models_dict(self):
         """MiniMax short names should be accessible via the MODELS dict."""
         # Note: MODELS dict uses last-entry-wins, so direct minimax entries
-        # may be overridden by nvidia/siliconflow/openrouter entries.
+        # may be overridden by openrouter entries.
         # Use get_models_for_provider() for provider-specific lookups.
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
@@ -2705,7 +2877,7 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider="deepseek",
             http_client=client,
         )
@@ -2873,142 +3045,6 @@ class TestPatchOpenAICaptureReasoningContent:
         assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
 
 
-class TestIsResponsesReasoningItem:
-    """_is_responses_reasoning_item flags encrypted OpenAI-Responses items."""
-
-    def test_rs_id_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"id": "rs_09363d42", "type": "x"})
-
-    def test_encrypted_data_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"data": "gAAAAAB...", "type": "x"})
-
-    def test_plain_text_reasoning_is_not_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert not _is_responses_reasoning_item(
-            {"type": "reasoning.text", "text": "thinking", "index": 0}
-        )
-        assert not _is_responses_reasoning_item("not a dict")
-
-
-class TestPatchOpenrouterStripResponsesReasoning:
-    """OpenAI-Responses encrypted reasoning items (`rs_` id / encrypted data)
-    are stripped from outgoing OpenRouter assistant messages, preventing the
-    multi-turn "Item with id 'rs_...' not found" 400 (store=false; #37777).
-    """
-
-    def _apply(self):
-        import langchain_openrouter.chat_models as mod
-
-        import EvoScientist.llm.patches as patches
-
-        orig = mod._convert_message_to_dict
-        orig_flag = patches._openrouter_reasoning_strip_patched
-        patches._openrouter_reasoning_strip_patched = False
-        patches._patch_openrouter_strip_responses_reasoning()
-        return patches, mod, orig, orig_flag
-
-    @staticmethod
-    def _restore(patches, mod, orig, orig_flag):
-        mod._convert_message_to_dict = orig
-        patches._openrouter_reasoning_strip_patched = orig_flag
-
-    def test_strips_encrypted_item_drops_key_when_empty(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.summary",
-                            "format": "openai-responses-v1",
-                            "id": "rs_09363d42b054",
-                            "data": "gAAAAAB...",
-                            "summary": "real reasoning text",
-                            "index": 0,
-                        }
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            # sole entry was an rs_ item → reasoning_details removed entirely.
-            assert "reasoning_details" not in result
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_keeps_plain_text_reasoning(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {"type": "reasoning.text", "text": "thinking", "index": 0},
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            kept = result["reasoning_details"]
-            assert len(kept) == 1
-            assert kept[0]["type"] == "reasoning.text"
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_does_not_mutate_original_message(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            details = [{"id": "rs_abc", "data": "blob"}]
-            msg = AIMessage(
-                content="x", additional_kwargs={"reasoning_details": details}
-            )
-            mod._convert_message_to_dict(msg)
-            # stored history untouched — we filter a fresh list, not in place.
-            assert details == [{"id": "rs_abc", "data": "blob"}]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_patch_is_idempotent(self):
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            wrapper = mod._convert_message_to_dict
-            # Second call is guarded by the flag → must not re-wrap.
-            patches._patch_openrouter_strip_responses_reasoning()
-            assert mod._convert_message_to_dict is wrapper
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_non_dict_entry_is_kept(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        "opaque",  # non-dict slipped in → kept, not crashed on
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            assert result["reasoning_details"] == ["opaque"]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-
 # =============================================================================
 # Test _patch_anthropic_strip_foreign_reasoning
 # =============================================================================
@@ -3163,6 +3199,153 @@ class TestAnthropicStripForeignReasoning:
         assert thinking_blocks
         assert thinking_blocks[0]["signature"] == ""
         assert result.content == "ok"
+
+
+# =============================================================================
+# Test _patch_deepagents_bound_reasoning_claude_only
+# =============================================================================
+
+
+class TestSummaryKeepsNonClaudeThinking:
+    """Only Claude binds thinking to the history a summary replaces; Kimi backends
+    reject a tool-call turn whose thinking is missing."""
+
+    @pytest.fixture(autouse=True)
+    def _agent_summarization(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.language_models import FakeListChatModel
+
+        from EvoScientist.middleware import create_per_run_summarization_middleware
+
+        # Building the agent's summarization middleware installs the patch.
+        create_per_run_summarization_middleware(
+            FakeListChatModel(responses=["unused"]),
+            FilesystemBackend(root_dir=tmp_path),
+        )
+
+    @staticmethod
+    def _events(model: str) -> list[dict]:
+        return [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "ls",
+                    "input": {},
+                },
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 2},
+            },
+            {"type": "message_stop"},
+        ]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["invoke", "stream"])
+    @pytest.mark.parametrize(
+        ("provider", "model", "key_env", "kept"),
+        [
+            ("anthropic", "claude-sonnet-5-5", "ANTHROPIC_API_KEY", ["tool_use"]),
+            (
+                "kimi-coding",
+                "kimi-for-coding",
+                "KIMI_API_KEY",
+                ["thinking", "tool_use"],
+            ),
+        ],
+    )
+    def test_reply_kept_across_a_summary(
+        self, monkeypatch, provider, model, key_env, kept, stream
+    ):
+        import json
+
+        import anthropic
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import HumanMessage
+
+        httpx = _anthropic_httpx()
+        monkeypatch.setenv(key_env, "test-key")
+        chat_model = get_chat_model(model, provider=provider)
+        events = self._events(model)
+
+        def respond(request):
+            if json.loads(request.content).get("stream"):
+                body = "".join(
+                    f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events
+                )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=body.encode(),
+                )
+            message = {
+                **events[0]["message"],
+                "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": ""},
+                    events[4]["content_block"],
+                ],
+                "stop_reason": "tool_use",
+            }
+            return httpx.Response(200, json=message)
+
+        chat_model._client = anthropic.Anthropic(
+            api_key=chat_model.anthropic_api_key.get_secret_value(),
+            base_url=chat_model.anthropic_api_url,
+            timeout=None,
+            http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        )
+        prompt = [HumanMessage("list files")]
+        if stream:
+            reply = None
+            for chunk in chat_model.stream(prompt):
+                reply = chunk if reply is None else reply + chunk
+        else:
+            reply = chat_model.invoke(prompt)
+
+        assert reply.response_metadata["model_name"] == model
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == kept
+
+    def test_unnamed_reply_keeps_upstreams_drop(self):
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import AIMessage
+
+        reply = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "done"},
+            ],
+            response_metadata={"model_provider": "anthropic"},
+        )
+
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == ["text"]
 
 
 # =============================================================================
@@ -3372,9 +3555,12 @@ class TestAutoConfig:
         assert call_kwargs["max_tokens"] == 16000
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_kimi_coding_declares_thinking(self, mock_init):
+    def test_kimi_coding_declares_thinking(self, mock_init, monkeypatch):
         """Kimi For Coding plan models declare thinking on the kimi-coding provider."""
         mock_init.return_value = "mock_model"
+        # Set the key explicitly: without it the test only passes when other
+        # test files leak KIMI_API_KEY, making it order-dependent / flaky.
+        monkeypatch.setenv("KIMI_API_KEY", "test-key")
 
         get_chat_model("kimi-for-coding", provider="kimi-coding")
 
@@ -3508,30 +3694,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_base_url_override(self, mock_init, monkeypatch):
-        """OpenAI provider should support base_url override (e.g. ccproxy Codex)."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-
-        get_chat_model("gpt-5-nano", provider="openai")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model_provider"] == "openai"
-        assert call_kwargs["base_url"] == "http://127.0.0.1:8000/codex/v1"
-        assert call_kwargs["api_key"] == "ccproxy-oauth"
-        # ccproxy uses the Responses API, so reasoning configuration is valid.
-        assert call_kwargs["reasoning"] == {
-            "effort": "high",
-            "summary": "auto",
-            "context": "all_turns",
-        }
-        # Proxy mode: Responses API (bypasses format chain), streaming ON
-        assert call_kwargs["use_responses_api"] is True
-        assert "streaming" not in call_kwargs
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_localhost_non_ccproxy_not_downgraded(self, mock_init, monkeypatch):
-        """Local OpenAI-compatible endpoints (vLLM, etc.) are not affected by ccproxy workarounds."""
+        """A user-set OPENAI_BASE_URL (vLLM, etc.) passes through with the usual defaults."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-local-key")
@@ -3539,242 +3702,13 @@ class TestAutoConfig:
         get_chat_model("gpt-5-nano", provider="openai")
 
         call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "http://127.0.0.1:8080/v1"
-        # NOT ccproxy: reasoning should be applied, no forced Chat Completions
+        assert call_kwargs["api_key"] == "sk-local-key"
+        # Reasoning is applied; Chat Completions is not forced
         assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
         assert "use_responses_api" not in call_kwargs
         assert "streaming" not in call_kwargs
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_codex_path_but_wrong_key_not_ccproxy(self, mock_init, monkeypatch):
-        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
-
-        get_chat_model("gpt-5-nano", provider="openai")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
-        assert "use_responses_api" not in call_kwargs
-        assert "default_headers" not in call_kwargs
-
-    @patch(
-        "EvoScientist.llm.models._installed_codex_client_version",
-        return_value="0.999.0",
-    )
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_client_headers(
-        self, mock_init, mock_installed_version, monkeypatch
-    ):
-        """ccproxy Codex mode sends Codex-CLI-shaped client headers."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.delenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", raising=False)
-
-        get_chat_model("gpt-5.5", provider="openai")
-
-        headers = mock_init.call_args[1]["default_headers"]
-        assert headers["originator"] == "codex_cli_rs"
-        assert headers["version"] == "0.999.0"
-        assert headers["User-Agent"].startswith("codex_cli_rs/0.999.0")
-        mock_installed_version.assert_called_once_with()
-        assert mock_init.call_args[1]["reasoning"]["effort"] == "xhigh"
-        assert mock_init.call_args[1]["reasoning"]["context"] == "all_turns"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_client_version_env(self, mock_init, monkeypatch):
-        """EVOSCIENTIST_CODEX_CLIENT_VERSION overrides the pinned version."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.setenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", "9.9.9")
-
-        get_chat_model("gpt-5.5", provider="openai")
-
-        headers = mock_init.call_args[1]["default_headers"]
-        assert headers["version"] == "9.9.9"
-        assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
-
-    @patch("EvoScientist.llm.models.subprocess.run")
-    def test_installed_codex_client_version(self, mock_run, monkeypatch):
-        """The advertised version follows the installed Codex CLI."""
-        from EvoScientist.llm import models
-
-        monkeypatch.setattr(models, "_installed_codex_version", "")
-        monkeypatch.setattr(models, "_codex_probe_disabled", False)
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stdout = "codex-cli 0.144.1\n"
-        mock_run.return_value.stderr = ""
-
-        assert models._installed_codex_client_version() == "0.144.1"
-        assert models._installed_codex_client_version() == "0.144.1"
-        mock_run.assert_called_once_with(
-            ["codex", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=models._CODEX_VERSION_TIMEOUT_SECONDS,
-            check=False,
-        )
-
-    @patch("EvoScientist.llm.models.subprocess.run")
-    def test_missing_codex_binary_is_not_reprobed(self, mock_run, monkeypatch):
-        """No Codex CLI installed is permanent for the process: probe once."""
-        from EvoScientist.llm import models
-
-        monkeypatch.setattr(models, "_installed_codex_version", "")
-        monkeypatch.setattr(models, "_codex_probe_disabled", False)
-        mock_run.side_effect = FileNotFoundError
-
-        assert models._installed_codex_client_version() == ""
-        assert models._installed_codex_client_version() == ""
-        assert mock_run.call_count == 1
-
-    @patch("EvoScientist.llm.models.subprocess.run")
-    def test_failed_codex_version_probe_is_retried(self, mock_run, monkeypatch):
-        """A transient probe failure (e.g. mid-upgrade) must not stick for the process."""
-        import subprocess
-
-        from EvoScientist.llm import models
-
-        monkeypatch.setattr(models, "_installed_codex_version", "")
-        monkeypatch.setattr(models, "_codex_probe_disabled", False)
-        ok = MagicMock(returncode=0, stdout="codex-cli 0.156.1\n", stderr="")
-        mock_run.side_effect = [subprocess.TimeoutExpired(["codex"], 1), ok]
-
-        assert models._installed_codex_client_version() == ""
-        assert models._installed_codex_client_version() == "0.156.1"
-        assert mock_run.call_count == 2
-
-    @patch(
-        "EvoScientist.llm.models._installed_codex_client_version",
-        return_value="0.140.0",
-    )
-    def test_older_installed_codex_uses_fallback(
-        self, mock_installed_version, monkeypatch
-    ):
-        """An outdated installed CLI must not undercut the safe fallback."""
-        from EvoScientist.llm.models import (
-            _CODEX_CLIENT_VERSION_FALLBACK,
-            _resolve_codex_client_version,
-        )
-
-        monkeypatch.delenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", raising=False)
-
-        assert _resolve_codex_client_version() == _CODEX_CLIENT_VERSION_FALLBACK
-        mock_installed_version.assert_called_once_with()
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_headers_respect_caller(self, mock_init, monkeypatch):
-        """Caller-supplied default_headers keys are not overridden."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-
-        get_chat_model(
-            "gpt-5.5",
-            provider="openai",
-            default_headers={"originator": "codex_vscode", "version": "9.9.9"},
-        )
-
-        headers = mock_init.call_args[1]["default_headers"]
-        assert headers["originator"] == "codex_vscode"
-        assert headers["version"] == "9.9.9"
-        assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_reasoning_context_respects_caller(
-        self, mock_init, monkeypatch
-    ):
-        """Caller-supplied reasoning.context is not overridden."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        reasoning = {"effort": "low", "context": "previous_response_id"}
-
-        get_chat_model(
-            "gpt-5.5",
-            provider="openai",
-            reasoning=reasoning,
-        )
-
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "low",
-            "context": "previous_response_id",
-        }
-        assert mock_init.call_args[1]["reasoning"] is not reasoning
-        assert reasoning == {"effort": "low", "context": "previous_response_id"}
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_reasoning_context_requires_responses_api(
-        self, mock_init, monkeypatch
-    ):
-        """Responses-only reasoning.context is not sent when Chat Completions is forced."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
-
-        get_chat_model(
-            "gpt-5.5",
-            provider="openai",
-            use_responses_api=False,
-            reasoning={"effort": "low"},
-        )
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["use_responses_api"] is False
-        assert call_kwargs["reasoning"] == {"effort": "low"}
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_env_false_drops_reasoning(
-        self, mock_init, monkeypatch
-    ):
-        """The global Chat Completions override still removes reasoning entirely."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "false")
-
-        get_chat_model("gpt-5.5", provider="openai")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["use_responses_api"] is False
-        assert "reasoning" not in call_kwargs
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_codex_none_headers(self, mock_init, monkeypatch):
-        """An explicit default_headers=None is normalized before gap-filling."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.setenv("EVOSCIENTIST_CODEX_CLIENT_VERSION", "9.9.9")
-
-        get_chat_model(
-            "gpt-5.5",
-            provider="openai",
-            default_headers=None,
-        )
-
-        headers = mock_init.call_args[1]["default_headers"]
-        assert headers["originator"] == "codex_cli_rs"
-        assert headers["version"] == "9.9.9"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_ccproxy_key_but_wrong_path_not_ccproxy(
-        self, mock_init, monkeypatch
-    ):
-        """ccproxy detection requires both /codex/ path AND ccproxy-oauth key."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-
-        get_chat_model("gpt-5-nano", provider="openai")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
-        assert "use_responses_api" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_no_base_url_when_unset(self, mock_init, monkeypatch):
@@ -4043,7 +3977,10 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
 
     def respond(request):
         captured["url"] = str(request.url)
-        captured["api_key"] = request.headers.get("x-api-key")
+        # anthropic 2.x sends the key as a bearer token, 1.x as x-api-key.
+        captured["api_key"] = request.headers.get("x-api-key") or request.headers.get(
+            "authorization", ""
+        ).removeprefix("Bearer ")
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -4073,3 +4010,321 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["model"] == "mimo-v2.6-pro"
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
+
+
+def test_minimax_wire_request(monkeypatch):
+    """Wire-level: MiniMax gets adaptive thinking and its documented output limit."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-test")
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+    model = get_chat_model("minimax-m3.1-flash", provider="minimax")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "MiniMax-M3.1-Flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
+    assert captured["body"]["model"] == "MiniMax-M3.1-Flash"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"] == {"type": "adaptive"}
+
+
+# =============================================================================
+# Test validate_opper_key
+# =============================================================================
+
+
+class TestValidateOpperKey:
+    """The Opper key validator probes the authenticated model catalog.
+
+    Opper's ``/v3/compat/models`` requires a key (401 without one, verified
+    against the live endpoint), so a plain GET distinguishes a good key from
+    a bad one without a sentinel-model request. All HTTP calls are mocked, so
+    the unit tests hit no network.
+    """
+
+    def test_empty_key_skipped(self):
+        """No key provided is skipped, not an error."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        is_valid, msg = validate_opper_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_probes_the_authenticated_model_catalog(self):
+        """The probe is a bearer-authenticated GET against /v3/compat/models."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            validate_opper_key("op-key")
+
+        assert mock_get.call_args.args[0] == "https://api.opper.ai/v3/compat/models"
+        headers = mock_get.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer op-key"
+
+    def test_success_means_valid(self):
+        """200 (catalog returned) means the key is valid."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            is_valid, msg = validate_opper_key("op-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejected_means_invalid(self, status):
+        """401/403 mean the key was rejected by the auth layer."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_opper_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        """Rate-limit / 5xx leave key validity unknown, not rejected."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_opper_key("op-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+        assert str(status) in msg
+
+
+class TestChatGPTSignIn:
+    """provider "openai" builds the ChatGPT sign-in model when the mode is oauth."""
+
+    @pytest.fixture
+    def built(self, monkeypatch):
+        calls = []
+
+        def _fake_build(model_id, **kwargs):
+            calls.append((model_id, kwargs))
+            return MagicMock(name="chatgpt_model")
+
+        monkeypatch.setattr("EvoScientist.llm.chatgpt_oauth.build_model", _fake_build)
+        monkeypatch.setattr(
+            "EvoScientist.llm.models.apply_known_context_window", lambda model: None
+        )
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+        return calls
+
+    def test_oauth_mode_builds_the_sign_in_model(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            get_chat_model("gpt-6-sol", provider="openai")
+
+        mock_init.assert_not_called()
+        model_id, kwargs = built[0]
+        assert model_id == "gpt-6-sol"
+        assert kwargs["reasoning"] == {
+            "effort": "high",
+            "summary": "auto",
+            "context": "all_turns",
+        }
+        assert "api_key" not in kwargs
+        assert "base_url" not in kwargs
+        assert "use_responses_api" not in kwargs
+        assert "default_headers" not in kwargs
+
+    def test_caller_reasoning_context_wins(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        reasoning = {"effort": "low", "context": "current_turn"}
+
+        get_chat_model("gpt-6-sol", provider="openai", reasoning=reasoning)
+
+        assert built[0][1]["reasoning"] == {"effort": "low", "context": "current_turn"}
+        assert reasoning == {"effort": "low", "context": "current_turn"}
+
+    def test_use_responses_api_false_does_not_apply(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        monkeypatch.setenv("EVOSCIENTIST_USE_RESPONSES_API", "false")
+
+        get_chat_model("gpt-6-sol", provider="openai")
+
+        kwargs = built[0][1]
+        assert "use_responses_api" not in kwargs
+        assert kwargs["reasoning"]["context"] == "all_turns"
+
+    def test_api_key_mode_is_unchanged(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "api_key")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model("gpt-6-sol", provider="openai")
+
+        assert built == []
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["api_key"] == "sk-env"
+        assert call_kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    def test_other_openai_sdk_providers_are_untouched(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://example.test/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-custom")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model("gpt-5.3-codex", provider="custom-openai")
+
+        assert built == []
+        assert mock_init.call_args[1]["base_url"] == "https://example.test/v1"
+
+    def test_whole_tool_args_patch_is_installed(self, built, monkeypatch):
+        import langchain_openai.chat_models.base as base
+
+        current = base._convert_responses_chunk_to_generation_chunk
+        monkeypatch.setattr(
+            base,
+            "_convert_responses_chunk_to_generation_chunk",
+            getattr(current, "__wrapped__", current),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+        get_chat_model("gpt-6-sol", provider="openai")
+
+        assert hasattr(
+            base._convert_responses_chunk_to_generation_chunk, "_evosci_whole_tool_args"
+        )
+
+    def test_not_signed_in_reaches_the_caller(self, tmp_path, monkeypatch):
+        from EvoScientist.llm.chatgpt_oauth import SIGN_IN_HINT, NotSignedInError
+
+        monkeypatch.setattr("EvoScientist.paths.DATA_DIR", tmp_path)
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+        with pytest.raises(NotSignedInError) as exc_info:
+            get_chat_model("gpt-6-sol", provider="openai")
+
+        assert str(exc_info.value) == SIGN_IN_HINT
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestReasoningEffortAcrossProviders:
+    """One stored level; a route with a known range gets the nearest level in it."""
+
+    @pytest.fixture(autouse=True)
+    def _keys(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "stored", "sent"),
+        [
+            ("openai", "gpt-6-sol", "none", "none"),
+            ("openai", "gpt-6-sol", "minimal", "minimal"),
+            ("openai", "gpt-6-sol", "xhigh", "xhigh"),
+            ("openai", "gpt-6-sol", "max", "max"),
+            ("openrouter", "gpt-6.1-sol", "max", "max"),
+            ("openrouter", "gpt-6.1-sol", "minimal", "minimal"),
+            ("openrouter", "gpt-6.1-sol", "none", "none"),
+            ("openai", "gpt-6-sol", "turbo", "turbo"),
+            ("openrouter", "gpt-6.1-sol", "turbo", "turbo"),
+        ],
+    )
+    def test_api_key_routes_get_the_stored_level(
+        self, monkeypatch, provider, model, stored, sent
+    ):
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", stored)
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model(model, provider=provider)
+
+        assert mock_init.call_args[1]["reasoning"]["effort"] == sent
+
+    def test_openai_base_url_override_gets_the_stored_level(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9000/v1")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "minimal")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model("gpt-6-sol", provider="openai")
+
+        assert mock_init.call_args[1]["reasoning"]["effort"] == "minimal"
+
+    @pytest.mark.parametrize(
+        ("stored", "sent"),
+        [
+            ("none", "low"),
+            ("minimal", "low"),
+            ("low", "low"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+            # Not a level on the scale: the backend answers for itself.
+            ("turbo", "turbo"),
+        ],
+    )
+    def test_sign_in_route_gets_the_nearest_level_it_accepts(
+        self, monkeypatch, stored, sent
+    ):
+        built = []
+        monkeypatch.setattr(
+            "EvoScientist.llm.chatgpt_oauth.build_model",
+            lambda model_id, **kwargs: built.append(kwargs) or MagicMock(),
+        )
+        monkeypatch.setattr(
+            "EvoScientist.llm.models.apply_known_context_window", lambda model: None
+        )
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", stored)
+
+        get_chat_model("gpt-6.1-sol", provider="openai")
+
+        assert built[0]["reasoning"]["effort"] == sent
+
+    def test_caller_supplied_reasoning_is_left_alone(self, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "max")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model(
+                "gpt-6-sol", provider="openai", reasoning={"effort": "minimal"}
+            )
+
+        assert mock_init.call_args[1]["reasoning"] == {"effort": "minimal"}

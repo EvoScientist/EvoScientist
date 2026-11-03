@@ -16,106 +16,11 @@ pilot so they exercise the actual production code path.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
-
 import pytest
 
 pytest.importorskip("textual")
 
-
-# ---------------------------------------------------------------------------
-# Module access
-#
-# ``EvoTextualInteractiveApp`` is defined inside ``run_textual_interactive``,
-# so it is not reachable as ``tui_interactive.EvoTextualInteractiveApp``.  We
-# grab it by invoking the factory once with a patched ``App.run_async`` that
-# captures the freshly-built instance. The synchronous factory owns its
-# top-level event loop, so each test boots it via :func:`_capture_app`.
-# ---------------------------------------------------------------------------
-
-
-async def _capture_app(monkeypatch, workspace) -> object:
-    """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
-    from pathlib import Path
-
-    from textual.app import App
-
-    from EvoScientist.cli import tui_interactive as tui_mod
-    from EvoScientist.paths import SessionDirs, Workspace
-
-    captured: dict = {}
-
-    async def _no_run(self, *args, **kwargs):
-        captured["app"] = self
-
-    monkeypatch.setattr(App, "run_async", _no_run)
-
-    fake_load_agent = AsyncMock(return_value=None)
-
-    @asynccontextmanager
-    async def _fake_checkpointer(*_a, **_k):
-        yield None
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_interactive.get_checkpointer",
-        _fake_checkpointer,
-        raising=False,
-    )
-
-    class _FakeSuggester:
-        def __init__(self, *_a, **_k):
-            pass
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.history_suggester.HistorySuggester", _FakeSuggester
-    )
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_interactive._auto_start_channel",
-        lambda *_a, **_k: None,
-        raising=False,
-    )
-
-    monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
-    # Note: ``create_run_dir`` and ``load_agent`` are passed
-    # as parameters to ``run_textual_interactive`` (the factory), so the
-    # closure inside ``EvoTextualInteractiveApp`` uses the fakes directly
-    # and the module-level ``_create_run_dir`` / ``load_agent``
-    # symbols never get a chance to run.
-
-    # The factory is synchronous at the outer level and owns its top-level
-    # loop via ``asyncio.run``.
-    try:
-        await asyncio.to_thread(
-            tui_mod.run_textual_interactive,
-            show_thinking=False,
-            channel_send_thinking=False,
-            # The banner shows this folder: keep it short, so it fits one line on
-            # the 80-column screen whatever the temp folder is called (it wraps on
-            # Windows and pushes the banner out of view).
-            dirs=SessionDirs(Workspace(Path.cwd())),
-            mode="dev",
-            model=None,
-            provider=None,
-            run_name="test-run",
-            thread_id=None,
-            load_agent=fake_load_agent,
-            create_run_dir=lambda ws, _name: ws.root,
-            config=None,
-        )
-    except SystemExit:
-        pass
-
-    app = captured.get("app")
-    if app is None:
-        raise RuntimeError(
-            "EvoTextualInteractiveApp was not captured — _no_run was never "
-            "called, meaning the factory crashed before constructing the app."
-        )
-    return app
-
+from tests.fakes.tui import capture_app
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -136,7 +41,7 @@ async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -167,7 +72,7 @@ async def test_clear_chat_with_anchor_released_also_resets(monkeypatch, workspac
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -195,7 +100,7 @@ async def test_clear_chat_short_conversation_anchored(monkeypatch, workspace):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -234,7 +139,7 @@ async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     # Tall-ish terminal: welcome + a few messages must fit in the
     # viewport, mirroring the user's manual-test setup.
     async with app.run_test(size=(80, 40)) as pilot:
@@ -310,7 +215,7 @@ async def test_short_turn_keeps_banner_at_top_after_layout_refresh(
     from EvoScientist.cli.widgets.assistant_message import AssistantMessage
     from EvoScientist.cli.widgets.user_message import UserMessage
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     # Tall terminal: welcome + a short exchange fits with room to spare,
     # which is exactly the bug condition (content < viewport).
     async with app.run_test(size=(80, 40)) as pilot:
@@ -348,7 +253,7 @@ async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch, workspace)
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -396,14 +301,17 @@ def _assert_banner_at_top(chat, welcome, label: str = "") -> None:
     )
 
 
-async def test_agent_python_notices_are_shown_in_the_app(monkeypatch, workspace):
+async def test_agent_shell_notices_are_shown_in_the_app(monkeypatch, workspace):
     """Textual hides terminal output while the app runs, so the hint and the
     server-python warning must reach the user as notifications."""
     from EvoScientist.cli import tui_interactive as tui_mod
 
     notice = "Run `EvoSci setup` [/x]"
-    monkeypatch.setattr(tui_mod, "_agent_python_notices", lambda: [notice])
-    app = await _capture_app(monkeypatch, workspace)
+    asked: list = []
+    monkeypatch.setattr(
+        tui_mod, "_agent_shell_notices", lambda *a: asked.append(a) or [notice]
+    )
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -411,3 +319,5 @@ async def test_agent_python_notices_are_shown_in_the_app(monkeypatch, workspace)
         (shown,) = [n for n in app._notifications if n.message == notice]
         assert shown.severity == "warning"
         assert shown.markup is False
+    # For the turns' own backend: the --dangerous note depends on it.
+    assert asked == [("local",)]

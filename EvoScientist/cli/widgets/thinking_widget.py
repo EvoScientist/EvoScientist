@@ -103,6 +103,13 @@ class ThinkingWidget(Static):
         self._content += chunk
         self._refresh_display()
 
+    def truncate(self, chars: int) -> None:
+        """Drop the tail a retried attempt produced; keeps earlier calls' thinking."""
+        if chars <= 0:
+            return
+        self._content = self._content[: max(0, len(self._content) - chars)]
+        self._refresh_display()
+
     def finalize(self) -> None:
         """Mark thinking as complete — stop spinner, collapse."""
         self._is_active = False

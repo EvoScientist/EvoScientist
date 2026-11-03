@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 
 class TestCurrentCommand:

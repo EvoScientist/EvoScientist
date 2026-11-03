@@ -14,13 +14,22 @@ Event fields:
 - ``progress``: a float in ``[0, 1]`` on ``running`` events, when known.
 - ``message``: a human-readable line.
 - ``detail``: an object on ``done`` and ``skipped`` events, e.g.
-  ``{"source": "system", ...}``.
+  ``{"source": "system", ...}``; on ``error`` events where the code has one
+  (``setup_failed``: the failed stage and its code; ``environment_busy``: the
+  processes still running, none when another update holds the lock); on
+  ``running`` events of ``EvoSci update`` while it waits for other processes
+  that run from the install (``{"waiting_for": [{"pid", "name", "path"}],
+  "cancel_file": "<path>"}``: creating that file cancels the wait). That
+  wait also ends when the program reading stdout closes the pipe, so a
+  caller reads until the terminal ``update`` line.
 - ``code``: a stable error code on ``error`` events (see :data:`ERROR_CODES`).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -42,6 +51,20 @@ ERROR_CODES = frozenset(
         "probe_failed",
         "unsupported_platform",
         "install_failed",
+        # The registry has no release inside the supported WebUI range.
+        "no_compatible_version",
+        # EvoSci update (stage ``update``): the index does not list the
+        # target; the target has no constraints.txt; a stage of the new
+        # EvoSci setup failed; the install is not one the command changes
+        # (the message says what to run); a server runs and was not stopped;
+        # the wait for processes running from the environment was cancelled,
+        # or another update holds the lock.
+        "unknown_version",
+        "no_constraints",
+        "setup_failed",
+        "manual_update",
+        "server_running",
+        "environment_busy",
     }
 )
 
@@ -116,6 +139,22 @@ class JsonEmitter:
         stream.flush()
 
 
+def stdin_is_pipe() -> bool:
+    """True when stdin is a pipe or a socket, the stdin a program that reads
+    the JSON lines gives us.
+
+    Node (the desktop app) gives a child UNIX socketpairs on macOS and Linux,
+    and a named pipe on Windows. A terminal, ``/dev/null``, ``NUL`` or a file
+    is not one; decided by the file type, since ``isatty()`` is True for
+    ``NUL`` on Windows.
+    """
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
 # How often a silent step repeats its last ``running`` event, so a reader
 # (the desktop app) can tell a slow step from a stuck one.
 HEARTBEAT_INTERVAL = 5.0
@@ -156,6 +195,40 @@ def wait_with_heartbeat(
             last, changed_at = current, clock()
         elif clock() - changed_at >= silence_limit:
             raise StepStalled(f"no progress for {silence_limit:g} s")
+
+
+class Heartbeat:
+    """A ``(fraction, message)`` progress callback that remembers its last
+    line, so a step that reports nothing for a while can repeat it.
+
+    :meth:`beat` repeats the line now (between the polls of
+    :func:`wait_with_heartbeat`); :meth:`tick` repeats it only when
+    :data:`HEARTBEAT_INTERVAL` has passed since the last line, for a loop in
+    this process (between archive members). Both run on the caller's thread.
+    """
+
+    def __init__(
+        self,
+        report: Callable[[float, str], None],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._report = report
+        self._clock = clock
+        self._last: tuple[float, str] | None = None
+        self._at = clock()
+
+    def __call__(self, fraction: float, message: str) -> None:
+        self._last = (fraction, message)
+        self._at = self._clock()
+        self._report(fraction, message)
+
+    def beat(self) -> None:
+        if self._last is not None:
+            self(*self._last)
+
+    def tick(self) -> None:
+        if self._clock() - self._at >= HEARTBEAT_INTERVAL:
+            self.beat()
 
 
 class ProgressThrottle:

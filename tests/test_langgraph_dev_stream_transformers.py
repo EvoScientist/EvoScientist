@@ -7,9 +7,8 @@ transformers declare. The middleware event mirror
 graph those writes hit a no-op writer and never reach the client.
 
 The factory lives in ``langgraph_dev.stream_transformers`` (re-exported by
-``main_graph``) so it can be exercised here without building the full agent that
-importing ``main_graph`` triggers. ``main_graph`` re-exports the symbol so
-langgraph-api discovers it on the graph's source module.
+``main_graph``) so it can be exercised on its own. ``main_graph`` re-exports
+the symbol so langgraph-api discovers it on the graph's source module.
 """
 
 from __future__ import annotations
@@ -37,9 +36,9 @@ def test_langgraph_api_registration_stores_the_factory():
     """The factory satisfies langgraph-api's registration contract.
 
     Uses a stand-in module namespace so the registration path is covered
-    without importing ``langgraph_api.graph`` (which needs a server config) or
-    ``main_graph`` (which builds the agent). ``main_graph`` re-exports the same
-    symbol, so this is what langgraph-api reads at deploy time.
+    without importing ``langgraph_api.graph`` (which needs a server config).
+    ``main_graph`` re-exports the same symbol, so this is what langgraph-api
+    reads at deploy time.
     """
     from types import SimpleNamespace
 

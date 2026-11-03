@@ -10,11 +10,13 @@ ccproxy is invoked via subprocess (not Python imports) so the
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 from EvoScientist.config import EvoScientistConfig
 
@@ -119,7 +121,7 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
     """Check if ccproxy has valid OAuth credentials.
 
     Args:
-        provider: ccproxy provider name ("claude_api" or "codex").
+        provider: ccproxy provider name.
 
     Returns:
         (is_valid, message) tuple.
@@ -183,27 +185,14 @@ def is_ccproxy_running(port: int) -> bool:
         return False
 
 
-# Codex plugin defaults overridden through ccproxy's env layer (``__`` nests
-# keys), which sits on top of whatever config file ccproxy discovers itself:
-#
-# - ``model_mappings``: rewrites any ``gpt-*``/``o1-*``/``o3-*``/``claude-*``
-#   model to ``gpt-5.3-codex`` before forwarding — silently overriding the
-#   model the user configured (and failing outright on accounts where
-#   ``gpt-5.3-codex`` is not served).
-# - ``inject_detection_payload``: prepends the Codex CLI system prompt to
-#   every request, which tells the model to edit files with an
-#   ``apply_patch`` tool EvoScientist does not provide.
-_CCPROXY_CODEX_ENV_OVERRIDES = {
-    "PLUGINS__CODEX__MODEL_MAPPINGS": "[]",
-    "PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD": "false",
-}
-
-
-def start_ccproxy(port: int) -> subprocess.Popen:
+def start_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen:
     """Start ccproxy serve as a background process.
 
     Args:
         port: Port number for the proxy server.
+        detached: Run it in its own session (process group on Windows), so
+            it outlives this process and the terminal's signals, as the
+            background langgraph dev server does.
 
     Returns:
         The Popen handle for the ccproxy process.
@@ -215,28 +204,44 @@ def start_ccproxy(port: int) -> subprocess.Popen:
     """
     exe = _ccproxy_exe() or "ccproxy"
     cmd = [exe, "serve", "--port", str(port)]
-    env = {**os.environ, **_CCPROXY_CODEX_ENV_OVERRIDES}
     logger.warning(
         "Starting ccproxy on port %d; first startup may take up to %d seconds",
         port,
         _CCPROXY_HEALTH_TIMEOUT_SECONDS,
     )
+    spawn: dict = {}
+    if detached:
+        if os.name == "nt":
+            # A console of its own, without a window: closing the terminal
+            # does not end it.
+            spawn["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            ) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        else:
+            spawn["start_new_session"] = True
     proc = subprocess.Popen(
         cmd,
-        env=env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **spawn,
     )
 
     deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"ccproxy exited immediately with code {proc.returncode}"
-            )
-        if is_ccproxy_running(port):
-            return proc
-        time.sleep(0.3)
+    try:
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"ccproxy exited immediately with code {proc.returncode}"
+                )
+            if is_ccproxy_running(port):
+                return proc
+            time.sleep(0.3)
+    except BaseException:
+        # Ctrl+C or an error during the wait: the caller never gets the
+        # handle, so nobody else could stop this process.
+        stop_ccproxy(proc)
+        raise
 
     # Timed out — clean up
     proc.terminate()
@@ -267,8 +272,9 @@ def stop_ccproxy(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def ensure_ccproxy(port: int) -> subprocess.Popen | None:
-    """Ensure ccproxy is running — reuse existing or start new.
+def ensure_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen | None:
+    """Ensure ccproxy is running — reuse existing or start new
+    (see :func:`start_ccproxy` for *detached*).
 
     Returns:
         Popen handle if we started a new process, None if already running.
@@ -276,7 +282,7 @@ def ensure_ccproxy(port: int) -> subprocess.Popen | None:
     if is_ccproxy_running(port):
         logger.debug("ccproxy already running on port %d", port)
         return None
-    return start_ccproxy(port)
+    return start_ccproxy(port, detached=detached)
 
 
 # =============================================================================
@@ -293,22 +299,12 @@ def setup_ccproxy_env(port: int) -> None:
     Always overrides existing values — when this function is called,
     we've decided to use ccproxy, so env must point to it.
     """
+    from .config.settings import record_env_origin
+
     os.environ["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{port}/claude"
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
-
-
-def setup_codex_env(port: int) -> None:
-    """Set environment variables for OpenAI/Codex ccproxy routing.
-
-    Force-sets ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY`` so that
-    downstream LangChain/OpenAI clients route through ccproxy's Codex
-    endpoint.
-
-    Always overrides existing values — when this function is called,
-    we've decided to use ccproxy, so env must point to it.
-    """
-    os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{port}/codex/v1"
-    os.environ["OPENAI_API_KEY"] = "ccproxy-oauth"
+    record_env_origin("ANTHROPIC_BASE_URL", "ccproxy")
+    record_env_origin("ANTHROPIC_API_KEY", "ccproxy")
 
 
 # =============================================================================
@@ -316,27 +312,25 @@ def setup_codex_env(port: int) -> None:
 # =============================================================================
 
 
-def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
-    """High-level: conditionally start ccproxy based on config.
+def maybe_start_ccproxy(
+    config: EvoScientistConfig, *, lasting: bool = False
+) -> subprocess.Popen | None:
+    """Start ccproxy when Anthropic uses OAuth.
 
-    Checks ``config.anthropic_auth_mode`` and ``config.openai_auth_mode``:
-    - ``oauth``: ccproxy must work — raises on failure.
-    - ``api_key``: no-op for that provider.
-
-    When either provider uses OAuth, ccproxy is started (single process
-    serves both providers). Environment variables are set for each
-    provider that uses OAuth.
+    OpenAI's OAuth mode signs in to ChatGPT directly and needs no proxy.
 
     Args:
         config: An ``EvoScientistConfig`` instance.
+        lasting: The ccproxy outlives this session, for every session and
+            the background server to share: start it detached and record it
+            for ``EvoSci ccproxy stop`` (:func:`stop_recorded_ccproxy`), and
+            return None so the caller does not stop it.
 
     Returns:
-        Popen handle if we started ccproxy, None otherwise.
+        Popen handle if we started ccproxy for this session to stop, None
+        otherwise.
     """
-    anthropic_oauth = getattr(config, "anthropic_auth_mode", "api_key") == "oauth"
-    openai_oauth = getattr(config, "openai_auth_mode", "api_key") == "oauth"
-
-    if not anthropic_oauth and not openai_oauth:
+    if not uses_oauth(config):
         return None
 
     if not is_ccproxy_available():
@@ -345,38 +339,160 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
             f"Install it with: {_oauth_install_hint()}"
         )
 
-    # Check auth for each provider that uses OAuth
-    if anthropic_oauth:
-        authed, msg = check_ccproxy_auth("claude_api")
-        if not authed:
-            raise RuntimeError(
-                f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
-                "Run: ccproxy auth login claude_api"
-            )
-
-    if openai_oauth:
-        authed, msg = check_ccproxy_auth("codex")
-        if not authed:
-            raise RuntimeError(
-                f"ccproxy Codex OAuth not authenticated: {msg}\n"
-                "Run: ccproxy auth login codex"
-            )
+    authed, msg = check_ccproxy_auth("claude_api")
+    if not authed:
+        raise RuntimeError(
+            f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
+            "Run: ccproxy auth login claude_api"
+        )
 
     port = config.ccproxy_port
     if not (1 <= port <= 65535):
         raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
 
-    # Start ccproxy (single process serves both providers)
-    proc = ensure_ccproxy(port)
-
-    # Set environment for each OAuth provider
-    if anthropic_oauth:
-        setup_ccproxy_env(port)
-    if openai_oauth:
-        setup_codex_env(port)
+    if lasting:
+        try:
+            with _lasting_start_lock():
+                proc = ensure_ccproxy(port, detached=True)
+                if proc is not None:
+                    # Recorded at once, under the lock: an interrupt during
+                    # the check below leaves a ccproxy that a stop finds.
+                    _record_lasting(proc.pid)
+                    if not _still_running(proc):
+                        _forget_lasting(proc.pid)
+        except OSError as exc:
+            # The lock timing out, too: a filelock Timeout is an OSError.
+            raise RuntimeError(f"Could not start ccproxy: {exc}") from exc
+    else:
+        proc = ensure_ccproxy(port, detached=False)
+    setup_ccproxy_env(port)
 
     if proc:
         logger.info("Started ccproxy on port %d", port)
     else:
         logger.info("Reusing existing ccproxy on port %d", port)
-    return proc
+    return None if lasting else proc
+
+
+def _still_running(proc: subprocess.Popen) -> bool:
+    """Whether *proc* keeps running: one that lost the port to another
+    ccproxy started at the same time answered the health probe through the
+    winner's, and exits; the winner records itself."""
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        return True
+    return False
+
+
+def _lasting_record() -> Path:
+    from . import paths
+
+    return paths.SERVER_HOME / "ccproxy.pid"
+
+
+def _lasting_start_lock():
+    """Held across the check for a running ccproxy and the start of a lasting
+    one: two sessions starting together would each spawn one, and the loser
+    can pass its health probe through the winner's port, then die on its bind
+    after being recorded."""
+    from filelock import FileLock
+
+    from .langgraph_dev.server_home import ensure_server_home
+
+    return FileLock(
+        str(ensure_server_home() / "ccproxy.lock"),
+        timeout=_CCPROXY_HEALTH_TIMEOUT_SECONDS + 10,
+    )
+
+
+def _record_lasting(pid: int) -> None:
+    from .langgraph_dev.server_home import ensure_server_home
+
+    try:
+        # Created as the server creates it: readable by this user only.
+        ensure_server_home()
+        _lasting_record().write_text(str(pid))
+    except OSError:
+        logger.warning("Could not record the ccproxy pid", exc_info=True)
+
+
+def _forget_lasting(pid: int) -> None:
+    """Remove the record of *pid*, when it is still the one recorded."""
+    if recorded_ccproxy_pid() != pid:
+        return
+    try:
+        _lasting_record().unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove the ccproxy pid record", exc_info=True)
+
+
+def uses_oauth(config: object) -> bool:
+    """Whether Anthropic uses OAuth, and so routes through ccproxy."""
+    return getattr(config, "anthropic_auth_mode", "api_key") == "oauth"
+
+
+def recorded_ccproxy_pid() -> int | None:
+    """The pid of the ccproxy a session started for every session, if one
+    is recorded."""
+    try:
+        return int(_lasting_record().read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _recorded_process():
+    """The recorded ccproxy's process: ``None`` when it is gone (its pid
+    unused, or used by another program now), ``...`` when it cannot be
+    inspected."""
+    import psutil
+
+    pid = recorded_ccproxy_pid()
+    if pid is None:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        cmdline = proc.cmdline()
+    except psutil.AccessDenied:
+        return ...
+    except psutil.NoSuchProcess:
+        return None
+    return proc if any("ccproxy" in part for part in cmdline) else None
+
+
+def recorded_ccproxy_running() -> int | None:
+    """The recorded ccproxy's pid while it runs, else None."""
+    proc = _recorded_process()
+    if proc is None:
+        return None
+    return recorded_ccproxy_pid() if proc is ... else proc.pid
+
+
+def stop_recorded_ccproxy() -> int | None:
+    """Stop the ccproxy a session started for every session (``EvoSci
+    ccproxy stop``, ``EvoSci service stop``, ``EvoSci update``); its pid, or
+    None when none runs. A pid whose process is not ccproxy (reused) is left
+    alone."""
+    import psutil
+
+    record = _lasting_record()
+    proc = _recorded_process()
+    if proc is ...:
+        # Kept: it may still be ours, and a later stop can try again.
+        return None
+    record.unlink(missing_ok=True)
+    if proc is None:
+        return None
+    pid = proc.pid
+    try:
+        tree = [*proc.children(recursive=True), proc]
+    except psutil.NoSuchProcess:
+        return None
+    for member in tree:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            member.terminate()
+    _gone, alive = psutil.wait_procs(tree, timeout=5)
+    for member in alive:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+            member.kill()
+    return pid

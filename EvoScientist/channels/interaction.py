@@ -672,6 +672,17 @@ class ApprovalOutcome:
     ``prompted`` is False only when the policy auto-resolved the interrupt
     without asking a human. The consumer's HITL loop counts only prompted
     rounds against its round budget (issue #469).
+
+    ``session_granted`` is True only when ``decisions`` came from a session
+    "approve all" grant that was already in force (all approve by
+    construction). Config rules and human replies, the reply that grants
+    included, leave it False: that reply can carry config rejections from a
+    mixed batch, so a caller sends the grant only with an answer the grant
+    produced. ``grant_in_force`` says whether the
+    session holds a grant once this outcome is returned, which the reply that
+    grants does too. ``rejected`` is True when a human replied and did not
+    approve, a stop included; a decline without it (timeout, a prompt that
+    could not be sent) was left unanswered.
     """
 
     decisions: list[dict] | None = None
@@ -680,6 +691,9 @@ class ApprovalOutcome:
     # True only when a human prompt was skipped because the caller's human
     # budget was already spent. Auto fast paths leave this False.
     budget_exhausted: bool = False
+    session_granted: bool = False
+    grant_in_force: bool = False
+    rejected: bool = False
 
 
 async def resolve_approval(
@@ -699,15 +713,22 @@ async def resolve_approval(
     exactly once, at prompt time (:meth:`ApprovalPolicy.decision_snapshot`);
     the reply branches consume that snapshot's REJECTs, so config changes
     while the human is deciding cannot alter what the approval operation
-    does with the reply.  ``/stop`` cancels silently (it already got its own
-    ack from the transport's stop fast-path).  An unrecognized reply declines
+    does with the reply.  ``/stop`` is a refusal without feedback (it already
+    got its own ack from the transport's stop fast-path).  An unrecognized reply declines
     *without feedback* and hands the raw text back to the driver via
     ``unrecognized_reply`` (see
     :class:`ApprovalOutcome` for the per-driver policy).
     """
+    # Read before the snapshot: a grant given by this very reply must not be
+    # reported as the answer's source, and an empty batch never takes the
+    # grant branch.
+    in_force = policy.is_session_granted(session_key)
+    granted = bool(action_requests) and in_force
     auto, policy_rejections = policy.decision_snapshot(session_key, action_requests)
     if auto is not None:
-        return ApprovalOutcome(decisions=auto)
+        return ApprovalOutcome(
+            decisions=auto, session_granted=granted, grant_in_force=in_force
+        )
 
     # After the session/config fast path, before any prompt. A spent human
     # budget must not ask, and must not have blocked the auto return above.
@@ -726,7 +747,7 @@ async def resolve_approval(
         return ApprovalOutcome(prompted=True)
 
     if is_stop_command(reply):
-        return ApprovalOutcome(prompted=True)
+        return ApprovalOutcome(prompted=True, rejected=True)
 
     decision = parse_approval_reply(reply)
     if decision == "auto":
@@ -737,6 +758,7 @@ async def resolve_approval(
                 action_requests, policy_rejections
             ),
             prompted=True,
+            grant_in_force=True,
         )
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)
@@ -748,8 +770,8 @@ async def resolve_approval(
         )
     if decision == "reject":
         await io.send(REJECTED_FEEDBACK)
-        return ApprovalOutcome(prompted=True)
+        return ApprovalOutcome(prompted=True, rejected=True)
 
     # Unrecognized — decline and report the raw text; the driver chooses
     # the feedback / refeed policy.
-    return ApprovalOutcome(unrecognized_reply=reply, prompted=True)
+    return ApprovalOutcome(unrecognized_reply=reply, prompted=True, rejected=True)

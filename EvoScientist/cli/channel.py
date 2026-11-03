@@ -269,7 +269,8 @@ def _cancel_channel_session(channel_type: str, chat_id: str) -> tuple[int, int]:
 # TUI (``cli/tui_interactive.py``'s channel handler), and headless
 # serve (``cli/commands.py::_serve_process_message``).  They all route
 # ``/foo`` text through ``cmd_manager`` instead of feeding it to the
-# LLM as a plain prompt.
+# LLM as a plain prompt; a slash naming an installed skill streams to
+# the agent.
 
 
 async def dispatch_channel_slash_command(
@@ -291,10 +292,10 @@ async def dispatch_channel_slash_command(
     """Dispatch a slash command from a channel message.
 
     Returns True if the helper handled the message (successfully or with
-    an error) — the caller must then return without streaming anything
-    to the agent.  Returns False for non-slash content or unresolved
-    slash commands, so the caller can fall through to the agent
-    streaming path (matches TUI behavior).
+    an error, including an unknown command) — the caller must then return
+    without streaming anything to the agent.  Returns False for non-slash
+    content and for ``/skill-name`` input naming an installed skill, so the
+    caller streams it to the agent like any other message.
 
     Parameters
     ----------
@@ -403,11 +404,14 @@ async def _dispatch_channel_slash_impl(
     from ..commands.channel_ui import ChannelCommandUI
     from ..commands.manager import manager as cmd_manager
 
-    # The wrapper only forwards slash-prefixed content, so an unresolved
-    # parse is always an unknown command — answer instead of feeding a typo
-    # to the agent.
+    # An unresolved slash is a pinned skill when it names one; anything else
+    # is an unknown command, answered here instead of fed to the agent.
     parsed = cmd_manager.resolve(msg.content)
     if parsed is None:
+        from ..commands import skill_slash
+
+        if skill_slash.skill_slash_names(msg.content, dirs.workspace):
+            return False
         bad_cmd = msg.content.split(None, 1)[0]
         _set_channel_response(
             msg.msg_id,
@@ -629,6 +633,28 @@ def remember_channel_origin(thread_id: str | None, msg: ChannelMessage) -> None:
         )
 
 
+def restore_channel_origin(
+    thread_id: str,
+    *,
+    channel_type: str,
+    chat_id: str,
+    sender: str,
+    metadata: dict | None,
+) -> None:
+    """Record a channel origin read back after a restart (no inbound message).
+
+    Serve uses it for a conversation armed for proactive pushes, whose origin
+    it stored in checkpoint metadata. A later channel turn overwrites it.
+    """
+    with _thread_channel_origins_lock:
+        _thread_channel_origins[thread_id] = _ChannelOrigin(
+            channel_type=channel_type,
+            chat_id=chat_id,
+            sender=sender,
+            metadata=dict(metadata) if metadata else None,
+        )
+
+
 def get_channel_origin(thread_id: str | None) -> _ChannelOrigin | None:
     """Return the channel origin remembered for ``thread_id``, or ``None``."""
     if not thread_id:
@@ -787,6 +813,11 @@ def channel_ask_user_prompt(
     )
 
 
+def channel_session_granted(msg: ChannelMessage) -> bool:
+    """Whether this message's chat has an "approve all" grant in force."""
+    return _approval_policy.is_session_granted(_channel_message_session_key(msg))
+
+
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,
@@ -807,9 +838,14 @@ def channel_hitl_prompt(
     and whether the budget skipped the prompt.
     """
     session_key = _channel_message_session_key(msg)
+    in_force = _approval_policy.is_session_granted(session_key)
     decisions = _approval_policy.auto_decision(session_key, action_requests)
     if decisions is not None:
-        return ApprovalOutcome(decisions=decisions)
+        return ApprovalOutcome(
+            decisions=decisions,
+            session_granted=bool(action_requests) and in_force,
+            grant_in_force=in_force,
+        )
     if human_budget_exhausted:
         return ApprovalOutcome(budget_exhausted=True)
 
@@ -840,7 +876,7 @@ def channel_hitl_prompt(
             # explicit notice. Only the serve-mode consumer refeeds the
             # text as a new turn.
             await io.send(UNRECOGNIZED_FEEDBACK)
-            return ApprovalOutcome(prompted=True)
+            return ApprovalOutcome(prompted=True, rejected=True)
         return outcome
 
     return _run_engine_on_bus(

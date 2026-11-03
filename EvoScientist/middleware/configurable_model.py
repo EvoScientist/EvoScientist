@@ -41,6 +41,8 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 
+from ..llm.registry import UnknownModelError
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,6 +157,8 @@ class ConfigurableModelMiddleware(AgentMiddleware):
             return handler(request)
         try:
             new_model = self._resolve(model_name, provider)
+        except UnknownModelError:
+            raise
         except Exception:
             logger.warning(
                 "ConfigurableModelMiddleware failed to resolve model=%r "
@@ -183,6 +187,8 @@ class ConfigurableModelMiddleware(AgentMiddleware):
             # langgraph dev event loop. Cache hits are still fast (a dict
             # lookup); the thread-pool overhead is irrelevant once warm.
             new_model = await asyncio.to_thread(self._resolve, model_name, provider)
+        except UnknownModelError:
+            raise
         except Exception:
             logger.warning(
                 "ConfigurableModelMiddleware failed to resolve model=%r "

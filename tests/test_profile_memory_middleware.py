@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 from types import SimpleNamespace
@@ -22,15 +23,18 @@ from EvoScientist.paths import Workspace
 
 
 def _request():
+    # ``ModelRequest`` always carries a tool list; a normal call has tools.
     request = SimpleNamespace(
         state={},
         runtime=object(),
+        tools=[object()],
         system_message=SystemMessage(content="base system"),
     )
     request.override = lambda **kwargs: SimpleNamespace(
         **{
             "state": request.state,
             "runtime": request.runtime,
+            "tools": request.tools,
             "system_message": kwargs.get("system_message", request.system_message),
         }
     )
@@ -39,13 +43,6 @@ def _request():
 
 def _path_project_id(workspace) -> str:
     return memory_module.resolve_project_id(workspace)
-
-
-def _profile_texts(memories):
-    return [
-        path.read_text(encoding="utf-8")
-        for path in (memories / "profile").rglob("*.md")
-    ]
 
 
 def _sorted_tool_names(middleware) -> list[str]:
@@ -611,6 +608,31 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_profile_without_frontmatter_is_injected_as_stored_when_repair_fails(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+    middleware.modify_request(_request())  # profile files exist now
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "# User profile\n\n## Preferences\n- Likes short reports\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        memory_module.EvoMemoryMiddleware,
+        "_write_text",
+        lambda _self, _path, _content: False,
+    )
+
+    system = _system(middleware.modify_request(_request()))
+
+    assert "- Likes short reports" in system
+    assert "intro: pending" not in system
+
+
 def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -693,72 +715,6 @@ async def test_profile_memory_async_path_inlines_content_under_blockbuster(
     )
 
 
-def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: RL",
-                "",
-                "## Experiment History",
-                "### [2026-01-01] Baseline",
-                "- **Conclusion**: Worked",
-                "",
-                "## Learned Preferences",
-                "- Prefers concise plans.",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    research_taste = (memories / "profile" / "RESEARCH_TASTE.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert user_profile.count("- **Name**: Alice") == 1
-    assert user_profile.count("Prefers concise plans.") == 1
-    assert user_profile.count("### Experiment History") == 1
-    assert user_profile.count("- **Conclusion**: Worked") == 1
-    assert research_taste.count("- **Primary Domain**: RL") == 1
-    assert "Migrated from /memories/MEMORY.md" not in user_profile
-    assert "Migrated from /memories/MEMORY.md" not in research_taste
-    assert not (memories / "MEMORY.md").exists()
-
-
-def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    legacy_path.write_text("  \n\n", encoding="utf-8")
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    assert not legacy_path.exists()
-
-
 def test_profile_memory_uses_explicit_workspace_for_project_profile(tmp_path):
     memories = tmp_path / "memories"
     active_workspace = tmp_path / "active-workspace"
@@ -802,79 +758,6 @@ async def test_profile_memory_resolves_project_id_once_per_middleware(
         path == "/profile/projects/P-cached-project/PROJECT_PROFILE.md"
         for path, _template in middleware._profile_specs
     )
-
-
-def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    custom_note = "Keep this custom deployment note."
-    legacy_path.write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Custom Notes",
-                custom_note,
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    assert custom_note in user_profile
-    assert not legacy_path.exists()
-
-
-def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: (unknown)",
-                "- **Role**: (unknown)",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: (unknown)",
-                "- **Preferred Methods**: (unknown)",
-                "",
-                "## Experiment History",
-                "(No experiments yet)",
-                "",
-                "## Learned Preferences",
-                "- (none yet)",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    migrated_profile_text = "\n".join(_profile_texts(memories))
-    assert "(unknown)" not in migrated_profile_text
-    assert "Imported from legacy MEMORY.md" not in migrated_profile_text
-    assert not (memories / "MEMORY.md").exists()
 
 
 # ---- profile bootstrap: frontmatter helpers ---------------------------------
@@ -1555,3 +1438,122 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
         m for m in sub["middleware"] if isinstance(m, memory_module.EvoMemoryMiddleware)
     )
     assert instance._enable_profile_bootstrap is False
+
+
+# ---- tool-less requests get no memory tool directives ------------------------
+
+
+def _request_with_tools(tools):
+    request = _request()
+    request.tools = tools
+    return request
+
+
+def test_tool_less_request_gets_no_memory_tool_directives(tmp_path):
+    """A request with an empty tool list (a proactive shadow turn) is not told to
+    run the memory preflight or record observations: with no tools the model
+    acts those directives out as text instead of answering."""
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+
+    with_tools = _system(middleware.modify_request(_request_with_tools([object()])))
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "Required memory preflight" in with_tools
+    assert "search_observations" in with_tools
+    assert "Required memory preflight" not in without
+    assert "search_observations" not in without
+    assert "record_observation" not in without
+    assert "No memory tools are available on this turn" in without
+    # Nor the profile edit guidance; the profile paths stay.
+    assert "normal file tools" in with_tools
+    assert "normal file tools" not in without
+    assert "edit the relevant" not in without
+    assert "/memories/profile/USER_PROFILE.md" in without
+    # The observation memory location and index still reach the tool-less call.
+    assert "/memories/observations/" in without
+
+
+def test_tool_less_async_request_gets_no_memory_tool_directives(tmp_path):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+
+    without = _system(asyncio.run(middleware.amodify_request(_request_with_tools([]))))
+
+    assert "Required memory preflight" not in without
+    assert "search_observations" not in without
+    assert "No memory tools are available on this turn" in without
+
+
+def test_tool_less_request_with_a_truncated_profile_is_not_told_to_read_it(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=4_000
+    )
+    middleware.modify_request(_request())
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "".join(f"- preference {i:04d}\n" for i in range(1_000)), encoding="utf-8"
+    )
+
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "characters omitted" in without
+    assert "do not try to read a part marked as omitted" in without
+
+
+def test_index_too_large_to_inline_mentions_search_only_with_hints():
+    from EvoScientist.memory.observations.index import (
+        _truncated_observation_index_context,
+    )
+
+    kwargs = {
+        "header": ["<observation_memory>"],
+        "intro": "Indexed observations:",
+        "lines": ["- " + "x" * 200],
+        "max_inline_chars": 10,
+    }
+    with_hints = _truncated_observation_index_context(
+        footer=["hint"], can_search=True, **kwargs
+    )
+    without = _truncated_observation_index_context(
+        footer=[], can_search=False, **kwargs
+    )
+    # The observation linker: search tools, but no hint footer.
+    linker = _truncated_observation_index_context(footer=[], can_search=True, **kwargs)
+
+    assert "search on demand" in with_hints
+    assert "search on demand" not in without
+    assert "too large to inline" in without
+    assert "search on demand" in linker
+
+
+def test_linker_index_keeps_the_search_advice_when_too_large(tmp_path):
+    from EvoScientist.memory.observations import index as index_module
+
+    documents = [object()]
+    with (
+        patch.object(index_module, "_observation_documents", return_value=documents),
+        patch.object(
+            index_module, "_observation_index_line", return_value="- " + "x" * 500
+        ),
+        patch.object(
+            index_module, "_observation_index_count_line", return_value="1 observation"
+        ),
+    ):
+        text = index_module.build_observation_linker_index_context(
+            memory_dir=tmp_path, project_id="p", exclude_ids=(), max_inline_chars=50
+        )
+    assert "search on demand" in text

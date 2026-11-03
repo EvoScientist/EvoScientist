@@ -1,11 +1,14 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import copy
+import json
 import logging
 import os
 import queue
 import re
+import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -15,6 +18,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from ..ccproxy_manager import uses_oauth
 from ..commands.base import (
     ChannelRuntime,
     Command,
@@ -30,8 +34,8 @@ from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_contex
 from ..paths import (
     SessionDirs,
     Workspace,
+    command_arg,
     ensure_dirs,
-    reload_env_dirs,
     start_workspace_path,
 )
 from ..runtime import AsyncRuntime
@@ -39,6 +43,7 @@ from ..stream.console import console
 from . import (
     async_notifier,
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
+    service_cmd,  # noqa: F401 — registers `EvoSci service` / `EvoSci ccproxy`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
@@ -60,11 +65,13 @@ from .channel import (
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
+    channel_session_granted,
     dispatch_channel_slash_command,
     forget_channel_origin,
     get_channel_origin,
     publish_to_channel_origin,
     remember_channel_origin,
+    restore_channel_origin,
 )
 from .channel_sends import PendingChannelSends
 from .mcp_ui import (
@@ -108,6 +115,53 @@ def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
     if not isinstance(runtime, AsyncRuntime):  # pragma: no cover - defensive
         raise RuntimeError("CLI async runtime context is invalid")
     return runtime
+
+
+def _interactive_start(prompt: str | None) -> bool:
+    """True when a person is at the terminal: no ``-p`` and both streams are ttys."""
+    streams = (sys.stdin, sys.stdout)
+    return not prompt and all(s is not None and s.isatty() for s in streams)
+
+
+def _providers_in_use(config: Any) -> set[str]:
+    """Providers of the main, auxiliary and fallback models."""
+    from ..config.onboard.wizard import _active_llm_providers
+
+    fallbacks = {
+        entry.rsplit(":", 1)[1].strip()
+        for entry in (config.model_fallbacks or "").split(",")
+        if ":" in entry
+    }
+    return _active_llm_providers(config) | fallbacks
+
+
+def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
+    """Stop startup when OpenAI uses ChatGPT sign-in and nobody is signed in.
+
+    An interactive start offers the browser sign-in first.
+    """
+    if getattr(config, "openai_auth_mode", "api_key") != "oauth":
+        return
+
+    from ..llm import chatgpt_oauth
+
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        return
+    if state.problem:
+        console.print(f"[yellow]ChatGPT: {state.problem}[/yellow]")
+    if interactive:
+        import questionary
+
+        from ..config.onboard.helpers import _run_chatgpt_login
+
+        if questionary.confirm("Sign in with ChatGPT now?", default=True).ask():
+            if _run_chatgpt_login():
+                return
+        console.print(f"[red]{chatgpt_oauth.SIGN_IN_AGAIN}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[red]{chatgpt_oauth.SIGN_IN_HINT}[/red]")
+    raise typer.Exit(1)
 
 
 # =============================================================================
@@ -169,7 +223,7 @@ def onboard(
     workspace settings, and agent parameters.
 
     Any answer can be pre-set via a flag (``--provider anthropic
-    --model claude-sonnet-4-6 ...``); prompts for unset answers stay
+    --model claude-sonnet-5-5 ...``); prompts for unset answers stay
     interactive unless ``--non-interactive`` is passed, in which case any
     missing required answer aborts the wizard.
     """
@@ -246,11 +300,146 @@ def onboard(
             strict=non_interactive,
         )
 
-    _run_onboard_cli(
+    saved = _run_onboard_cli(
         skip_validation=skip_validation,
         prompter=prompter,
         runtime=_get_cli_async_runtime(ctx),
     )
+    if saved is True and prompter is None and sys.stdin.isatty():
+        _offer_server_start()
+
+
+def _offer_server_start() -> None:
+    """After onboarding: offer to start the background agent service from
+    ``default_workdir``. A running one keeps the settings it started with;
+    say how to apply the new ones."""
+    import questionary
+
+    from ..config import get_effective_config
+    from ..config.onboard.style import CONFIRM_STYLE, QMARK
+    from ..langgraph_dev import manager
+    from .server_cmd import start_background
+
+    config = get_effective_config()
+    port, host = manager.configured_address(config)
+    if manager.is_langgraph_dev_running(port=port, host=host):
+        sidecar = manager._read_workspace_sidecar()
+        if manager.is_lasting(sidecar):
+            # From the project it was started from, which the WebUI opens.
+            recorded = sidecar.get("workspace")
+            workspace = escape(command_arg(recorded) if recorded else "<project>")
+            console.print(
+                "[dim]The background agent service runs with your previous "
+                "settings; to apply the new ones, restart it: [bold]EvoSci "
+                "service stop[/bold], then [bold]EvoSci service start "
+                f"--workdir {workspace}[/bold] (this ends its running "
+                "background work).[/dim]"
+            )
+        else:
+            console.print(
+                "[dim]A server that is not the background service runs on the "
+                "port (an EvoSci deploy, the desktop app or an older release); "
+                "the new settings apply once it restarts.[/dim]"
+            )
+        return
+    if not config.default_workdir:
+        # Started from the folder onboarding ran in (often the home folder),
+        # it would pin the WebUI and the desktop app to that folder's project;
+        # the first session in a project starts it instead.
+        console.print(
+            "[dim]The background agent service starts with your next EvoSci "
+            "session in a project, and keeps running for every session until "
+            "[bold]EvoSci service stop[/bold].[/dim]"
+        )
+        return
+    project = start_workspace_path(None, config.default_workdir)
+    answer = questionary.confirm(
+        f"Start the background agent service for {project} now? It keeps "
+        "running for every EvoSci session until `EvoSci service stop`.",
+        default=True,
+        style=CONFIRM_STYLE,
+        qmark=QMARK,
+    ).ask()
+    if not answer:
+        return
+    try:
+        start_background(None, with_ccproxy=True)
+    except typer.Exit:
+        console.print("[dim]It starts with your next EvoSci session.[/dim]")
+    except Exception as exc:
+        # The configuration is saved; the service starts with the next session.
+        console.print(
+            f"[yellow]Could not start the background agent service "
+            f"({escape(str(exc))}); it starts with your next EvoSci "
+            "session.[/yellow]"
+        )
+
+
+# =============================================================================
+# Update command
+# =============================================================================
+
+
+@app.command()
+def update(
+    version: str | None = typer.Option(
+        None,
+        "--version",
+        help=(
+            "Install this release instead of the newest one; an older one rolls "
+            "back. An older release keeps only the config keys and values it "
+            "knows: its next config save drops the rest (all settings, if it "
+            "cannot read the file), so config.yaml is copied to "
+            "config.yaml.bak-<current version> first. sessions.db is used as it is."
+        ),
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Only print the installed and the newest version"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Stop a running server without asking"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line; never asks"
+    ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Pass --skip <id> to the new EvoSci setup (repeatable)"
+        ),
+    ] = None,
+):
+    """Update EvoScientist to the newest release, with its tested dependencies.
+
+    A uv tool install (the install scripts, or uv tool install) is reinstalled
+    with the release's constraints.txt, keeping its extras, Python version and
+    packages added with --with, on uv's own Python (an install made without
+    --python moves to uv's Python of the same version on its first update).
+    The new version's EvoSci setup runs afterwards. For pip, conda, an
+    editable install or the Docker image, it prints what to run instead.
+    """
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+    from ..updater import UpdateOptions, run_update
+
+    if json_output:
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+        emit = JsonEmitter()
+        confirm = None
+    else:
+        emit = ConsoleEmitter(console)
+        confirm = (
+            (lambda question: typer.confirm(question, default=False))
+            if sys.stdin.isatty()
+            else None
+        )
+    opts = UpdateOptions(
+        version=version, check=check, yes=yes, json=json_output, skip=list(skip or ())
+    )
+    code = run_update(opts, emit, confirm=confirm)
+    if code:
+        raise typer.Exit(code)
 
 
 # =============================================================================
@@ -272,10 +461,16 @@ def setup(
     cn: bool = typer.Option(
         False, "--cn", help="Download from mainland China mirrors and remember it"
     ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Skip this stage (repeatable; ids from --manifest)"
+        ),
+    ] = None,
 ):
     """Install what EvoScientist needs beyond the Python package (Node.js, Git
-    for Windows on Windows, and a Python for the agent's shell when none is on
-    PATH).
+    for Windows on Windows, a Python for the agent's shell when none is on
+    PATH, and the WebUI).
 
     Runs every stage that applies to this platform, in order. With ``--json``
     stdout carries only the JSON event lines; everything else goes to stderr.
@@ -299,19 +494,33 @@ def setup(
 
         redirect_console_to_stderr()
 
+    known = ", ".join(s.id for s in STAGES)
+    skipped = frozenset(skip or ())
+    unknown = sorted(skipped - {s.id for s in STAGES})
+    if unknown:
+        typer.echo(
+            f"Unknown stage {', '.join(map(repr, unknown))}. Known stages: {known}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if skipped and stage is not None:
+        typer.echo("--skip cannot be combined with --stage.", err=True)
+        raise typer.Exit(2)
+
     selected = tuple(s for s in STAGES if s.applies())
     if stage is not None:
         found = get_stage(stage)
         if found is None:
-            known = ", ".join(s.id for s in STAGES)
             typer.echo(f"Unknown stage {stage!r}. Known stages: {known}", err=True)
             raise typer.Exit(2)
         selected = (found,)
 
     if cn:
+        from ..config.store import ConfigError
+
         try:
             set_config_value("mirror", "cn")
-        except OSError as exc:
+        except (OSError, ConfigError) as exc:
             # Saving the choice is secondary; this run still uses the mirror.
             logging.getLogger(__name__).warning(
                 f"Could not save mirror: cn to the config ({exc}); "
@@ -320,7 +529,7 @@ def setup(
     mirror = "cn" if cn else load_config().mirror
 
     emit = JsonEmitter() if json_output else ConsoleEmitter(console)
-    code = run_stages(selected, emit, mirror)
+    code = run_stages(selected, emit, mirror, skip=skipped)
     if code:
         raise typer.Exit(code)
 
@@ -345,20 +554,23 @@ _CONFIGURE_SECTIONS = {
 }
 
 
-def _run_onboard_cli(**kwargs: Any) -> None:
+def _run_onboard_cli(**kwargs: Any) -> bool:
     """Invoke the wizard, presenting non-interactive errors as a clean
-    message + exit code 1 instead of a raw Python traceback.
+    message + exit code 1 instead of a raw Python traceback. Returns whether
+    the configuration was saved.
 
     The wizard raises ``RuntimeError`` for *expected* non-interactive
     failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
-    required flags under ``--non-interactive``, or a missing base URL.
-    Those are user-input problems, not bugs — surface them like any other
+    required flags under ``--non-interactive``, or a missing base URL. A
+    refused config file (one that does not parse, or the lock held
+    elsewhere) or a write that keeps failing raises ``ConfigError``, a
+    ``RuntimeError`` too. Those are user-input problems, not bugs — surface them like any other
     CLI validation error rather than dumping a stack trace.
     """
     from ..config import run_onboard
 
     try:
-        run_onboard(**kwargs)
+        return run_onboard(**kwargs)
     except RuntimeError as exc:
         console.print(f"[red]✗ {escape(str(exc))}[/red]")
         raise typer.Exit(code=1) from exc
@@ -413,7 +625,7 @@ def configure_provider(
 
 @configure_app.command("model")
 def configure_model():
-    """Re-run model selection (and reasoning effort for OpenRouter)."""
+    """Re-run model selection (and reasoning effort for OpenRouter and OpenAI)."""
     _configure_section("model")
 
 
@@ -473,15 +685,22 @@ def channel_setup(ctx: typer.Context):
     Guides you through selecting and configuring messaging channels
     (Telegram, Discord, or iMessage).
     """
-    from ..config import load_config, save_config
+    from ..config import load_config
     from ..config.onboard.channels import _step_channels
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError, config_lock, read_config_mapping
 
-    config = load_config()
-    updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
+    try:
+        with config_lock():
+            read_config_mapping()
+            config = load_config()
+            updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
+            if updates:
+                set_config_values(updates)
+    except (SettingsError, ConfigError, OSError) as e:
+        console.print(f"[red]Channel configuration not saved: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     if updates:
-        for key, value in updates.items():
-            setattr(config, key, value)
-        save_config(config)
         console.print("[green]Channel configuration saved.[/green]")
     else:
         console.print("[dim]No changes made.[/dim]")
@@ -574,80 +793,90 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _prepare_workdir_or_exit(path: str | os.PathLike[str]) -> Path:
+    """:func:`~EvoScientist.langgraph_dev.registration.prepare_workdir`, or
+    ``typer.Exit(1)`` with its message for a known project's missing folder."""
+    from ..langgraph_dev.registration import ServerUnusableError, prepare_workdir
+
+    try:
+        return prepare_workdir(path)
+    except ServerUnusableError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+
 def _ensure_async_subagent_server(
     config: Any, *, dirs: SessionDirs, backend: str | None = None
 ) -> None:
     """Start the langgraph dev subprocess for background agent work.
 
     Shared by both the interactive entry and the serve entry so the
-    user-visible status message and workspace-mismatch handling stay in one
-    place.
+    user-visible status message and the refusal handling stay in one place.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded to
     ``ensure_langgraph_dev`` so whether a server is needed follows the
     surface's choice rather than re-reading the global flag. ``None`` keeps the
     global-read behavior.
 
-    Raises ``typer.Exit(1)`` (after surfacing a red error) when an
-    externally-managed langgraph dev is already running for a different
-    workspace — e.g., ``EvoSci deploy --workdir /A`` is up and the user
-    is starting ``EvoSci`` / ``EvoSci serve`` in /B. Continuing in that
-    state would route async sub-agent calls to a process pinned to /A
-    while the main agent runs in /B.
+    Raises ``typer.Exit(1)`` (after surfacing a red error) when the server
+    cannot be used for *dirs* (``ServerUnusableError``): the server is from
+    an older EvoScientist, or the project's folder is gone.
     """
-    from ..langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        WorkspaceMismatchError,
-        _is_loopback_host,
-        ensure_langgraph_dev,
-        is_async_subagents_available,
-    )
+    from ..langgraph_dev.manager import ensure_langgraph_dev
+    from ..langgraph_dev.registration import ServerUnusableError
 
     try:
         with console.status(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            ensure_langgraph_dev(
+            served = ensure_langgraph_dev(
                 config,
                 workspace_dir=dirs.workspace.root,
-                run_dir=dirs.run_dir,
                 backend=backend,
             )
-            _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
-            _adopt_stale_scheduled_tasks(workspace=dirs.workspace)
-    except WorkspaceMismatchError as exc:
-        console.print(f"[red]{exc}[/red]")
+    except ServerUnusableError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
         _remove_unused_run_dir(dirs.run_dir)
         raise typer.Exit(1) from exc
 
     from ..langgraph_dev import manager as _lg_manager
 
-    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+    if not served:
         console.print(
-            "[yellow]⚠ Configuration or version changed since the background "
-            "agent server was launched — it still runs the old settings or "
-            "version. Apply them with [bold]EvoSci server stop[/bold], then "
-            "restart EvoSci.[/yellow]"
+            f"[yellow]{escape(_lg_manager.SERVER_UNAVAILABLE_MESSAGE)}[/yellow]"
         )
-    if _lg_manager.AGENT_PYTHON_DRIFT is not None:
-        console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")
+    _print_server_notices()
 
-    # The backend is shared by every UI mode, so the exposure warning lives
-    # here, not just in deploy/WebUI. Gated on the server being up: warning
-    # about a bind that never happened would be worse than saying nothing.
-    bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
-    if (
-        bind_host
-        and not _is_loopback_host(bind_host)
-        and is_async_subagents_available()
-    ):
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]Agent server listening on {bind_host} — no auth, and "
-            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
-            f"networks.[/bold red]"
+
+def print_exposure_warnings(exposure: Any, *, to: Any = None) -> None:
+    """Print the warnings for a server with *exposure* (a
+    :class:`~EvoScientist.langgraph_dev.registration.ServerExposure`, or
+    ``None``) on the console *to* (this module's by default), as every
+    terminal surface shows them."""
+    from ..langgraph_dev.registration import exposure_warnings
+
+    for label, message in exposure_warnings(exposure):
+        (to or console).print(
+            f"[bold white on red] ⚠ {label} [/bold white on red] "
+            f"[bold red]{escape(message)}[/bold red]"
         )
+
+
+def _print_server_notices() -> None:
+    """What the user should know about the server a start found or started:
+    drift since its launch, and a public bind or tunnel."""
+    from ..langgraph_dev import manager as _lg_manager
+
+    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.CONFIG_DRIFT_MESSAGE)}[/yellow]")
+    if _lg_manager.AGENT_SHELL_DRIFT is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_SHELL_DRIFT)}[/yellow]")
+
+    # The server serves every project, so a public bind or tunnel, whichever
+    # session started it, exposes this one too; the server said so when it
+    # registered the project.
+    print_exposure_warnings(_lg_manager.SERVER_EXPOSURE)
 
 
 def warn_server_backend_hitl_caveats(
@@ -674,49 +903,39 @@ def warn_server_backend_hitl_caveats(
     )
 
 
-def _reconcile_autoskill_schedule(config: Any, *, workspace: Workspace) -> None:
-    """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron.
+def dangerous_flag_note(backend: str | None, *, webui: bool = False) -> str | None:
+    """Where this session's ``--dangerous`` applies, for a session whose turns
+    run on *backend*, or for the WebUI's: the background server serves later
+    sessions too, so it does not get the flag. ``None`` without the flag."""
+    from ..langgraph_dev.manager import _set_by_flag
 
-    The cron belongs to the workspace, whichever run folder the session
-    works in. Only for a server known to serve *workspace*, as for
-    ``_adopt_stale_scheduled_tasks``: the reconcile replaces crons it counts as
-    the workspace's, and in another workspace's store those are not.
-    """
-    try:
-        from ..langgraph_dev import manager
-        from ..memory.autoskills.schedule import reconcile_autoskill_schedule
-
-        if manager.SERVED_WORKSPACE != workspace.root:
-            return
-        reconcile_autoskill_schedule(config, workspace_dir=workspace.root)
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
+    if not _set_by_flag("EVOSCIENTIST_DANGEROUS_MODE"):
+        return None
+    if webui:
+        return (
+            "--dangerous has no effect here: the WebUI's turns run in the "
+            "background server, which follows dangerous_mode in config.yaml."
         )
-
-
-def _adopt_stale_scheduled_tasks(*, workspace: Workspace) -> None:
-    """Best-effort re-tagging of the served store's untagged and moved tasks.
-
-    Their runs then work in *workspace* and pass the server's folder check.
-    Only for a server known to serve *workspace*: a reused server without a
-    workspace record, or one another session has since moved, may hold another
-    workspace's store, whose crons this must not take over.
-    """
-    try:
-        from ..cron import schedule as crons
-        from ..langgraph_dev import manager
-
-        if manager.SERVED_WORKSPACE != workspace.root:
-            return
-        if crons.is_available():
-            crons.adopt_stale_tasks(
-                crons._client(), workspace, run_kind=crons.SCHEDULED_RUN_KIND
-            )
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "Failed to re-tag stale scheduled tasks", exc_info=True
+    if backend == "langgraph_server":
+        # The flag implies auto_approve, which this session's runs carry.
+        return (
+            "--dangerous does not reach the background server, which runs this "
+            "session's turns and keeps its own dangerous_mode. There the flag "
+            "only turns approvals off, as --auto-approve does, so while that "
+            "server's dangerous_mode is off a command EvoSci flags as dangerous "
+            "is refused instead of asked about."
         )
+    return (
+        "--dangerous applies to this session's own agent. The background "
+        "server's agents (async sub-agents, memory workers, the WebUI) follow "
+        "dangerous_mode in config.yaml."
+    )
+
+
+def _print_dangerous_flag_note(backend: str | None, *, webui: bool = False) -> None:
+    note = dangerous_flag_note(backend, webui=webui)
+    if note is not None:
+        console.print(f"[yellow]⚠ {escape(note)}[/yellow]")
 
 
 def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
@@ -739,19 +958,16 @@ def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
     )
 
 
-# How long a CLI waits for EvoMemory work before it exits or moves the server.
+# How long a one-shot CLI run waits for EvoMemory work before it exits.
 _MEMORY_WAIT_SECONDS = 120.0
 _MEMORY_WAIT_POLL_SECONDS = 0.5
 _MEMORY_WAIT_OUTPUT_GRACE_SECONDS = 3.0
 
 
-def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
-    """Wait, bounded, for queued EvoMemory work to finish.
-
-    One-shot runs wait so post-run memory persists before atexit cleanup;
-    moving the server waits because a move stops runs in flight.
-    ``timeout_action`` says what happens when the wait runs out. Returns at
-    once when nothing runs.
+def _wait_for_memory_workers() -> None:
+    """Wait, bounded, for queued EvoMemory work to finish, so post-run memory
+    persists before a one-shot run's atexit cleanup. Returns at once when
+    nothing runs.
     """
     try:
         from ..memory.worker_activity import (
@@ -780,9 +996,7 @@ def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
             announced = True
 
     def print_timeout(phase: MemoryActivityPhase) -> None:
-        console.print(
-            f"[dim]EvoMemory {phase} is still running; {timeout_action}.[/dim]"
-        )
+        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
 
     wait_for_memory_pipeline_idle(
         timeout_seconds=_MEMORY_WAIT_SECONDS,
@@ -795,22 +1009,24 @@ def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
 
 
 _RESUME_SYNC_STATUS = (
-    "[dim]Syncing background agent server to resumed workspace...[/dim]"
+    "[dim]Registering the resumed project with the background agent server...[/dim]"
 )
 
 
-async def _sync_background_agent_server_workspace(
+async def _register_project(
     config: Any,
     *,
     dirs: SessionDirs,
     backend: str | None = None,
-    status_message: str = _RESUME_SYNC_STATUS,
-) -> None:
-    """Sync langgraph dev to a resumed workspace for background agent work.
+) -> bool:
+    """Register *dirs*' project with the background agent server, starting
+    the server when it is not running. False when the server needed for
+    background work does not serve the project (it did not start, or the
+    registration failed).
 
     ``ensure_langgraph_dev`` is intentionally always called: EvoMemory
     background workers require the server even when async subagents are disabled.
-    WorkspaceMismatchError is left for callers to handle according to their UI
+    ServerUnusableError is left for callers to handle according to their UI
     flow.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded so
@@ -819,79 +1035,62 @@ async def _sync_background_agent_server_workspace(
     """
     import asyncio
 
-    from ..langgraph_dev.manager import (
-        ensure_langgraph_dev,
-        owned_server_pinned_elsewhere,
-    )
+    from ..langgraph_dev.manager import ensure_langgraph_dev
 
-    with console.status(status_message, spinner="dots"):
-        # Only a move stops runs in flight; a sync to the served folders is a
-        # health check and must not wait on memory work.
-        if await asyncio.to_thread(
-            owned_server_pinned_elsewhere, dirs.workspace.root, dirs.run_dir
-        ):
-            await asyncio.to_thread(
-                _wait_for_memory_workers, timeout_action="moving the server anyway"
-            )
-        await asyncio.to_thread(
+    with console.status(_RESUME_SYNC_STATUS, spinner="dots"):
+        served = await asyncio.to_thread(
             ensure_langgraph_dev,
             config,
             workspace_dir=dirs.workspace.root,
-            run_dir=dirs.run_dir,
             backend=backend,
         )
-        await asyncio.to_thread(
-            _reconcile_autoskill_schedule,
-            config,
-            workspace=dirs.workspace,
-        )
-        await asyncio.to_thread(_adopt_stale_scheduled_tasks, workspace=dirs.workspace)
+    return served
 
 
-async def _move_server_or_keep_session(
+async def _register_or_keep_session(
     config: Any,
     *,
     target: SessionDirs,
     current: SessionDirs | None,
     backend: str | None = None,
-    new_run_dir: bool = False,
-    status_message: str = _RESUME_SYNC_STATUS,
 ) -> bool:
-    """Move the background agent server to *target* before a session goes there.
+    """Register *target*'s project with the server before a session goes there.
 
-    Until the server serves several workspaces it is pinned to one workspace
-    and run folder, so background workers and deployed sub-agents would
-    otherwise keep working in *current*, the folders the server was last
-    synced to (``None`` when it was not started yet). Nothing happens when
-    the two are the same.
+    The server serves every registered project, so background workers and
+    deployed sub-agents work in *target* once its project is registered.
+    Nothing happens when *target* is in *current*'s project (``None`` when the
+    server was not started yet), whichever run folder it works in.
 
-    Raises ``WorkspaceMismatchError`` when another EvoSci session holds the
-    server for other folders: the caller keeps its session as it is, and the
-    run folder made for *target* (``new_run_dir``) is removed. Returns False
-    when the move failed otherwise: the session can go to *target*, but
-    async sub-agents and EvoMemory workers may be unavailable.
+    Raises ``ServerUnusableError`` when the server cannot be used for
+    *target*'s project (a server from an older EvoScientist, or a known
+    project whose folder is gone): the caller keeps its session as it is.
+    Returns False when the registration failed otherwise: the session can go
+    to *target*, but async sub-agents and EvoMemory workers may be
+    unavailable. An ``OSError`` creating *target*'s folder is raised: the
+    session cannot work there.
     """
-    if target == current:
+    if current is not None and target.workspace == current.workspace:
         return True
 
-    from ..langgraph_dev.manager import WorkspaceMismatchError
+    import asyncio
 
+    from ..langgraph_dev.registration import ServerUnusableError, prepare_workdir
+
+    # Whatever the backend: a known project whose folder is gone is refused
+    # rather than recreated empty.
+    await asyncio.to_thread(prepare_workdir, target.workspace.root)
     try:
-        await _sync_background_agent_server_workspace(
-            config, dirs=target, backend=backend, status_message=status_message
-        )
-    except WorkspaceMismatchError:
-        if new_run_dir:
-            _remove_unused_run_dir(target.run_dir)
+        return await _register_project(config, dirs=target, backend=backend)
+    except ServerUnusableError:
         raise
     except Exception:
         logging.getLogger(__name__).warning(
-            "Failed to sync background agent server to %s; continuing in degraded mode",
-            target.work_dir,
+            "Failed to register %s with the background agent server; "
+            "continuing in degraded mode",
+            target.workspace.root,
             exc_info=True,
         )
         return False
-    return True
 
 
 async def _restore_thread_dirs(
@@ -903,16 +1102,19 @@ async def _restore_thread_dirs(
     config: Any,
     backend: str | None = None,
 ) -> SessionDirs:
-    """Return the folders to resume *thread_id* in, with the server moved there.
+    """Return the folders to resume *thread_id* in, with their project
+    registered with the server.
 
     A thread resumes in the workspace and run folder it was stored with,
     wherever the CLI was started; a thread stored without folders resumes in
-    *dirs*, the folders the session started in. *served* are the folders the
-    server was started for, ``None`` when it was not started yet. A run
+    *dirs*, the folders the session started in. *served* are the folders of
+    the project the server already serves for this session, ``None`` when it
+    was not started yet. A run
     folder made for *dirs* that the thread does not use is removed. Raises
-    ``typer.Exit(1)`` when another session holds the server.
+    ``typer.Exit(1)`` when the server cannot be used there, or the thread's
+    folder cannot be created.
     """
-    from ..langgraph_dev.manager import WorkspaceMismatchError
+    from ..langgraph_dev.registration import ServerUnusableError
 
     metadata = await graph_gateway.get_thread_metadata(thread_id) or {}
     restored = (
@@ -920,17 +1122,17 @@ async def _restore_thread_dirs(
         or dirs
     )
     try:
-        synced = await _move_server_or_keep_session(
+        synced = await _register_or_keep_session(
             config, target=restored, current=served, backend=backend
         )
-    except WorkspaceMismatchError as exc:
+    except (ServerUnusableError, OSError) as exc:
         _remove_unused_run_dir(dirs.run_dir)
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
     if not synced:
         console.print(
-            "[yellow]Background agent server sync failed; async subagents and "
-            "EvoMemory workers may be unavailable.[/yellow]"
+            "[yellow]The background agent server is unavailable for this project; "
+            "async subagents and EvoMemory workers may be unavailable.[/yellow]"
         )
     if restored != dirs:
         _remove_unused_run_dir(dirs.run_dir)
@@ -1223,6 +1425,8 @@ async def compact_conversation(
         "cutoff_index": state_cutoff,
         "summary_message": summary_msg,
         "file_path": file_path,
+        # Kept messages before this index lose reasoning bound to the old history.
+        "created_at_index": len(messages),
     }
 
     await graph_gateway.update_state_values(
@@ -1344,16 +1548,30 @@ async def _apply_serve_resume_state(
 ) -> None:
     """Adopt a resumed thread/workspace into serve-mode runtime state.
 
-    Workspace-bound resources are rebuilt and synced before mutating the shared
-    state. The agent is loaded before syncing the external server so a load
-    failure cannot move the server away from the currently active session.
-    When another session holds the server nothing changes; when the move fails
-    otherwise, serve switches and continues without background work.
+    Workspace-bound resources are rebuilt and the new project registered
+    before mutating the shared state. When the server cannot be used for the
+    new project nothing changes; when the registration fails otherwise, serve
+    switches and continues without background work.
     """
     import asyncio
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
     workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    old_thread_id = runtime_state.thread_id
+    thread_changed = thread_id != old_thread_id
+    # Serve pauses the thread it leaves and ends the wait on a thread restored
+    # after a restart, in the store of the workspace it leaves them in; a
+    # refused move puts back what the snapshot recorded.
+    left: Any = None
+
+    async def leave_thread(proactive: Any) -> None:
+        nonlocal left
+        left = proactive.snapshot_leave(old_thread_id)
+        for call in (
+            lambda: proactive.leave(old_thread_id),
+            lambda: proactive.on_turn(thread_id),
+        ):
+            await asyncio.to_thread(_serve_proactive_call, call)
 
     if new_dirs is not None:
         effective_config = _serve_resume_config(runtime_state, config)
@@ -1362,6 +1580,13 @@ async def _apply_serve_resume_state(
                 "Cannot resume into a different workspace in serve mode without "
                 "the effective configuration."
             )
+        from ..langgraph_dev.registration import (
+            ServerUnusableError,
+            refuse_missing_project,
+        )
+
+        # Before the agent load, which recreates the folder.
+        await asyncio.to_thread(refuse_missing_project, new_dirs.workspace.root)
         new_agent = await asyncio.to_thread(
             _load_agent,
             work_dir=str(new_dirs.work_dir),
@@ -1369,28 +1594,220 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
-        if not await _move_server_or_keep_session(
-            effective_config,
-            target=new_dirs,
-            current=runtime_state.dirs,
-            backend=runtime_state.gateway_backend,
-        ):
-            console.print(
-                "[yellow]Background agent server sync failed; async "
-                "subagents and EvoMemory workers may be unavailable.[/yellow]"
+        proactive = getattr(channel_runtime, "proactive", None)
+        moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
+        if proactive is not None and moves_workspace:
+            # Serve follows one workspace at a time: pause the thread it leaves
+            # and delete the proactive cron of the workspace it leaves.
+            if thread_changed:
+                await leave_thread(proactive)
+            await asyncio.to_thread(_serve_proactive_call, proactive.stop)
+        try:
+            moved = await _register_or_keep_session(
+                effective_config,
+                target=new_dirs,
+                current=runtime_state.dirs,
+                backend=runtime_state.gateway_backend,
             )
+        except (ServerUnusableError, OSError):
+            if proactive is not None and moves_workspace:
+                if left is not None:
+                    # The session stays where it was: arm again what serve paused.
+                    snapshot = left
+                    await asyncio.to_thread(
+                        _serve_proactive_call, lambda: proactive.undo_leave(snapshot)
+                    )
+                # ``stop`` deleted the cron above; bring it back for the threads
+                # that stay armed.
+                await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+            raise
+        if not moved:
+            console.print(
+                "[yellow]The background agent server is unavailable for this "
+                "project; async subagents and EvoMemory workers may be "
+                "unavailable.[/yellow]"
+            )
+            if proactive is not None and moves_workspace:
+                from ..proactive.serve import MOVE_FAILED_REASON
+
+                proactive.unavailable_reason = MOVE_FAILED_REASON
+        elif proactive is not None and moves_workspace:
+            proactive.move_to(new_dirs.workspace)
+            # Clears a proactive cron an earlier serve left in that workspace.
+            await asyncio.to_thread(_serve_proactive_call, proactive.reconcile)
         workspace_update = (new_dirs, new_agent)
 
-    old_thread_id = runtime_state.thread_id
-    thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            if left is None:
+                await leave_thread(proactive)
+            # A thread armed or paused earlier is armed again here.
+            await asyncio.to_thread(
+                _serve_proactive_call, lambda: proactive.adopt(thread_id)
+            )
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
         runtime_state.dirs = updated_dirs
         _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
+
+    # Tell the proactive cron which threads serve can now deliver to. Last, so
+    # the thread, folders and agent are already the new ones. Idempotent:
+    # ``/resume`` reaches this function twice.
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None:
+        await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+
+
+def _serve_turn_metadata(
+    dirs: SessionDirs,
+    model: str | None,
+    thread_id: str,
+    channel_runtime: ChannelRuntime | None,
+) -> dict[str, str]:
+    """Run metadata of a serve turn: ``build_metadata`` plus, for a thread armed
+    for proactive pushes, its channel origin.
+
+    The runtime copies run metadata into the run's checkpoints, which is how
+    the origin survives a restart. ``build_metadata`` itself stays as it is:
+    the TUI, the CLI and single-shot runs share it.
+    """
+    from ..proactive.serve import origin_run_metadata
+
+    meta = build_metadata(dirs, model)
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None and proactive.is_armed(thread_id):
+        origin = get_channel_origin(thread_id)
+        if origin is not None:
+            meta.update(origin_run_metadata(origin))
+    return meta
+
+
+def _serve_proactive_call(call: Callable[[], None]) -> None:
+    """Run a proactive-controller call; a failure is logged, never raised.
+
+    Proactive pushes are best effort: a dev-server error must not break the
+    channel turn or the ``/new`` / ``/resume`` that triggered the call.
+    """
+    try:
+        call()
+    except Exception:
+        _serve_logger.warning("Proactive push bookkeeping failed", exc_info=True)
+
+
+def _serve_proactive_controller(
+    config: "EvoScientistConfig",
+    runtime_gateways: "RuntimeGateways",
+    *,
+    gateway_backend: str | None,
+    workspace: Workspace,
+) -> Any:
+    """Build serve's proactive controller, marked unavailable with the reason.
+
+    The cron runs on the dev server, so the feature needs serve's gateway to
+    be the server one: not the ``local`` backend, and not #470's fallback to
+    the in-process gateway when the dev server was unavailable at startup.
+    """
+    from ..gateway.composite import CompositeGraphGateway
+    from ..langgraph_dev.sdk import (
+        configured_langgraph_dev_url,
+        default_scheduler_timezone,
+        get_langgraph_sync_client,
+    )
+    from ..proactive.serve import ProactiveServe
+
+    reason = None
+    client = None
+    if gateway_backend != "langgraph_server":
+        reason = "proactive follow-ups need `gateway_backend_serve: langgraph_server`"
+    elif not isinstance(runtime_gateways.graph_gateway, CompositeGraphGateway):
+        reason = (
+            "the dev server was unavailable when serve started, so serve runs "
+            "in-process; restart serve to use proactive follow-ups"
+        )
+    else:
+        # Serve's message loop makes these calls: a dev server that accepts
+        # connections but stalls must not hold channel messages for minutes.
+        client = get_langgraph_sync_client(
+            url=configured_langgraph_dev_url(), timeout=10.0
+        )
+    return ProactiveServe(
+        workspace=workspace,
+        client=client,
+        timezone=default_scheduler_timezone(config),
+        unavailable_reason=reason,
+        publish=publish_to_channel_origin,
+        can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
+        forget_origin=forget_channel_origin,
+        origin_of=get_channel_origin,
+        remember_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **asdict(origin)
+        ),
+    )
+
+
+def _serve_restore_proactive(proactive: Any, async_runtime: AsyncRuntime) -> None:
+    """Re-arm the conversation that was armed before serve restarted.
+
+    Its channel origin comes back from checkpoint metadata, so a push can
+    reach the chat even though serve starts on a fresh thread.
+    """
+    from ..sessions import latest_origin_checkpoints
+
+    if not proactive.available:
+        return
+    rows = async_runtime.run_sync(latest_origin_checkpoints)
+    restored = proactive.restore(
+        rows,
+        restore_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **origin
+        ),
+    )
+    if restored is not None:
+        console.print(
+            f"[dim]Proactive follow-ups: waiting on thread {restored[:8]} "
+            "from before the restart.[/dim]"
+        )
+
+
+def _make_serve_proactive_switch(
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None,
+) -> Callable[[str], None]:
+    """Make a thread serve's current one after a push was applied to it.
+
+    Used for the thread restored after a restart: the user's reply to the
+    push then continues that conversation, as after ``/resume``.
+    """
+
+    def _switch(thread_id: str) -> None:
+        import asyncio
+
+        from ..sessions import get_thread_metadata
+
+        async def _go() -> None:
+            stored = await get_thread_metadata(thread_id) or {}
+            dirs = await asyncio.to_thread(
+                SessionDirs.from_stored,
+                stored.get("workspace_dir"),
+                stored.get("run_dir"),
+            )
+            await _apply_serve_resume_state(
+                runtime_state,
+                channel_runtime,
+                thread_id=thread_id,
+                dirs=dirs or runtime_state.dirs,
+            )
+
+        runtime_state.async_runtime.run_sync(_go)
+        console.print(
+            f"[dim][serve] Continuing thread {thread_id} (proactive push)[/dim]"
+        )
+
+    return _switch
 
 
 def _make_serve_handle_session_resume_cb(
@@ -1644,7 +2061,13 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(dirs, model)
+        meta = _serve_turn_metadata(
+            dirs, model, runtime_state.thread_id, channel_runtime
+        )
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            # A turn in serve's fresh thread ends a restored thread's candidacy.
+            _serve_proactive_call(lambda: proactive.on_turn(runtime_state.thread_id))
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1655,6 +2078,7 @@ def _serve_process_message(
                 interactive=True,
                 metadata=meta,
                 configurable_extra=active_teams_configurable_extra(channel_runtime),
+                approve_all_at_start=channel_session_granted(msg),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -1706,8 +2130,8 @@ def _serve_drain_notifications(
             console.print(line_text, style=line_style, markup=False)
         # Use the current folders from runtime_state (updated by /resume's
         # session-rebind callback).
-        meta = build_metadata(runtime_state.dirs, model)
         tid = runtime_state.thread_id
+        meta = _serve_turn_metadata(runtime_state.dirs, model, tid, channel_runtime)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1833,25 +2257,28 @@ def serve(
     config = get_effective_config(cli_overrides)
     async_runtime = _get_cli_async_runtime(ctx)
     if debug:
+        from ..config.settings import record_env_origin
+
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
         os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
+        record_env_origin("EVOSCIENTIST_LOG_LEVEL", "cli")
+        record_env_origin("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "cli")
     apply_config_to_env(config)
     if debug:
         _configure_logging()
 
-    # Auto-start ccproxy if any provider uses OAuth mode
-    _ccproxy_proc_serve = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    _require_chatgpt_sign_in(config, interactive=False)
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
+    if uses_oauth(config):
         try:
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            from ..ccproxy_manager import maybe_start_ccproxy
 
-            _ccproxy_proc_serve = maybe_start_ccproxy(config)
-            if _ccproxy_proc_serve:
-                import atexit
-
-                atexit.register(stop_ccproxy, _ccproxy_proc_serve)
+            # It outlives this session, for every session and the background
+            # server to share (EvoSci ccproxy stop / service stop).
+            maybe_start_ccproxy(config, lasting=True)
         except RuntimeError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(1) from exc
 
     if not config.channel_enabled:
@@ -1860,18 +2287,19 @@ def serve(
         raise typer.Exit(1)
 
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
-    ws_path = start_workspace_path(workdir, config.default_workdir)
-    os.makedirs(ws_path, exist_ok=True)
+    ws_path = _prepare_workdir_or_exit(
+        start_workspace_path(workdir, config.default_workdir)
+    )
     dirs = SessionDirs(Workspace(ws_path))
-    reload_env_dirs()
     ensure_dirs()
 
     from ..config import GatewaySurface, resolve_gateway_backend
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.SERVE)
+    _print_dangerous_flag_note(gateway_backend)
 
-    # Auto-start langgraph dev (after workspace resolution, so deployed
-    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Auto-start langgraph dev and register the CLI's project (after the
+    # workspace is resolved).
     _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if config.dangerous_mode:
@@ -1909,6 +2337,23 @@ def serve(
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
+
+    # Proactive pushes (#263): serve owns the workspace's proactive cron.
+    # Re-arm the conversation armed before a restart, then recreate the cron,
+    # or delete it when nothing is armed: a cron kept from an earlier run
+    # fails every tick after a dev-server restart.
+    proactive = _serve_proactive_controller(
+        config,
+        runtime_gateways,
+        gateway_backend=gateway_backend,
+        workspace=dirs.workspace,
+    )
+    channel_runtime.proactive = proactive
+    _serve_proactive_call(lambda: _serve_restore_proactive(proactive, async_runtime))
+    _serve_proactive_call(proactive.reconcile)
+    _serve_proactive_switch = _make_serve_proactive_switch(
+        runtime_state, channel_runtime
+    )
 
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
@@ -2060,12 +2505,23 @@ def serve(
                 # finished -> start writing) that would otherwise sit in state
                 # with the reader disarmed until an inbound channel message.
                 runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
+
+            # Apply proactive pushes the cron decided (throttled inside).
+            _serve_proactive_call(
+                lambda: proactive.poll(
+                    current_thread_id=runtime_state.thread_id,
+                    switch_to=_serve_proactive_switch,
+                )
+            )
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
+        # The server outlives serve: without serve nothing can be delivered,
+        # so the cron would only cost calls.
+        _serve_proactive_call(proactive.stop)
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
 
@@ -2086,6 +2542,7 @@ def config_callback(ctx: typer.Context):
 def config_list():
     """List all configuration values"""
     from ..config import get_config_path, list_config
+    from ..config.settings import display_config_value
 
     config_data = list_config()
 
@@ -2093,13 +2550,11 @@ def config_list():
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
 
-    # Mask API keys
+    # Mask API keys, tokens, secrets and passwords
     def format_value(key: str, value: Any) -> str:
-        if "api_key" in key and value:
-            return "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
         if value == "":
             return "[dim](not set)[/dim]"
-        return str(value)
+        return escape(display_config_value(key, value))
 
     for key, value in config_data.items():
         table.add_row(key, format_value(key, value))
@@ -2112,21 +2567,17 @@ def config_list():
 def config_get(key: str = typer.Argument(..., help="Configuration key to get")):
     """Get a single configuration value"""
     from ..config import get_config_value
+    from ..config.settings import display_config_value
 
     value = get_config_value(key)
     if value is None:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)
 
-    # Mask API keys
-    if "api_key" in key and value:
-        display_value = "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
-    elif value == "":
-        display_value = "(not set)"
-    else:
-        display_value = str(value)
+    # Mask API keys, tokens, secrets and passwords
+    display_value = display_config_value(key, value)
 
-    console.print(f"[cyan]{key}[/cyan]: {display_value}")
+    console.print(f"[cyan]{key}[/cyan]: {escape(display_value)}")
 
 
 @config_app.command("set")
@@ -2135,13 +2586,38 @@ def config_set(
     value: str = typer.Argument(..., help="New value"),
 ):
     """Set a single configuration value"""
-    from ..config import set_config_value
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError
 
-    if set_config_value(key, value):
-        console.print(f"[green]Set {escape(key)}[/green]")
-    else:
-        console.print(f"[red]Could not set {escape(key)}: invalid key or value[/red]")
-        raise typer.Exit(1)
+    try:
+        _, warnings = set_config_values({key: value})
+    except SettingsError as e:
+        reason = e.errors.get(key, "invalid key or value")
+        console.print(f"[red]Could not set {escape(key)}: {escape(reason)}[/red]")
+        raise typer.Exit(1) from None
+    except (ConfigError, OSError) as e:
+        # OSError: for example a Windows replace that kept failing while
+        # another program had the file open; nothing was written.
+        console.print(f"[red]Could not set {escape(key)}: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
+    console.print(f"[green]Set {escape(key)}[/green]")
+    if key in warnings:
+        console.print(f"[yellow]Note: {escape(warnings[key])}[/yellow]")
+    from ..memory.autoskills.schedule import AUTOSKILL_SETTINGS
+
+    if key in AUTOSKILL_SETTINGS:
+        _apply_autoskills_settings()
+
+
+def _apply_autoskills_settings(config: Any = None) -> None:
+    """Have a running server reschedule every project's AutoSkills cron,
+    reached at *config*'s address (by default the current configuration's)."""
+    from ..config import get_effective_config
+    from ..langgraph_dev.registration import apply_autoskills_settings
+
+    note = apply_autoskills_settings(config or get_effective_config())
+    if note is not None:
+        console.print(f"[yellow]{escape(note)}[/yellow]")
 
 
 @config_app.command("reset")
@@ -2163,8 +2639,18 @@ def config_reset(
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    reset_config()
+    from ..config import get_effective_config
+    from ..config.store import ConfigError
+
+    # The server keeps the address it started on, which a reset may drop.
+    before = get_effective_config()
+    try:
+        reset_config()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     console.print("[green]Configuration reset to defaults.[/green]")
+    _apply_autoskills_settings(before)
 
 
 @config_app.command("path")
@@ -2454,7 +2940,29 @@ def sessions_stats(ctx: typer.Context):
 
 def _version_callback(value: bool):
     if value:
-        typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
+        # ``--version`` is eager, so it runs before ``--json`` is parsed (Click
+        # runs eager callbacks in command-line order); read the raw arguments
+        # so both flag orders print the same JSON.
+        if "--json" in sys.argv[1:]:
+            from ..setup.protocol import PROTOCOL
+            from ..setup.webui import compat_range
+            from ..stream.json_sink import redirect_console_to_stderr
+
+            # stdout carries only the JSON line; a warning (e.g. the range
+            # override) goes to stderr.
+            redirect_console_to_stderr()
+
+            typer.echo(
+                json.dumps(
+                    {
+                        "version": _pkg_version("EvoScientist"),
+                        "protocol": PROTOCOL,
+                        "webui_compat": compat_range(),
+                    }
+                )
+            )
+        else:
+            typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
         raise typer.Exit()
 
 
@@ -2467,6 +2975,64 @@ def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> 
     terminal, so it falls back to the Rich CLI instead.
     """
     return not prompt and not thread_id
+
+
+# 2 is Click's usage-error code; 1 stays "the run failed".
+RUBRIC_UNMET_EXIT_CODE = 3
+
+
+def _resolve_rubric_option(value: str | None, *, prompt: str | None) -> str | None:
+    """Return the text given by ``--rubric``, reading ``@path`` from disk."""
+    if value is None:
+        return None
+    if not prompt:
+        raise typer.BadParameter("--rubric requires -p/--prompt (single-shot mode)")
+    from ..rubric_text import RubricTextError, read_rubric_text
+
+    try:
+        return read_rubric_text(value)
+    except RubricTextError as exc:
+        raise typer.BadParameter(f"--rubric {exc}") from exc
+
+
+def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:
+    """Exit code for a single-shot run that finished; ``None`` keeps the default."""
+    if rubric is None or result == "satisfied":
+        return None
+    return RUBRIC_UNMET_EXIT_CODE
+
+
+def _rubric_exit_notice(result: str | None, exit_code: int) -> str:
+    """The line a graded single-shot run prints before it exits with *exit_code*."""
+    if result is None:
+        # No verdict at all: a cancelled approval or question, the round limit.
+        return (
+            "The run stopped before the acceptance criteria were checked "
+            f"(exit code {exit_code})."
+        )
+    if result == "failed":
+        return (
+            f"The acceptance criteria could not be evaluated (exit code {exit_code})."
+        )
+    if result == "grader_error":
+        return (
+            "The acceptance criteria could not be checked: the grader failed "
+            f"(exit code {exit_code})."
+        )
+    return f"Acceptance criteria not met (exit code {exit_code})."
+
+
+def _single_shot_agent_config(config: Any, rubric: str | None) -> Any:
+    """The config a single-shot run builds its agent from.
+
+    The grader runs when the agent stops, so a graded run keeps sub-agents in-turn. The
+    agent is built from a copy; the background server is compared with the user's config.
+    """
+    if rubric is None:
+        return config
+    agent_config = copy.copy(config)
+    agent_config.enable_async_subagents = False
+    return agent_config
 
 
 def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
@@ -2546,7 +3112,9 @@ def _main_callback(
     auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
-        help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth (ccproxy).",
+        help="Auth mode: api_key (default) or oauth, which uses the Claude "
+        "subscription (via ccproxy) and ChatGPT sign-in for whichever of "
+        "Anthropic and OpenAI the main, auxiliary or a fallback model uses.",
     ),
     ui: str | None = typer.Option(
         None,
@@ -2570,8 +3138,36 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
+    # Annotated, so a direct call without these arguments gets a plain default
+    # rather than Typer's OptionInfo default, which is truthy.
+    rubric: Annotated[
+        str | None,
+        typer.Option(
+            "--rubric",
+            metavar="TEXT|@PATH",
+            help=(
+                "Acceptance criteria for a single-shot (-p) run. The work is "
+                "graded each time the agent stops and sent back with the gaps, "
+                "up to 3 passes. Literal text, or '@path' to read a file. "
+                "Sub-agents run in-turn for this run. Exit code 3 when the run "
+                "ends without a satisfied verdict."
+            ),
+        ),
+    ] = None,
+    version_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            hidden=True,
+            help="With --version: print the version, protocol and WebUI range as JSON.",
+        ),
+    ] = False,
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
+    if version_json:
+        # ``--version --json`` exits in the version callback before this runs.
+        typer.echo("--json is only valid with --version.", err=True)
+        raise typer.Exit(2)
     # If a subcommand was invoked, don't run the default behavior
     if ctx.invoked_subcommand is not None:
         return
@@ -2596,6 +3192,8 @@ def _main_callback(
         from ..stream.json_sink import redirect_console_to_stderr
 
         redirect_console_to_stderr()
+
+    rubric_text = _resolve_rubric_option(rubric, prompt=prompt)
 
     # stream-json is headless, so auto-mode defaults on (auto-handle approval and
     # ask_user gates) unless the caller explicitly passed --no-auto-mode. Without
@@ -2646,25 +3244,41 @@ def _main_callback(
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
-        cli_overrides["anthropic_auth_mode"] = auth_mode
-        cli_overrides["openai_auth_mode"] = auth_mode
 
     config = get_effective_config(cli_overrides)
+    if auth_mode:
+        # oauth only for subscriptions a configured model can use; api_key always.
+        in_use = _providers_in_use(config)
+        for provider in ("anthropic", "openai"):
+            if auth_mode == "api_key" or provider in in_use:
+                setattr(config, f"{provider}_auth_mode", auth_mode)
     apply_config_to_env(config)
 
-    # Auto-start ccproxy if any provider uses OAuth mode
-    _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if rubric_text is not None:
+        from ..config import GatewaySurface, resolve_gateway_backend
+
+        single_shot_backend = resolve_gateway_backend(
+            config, GatewaySurface.SINGLE_SHOT
+        )
+        if single_shot_backend == "langgraph_server":
+            raise typer.BadParameter(
+                "--rubric needs the local gateway for single-shot runs: on "
+                "langgraph_server the agent runs in the server process, which "
+                "still dispatches background sub-agents the grader cannot wait for"
+            )
+
+    _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
+    if uses_oauth(config):
         try:
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+            from ..ccproxy_manager import maybe_start_ccproxy
 
-            _ccproxy_proc = maybe_start_ccproxy(config)
-            if _ccproxy_proc:
-                import atexit
-
-                atexit.register(stop_ccproxy, _ccproxy_proc)
+            # It outlives this session, for every session and the background
+            # server to share (EvoSci ccproxy stop / service stop).
+            maybe_start_ccproxy(config, lasting=True)
         except RuntimeError as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(1) from exc
 
     show_thinking = config.show_thinking if not no_thinking else False
@@ -2707,20 +3321,18 @@ def _main_callback(
         workspace_root = start_workspace_path()
     elif workdir:
         workspace_root = start_workspace_path(workdir)
-        os.makedirs(workspace_root, exist_ok=True)
     else:
         workspace_root = start_workspace_path(default_workdir=config.default_workdir)
         effective_mode = mode or config.default_mode
-    workspace = Workspace(workspace_root)
+    # Before run mode's ``runs/`` folder, which would recreate a missing root.
+    workspace = Workspace(_prepare_workdir_or_exit(workspace_root))
 
-    # The project .env was merged into os.environ by get_effective_config().
-    reload_env_dirs()
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 
     # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
-    # langgraph server (full MCP + async) + the published @evoscientist/webui
-    # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
+    # langgraph server (full MCP + async) + the locally installed
+    # @evoscientist/webui front-end in THIS terminal, then block. Reuses start_langgraph_dev
     # but leaves `EvoSci deploy` untouched (it stays a clean server for external
     # UIs / SDK clients).
     #
@@ -2740,6 +3352,8 @@ def _main_callback(
                     "[dim]The WebUI works in the workspace root; --mode run "
                     "applies to the CLI and TUI.[/dim]"
                 )
+            # The WebUI's turns run in the background server.
+            _print_dangerous_flag_note("langgraph_server", webui=True)
             run_webui(config, workspace_dir=str(workspace.root))
             return
         config.ui_backend = "cli"
@@ -2762,9 +3376,10 @@ def _main_callback(
     else:
         _gateway_surface = GatewaySurface.INTERACTIVE
     gateway_backend = resolve_gateway_backend(config, _gateway_surface)
+    _print_dangerous_flag_note(gateway_backend)
 
-    # Auto-start langgraph dev (after workspace resolution, so deployed
-    # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    # Auto-start langgraph dev and register the CLI's project (after the
+    # workspace is resolved).
     # A one-shot resume starts it for the thread's own folders instead, unless
     # the server gateway backend needs a running server to be built.
     prespawn = not (prompt and thread_id) or gateway_backend == "langgraph_server"
@@ -2823,9 +3438,10 @@ def _main_callback(
                     work_dir=str(session_dirs.work_dir),
                     workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
-                    config=config,
+                    config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
                 )
+                rubric_result: str | None = None
                 try:
                     if effective_output_format == "stream-json":
                         # Headless JSONL path: drive the sink through the gateway
@@ -2839,9 +3455,21 @@ def _main_callback(
                             target=GraphTarget(
                                 local_graph=agent, **session_dirs.metadata()
                             ),
+                            rubric=rubric_text,
                         )
+
+                        def _track_verdict(event: dict) -> None:
+                            nonlocal rubric_result
+                            if event.get("type") == "rubric_evaluation":
+                                result = event.get("result")
+                                rubric_result = (
+                                    result if isinstance(result, str) else None
+                                )
+
                         try:
-                            await stream_json(graph_gateway, request)
+                            await stream_json(
+                                graph_gateway, request, on_event=_track_verdict
+                            )
                         except Exception as exc:
                             # stream_events already emitted a terminal `error`
                             # event onto the JSON stream before re-raising; exit
@@ -2865,10 +3493,11 @@ def _main_callback(
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,
                                 async_runtime=async_runtime,
+                                rubric=rubric_text,
                             )
                         )
                         try:
-                            await asyncio.shield(stream_worker)
+                            rubric_result = await asyncio.shield(stream_worker)
                         except asyncio.CancelledError:
                             from ..stream.display import request_stream_cancel
                             from .tui_runtime import settle_cancelled_worker
@@ -2878,6 +3507,11 @@ def _main_callback(
                                 on_cancel=request_stream_cancel,
                             )
                             raise
+                    exit_code = _rubric_exit_code(rubric_text, rubric_result)
+                    if exit_code is not None:
+                        notice = _rubric_exit_notice(rubric_result, exit_code)
+                        console.print(f"[yellow]{notice}[/yellow]")
+                        raise typer.Exit(exit_code)
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this
@@ -2913,6 +3547,30 @@ def _main_callback(
         )
 
 
+# Upstream's logger and its two records for a grader attempt that raised.
+_GRADER_LOGGER = "deepagents.middleware.rubric"
+_GRADER_FAILURE_RECORDS = ("grader failed", "coverage retry raised")
+
+
+def _grader_failure_on_one_line(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of upstream's grader-failure record with the reason instead of the traceback.
+
+    The verdict already says why; the record itself keeps its traceback for other handlers.
+    """
+    if record.name != _GRADER_LOGGER or not record.exc_info:
+        return record
+    message = record.getMessage()
+    if not any(marker in message for marker in _GRADER_FAILURE_RECORDS):
+        return record
+    exc = record.exc_info[1]
+    short = copy.copy(record)
+    short.msg = f"{message}: {type(exc).__name__}: {exc}"
+    short.args = None
+    short.exc_info = None
+    short.exc_text = None
+    return short
+
+
 def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
@@ -2936,6 +3594,8 @@ def _configure_logging():
         """Custom handler that renders warnings in dim style."""
 
         def emit(self, record: logging.LogRecord) -> None:
+            if not verbose_logging:
+                record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
                 msg = record.getMessage()

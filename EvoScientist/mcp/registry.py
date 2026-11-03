@@ -24,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+from .. import uv_tool
 from ..git_cli import clone_repo as _clone_repo
 
 logger = logging.getLogger(__name__)
@@ -68,32 +69,6 @@ class MCPServerEntry:
 # =============================================================================
 
 
-def _is_uv_tool_env() -> bool:
-    """Return True when running inside a ``uv tool install`` isolated environment.
-
-    Detection: ``VIRTUAL_ENV`` is set and its path contains the uv tools
-    directory segment (``/uv/tools/`` on Unix, ``\\uv\\tools\\`` on Windows).
-    """
-    virtual_env = os.environ.get("VIRTUAL_ENV", "")
-    if not virtual_env:
-        return False
-    normalized = virtual_env.replace("\\", "/")
-    return "/uv/tools/" in normalized
-
-
-def _uv_tool_name() -> str | None:
-    """Extract the uv tool name from ``VIRTUAL_ENV``.
-
-    Returns ``None`` when not in a uv tool environment.
-    The tool name is the last path component of ``VIRTUAL_ENV``
-    (e.g. ``/home/user/.local/share/uv/tools/evoscientist`` → ``evoscientist``).
-    """
-    if not _is_uv_tool_env():
-        return None
-    virtual_env = os.environ.get("VIRTUAL_ENV", "")
-    return Path(virtual_env).name or None
-
-
 def _bare_package_name(package: str) -> str:
     """Extract the bare package name from a PEP 508 requirement string.
 
@@ -103,59 +78,19 @@ def _bare_package_name(package: str) -> str:
     return re.split(r"[\[><=!~;]", package, maxsplit=1)[0].strip()
 
 
-def _receipt_entry_to_spec(entry: dict[str, object]) -> str:
-    """Convert a ``uv-receipt.toml`` requirement entry to a PEP 508 string.
-
-    Handles ``name``, ``extras`` (list), and ``specifier`` (version constraint)
-    fields that uv records in the receipt.
-    """
-    spec = str(entry.get("name", ""))
-    extras = entry.get("extras")
-    if extras and isinstance(extras, list):
-        spec += "[" + ",".join(str(e) for e in extras) + "]"
-    specifier = entry.get("specifier")
-    if specifier:
-        spec += str(specifier)
-    return spec
-
-
-def _uv_tool_existing_requirements() -> dict[str, str]:
-    """Read existing ``--with`` requirements from the uv tool receipt.
-
-    Returns a mapping of ``{bare_name: full_spec}`` (excluding the tool
-    itself) so that ``uv tool install --with`` calls can preserve them
-    with their original extras and version constraints.
-    """
-    virtual_env = os.environ.get("VIRTUAL_ENV", "")
-    if not virtual_env:
-        return {}
-    receipt = Path(virtual_env) / "uv-receipt.toml"
-    if not receipt.is_file():
-        return {}
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ModuleNotFoundError:
-            return {}
-    try:
-        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    tool_name = _uv_tool_name() or ""
-    reqs = data.get("tool", {}).get("requirements", [])
-    return {
-        r["name"]: _receipt_entry_to_spec(r)
-        for r in reqs
-        if isinstance(r, dict) and r.get("name") and r["name"] != tool_name
-    }
-
-
 def pip_install_hint() -> str:
-    """Human-readable install command for error messages."""
-    if _is_uv_tool_env():
-        return "uv tool install --reinstall evoscientist --with"
+    """Human-readable install command for error messages.
+
+    In EvoScientist's uv tool environment it installs into that environment
+    with ``uv pip``: a hand-written ``uv tool install --with`` would have to
+    repeat the version, extras and constraints the receipt records, or it
+    drops them.
+    """
+    uv = uv_tool.find_uv()
+    if uv_tool.tool_env() is not None and uv:
+        # PowerShell runs a quoted path only after the call operator.
+        call = "& " if sys.platform == "win32" else ""
+        return f'{call}"{uv}" pip install --python "{sys.executable}"'
     if shutil.which("uv"):
         return "uv pip install"
     return "pip install"
@@ -172,10 +107,11 @@ def _uv_tool_bin_dir() -> Path | None:
     if cached is not _UNSET:
         return cached  # type: ignore[return-value]
     result: Path | None = None
-    if shutil.which("uv"):
+    uv = uv_tool.find_uv()
+    if uv:
         try:
             proc = subprocess.run(
-                ["uv", "tool", "dir", "--bin"],
+                [uv, "tool", "dir", "--bin"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -206,41 +142,119 @@ def _uv_tool_bin(command: str) -> Path | None:
     return None
 
 
-def _install_with_uv_tool_env(package: str) -> bool:
-    """Install *package* into the evosci uv-tool env via ``--with``.
+def _uv_env(uv: str) -> dict[str, str]:
+    """The environment to run *uv* in, with the configured mirror, as for
+    ``EvoSci update``."""
+    from ..config import load_config
 
-    Only does anything when the current interpreter is inside a uv tool
-    env; otherwise returns False immediately. On success the package is
-    recorded in uv's receipt and survives ``uv tool upgrade evoscientist``.
-    """
-    if not (_is_uv_tool_env() and shutil.which("uv")):
-        return False
-    tool_name = _uv_tool_name()
-    if not tool_name:
-        return False
-    existing = _uv_tool_existing_requirements()
-    cmd = ["uv", "tool", "install", tool_name, "-q"]
-    for spec in existing.values():
-        cmd += ["--with", spec]
-    if _bare_package_name(package) not in existing:
+    return uv_tool.uv_environment(uv, load_config().mirror)
+
+
+def _uv_tool_reinstall_cmd(
+    uv: str, receipt: uv_tool.Receipt, package: str, constraints: Path | None
+) -> list[str]:
+    """The ``uv tool install`` that adds *package* and keeps what the receipt
+    records: EvoScientist's version (or the source it came from) and extras,
+    the Python, every ``--with`` requirement and, through *constraints*, the
+    constraints. A package already in the receipt keeps its recorded spec.
+    EvoScientist's own extras (``evoscientist[telegram]``) join its own
+    requirement: a second evoscientist entry would make the receipt one that
+    ``EvoSci update`` refuses."""
+    from importlib.metadata import version
+
+    from packaging.requirements import Requirement
+
+    own_entry = dict(receipt.own)
+    bare = uv_tool.normalize(_bare_package_name(package))
+    if bare == uv_tool.PACKAGE:
+        added = sorted(set(Requirement(package).extras) - set(receipt.extras))
+        if added and "editable" in own_entry:
+            raise uv_tool.ReceiptError(
+                f"cannot add extras {added} to an editable EvoScientist install"
+            )
+        own_entry["extras"] = receipt.extras + added
+    extras = own_entry.get("extras") or []
+    if "editable" in own_entry:
+        own = ["--editable", uv_tool.requirement_string(own_entry)]
+    elif receipt.source is not None:
+        own = [uv_tool.requirement_string(own_entry)]
+    else:
+        suffix = f"[{','.join(extras)}]" if extras else ""
+        own = [f"EvoScientist{suffix}=={version('EvoScientist')}"]
+    managed = uv_tool.runs_on_managed_python(uv)
+    if managed is None:
+        raise RuntimeError("uv cannot tell which kind of Python the environment uses")
+    cmd = [uv, "tool", "install", "-q", "--python", uv_tool.python_request(receipt)]
+    # Stay on the kind of interpreter the environment has: uv prefers its
+    # own Python when one is installed.
+    cmd.append("--managed-python" if managed else "--no-managed-python")
+    if constraints is not None:
+        # By name, run from its folder: uv splits a -c path at spaces
+        # (astral-sh/uv#12639).
+        cmd += ["-c", constraints.name]
+    cmd += receipt.with_args()
+    if bare != uv_tool.PACKAGE and all(
+        uv_tool.normalize(e["name"]) != bare for e in receipt.others
+    ):
         cmd += ["--with", package]
+    return cmd + own
+
+
+def _install_with_uv_tool_env(package: str) -> bool:
+    """Install *package* into EvoScientist's uv tool environment via ``--with``.
+
+    Only in a uv tool environment on macOS and Linux; otherwise returns False
+    and the caller falls back. The package is recorded in uv's receipt, so
+    ``EvoSci update`` keeps it. On Windows the running ``EvoSci`` keeps the
+    environment's files open, and a replace that fails halfway leaves it
+    broken, so the fallback (``uv pip install``) is used there.
+    """
+    if sys.platform == "win32":
+        return False
+    env = uv_tool.tool_env()
+    uv = uv_tool.find_uv()
+    if env is None or uv is None:
+        return False
+    constraints: Path | None = None
+    # One finally for the temp constraints file, whichever step fails.
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        try:
+            receipt = uv_tool.read_receipt(env)
+            lines = receipt.constraint_lines()
+            if lines:
+                fd, name = tempfile.mkstemp(prefix="evosci-constraints-", suffix=".txt")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines) + "\n")
+                constraints = Path(name)
+            cmd = _uv_tool_reinstall_cmd(uv, receipt, package, constraints)
+            # It resolves the whole environment again: through the same
+            # certificates and mirrors as EvoSci update.
+            uv_env = _uv_env(uv)
+        except Exception as exc:  # the caller falls back to pip
+            logger.info(f"Not adding {package} with uv tool install --with: {exc}")
+            return False
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=constraints.parent if constraints is not None else None,
+            env=uv_env,
+        )
         if result.returncode == 0:
             import importlib
 
             importlib.invalidate_caches()
             return True
         logger.info(
-            "uv tool install %s --with %s failed (exit %d); falling back",
-            tool_name,
-            package,
-            result.returncode,
+            f"uv tool install --with {package} failed (exit {result.returncode}); "
+            f"falling back: {result.stderr.strip()}"
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.info(
-            "uv tool install --with %s errored (%s); falling back", package, exc
-        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.info(f"uv tool install --with {package} errored ({exc}); falling back")
+    finally:
+        if constraints is not None:
+            constraints.unlink(missing_ok=True)
     return False
 
 
@@ -250,15 +264,23 @@ def _install_via_pip(package: str) -> bool:
     Importable from the current interpreter on success. Not durable under
     ``uv sync`` — the reconcile will remove anything not in the lockfile.
     """
-    commands: list[list[str]] = []
-    if shutil.which("uv"):
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    # The uv the install scripts recorded first: on Windows a script install
+    # has no uv on PATH, and its environment has no pip.
+    uv = uv_tool.find_uv()
+    if uv:
         commands.append(
-            ["uv", "pip", "install", "--python", sys.executable, "-q", package]
+            (
+                [uv, "pip", "install", "--python", sys.executable, "-q", package],
+                _uv_env(uv),
+            )
         )
-    commands.append([sys.executable, "-m", "pip", "install", "-q", package])
-    for cmd in commands:
+    commands.append(([sys.executable, "-m", "pip", "install", "-q", package], None))
+    for cmd, cmd_env in commands:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120, env=cmd_env
+            )
             if result.returncode == 0:
                 import importlib
 
@@ -274,8 +296,10 @@ def install_library(package: str) -> bool:
 
     Strategy:
 
-    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
-       package lands in evosci's isolated env and is importable from it.
+    1. **uv tool env** (macOS and Linux): ``uv tool install`` again with the
+       receipt's version, extras, Python, constraints and ``--with``
+       packages plus ``--with <pkg>`` — the package lands in evosci's
+       isolated env, is importable from it and recorded in the receipt.
     2. **Fallback**: ``uv pip install`` / ``pip install`` into the active
        venv. Not durable under ``uv sync``, but there's no better option
        for libraries outside a uv tool env.
@@ -293,7 +317,8 @@ def install_cli_tool(package: str, *, verify_command: str) -> bool:
 
     Strategy:
 
-    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
+    1. **uv tool env** (macOS and Linux): the same receipt-keeping
+       ``uv tool install ... --with <pkg>`` as :func:`install_library` —
        durable via uv's receipt, binary resolvable via the tool's bin dir.
     2. **Standalone ``uv tool install <pkg>``**: binary symlinked under
        ``~/.local/bin`` (``uv tool dir --bin``); survives ``uv sync``.
@@ -310,10 +335,11 @@ def install_cli_tool(package: str, *, verify_command: str) -> bool:
     # branch.
     if _install_with_uv_tool_env(package):
         return True
-    if shutil.which("uv"):
+    uv = uv_tool.find_uv()
+    if uv:
         try:
             result = subprocess.run(
-                ["uv", "tool", "install", "-q", package],
+                [uv, "tool", "install", "-q", package],
                 capture_output=True,
                 text=True,
                 timeout=180,

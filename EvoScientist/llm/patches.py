@@ -6,19 +6,19 @@ fix upstream bugs, applied at import time or on first use.
 Patches:
     - _patch_anthropic_proxy_compat: ccproxy dict→Pydantic model mismatch
     - _patch_openai_compat_content: list content→string for strict APIs
-    - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
-    - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
-      encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
-      (store=false → "Item with id rs_... not found")
+    - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
+      ChatGPT Codex backend sends only in ``function_call_arguments.done``
+      (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
+    - _patch_deepagents_bound_reasoning_claude_only: after a summary, drop
+      kept ``anthropic``-tagged thinking for Claude only (installed by
+      ``create_per_run_summarization_middleware``)
 
 Utilities:
-    - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
     - _flatten_message_content: convert content blocks to plain string
 """
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import os
 import sys
 from collections.abc import (
     AsyncIterator,
@@ -80,131 +79,6 @@ def _patch_anthropic_proxy_compat() -> None:
 
 
 _patch_anthropic_proxy_compat()
-
-
-# ---------------------------------------------------------------------------
-# Patch: ccproxy-api 0.2.7 Codex compatibility.
-#
-# 1) ResponseObject.output is required but upstream may omit it → 502.
-#    Fix: make output default to [].
-# 2) CodexMessage.role only allows "user"/"assistant" → 400 on system msgs.
-#    Fix: widen to also accept "system" and "developer".
-# 3) langchain-openai iterates response.output which can be None after the
-#    proxy strips it.  Fix: guard in _construct_lc_result_from_responses_api.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_codex_compat() -> None:
-    """Patch ccproxy-api models for Responses API compatibility."""
-    # 1) Make ResponseObject.output optional (default=[])
-    try:
-        import ccproxy.llms.models.openai as _oai_mod
-
-        _OrigResponse = _oai_mod.ResponseObject
-
-        from pydantic import Field as _PydanticField
-
-        class _PatchedResponseObject(_OrigResponse):  # type: ignore[misc]
-            output: list = _PydanticField(default_factory=list)  # type: ignore[assignment]
-
-            model_config = _OrigResponse.model_config.copy()
-
-        _PatchedResponseObject.__name__ = "ResponseObject"
-        _PatchedResponseObject.__qualname__ = "ResponseObject"
-        _oai_mod.ResponseObject = _PatchedResponseObject  # type: ignore[misc]
-
-        # Also patch modules that import ResponseObject directly
-        for _mod_path in (
-            "ccproxy.llms.formatters.openai_to_openai.responses",
-            "ccproxy.llms.formatters.anthropic_to_openai.responses",
-        ):
-            try:
-                import importlib
-
-                _mod = importlib.import_module(_mod_path)
-                if hasattr(_mod, "ResponseObject"):
-                    _mod.ResponseObject = _PatchedResponseObject  # type: ignore[attr-defined]
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 2) Widen CodexMessage.role to accept system/developer
-    try:
-        from typing import Annotated, Literal
-
-        import ccproxy.plugins.codex.models as _codex_mod
-
-        _OrigMessage = _codex_mod.CodexMessage
-
-        from pydantic import Field as _Field
-
-        class _PatchedCodexMessage(_OrigMessage):  # type: ignore[misc]
-            role: Annotated[  # type: ignore[assignment]
-                Literal["user", "assistant", "system", "developer"],
-                _Field(description="Message role"),
-            ]
-
-        _PatchedCodexMessage.__name__ = "CodexMessage"
-        _PatchedCodexMessage.__qualname__ = "CodexMessage"
-        _codex_mod.CodexMessage = _PatchedCodexMessage  # type: ignore[misc]
-    except Exception:
-        pass
-
-    # 3) Fix StreamingBufferService returning response.completed event
-    #    whose output is None/empty, instead of using accumulated outputs.
-    try:
-        from ccproxy.llms.streaming.accumulators import ResponsesAccumulator
-
-        _orig_get = ResponsesAccumulator.get_completed_response
-
-        def _patched_get(self: Any) -> dict | None:
-            result = _orig_get(self)
-            if result is not None:
-                output = result.get("output")
-                if output is None:
-                    # output field lost — force rebuild from accumulated items
-                    return None
-            return result
-
-        ResponsesAccumulator.get_completed_response = _patched_get  # type: ignore[assignment]
-    except Exception:
-        pass
-
-    # 4) Guard langchain-openai against None output (final safety net)
-    try:
-        import langchain_openai.chat_models.base as _base
-
-        _orig_construct = _base._construct_lc_result_from_responses_api
-
-        def _safe(response: Any, *args: Any, **kwargs: Any) -> Any:
-            if response.output is None:
-                response.output = []
-            return _orig_construct(response, *args, **kwargs)
-
-        _base._construct_lc_result_from_responses_api = _safe
-    except Exception:
-        pass
-
-
-_patch_ccproxy_codex_compat()
-
-
-# ---------------------------------------------------------------------------
-# Utility: detect ccproxy's Codex adapter (as opposed to generic localhost).
-# ---------------------------------------------------------------------------
-def _is_ccproxy_codex() -> bool:
-    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
-
-    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
-    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
-    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
-    """
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    return (
-        ("127.0.0.1" in base_url or "localhost" in base_url)
-        and api_key == "ccproxy-oauth"
-        and "/codex/" in base_url
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -646,89 +520,6 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
 
 
 # ---------------------------------------------------------------------------
-# Patch: ccproxy Codex Responses API rejects "system" role messages.
-# Convert SystemMessage to use "developer" role via langchain-openai's
-# __openai_role__ mechanism.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_system_to_developer(model: Any) -> None:
-    """Convert SystemMessage role from 'system' to 'developer' for ccproxy.
-
-    ccproxy's Responses API endpoint rejects system role messages with
-    400 "System messages are not allowed".  LangChain's ``langchain_openai``
-    checks ``additional_kwargs["__openai_role__"]`` and uses that value as
-    the message role when serializing to the API.
-
-    Args:
-        model: A LangChain chat model instance to patch in-place.
-    """
-    import copy
-    import functools
-
-    from langchain_core.messages import SystemMessage
-
-    def _system_to_developer(messages: list[BaseMessage]) -> list[BaseMessage]:
-        out: list[BaseMessage] = []
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                if msg.additional_kwargs.get("__openai_role__") != "developer":
-                    msg = copy.copy(msg)
-                    msg.additional_kwargs = {
-                        **msg.additional_kwargs,
-                        "__openai_role__": "developer",
-                    }
-            out.append(msg)
-        return out
-
-    orig_generate = getattr(model, "_generate", None)
-    if orig_generate is None:
-        return
-
-    @functools.wraps(orig_generate)
-    def _patched_generate(
-        messages: list[BaseMessage], *args: Any, **kwargs: Any
-    ) -> Any:
-        return orig_generate(_system_to_developer(messages), *args, **kwargs)
-
-    model._generate = _patched_generate
-
-    orig_agenerate = getattr(model, "_agenerate", None)
-    if orig_agenerate is not None:
-
-        @functools.wraps(orig_agenerate)
-        async def _patched_agenerate(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return await orig_agenerate(_system_to_developer(messages), *args, **kwargs)
-
-        model._agenerate = _patched_agenerate
-
-    orig_stream = getattr(model, "_stream", None)
-    if orig_stream is not None:
-
-        @functools.wraps(orig_stream)
-        def _patched_stream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return orig_stream(_system_to_developer(messages), *args, **kwargs)
-
-        model._stream = _patched_stream
-
-    orig_astream = getattr(model, "_astream", None)
-    if orig_astream is not None:
-
-        @functools.wraps(orig_astream)
-        async def _patched_astream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            async for chunk in orig_astream(
-                _system_to_developer(messages), *args, **kwargs
-            ):
-                yield chunk
-
-        model._astream = _patched_astream
-
-
-# ---------------------------------------------------------------------------
 # Patch (module-level): langchain-openai's _convert_dict_to_message and
 # _convert_delta_to_message_chunk discard provider-specific fields like
 # `reasoning_content`. We monkey-patch them to capture reasoning_content
@@ -923,62 +714,8 @@ def _patch_anthropic_strip_foreign_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
-# items from outgoing assistant messages.
-#
-# OpenRouter's `/responses` beta is stateless — it does not propagate
-# `store=true` / `previous_response_id` upstream. So when a prior turn's
-# assistant message carries a reasoning item with an `rs_*` id (the encrypted
-# Responses reasoning block), replaying it on the next turn fails with HTTP 400:
-#   "Item with id 'rs_...' not found. Items are not persisted when `store` is
-#    set to false. ... remove this item from your input."
-# (observed against both Azure and OpenAI upstreams — so deepagents'
-# azure-ignore is not sufficient). The only robust fix is to drop these items
-# on passback, exactly as the upstream error instructs. Reasoning DISPLAY is
-# unaffected: it happens when the item is generated, not on passback.
-# Related: langchain-ai/langchain#37777.
-# ---------------------------------------------------------------------------
-_openrouter_reasoning_strip_patched = False
-
-
-def _is_responses_reasoning_item(entry: Any) -> bool:
-    """True for an OpenAI-Responses encrypted reasoning item (`rs_` id / data)."""
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get("id") or "").startswith("rs_") or bool(entry.get("data"))
-
-
-def _patch_openrouter_strip_responses_reasoning() -> None:
-    global _openrouter_reasoning_strip_patched
-    if _openrouter_reasoning_strip_patched:
-        return
-    try:
-        import langchain_openrouter.chat_models as _mod
-
-        _orig = _mod._convert_message_to_dict
-
-        def _patched(message: Any) -> Any:
-            result = _orig(message)
-            details = (
-                result.get("reasoning_details") if isinstance(result, dict) else None
-            )
-            if isinstance(details, list):
-                kept = [e for e in details if not _is_responses_reasoning_item(e)]
-                if kept:
-                    result["reasoning_details"] = kept
-                else:
-                    result.pop("reasoning_details", None)
-            return result
-
-        _mod._convert_message_to_dict = _patched
-        _openrouter_reasoning_strip_patched = True
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): default structured output to json_schema for
-# Moonshot's always-thinking models (kimi-k3).
+# Moonshot's always-thinking models (the kimi-k3 family).
 #
 # Moonshot rejects a forced tool choice while thinking is enabled with HTTP 400:
 #   "tool_choice 'specified' is incompatible with thinking enabled"
@@ -1010,9 +747,9 @@ def _patch_openrouter_structured_output() -> None:
             **kwargs: Any,
         ) -> Any:
             if method == "function_calling":
-                from .models import _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS
+                from .models import _openrouter_needs_json_schema
 
-                if self.model_name in _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS:
+                if _openrouter_needs_json_schema(self.model_name):
                     method = "json_schema"
             return _orig(self, schema, method=method, **kwargs)
 
@@ -1143,8 +880,9 @@ def _merge_runs_config_kwargs(
     """Merge the live model override into ``kwargs`` for ``runs.create``.
 
     ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
-    they replace any the caller passed, so the server can refuse a run meant
-    for other folders.
+    they replace any the caller passed. A run named by its graph goes to that
+    graph's assistant for the folders' workspace, which stands for the
+    project; the server reads the run folder from ``run_dir``.
 
     Model source, in increasing precedence:
 
@@ -1184,6 +922,12 @@ def _merge_runs_config_kwargs(
     merged_configurable = {**existing_configurable, **overrides}
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
+    if isinstance(kwargs.get("assistant_id"), str):
+        from EvoScientist.langgraph_dev.assistants import launch_assistant_id
+
+        kwargs["assistant_id"] = launch_assistant_id(
+            kwargs["assistant_id"], (folders or {}).get("workspace_dir")
+        )
     return kwargs
 
 
@@ -1441,3 +1185,117 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: deepagents (0.7.30+) drops the ``thinking`` blocks of messages kept
+# across a summary whenever they are tagged ``model_provider == "anthropic"``.
+# Only Claude binds them to the earlier history; every Anthropic-protocol reply
+# carries that tag, and Kimi backends reject a tool-call turn without thinking.
+# ---------------------------------------------------------------------------
+def _patch_deepagents_bound_reasoning_claude_only() -> None:
+    """Keep thinking of models named other than Claude (upstream's Bedrock rule).
+
+    A reply without a model name keeps upstream's drop.
+    """
+    try:
+        import deepagents.middleware.summarization as _summ_mod
+    except ImportError:
+        return
+
+    _orig = getattr(_summ_mod, "_bound_reasoning_types", None)
+    if _orig is None or hasattr(_orig, "_evosci_claude_only"):
+        return
+
+    @functools.wraps(_orig)
+    def _patched(message: AIMessage) -> frozenset[str]:
+        metadata = message.response_metadata
+        model = str(metadata.get("model_name") or "").lower()
+        if (
+            metadata.get("model_provider") == "anthropic"
+            and model
+            and "claude" not in model
+            and "anthropic" not in model
+        ):
+            return frozenset()
+        return _orig(message)
+
+    _patched._evosci_claude_only = True  # type: ignore[attr-defined]
+    _summ_mod._bound_reasoning_types = _patched
+
+
+# ---------------------------------------------------------------------------
+# Patch: the ChatGPT Codex backend usually sends parallel tool calls whole
+# (only ``response.function_call_arguments.done``), while langchain-openai
+# builds tool-call arguments from ``.delta`` events alone, leaving them empty.
+# Hand the full arguments through as a single delta when none was streamed.
+# ---------------------------------------------------------------------------
+# Calls whose delivered arguments are remembered at once (across all streams).
+_WHOLE_TOOL_ARGS_RECORD = 256
+
+
+def _patch_openai_responses_whole_tool_args() -> None:
+    """Keep tool-call arguments that arrive only in the ``done`` event.
+
+    Process-wide: every ``ChatOpenAI`` Responses stream passes through it, so it
+    changes nothing unless a call's arguments would otherwise be lost.
+    """
+    try:
+        import langchain_openai.chat_models.base as _base
+        from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
+
+        _orig = _base._convert_responses_chunk_to_generation_chunk
+    except (ImportError, AttributeError):
+        return
+    if hasattr(_orig, "_evosci_whole_tool_args"):
+        return
+    # Arguments delivered so far per call; insertion-ordered so a stream cut
+    # before ``done`` cannot grow it forever. A call pushed out is left to upstream;
+    # only with more than twice the record's calls open at once is one forgotten.
+    delivered: dict[str, str] = {}
+    dropped: dict[str, None] = {}
+
+    def _add(item_id: str, text: str) -> None:
+        if item_id in dropped:
+            return
+        delivered[item_id] = delivered.get(item_id, "") + text
+        if len(delivered) > _WHOLE_TOOL_ARGS_RECORD:
+            oldest = next(iter(delivered))
+            del delivered[oldest]
+            dropped[oldest] = None
+            if len(dropped) > _WHOLE_TOOL_ARGS_RECORD:
+                del dropped[next(iter(dropped))]
+
+    @functools.wraps(_orig)
+    def _convert(chunk: Any, *args: Any, **kwargs: Any) -> Any:
+        kind = getattr(chunk, "type", None)
+        if kind == "response.output_item.added":
+            item = getattr(chunk, "item", None)
+            # Some servers open the call with (part of) its arguments filled in.
+            if getattr(item, "type", None) == "function_call":
+                # A new call: whatever an earlier, cut stream left under this id is stale.
+                delivered.pop(item.id, None)
+                dropped.pop(item.id, None)
+                if item.arguments:
+                    _add(item.id, item.arguments)
+        elif kind == "response.function_call_arguments.delta":
+            _add(chunk.item_id, chunk.delta)
+        elif kind == "response.function_call_arguments.done":
+            sent = delivered.pop(chunk.item_id, "")
+            full = chunk.arguments or ""
+            missing = full[len(sent) :] if full.startswith(sent) else ""
+            if chunk.item_id in dropped:
+                del dropped[chunk.item_id]
+                missing = ""
+            if missing:
+                chunk = ResponseFunctionCallArgumentsDeltaEvent.construct(
+                    type="response.function_call_arguments.delta",
+                    delta=missing,
+                    item_id=chunk.item_id,
+                    output_index=chunk.output_index,
+                    sequence_number=chunk.sequence_number,
+                )
+        return _orig(chunk, *args, **kwargs)
+
+    _convert._evosci_whole_tool_args = True  # type: ignore[attr-defined]
+    _base._convert_responses_chunk_to_generation_chunk = _convert

@@ -14,7 +14,6 @@ from EvoScientist.ccproxy_manager import (
     is_ccproxy_running,
     maybe_start_ccproxy,
     setup_ccproxy_env,
-    setup_codex_env,
     start_ccproxy,
     stop_ccproxy,
 )
@@ -56,16 +55,6 @@ class TestCheckCcproxyAuth:
         assert cmd[1:] == ["auth", "status", "claude_api"]
         # ccproxy CLI cold start takes ~10s; timeout must leave headroom
         assert mock_run.call_args[1]["timeout"] == _CCPROXY_AUTH_TIMEOUT_SECONDS
-
-    @patch("subprocess.run")
-    def test_valid_auth_codex(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="Authenticated", stderr=""
-        )
-        valid, _msg = check_ccproxy_auth("codex")
-        assert valid is True
-        cmd = mock_run.call_args[0][0]
-        assert cmd[1:] == ["auth", "status", "codex"]
 
     @patch("subprocess.run")
     def test_invalid_auth(self, mock_run):
@@ -163,6 +152,19 @@ class TestStartCcproxy:
         with pytest.raises(RuntimeError, match="did not become healthy"):
             start_ccproxy(8000)
 
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt, OSError])
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
+    @patch("subprocess.Popen")
+    def test_interrupted_wait_stops_the_process(self, mock_popen, mock_running, raised):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        mock_running.side_effect = raised
+
+        with pytest.raises(raised):
+            start_ccproxy(8000)
+        proc.terminate.assert_called_once()
+
     @patch("subprocess.Popen", side_effect=FileNotFoundError)
     def test_missing_binary(self, mock_popen):
         with pytest.raises(FileNotFoundError):
@@ -170,30 +172,16 @@ class TestStartCcproxy:
 
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
     @patch("subprocess.Popen")
-    def test_codex_plugin_overrides_via_env(
-        self, mock_popen, mock_running, monkeypatch
-    ):
-        """Codex plugin defaults are overridden through ccproxy's env layer.
-
-        Env overrides sit on top of whatever config file ccproxy discovers, so a
-        user's own ``config.toml`` keeps working; no generated file is involved.
-        """
+    def test_start_passes_no_codex_overrides(self, mock_popen, mock_running):
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
         mock_running.side_effect = [True]
-        monkeypatch.setenv("EVOSCI_TEST_INHERITED", "1")
-        monkeypatch.delenv("CONFIG_FILE", raising=False)
 
         start_ccproxy(8000)
 
-        cmd = mock_popen.call_args[0][0]
-        env = mock_popen.call_args[1]["env"]
-        assert "--config" not in cmd
-        assert env["PLUGINS__CODEX__MODEL_MAPPINGS"] == "[]"
-        assert env["PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD"] == "false"
-        assert env["EVOSCI_TEST_INHERITED"] == "1"
-        assert "CONFIG_FILE" not in env
+        env = mock_popen.call_args[1].get("env") or {}
+        assert not [key for key in env if key.startswith("PLUGINS__CODEX__")]
 
 
 # =============================================================================
@@ -214,7 +202,7 @@ class TestEnsureCcproxy:
         mock_start.return_value = proc
         result = ensure_ccproxy(8000)
         assert result is proc
-        mock_start.assert_called_once_with(8000)
+        mock_start.assert_called_once_with(8000, detached=False)
 
 
 # =============================================================================
@@ -241,32 +229,6 @@ class TestSetupCcproxyEnv:
 
         assert os.environ["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000/claude"
         assert os.environ["ANTHROPIC_API_KEY"] == "ccproxy-oauth"
-
-
-# =============================================================================
-# setup_codex_env
-# =============================================================================
-
-
-class TestSetupCodexEnv:
-    def test_sets_vars(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-
-        setup_codex_env(8000)
-
-        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
-        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
-
-    def test_overrides_existing(self, monkeypatch):
-        """Force-sets vars even if already configured (oauth takes priority)."""
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://custom:9999")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key")
-
-        setup_codex_env(8000)
-
-        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
-        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
 
 
 # =============================================================================
@@ -333,33 +295,26 @@ class TestMaybeStartCcproxy:
         with pytest.raises(RuntimeError, match="not authenticated"):
             maybe_start_ccproxy(config)
 
-    @patch("EvoScientist.ccproxy_manager.setup_codex_env")
     @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
-    @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
-    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
-    def test_openai_oauth_mode_starts(
-        self, mock_avail, mock_auth, mock_ensure, mock_env
-    ):
-        proc = MagicMock()
-        mock_ensure.return_value = proc
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available")
+    def test_openai_oauth_alone_needs_no_proxy(self, mock_avail, mock_ensure):
         config = MagicMock()
         config.anthropic_auth_mode = "api_key"
         config.openai_auth_mode = "oauth"
-        config.ccproxy_port = 8000
 
-        result = maybe_start_ccproxy(config)
-        assert result is proc
-        mock_auth.assert_called_once_with("codex")
-        mock_env.assert_called_once()
+        assert maybe_start_ccproxy(config) is None
+        mock_avail.assert_not_called()
+        mock_ensure.assert_not_called()
 
-    @patch("EvoScientist.ccproxy_manager.setup_codex_env")
     @patch("EvoScientist.ccproxy_manager.setup_ccproxy_env")
     @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
     @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
-    def test_both_oauth_starts_both(
-        self, mock_avail, mock_auth, mock_ensure, mock_anthropic_env, mock_codex_env
+    def test_both_oauth_starts_the_proxy_for_anthropic_only(
+        self, mock_avail, mock_auth, mock_ensure, mock_env, monkeypatch
     ):
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         proc = MagicMock()
         mock_ensure.return_value = proc
         config = MagicMock()
@@ -367,19 +322,18 @@ class TestMaybeStartCcproxy:
         config.openai_auth_mode = "oauth"
         config.ccproxy_port = 8000
 
-        result = maybe_start_ccproxy(config)
-        assert result is proc
-        # Auth checked for both providers
-        assert mock_auth.call_count == 2
-        mock_anthropic_env.assert_called_once()
-        mock_codex_env.assert_called_once()
+        assert maybe_start_ccproxy(config) is proc
+        mock_auth.assert_called_once_with("claude_api")
+        mock_env.assert_called_once()
+        assert "OPENAI_BASE_URL" not in os.environ
+        assert "OPENAI_API_KEY" not in os.environ
 
     @patch("EvoScientist.ccproxy_manager._is_editable_install", return_value=True)
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=False)
-    def test_openai_oauth_raises_no_binary_editable(self, mock_avail, mock_edit):
+    def test_oauth_raises_no_binary_editable(self, mock_avail, mock_edit):
         config = MagicMock()
-        config.anthropic_auth_mode = "api_key"
-        config.openai_auth_mode = "oauth"
+        config.anthropic_auth_mode = "oauth"
+        config.openai_auth_mode = "api_key"
         with pytest.raises(RuntimeError) as exc_info:
             maybe_start_ccproxy(config)
         msg = str(exc_info.value)
@@ -389,27 +343,15 @@ class TestMaybeStartCcproxy:
 
     @patch("EvoScientist.ccproxy_manager._is_editable_install", return_value=False)
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=False)
-    def test_openai_oauth_raises_no_binary_pip(self, mock_avail, mock_edit):
+    def test_oauth_raises_no_binary_pip(self, mock_avail, mock_edit):
         config = MagicMock()
-        config.anthropic_auth_mode = "api_key"
-        config.openai_auth_mode = "oauth"
+        config.anthropic_auth_mode = "oauth"
+        config.openai_auth_mode = "api_key"
         with pytest.raises(RuntimeError) as exc_info:
             maybe_start_ccproxy(config)
         msg = str(exc_info.value)
         assert "ccproxy is required for OAuth mode but not found" in msg
         assert "pip install 'evoscientist[oauth]'" in msg
-
-    @patch(
-        "EvoScientist.ccproxy_manager.check_ccproxy_auth",
-        return_value=(False, "expired"),
-    )
-    @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
-    def test_openai_oauth_raises_no_auth(self, mock_avail, mock_auth):
-        config = MagicMock()
-        config.anthropic_auth_mode = "api_key"
-        config.openai_auth_mode = "oauth"
-        with pytest.raises(RuntimeError, match="Codex OAuth not authenticated"):
-            maybe_start_ccproxy(config)
 
     @patch("EvoScientist.ccproxy_manager.setup_ccproxy_env")
     @patch("EvoScientist.ccproxy_manager.ensure_ccproxy")
@@ -427,7 +369,7 @@ class TestMaybeStartCcproxy:
         config.ccproxy_port = 7777
 
         maybe_start_ccproxy(config)
-        mock_ensure.assert_called_once_with(7777)
+        mock_ensure.assert_called_once_with(7777, detached=False)
 
     @patch("EvoScientist.ccproxy_manager.check_ccproxy_auth", return_value=(True, "OK"))
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True)
@@ -451,3 +393,179 @@ class TestMaybeStartCcproxy:
 
         with pytest.raises(ValueError, match="Invalid ccproxy port"):
             maybe_start_ccproxy(config)
+
+
+def test_start_ccproxy_detached_runs_in_own_session(monkeypatch):
+    """It outlives the CLI and its terminal's signals, with the server."""
+    import subprocess
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    spawned: dict = {}
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    def popen(cmd, **kwargs):
+        spawned.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_running", lambda port: True)
+
+    ccproxy_mod.start_ccproxy(8000, detached=True)
+
+    if ccproxy_mod.os.name == "nt":
+        assert spawned["creationflags"] == (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        assert spawned["start_new_session"] is True
+
+
+def test_maybe_start_ccproxy_lasting_is_recorded_not_returned(monkeypatch, tmp_path):
+    """The caller does not stop it; ``EvoSci ccproxy stop`` does."""
+    import subprocess
+    from types import SimpleNamespace
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
+    started: list = []
+
+    class _Running:
+        pid = 77
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("ccproxy", timeout)
+
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
+    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda _p: (True, ""))
+    monkeypatch.setattr(
+        ccproxy_mod,
+        "ensure_ccproxy",
+        lambda port, *, detached: started.append(detached) or _Running(),
+    )
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", lambda port: None)
+    config = SimpleNamespace(anthropic_auth_mode="oauth", ccproxy_port=8000)
+
+    assert ccproxy_mod.maybe_start_ccproxy(config, lasting=True) is None
+    assert started == [True]
+    assert (tmp_path / "ccproxy.pid").read_text() == "77"
+
+
+def test_stop_recorded_ccproxy_leaves_other_process(monkeypatch, tmp_path):
+    """A recorded pid reused by another program is not stopped."""
+    import psutil
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    from EvoScientist import paths
+
+    class _OtherProgram:
+        pid = 4242
+
+        def cmdline(self):
+            return ["python", "-c", "import time; time.sleep(60)"]
+
+        def terminate(self):
+            raise AssertionError("another program was stopped")
+
+        kill = terminate
+
+    monkeypatch.setattr(psutil, "Process", lambda pid: _OtherProgram())
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
+    (tmp_path / "ccproxy.pid").write_text("4242")
+
+    assert ccproxy_mod.stop_recorded_ccproxy() is None
+    assert not (tmp_path / "ccproxy.pid").exists()
+
+
+def test_lasting_starts_at_once_spawn_one_ccproxy(monkeypatch, tmp_path):
+    """The second session finds the first one's ccproxy and records nothing."""
+    import subprocess
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
+    healthy = threading.Event()
+    spawned: list = []
+
+    class _Running:
+        pid = 77
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("ccproxy", timeout)
+
+    def start(port, *, detached):
+        spawned.append(port)
+        time.sleep(0.3)
+        healthy.set()
+        return _Running()
+
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
+    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda _p: (True, ""))
+    monkeypatch.setattr(
+        ccproxy_mod, "is_ccproxy_running", lambda port: healthy.is_set()
+    )
+    monkeypatch.setattr(ccproxy_mod, "start_ccproxy", start)
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", lambda port: None)
+    config = SimpleNamespace(anthropic_auth_mode="oauth", ccproxy_port=8000)
+    sessions = [
+        threading.Thread(
+            target=ccproxy_mod.maybe_start_ccproxy,
+            args=(config,),
+            kwargs={"lasting": True},
+        )
+        for _ in range(2)
+    ]
+    for session in sessions:
+        session.start()
+    for session in sessions:
+        session.join()
+
+    assert spawned == [8000]
+    assert (tmp_path / "ccproxy.pid").read_text() == "77"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+def test_lasting_ccproxy_creates_private_server_home(monkeypatch, tmp_path):
+    """Created first by a ccproxy start, the server home is this user's only,
+    as the server creates it."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "server")
+    with ccproxy_mod._lasting_start_lock():
+        pass
+
+    assert (tmp_path / "server").stat().st_mode & 0o777 == 0o700
+
+
+def test_lasting_start_that_cannot_lock_is_runtime_error(monkeypatch):
+    """Callers report a RuntimeError; a lock timeout is an OSError."""
+    from types import SimpleNamespace
+
+    from filelock import Timeout
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    class _Stuck:
+        def __enter__(self):
+            raise Timeout("ccproxy.lock")
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
+    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda _p: (True, ""))
+    monkeypatch.setattr(ccproxy_mod, "_lasting_start_lock", _Stuck)
+    config = SimpleNamespace(anthropic_auth_mode="oauth", ccproxy_port=8000)
+
+    with pytest.raises(RuntimeError, match="Could not start ccproxy"):
+        ccproxy_mod.maybe_start_ccproxy(config, lasting=True)

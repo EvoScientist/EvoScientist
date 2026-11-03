@@ -6,7 +6,8 @@ import functools
 import logging
 import os
 import re
-import shutil
+import shlex
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,18 +15,90 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _darwin_stored_path(path: Path) -> Path:
+    """Spell the deepest existing part as stored on disk (macOS)."""
+    import fcntl
+
+    missing: list[str] = []
+    current = path
+    while True:
+        try:
+            fd = os.open(current, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            # Fallback to parent walk is deliberate: components that do not exist or cannot
+            # be opened (e.g. EACCES without read permission) keep their typed spelling.
+            if current.parent == current:
+                return path
+            missing.append(current.name)
+            current = current.parent
+        else:
+            try:
+                raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            except OSError:
+                return path
+            finally:
+                os.close(fd)
+            stored = Path(os.fsdecode(raw.split(b"\x00", 1)[0]))
+            return stored.joinpath(*reversed(missing)) if missing else stored
+
+
 def normalize_path(path: str | Path) -> Path:
     """Return the canonical absolute form of *path*.
 
     Expands ``~`` and resolves symlinks, so ``/tmp/x`` and ``/private/tmp/x``
     on macOS, or two spellings of a symlinked project folder, compare equal.
+    On macOS, the existing part of the path is spelled as stored on disk (so
+    ``~/research`` and ``~/Research`` compare equal) and the missing tail
+    keeps the typed spelling.
     The path does not need to exist. Raises ``ValueError`` for a path with a
     NUL byte, which no platform accepts (Windows on Python 3.13 would
     otherwise resolve it without complaint).
     """
     if "\x00" in str(path):
         raise ValueError(f"Path contains a NUL byte: {path!r}")
-    return Path(path).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
+    return _darwin_stored_path(resolved) if sys.platform == "darwin" else resolved
+
+
+def file_tool_path(path: str | Path) -> str:
+    """Spell a host path so deepagents' virtual-path validator accepts it.
+
+    Windows drive paths need a leading slash (``/C:/project/file``). The
+    sandbox decodes that alias; shell commands still use ``C:/project/file``.
+    POSIX paths and paths that are already virtual are unchanged.
+    """
+    value = str(path)
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return "/" + value.replace("\\", "/")
+    return value
+
+
+def host_file_tool_path(path: str) -> str:
+    """On Windows, use forward slashes for every path and decode `/C:/...` aliases.
+
+    Other platforms get *path* back unchanged.
+    """
+    if os.name == "nt":
+        if re.match(r"^/[A-Za-z]:(/|$)", path):
+            path = f"{path[1:3]}/{path[4:]}"
+        return path.replace("\\", "/")
+    return path
+
+
+def command_arg(path: str | Path) -> str:
+    """*path* as one argument of a command printed for the user to copy:
+    quoted for a POSIX shell (``shlex.quote``), or on Windows in double quotes
+    when it holds whitespace, which ``cmd`` and PowerShell read as one
+    argument (other characters they treat specially are left as they are)."""
+    shown = str(path)
+    if os.name == "nt":
+        return f'"{shown}"' if any(ch.isspace() for ch in shown) else shown
+    return shlex.quote(shown)
+
+
+# What reading a stored or forwarded folder value can raise: a wrong type,
+# a NUL byte, an unresolvable path or a symlink loop.
+PATH_ERRORS = (TypeError, ValueError, OSError, RuntimeError)
 
 
 @dataclass(frozen=True)
@@ -52,6 +125,19 @@ class Workspace:
     def runs_dir(self) -> Path:
         """Parent folder of ``--mode=run`` session folders (``<root>/runs``)."""
         return self.root / "runs"
+
+    def is_run_folder(self, path: str | Path) -> bool:
+        """True if *path* is one of this workspace's ``--mode=run`` session
+        folders: it resolves to ``<root>/runs/<name>``. A ``runs`` folder or a
+        run folder that links outside ``<root>/runs`` is not supported; a run
+        folder linking to another run folder reads as that one.
+
+        Resolves *path*, so call it off the event loop on the server.
+        """
+        runs = self.runs_dir
+        if runs.is_symlink():
+            return False
+        return normalize_path(path).parent == normalize_path(runs)
 
     @property
     def media_dir(self) -> Path:
@@ -123,21 +209,19 @@ class SessionDirs:
         """Read the folders a thread was stored with, normalised.
 
         Returns ``None`` when nothing was stored or the value cannot be
-        resolved. A ``run_dir`` outside the workspace is dropped: run folders
-        live under ``<root>/runs``. Resolves paths, so call it off the event
-        loop on the server.
+        resolved. A ``run_dir`` that is not one of the workspace's run folders
+        (``<root>/runs/<name>``) is dropped. Resolves paths, so call it off
+        the event loop on the server.
         """
         if not workspace_dir:
             return None
         try:
             dirs = cls(Workspace(workspace_dir), Path(run_dir) if run_dir else None)
-        except (ValueError, OSError, RuntimeError):
+            if dirs.run_dir is None or dirs.workspace.is_run_folder(dirs.run_dir):
+                return dirs
+        except PATH_ERRORS:
             return None
-        if dirs.run_dir is not None and not dirs.run_dir.is_relative_to(
-            dirs.workspace.root
-        ):
-            return cls(dirs.workspace)
-        return dirs
+        return cls(dirs.workspace)
 
     @classmethod
     def from_legacy(cls, workspace_dir: str | Path) -> SessionDirs:
@@ -147,12 +231,14 @@ class SessionDirs:
         folder ``<root>/runs/<name>`` whose name has the form ``--mode=run``
         generates is split into the workspace and ``run_dir``. Named runs are
         left as they are, because a project folder can itself live in a
-        folder called ``runs``. Only the one-time upgrade of stored values
-        uses this; new values carry ``run_dir`` themselves.
+        folder called ``runs``. The one-time upgrade of stored values and the
+        import of an older server's store use this; new values carry
+        ``run_dir`` themselves.
         """
         path = normalize_path(workspace_dir)
-        if path.parent.name == "runs" and is_generated_run_name(path.name):
-            return cls(Workspace(path.parent.parent), path)
+        project = Workspace(path.parent.parent)
+        if is_generated_run_name(path.name) and project.is_run_folder(path):
+            return cls(project, path)
         return cls(Workspace(path))
 
 
@@ -172,20 +258,41 @@ def start_workspace_path(
 def process_workspace() -> Workspace:
     """The workspace of a process that was not given one explicitly.
 
-    ``EVOSCIENTIST_WORKSPACE_DIR`` when set (the langgraph dev manager sets it
-    for the server subprocess), otherwise the current directory. Read once per
-    process, so every graph the server builds and every route it answers agree
-    on the workspace even if the environment changes later (a ``.env`` merge).
+    ``EVOSCIENTIST_WORKSPACE_DIR`` when set, otherwise the current directory.
+    Read once per process, so it does not change with the environment later.
+    The langgraph dev server has no workspace of its own:
+    it serves every registered project (see :func:`launcher_workspace`).
     """
     return Workspace(_env_path("EVOSCIENTIST_WORKSPACE_DIR") or Path.cwd())
 
 
+# Names the project of the client that started the langgraph dev server.
+LAUNCHER_WORKSPACE_ENV = "EVOSCIENTIST_LAUNCHER_WORKSPACE"
+
+
+@functools.cache
+def launcher_workspace() -> Workspace | None:
+    """In the langgraph dev server: the project of the client that started it
+    (``LAUNCHER_WORKSPACE_ENV``), or ``None`` when it was started without one.
+
+    The server serves every registered project and works in the server home;
+    this is only the project ``GET /api/workspace`` reports once that client
+    registered it. Read once per process.
+    """
+    path = _env_path(LAUNCHER_WORKSPACE_ENV)
+    if path is None:
+        return None
+    try:
+        return Workspace(path)
+    except PATH_ERRORS:
+        logger.warning("Cannot read the launcher's project %s.", path, exc_info=True)
+        return None
+
+
 @functools.cache
 def process_session_dirs() -> SessionDirs:
-    """:func:`process_workspace` plus the run folder the process works in.
-
-    The langgraph dev manager sets ``EVOSCIENTIST_RUN_DIR`` when it starts the
-    server for a ``--mode=run`` session. Read once per process, like the
+    """:func:`process_workspace` plus the run folder the process works in
+    (``EVOSCIENTIST_RUN_DIR`` when set). Read once per process, like the
     workspace.
     """
     return SessionDirs(process_workspace(), _env_path("EVOSCIENTIST_RUN_DIR"))
@@ -197,29 +304,86 @@ def resolve_virtual_path(work_dir: str | Path, virtual_path: str) -> Path:
     return (Path(work_dir) / vpath.lstrip("/")).resolve()
 
 
-def _expand(path: str) -> Path:
-    return Path(path).expanduser()
-
-
 def _env_path(key: str) -> Path | None:
-    value = os.getenv(key)
-    if not value:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
         return None
-    return _expand(value)
+    return Path(value).expanduser()
 
 
-def _global_data_dir() -> Path:
-    """Global application data directory (~/.evoscientist/ by default).
+def _shared_dir_from_env(key: str) -> Path | None:
+    """Read a folder that other programs locate too from *key*, as an absolute path.
+
+    The data and config folders are also found by the WebUI and the desktop
+    app, so they follow one path rule: an unset, empty or whitespace-only
+    value counts as unset; a leading ``~``, alone or followed by a path
+    separator, is the home folder, and nothing else is expanded (no ``~user``,
+    no environment variables); a relative path is resolved against the
+    current folder.
+    """
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return None
+    if value == "~" or value.startswith(("~/", "~" + os.sep)):
+        value = str(Path.home()) + value[1:]
+    return Path(os.path.abspath(value))
+
+
+def _data_dir() -> Path:
+    """Data folder: ``$EVOSCIENTIST_DATA_DIR``, by default ``~/.evoscientist``.
 
     This is the base for sessions.db, skills/, memories/, history — things
     that are NOT configuration but application state. Config files (config.yaml,
-    mcp.yaml) continue to live in XDG_CONFIG_HOME.
+    mcp.yaml) live in CONFIG_DIR.
     """
-    return Path.home() / ".evoscientist"
+    return (
+        _shared_dir_from_env("EVOSCIENTIST_DATA_DIR") or Path.home() / ".evoscientist"
+    )
 
 
-# Global data dir: ~/.evoscientist/ by default, overridable via env var.
-DATA_DIR: Path = _env_path("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+def _config_dir() -> Path:
+    """Configuration folder: ``$XDG_CONFIG_HOME/evoscientist``, by default
+    ``~/.config/evoscientist`` (config.yaml, mcp.yaml)."""
+    return (
+        _shared_dir_from_env("XDG_CONFIG_HOME") or Path.home() / ".config"
+    ) / "evoscientist"
+
+
+# Whether this process is the langgraph dev server (``start_langgraph_dev``
+# sets the variable). Read once, at import, and removed from the environment,
+# so the agent's commands and MCP servers do not take themselves for it.
+SERVER_PROCESS: bool = os.environ.pop("EVOSCIENTIST_SERVER_PROCESS", None) == "1"
+
+# Both folders are read once, when this module is imported: a workspace ``.env``
+# loaded later does not move them, and processes this one starts get them as
+# absolute paths (see ``dir_env``).
+DATA_DIR: Path = _data_dir()
+CONFIG_DIR: Path = _config_dir()
+# Whether XDG_CONFIG_HOME was set when this process started (see ``dir_env``).
+_XDG_CONFIG_HOME_SET: bool = _shared_dir_from_env("XDG_CONFIG_HOME") is not None
+
+
+def dir_env(env: dict[str, str]) -> dict[str, str]:
+    """Return *env* with this process's data and config folders, as absolute paths.
+
+    For processes this one starts (the langgraph dev server, the WebUI): they
+    work in other folders, so they get the folders this process uses rather
+    than resolving the variables again.
+    ``XDG_CONFIG_HOME`` is passed only if this process started with it: unset
+    gives the same folder, and other programs the child runs (the agent's
+    shell, MCP servers) may treat a set value differently from an unset one.
+    A memories folder override is passed as the absolute folder this process
+    uses, since the child works in another folder.
+    """
+    env = {**env, "EVOSCIENTIST_DATA_DIR": str(DATA_DIR)}
+    if _XDG_CONFIG_HOME_SET:
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+    else:
+        env.pop("XDG_CONFIG_HOME", None)
+    if MEMORIES_DIR != GLOBAL_MEMORIES_DIR:
+        env["EVOSCIENTIST_MEMORIES_DIR"] = os.path.abspath(MEMORIES_DIR)
+        env.pop("EVOSCIENTIST_MEMORY_DIR", None)
+    return env
 
 
 def _global_skills_dir() -> Path:
@@ -236,8 +400,14 @@ GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 # Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
 
+# Server home: files that belong to the langgraph dev server rather than to a
+# workspace, such as the local secret (~/.evoscientist/server/).
+SERVER_HOME: Path = DATA_DIR / "server"
 
-# Memories dir: global by default, overridable via env var.
+
+# Memories dir: global by default, overridable via env var. Read once, at
+# import: a project ``.env`` does not move it (the ``.env`` reaches the CLI
+# only, and the CLI and the server must use one folder).
 # Supports both new (EVOSCIENTIST_MEMORIES_DIR) and old (EVOSCIENTIST_MEMORY_DIR) env vars.
 def _memories_dir_from_env() -> Path:
     return (
@@ -248,91 +418,6 @@ def _memories_dir_from_env() -> Path:
 
 
 MEMORIES_DIR: Path = _memories_dir_from_env()
-
-
-def reload_env_dirs() -> None:
-    """Re-read the memories-folder override from the environment.
-
-    ``paths`` is imported before ``get_effective_config()`` merges the
-    project ``.env`` into ``os.environ``, so entry points call this once
-    after loading their config to pick up an override set there.
-    """
-    global MEMORIES_DIR
-    MEMORIES_DIR = _memories_dir_from_env()
-
-
-# DEPRECATED(0.1.0): remove this migration helper and its call site below.
-def migrate_legacy_sessions_db() -> None:
-    """One-time migration: copy sessions.db (and its WAL/SHM siblings) from
-    ~/.config/evoscientist/ to ~/.evoscientist/.
-
-    Scope is intentionally narrow — only the SQLite trio, because users can't
-    easily move those by hand. User-facing files (skills/, memories/, history)
-    are migrated via an agent prompt documented in the release notes.
-
-    Idempotent via ``.migrated`` marker file. The marker is not written when
-    a copy fails, so transient I/O errors don't permanently block retry.
-    """
-    marker = DATA_DIR / ".migrated"
-    if marker.exists():
-        return
-
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
-        return
-
-    # Resolve legacy source via XDG_CONFIG_HOME (matches config.settings.get_config_dir).
-    # Inlined here to avoid importing config.settings at paths load time.
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    legacy = (
-        (Path(xdg) / "evoscientist")
-        if xdg
-        else (Path.home() / ".config" / "evoscientist")
-    )
-    if not legacy.exists():
-        marker.touch()
-        return
-
-    migrated: list[str] = []
-    failed: list[str] = []
-    for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
-        src = legacy / name
-        dst = DATA_DIR / name
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue  # already migrated
-        try:
-            shutil.copy2(src, dst)
-            migrated.append(name)
-        except OSError as e:
-            logger.warning("Failed to migrate %s: %s", src, e)
-            failed.append(name)
-
-    if migrated:
-        logger.info(
-            "Migrated legacy session DB from %s to %s: %s. "
-            "Legacy files are kept as backup; this auto-migration will be "
-            "removed in EvoScientist 0.1.0.",
-            legacy,
-            DATA_DIR,
-            ", ".join(migrated),
-        )
-
-    # Only write the marker when there were no failures — preserves retry
-    # on transient I/O errors.
-    if not failed:
-        marker.touch()
-
-
-# DEPRECATED(0.1.0): remove this call together with migrate_legacy_sessions_db().
-try:
-    migrate_legacy_sessions_db()
-except Exception:
-    # Never block startup on migration failures
-    logger.exception("Legacy session DB migration failed; continuing without it.")
 
 
 def ensure_dirs() -> None:

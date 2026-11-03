@@ -6,7 +6,7 @@ defaults. The wrapper reports what it did through an injected
 owns any display state (there are no process-global variables here).
 
 The selector only activates when the agent has more than ``threshold`` tools
-(default 26). Below that, the extra LLM call isn't worth the token savings.
+(default 42). Below that, the extra LLM call isn't worth the token savings.
 
 Usage::
 
@@ -37,6 +37,7 @@ from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.tools import BaseTool
 from langgraph.constants import TAG_NOSTREAM
 
+from ..message_meta import is_pinned_skill
 from .events import NO_OP_SINK, MiddlewareEventSink
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,46 @@ logger = logging.getLogger(__name__)
 # Default threshold: only run tool selection when tools exceed this count.
 # Base tools are ~29; selector activates when MCP tools push count above 42.
 DEFAULT_TOOL_THRESHOLD = 42
+# Every built-in tool, so selection only trims MCP tools (and ``tavily_search``).
+# A new built-in tool belongs here too.
 DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
     {
+        # Core
         "think_tool",
         "task",
+        "write_todos",
+        "skill_manager",
+        "ask_user",
+        "update_goal",
+        "code_interpreter",
+        # Files and shell
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        "execute",
+        "delete",
+        # Background processes
+        "run_in_background",
+        "check_process",
+        "list_processes",
+        "stop_process",
+        # Scheduled tasks
+        "schedule_task",
+        "list_scheduled_tasks",
+        "cancel_scheduled_task",
+        # Memory
         "read_memory",
         "record_observation",
         "search_observations",
+        # Async sub-agents
+        "start_async_task",
+        "check_async_task",
+        "update_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
     }
 )
 
@@ -149,6 +183,14 @@ def _available_always_include(
     """Return mandatory BaseTool names that exist on this request."""
     available_names = {tn for tool in tools if (tn := _tool_name(tool))}
     return sorted(candidates & available_names)
+
+
+def _without_pinned_skills(request: ModelRequest) -> ModelRequest:
+    """Hide pinned skill bodies: the selector queries the last human message."""
+    messages = [m for m in request.messages if not is_pinned_skill(m)]
+    if len(messages) == len(request.messages):
+        return request
+    return request.override(messages=messages)
 
 
 class _ConditionalToolSelectorMiddleware(AgentMiddleware):
@@ -255,6 +297,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
 
         total = len(request.tools)
         self._events.on_tool_selection_started(total)
+        selector_request = _without_pinned_skills(request)
 
         # Track whether handler was called — if so, any exception is from
         # the downstream model, not the selector, and must propagate.
@@ -276,19 +319,23 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             if selected:
                 logger.debug("Selected tools: %s", selected)
             _end_selection()
+            if selector_request is not request:
+                req = req.override(messages=request.messages)
             return handler(req)
 
         try:
             selector = self._build_selector(request)
             try:
-                return selector.wrap_model_call(request, _handler_after_selection)
+                return selector.wrap_model_call(
+                    selector_request, _handler_after_selection
+                )
             except Exception as exc:
                 if _handler_called or not self._switch_to_auto_tool_choice(
                     exc, selector
                 ):
                     raise
                 return self._build_selector(request).wrap_model_call(
-                    request, _handler_after_selection
+                    selector_request, _handler_after_selection
                 )
         except Exception as exc:
             if _handler_called:
@@ -315,6 +362,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
 
         total = len(request.tools)
         self._events.on_tool_selection_started(total)
+        selector_request = _without_pinned_skills(request)
 
         _handler_called = False
         _selection_open = True
@@ -333,13 +381,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             if selected:
                 logger.debug("Selected tools: %s", selected)
             _end_selection()
+            if selector_request is not request:
+                req = req.override(messages=request.messages)
             return await handler(req)
 
         try:
             selector = self._build_selector(request)
             try:
                 return await selector.awrap_model_call(
-                    request, _handler_after_selection
+                    selector_request, _handler_after_selection
                 )
             except Exception as exc:
                 if _handler_called or not self._switch_to_auto_tool_choice(
@@ -347,7 +397,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
                 ):
                     raise
                 return await self._build_selector(request).awrap_model_call(
-                    request, _handler_after_selection
+                    selector_request, _handler_after_selection
                 )
         except Exception as exc:
             if _handler_called:
@@ -377,16 +427,12 @@ def create_tool_selector_middleware(
         model: Chat model for tool selection.  If *None*, the default
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
-            Default 26.  Set to 0 to always run selection.
+            Default 42.  Set to 0 to always run selection.
         events: Frontend event sink to report selection to.
 
-    ``think_tool``, ``task``, and memory tools are always included because:
-
-    - ``think_tool``: required every step for structured reflection
-    - ``task``: core delegation mechanism; tested and confirmed the selector
-      model never auto-selects it (0/5 complex queries)
-    - memory tools: referenced by memory prompts; filtering them makes the
-      agent unable to use memory even when the prompt tells it to
+    Built-in tools (``DEFAULT_ALWAYS_INCLUDE_TOOLS``) are always included:
+    the prompts and workflows rely on them, and the selector model never
+    picks ``task`` on its own (0/5 complex queries).
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 

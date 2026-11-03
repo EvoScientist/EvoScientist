@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import NotRequired, TypedDict
 
+# The most steps a background memory run takes. Its graph binds it, which
+# bounds an in-process run; its launch passes it in the run's config, which
+# langgraph-api fills with its own limit otherwise.
+MEMORY_AGENT_RECURSION_LIMIT = 100
+
 
 class MemoryType(StrEnum):
     """Kinds of reusable memory an observation can represent."""
@@ -45,14 +50,19 @@ class ObservationRelation(StrEnum):
 
 
 class ObservationRecordResult(TypedDict):
-    """Result returned by `record_observation`."""
+    """Result returned by `record_observation`.
 
-    observation_id: str
-    path: str
+    `observation_id` and `path` name the written or matching file; a refused
+    placeholder has neither.
+    """
+
+    observation_id: NotRequired[str]
+    path: NotRequired[str]
     created: bool
     memory_type: MemoryType
     scope: MemoryScope
     project_id: NotRequired[str]
+    note: NotRequired[str]
 
 
 class RelatedObservationResult(TypedDict):
@@ -80,6 +90,7 @@ class ObservationSearchDocument:
     text: str
     related_observations: tuple[RelatedObservationResult, ...] = ()
     created_at: str | None = None
+    source_session_id: str | None = None
 
 
 class ObservationSearchHit(TypedDict):

@@ -87,6 +87,19 @@ def running_bg_process_names(url: str, *, timeout: float = 3.0) -> list[str]:
         return []
 
 
+def has_busy_thread(url: str, *, timeout: float = 3.0) -> bool:
+    """True when a thread is running a turn (``busy``), not counting
+    background jobs, for a prompt that names those separately. Best-effort:
+    False on any error."""
+    try:
+        return bool(
+            _search_threads(url, {"status": "busy", "limit": 1}, timeout=timeout)
+        )
+    except Exception as exc:
+        logger.warning(f"Busy-thread lookup failed for {url}: {exc}")
+        return False
+
+
 def _probe_active_state(
     url: str, *, watched_thread_id: str | None = None, timeout: float = 3.0
 ) -> ActiveState:

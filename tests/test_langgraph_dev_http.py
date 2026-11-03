@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from starlette.testclient import TestClient
 
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.langgraph_dev.http import app
 from EvoScientist.paths import Workspace
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def test_get_models_returns_entries_and_default():
@@ -167,14 +168,19 @@ def test_ollama_discovery_skipped_when_base_url_absent():
 # ---- /api/teams -----------------------------------------------------------
 
 
-def _expert_info(
-    name: str,
-    *,
-    description: str = "",
-    byline: str = "",
-    capability_tags: list[str] | None = None,
-    avatar_hint: str = "",
-):
+@pytest.fixture
+def launcher(monkeypatch, tmp_path):
+    """The served project of the client that started the server."""
+    from EvoScientist import paths
+    from EvoScientist.langgraph_dev import registry
+
+    workspace = Workspace(tmp_path)
+    monkeypatch.setattr(paths, "launcher_workspace", lambda: workspace)
+    registry.REGISTRY.set_registered(workspace.key, True)
+    return workspace
+
+
+def _expert_info(name: str, *, description: str = ""):
     """Build a SkillInfo for an expert skill (agent-teams v1)."""
     from pathlib import Path
 
@@ -186,12 +192,10 @@ def _expert_info(
         path=Path(f"/skills/{name}"),
         source="builtin",
         type="expert",
-        byline=byline,
-        capability_tags=list(capability_tags or []),
-        avatar_hint=avatar_hint,
     )
 
 
+@pytest.mark.usefixtures("launcher")
 def test_get_teams_returns_installed_expert_skills():
     experts = [
         _expert_info("expert-a", description="First expert"),
@@ -209,6 +213,7 @@ def test_get_teams_returns_installed_expert_skills():
     assert names == ["expert-a", "expert-b"]
 
 
+@pytest.mark.usefixtures("launcher")
 def test_get_teams_omits_backend_implementation_fields():
     """Never leak SKILL.md body / role / dispatch / source / path / etc.
     onto the gallery endpoint — those are backend-only."""
@@ -236,42 +241,20 @@ def test_get_teams_omits_backend_implementation_fields():
     )
 
 
-def test_get_teams_projects_optional_gallery_metadata_when_present():
-    experts = [
-        _expert_info(
-            "idea-brainstorm",
-            description="Multi-round brainstorm",
-            byline="Research idea brainstormer",
-            capability_tags=["Iteration", "ELO ranking"],
-            avatar_hint="lightbulb",
-        ),
-    ]
+@pytest.mark.usefixtures("launcher")
+def test_get_teams_entry_is_name_and_description():
+    """Each gallery card carries name and description only."""
+    experts = [_expert_info("minimal-expert", description="Minimal expert")]
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
         body = client.get("/api/teams").json()
     entry = body["teams"][0]
-    assert entry["name"] == "idea-brainstorm"
-    assert entry["description"] == "Multi-round brainstorm"
-    assert entry["byline"] == "Research idea brainstormer"
-    assert entry["capability_tags"] == ["Iteration", "ELO ranking"]
-    assert entry["avatar_hint"] == "lightbulb"
+    assert entry == {"name": "minimal-expert", "description": "Minimal expert"}
 
 
-def test_get_teams_omits_optional_fields_when_absent():
-    """Gallery card should degrade gracefully when an expert declares
-    only the minimum (name, description, type: expert)."""
-    experts = [_expert_info("minimal-expert")]  # no byline / tags / avatar
-    with patch(
-        "EvoScientist.tools.skills_manager.list_expert_skills",
-        return_value=experts,
-    ):
-        body = client.get("/api/teams").json()
-    entry = body["teams"][0]
-    assert set(entry.keys()) == {"name", "description"}
-
-
+@pytest.mark.usefixtures("launcher")
 def test_get_teams_returns_empty_list_when_no_experts_installed():
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -281,12 +264,11 @@ def test_get_teams_returns_empty_list_when_no_experts_installed():
     assert body == {"teams": []}
 
 
-def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
+def test_get_teams_calls_loader_with_include_system_true(launcher):
     """First-party experts ship as builtin skills; the endpoint must
     include the builtin tier or the gallery will be empty on a fresh
     workspace with no user-installed experts, and it must look in the
-    server's workspace."""
-    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+    project of the client that started the server."""
     calls = []
 
     def spy(include_system=False, *, workspace):
@@ -298,7 +280,91 @@ def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
         new=spy,
     ):
         client.get("/api/teams")
-    assert calls == [(True, Workspace(tmp_path))]
+    assert calls == [(True, launcher)]
+
+
+def test_get_teams_lists_named_project(launcher, tmp_path):
+    from EvoScientist.langgraph_dev import registry
+
+    other = Workspace(tmp_path / "other")
+    other.root.mkdir()
+    registry.REGISTRY.set_registered(other.key, True)
+    calls = []
+
+    def spy(include_system=False, *, workspace):
+        calls.append(workspace)
+        return []
+
+    with patch("EvoScientist.tools.skills_manager.list_expert_skills", new=spy):
+        resp = client.get("/api/teams", params={"workspace_dir": other.key})
+
+    assert resp.status_code == 200
+    assert calls == [other]
+
+
+@pytest.mark.parametrize(
+    ("workspace_dir", "status", "error"),
+    [("relative/ws", 400, "invalid_path"), (None, 404, "not_served")],
+)
+@pytest.mark.usefixtures("launcher")
+def test_get_teams_refuses_unserved_project(workspace_dir, status, error, tmp_path):
+    if workspace_dir is None:
+        workspace_dir = str(tmp_path / "nonexistent")
+    resp = client.get("/api/teams", params={"workspace_dir": workspace_dir})
+
+    assert resp.status_code == status
+    assert resp.json() == {"error": error}
+
+
+# ---- /api/workspace -------------------------------------------------------
+# The WebUI reads the folder it shows here instead of from a file on its own
+# machine, and uses the string as-is.
+
+
+def test_get_workspace_returns_launcher_project_key(monkeypatch, tmp_path):
+    from EvoScientist import paths
+    from EvoScientist.langgraph_dev import registry
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    registry.REGISTRY.set_registered(Workspace(tmp_path / "real").key, True)
+    monkeypatch.setattr(
+        paths, "launcher_workspace", lambda: Workspace(tmp_path / "link")
+    )
+
+    resp = client.get("/api/workspace")
+
+    assert resp.json() == {
+        "workspace_dir": Workspace(tmp_path / "real").key,
+        "run_dir": None,
+    }
+
+
+@pytest.mark.parametrize("case", ["no launcher", "unregistered", "folder missing"])
+def test_get_workspace_answers_503_without_served_launcher(monkeypatch, tmp_path, case):
+    """Not 404: the WebUI takes that for a server without this route."""
+    from EvoScientist import paths
+    from EvoScientist.langgraph_dev import registry
+
+    workspace = Workspace(tmp_path / "ws")
+    workspace.root.mkdir()
+    if case != "unregistered":
+        registry.REGISTRY.set_registered(workspace.key, True)
+    if case == "folder missing":
+        workspace.root.rmdir()
+    launcher = None if case == "no launcher" else workspace
+    monkeypatch.setattr(paths, "launcher_workspace", lambda: launcher)
+
+    for route in ("/api/workspace", "/api/teams"):
+        resp = client.get(route)
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "no_workspace"
+
+
+def test_get_workspace_refuses_a_foreign_origin():
+    resp = client.get("/api/workspace", headers={"Origin": "https://evil.example"})
+
+    assert resp.status_code == 403
 
 
 # ---- /api/bg_process_status -----------------------------------------------

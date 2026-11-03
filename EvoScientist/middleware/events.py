@@ -36,11 +36,12 @@ a slow sink from the run.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol, runtime_checkable
+
+from .. import paths
 
 MIDDLEWARE_EVENT_TAG = "evoscientist"
 """Wire tag for middleware events carried on the LangGraph ``custom`` channel.
@@ -343,8 +344,8 @@ class StreamBroadcastSink:
     preserving local in-process consumers if a binder ever exists.
 
     Delivery is single-rendered per backend by construction, with no
-    suppression flag: the local CLI process never sets
-    ``EVOSCIENTIST_SERVER_PROCESS``, so local stacks never broadcast and render
+    suppression flag: the local CLI process is never the server
+    (``paths.SERVER_PROCESS``), so local stacks never broadcast and render
     once via the injected frontend sink; server stacks broadcast, and their
     silent wrapped sink renders nothing.
 
@@ -412,16 +413,16 @@ def resolve_middleware_event_sink(
       main-agent frontend widgets, and their results reach the client via
       thread state, not live custom events;
     * main stacks without an explicit sink use :class:`RunScopedEventSink`;
-    * main stacks inside a langgraph dev subprocess (``EVOSCIENTIST_SERVER_PROCESS``
-      set — i.e. the process serves graphs over HTTP, where no frontend sink
-      can exist) are additionally wrapped in :class:`StreamBroadcastSink` so
-      middleware events reach the client over the ``custom`` channel. The
-      local CLI process never sets that variable, so local stacks never
-      broadcast (single render via the injected sink).
+    * main stacks inside the langgraph dev server (``paths.SERVER_PROCESS``:
+      the process serves graphs over HTTP, where no frontend sink can exist)
+      are additionally wrapped in :class:`StreamBroadcastSink` so middleware
+      events reach the client over the ``custom`` channel. The local CLI
+      process is never the server, so local stacks never broadcast (single
+      render via the injected sink).
     """
     if for_async_subagent:
         return NO_OP_SINK
     sink = events if events is not None else RunScopedEventSink()
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
+    if paths.SERVER_PROCESS:
         return StreamBroadcastSink(sink)
     return sink

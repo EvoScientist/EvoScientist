@@ -127,6 +127,39 @@ def test_create_tool_selector_always_include():
         ]
 
 
+@pytest.mark.usefixtures("no_mcp")
+def test_always_include_covers_every_builtin_tool(tmp_path, monkeypatch):
+    """Selection must never drop a built-in tool of the main agent, so a new
+    built-in has to join ``DEFAULT_ALWAYS_INCLUDE_TOOLS``."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import create_cli_agent
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.middleware.tool_selector import DEFAULT_ALWAYS_INCLUDE_TOOLS
+    from EvoScientist.paths import Workspace
+
+    class _Model(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    # Every optional tool on, the async-task tools included.
+    monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
+    model = _Model(messages=iter([]))
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_cli_agent(
+        workspace=Workspace(tmp_path),
+        config=EvoScientistConfig(),
+        chat_model=model,
+        checkpointer=InMemorySaver(),
+    )
+
+    builtins = set(agent.nodes["tools"].bound.tools_by_name)
+    assert "start_async_task" in builtins
+    assert builtins - DEFAULT_ALWAYS_INCLUDE_TOOLS == set()
+
+
 def test_custom_threshold():
     p1, p2, p3, p4 = _factory_patches()
     with p1, p2, p3, p4:
@@ -834,7 +867,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider=provider,
             http_async_client=client,
         )
@@ -1199,3 +1232,69 @@ def test_auto_selector_model_survives_copy():
     for clone in (copy.copy(wrapped), copy.deepcopy(wrapped)):
         assert type(clone) is _AutoToolChoiceSelectorModel
         assert isinstance(clone._model, FakeListChatModel)
+
+
+def _pinned_skill_message():
+    from langchain_core.messages import HumanMessage
+
+    return HumanMessage(
+        "<skill name='alpha'>long body</skill>",
+        additional_kwargs={"lc_source": "pinned_skill", "skill": {"name": "alpha"}},
+    )
+
+
+def _selection_request():
+    from langchain_core.messages import HumanMessage
+
+    return ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage("find papers on X"), _pinned_skill_message()],
+        tools=[_tool(f"t{i}") for i in range(15)],
+    )
+
+
+def test_selector_sees_the_user_message_and_model_sees_the_skill():
+    seen_by_selector = []
+    seen_by_model = []
+
+    class _Selector:
+        def wrap_model_call(self, request, handler):
+            seen_by_selector.append(list(request.messages))
+            return handler(request.override(tools=request.tools[:2]))
+
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=lambda _always: _Selector(), threshold=10
+    )
+    request = _selection_request()
+
+    cond.wrap_model_call(request, lambda req: seen_by_model.append(req) or "ok")
+
+    assert [m.content for m in seen_by_selector[0]] == ["find papers on X"]
+    assert seen_by_model[0].messages == request.messages
+    assert len(seen_by_model[0].tools) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_selector_sees_the_user_message_and_model_sees_the_skill():
+    seen_by_selector = []
+    seen_by_model = []
+
+    class _Selector:
+        async def awrap_model_call(self, request, handler):
+            seen_by_selector.append(list(request.messages))
+            return await handler(request.override(tools=request.tools[:2]))
+
+    async def _handler(req):
+        seen_by_model.append(req)
+        return "ok"
+
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=lambda _always: _Selector(), threshold=10
+    )
+    request = _selection_request()
+
+    await cond.awrap_model_call(request, _handler)
+
+    assert [m.content for m in seen_by_selector[0]] == ["find papers on X"]
+    assert seen_by_model[0].messages == request.messages
+    assert len(seen_by_model[0].tools) == 2

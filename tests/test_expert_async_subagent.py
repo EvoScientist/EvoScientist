@@ -901,6 +901,7 @@ class TestCallerModelInheritance:
         ns = SimpleNamespace(
             tool_call_id="tc1",
             config={"configurable": {"model": model, "model_provider": provider}},
+            context=None,
         )
         if state is not None:
             ns.state = state
@@ -1065,3 +1066,51 @@ class TestCallerModelInheritance:
             )
         # Reset restores the default (None) — nothing leaks to the next launch.
         assert not patches_mod._caller_configurable.get()
+
+
+async def test_finished_task_is_not_reported_inside_the_run(workspace):
+    """cli/async_notifier reports finished tasks; the run itself adds nothing."""
+    from deepagents import create_deep_agent
+    from deepagents.backends import FilesystemBackend
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class _Model(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    client = MagicMock()
+    client.runs.get = AsyncMock(return_value={"run_id": "r1", "status": "success"})
+    client.threads.get = AsyncMock(return_value={"status": "idle", "values": {}})
+    spec = {**_standard_spec(), "url": "http://127.0.0.1:1"}
+    agent = create_deep_agent(
+        model=_Model(responses=[AIMessage(content="ok")]),
+        backend=FilesystemBackend(root_dir=str(workspace.root), virtual_mode=True),
+        middleware=[
+            EvoAsyncSubAgentMiddleware(workspace=workspace, async_subagents=[spec])
+        ],
+        checkpointer=InMemorySaver(),
+    )
+    task = {
+        "task_id": "t1",
+        "agent_name": "writing-agent",
+        "thread_id": "t1",
+        "run_id": "r1",
+        "status": "running",
+        "created_at": "2026-10-16T00:00:00Z",
+        "last_checked_at": "2026-10-16T00:00:00Z",
+        "last_updated_at": "2026-10-16T00:00:00Z",
+    }
+    with patch(
+        "deepagents.middleware.async_subagents._ClientCache.get_async",
+        return_value=client,
+    ):
+        out = await agent.ainvoke(
+            {"messages": [HumanMessage("hi")], "async_tasks": {"t1": task}},
+            {"configurable": {"thread_id": "main"}},
+        )
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["async_tasks"]["t1"]["status"] == "running"

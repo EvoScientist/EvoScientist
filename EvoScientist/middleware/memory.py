@@ -1,17 +1,18 @@
 """Memory middleware for EvoScientist.
 
 The middleware owns the markdown files under ``/memories/profile/``: it creates
-them when missing, migrates the old ``/memories/MEMORY.md`` file when present,
-injects either profile contents or profile file pointers into model calls, and
-points agents at observation memory under ``/memories/observations/``. Agents
-still read and edit profile files through their normal ``/memories/...`` tools;
-observation writes go through the structured ``record_observation`` tool.
+them when missing, injects either profile contents or profile file pointers into
+model calls, and points agents at observation memory under
+``/memories/observations/``. Agents still read and edit profile files through
+their normal ``/memories/...`` tools; observation writes go through the
+structured ``record_observation`` tool.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import re
@@ -30,6 +31,7 @@ from langchain_core.messages import HumanMessage
 
 from .. import paths as _paths
 from ..memory import (
+    DEFAULT_INLINE_ROWS_PER_SESSION,
     MemorySourceType,
     ObservationRecordResult,
     build_observation_index_context,
@@ -46,8 +48,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 60_000
 _TRUNCATED_PROFILE_HEAD_RATIO = 0.75
 _warned_profile_truncations: set[tuple[str, ...]] = set()
-_LEGACY_MEMORY_FILENAME = "MEMORY.md"
-_LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
 
 PROFILE_MEMORY_INSTRUCTIONS = """
@@ -76,6 +76,20 @@ Profile update scope:
   command output, or temporary run context, leave profile files unchanged.
 """
 
+# Variant for model calls that carry no tools: the paths stay, the read and
+# edit guidance goes (a model told to edit a file it cannot reach acts the
+# edit out as text).
+PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS = """
+These profile notes live under `/memories/profile/`:
+- `/memories/profile/SOUL.md`: how this copy should usually behave; voice and boundaries.
+- `/memories/profile/USER_PROFILE.md`: facts and preferences about the user.
+- `/memories/profile/RESEARCH_TASTE.md`: research interests, standards, methods that fit, and things to avoid.
+- `/memories/profile/projects/{project_id}/PROJECT_PROFILE.md`: conventions, commands, and pitfalls for this workspace.
+
+No file tools are available on this turn; use the profile context below as it is,
+and do not try to read a part marked as omitted.
+"""
+
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
 Observation memory lives under `/memories/observations/`:
 - `/memories/observations/global/`: cross-project observations.
@@ -97,6 +111,18 @@ Required memory preflight:
   the actual workspace work as appropriate.
 - Mention the result briefly before continuing: observation IDs used, or that
   no relevant observation was found. Keep this preflight short.
+"""
+
+# Variant for model calls that carry no tools (e.g. a proactive shadow turn):
+# the preflight above would tell the model to call tools it does not have, which
+# it then acts out as text instead of answering.
+OBSERVATION_MEMORY_READ_INSTRUCTIONS_NO_TOOLS = """
+Observation memory lives under `/memories/observations/`:
+- `/memories/observations/global/`: cross-project observations.
+- `/memories/observations/projects/{project_id}/`: observations for this workspace.
+
+No memory tools are available on this turn. The inlined observation index below
+is the memory in context for this reply; use it directly.
 """
 
 OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
@@ -315,6 +341,17 @@ def _apply_bootstrap_view(
     return merged
 
 
+def _request_has_tools(request: ModelRequest) -> bool:
+    """True when the model request carries at least one tool.
+
+    A request with no tools (a proactive shadow turn strips them all) must not
+    receive tool-usage directives: a model told to run a memory preflight with
+    no tools acts it out as text instead of answering. ``ModelRequest`` always
+    holds a list here.
+    """
+    return bool(request.tools)
+
+
 def _current_thread_id() -> str | None:
     """Thread id of the running graph, or None outside a runnable context."""
     try:
@@ -448,59 +485,11 @@ def _warn_profile_truncation(agent_paths: list[str], budget: int) -> None:
     )
 
 
-def _legacy_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
-    """Split the old ``MEMORY.md`` format into preface and top-level sections."""
-    pattern = re.compile(
-        r"^## (?P<heading>.+?)\n(?P<body>.*?)(?=^## |\Z)",
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    sections = [
-        (match.group("heading").strip(), match.group("body").strip())
-        for match in pattern.finditer(content)
-    ]
-    first = pattern.search(content)
-    preface = content[: first.start()].strip() if first else content.strip()
-    return preface, sections
-
-
-def _is_legacy_placeholder_line(line: str) -> bool:
-    """Return whether a legacy line is only default-template filler."""
-    stripped = line.strip()
-    if stripped in {"", "- (none yet)", "- (none)", "(No experiments yet)", "(none)"}:
-        return True
-    return bool(re.fullmatch(r"- \*\*[^*]+\*\*:\s*\(unknown\)", stripped))
-
-
-def _clean_legacy_body(body: str) -> str:
-    """Drop old template placeholders while keeping real legacy notes."""
-    lines = [
-        line.rstrip()
-        for line in body.strip().splitlines()
-        if not _is_legacy_placeholder_line(line)
-    ]
-    return "\n".join(lines).strip()
-
-
-def _clean_legacy_preface(preface: str) -> str:
-    """Remove the old root heading from pre-section legacy text."""
-    lines = [
-        line.rstrip()
-        for line in preface.strip().splitlines()
-        if line.strip() != "# EvoScientist Memory"
-    ]
-    return "\n".join(lines).strip()
-
-
-def _append_imported_section(content: str, body: str) -> str:
-    """Append migrated legacy text under a clear, inspectable heading."""
-    return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
-    The middleware bootstraps missing files, migrates legacy memory, and adds
-    profile context to model requests.
+    The middleware bootstraps missing files and adds profile context to model
+    requests.
     """
 
     def __init__(
@@ -516,6 +505,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_observation_tool: bool = True,
         memory_scheduler: MemoryScheduler | None = None,
         enable_profile_bootstrap: bool = False,
+        inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir).expanduser()
@@ -524,6 +514,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._enable_profile_memory = enable_profile_memory
         self._enable_profile_bootstrap = enable_profile_bootstrap
         self._enable_observation_memory = enable_observation_memory
+        self._inline_rows_per_session = inline_rows_per_session
         self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
@@ -626,17 +617,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return False
         return True
 
-    def _delete_legacy_memory(self, legacy_path: Path) -> bool:
-        """Remove the old memory file after it has no content left to preserve."""
-        try:
-            legacy_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning("Failed to delete legacy memory %s: %s", legacy_path, e)
-            return False
-        return True
-
     def _ensure_observation_dirs(self) -> None:
         """Create non-project observation directories agents are prompted to search."""
         try:
@@ -659,88 +639,21 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 and content.strip()
                 and _FRONTMATTER_RE.match(content) is None
             ):
-                # Pre-frontmatter profiles: prepend defaults, keep the body verbatim.
-                content = _join_frontmatter(
+                # A profile without frontmatter: prepend defaults, keep the body
+                # verbatim; inject what is on disk if the rewrite fails.
+                repaired = _join_frontmatter(
                     _default_user_profile_frontmatter(), content
                 )
-                self._write_text(path, content)
+                if self._write_text(path, repaired):
+                    content = repaired
             records.append((memory_path, content))
         return records
 
-    def _migrate_legacy_memory(self) -> bool:
-        """Import recognized sections from legacy ``MEMORY.md`` into profiles.
-
-        The legacy file is removed only after real content is copied or the file
-        is found to contain only old template placeholders.
-        """
-        legacy_path = self._memory_dir / _LEGACY_MEMORY_FILENAME
-        legacy = self._read_text(legacy_path)
-        if legacy is None:
-            return True
-        if not legacy.strip():
-            return self._delete_legacy_memory(legacy_path)
-
-        user_profile_path = "/profile/USER_PROFILE.md"
-        research_taste_path = "/profile/RESEARCH_TASTE.md"
-        imports: dict[str, list[str]] = {
-            user_profile_path: [],
-            research_taste_path: [],
-        }
-        recognized_paths = {
-            "User Profile": user_profile_path,
-            "Research Preferences": research_taste_path,
-            "Experiment History": user_profile_path,
-            "Learned Preferences": user_profile_path,
-        }
-
-        preface, legacy_sections = _legacy_sections(legacy)
-        preface_body = _clean_legacy_preface(preface)
-        if preface_body:
-            imports[user_profile_path].append(f"### Notes\n{preface_body}")
-        for heading, body in legacy_sections:
-            cleaned = _clean_legacy_body(body)
-            if not cleaned:
-                continue
-            target_path = recognized_paths.get(heading, user_profile_path)
-            imports.setdefault(target_path, []).append(f"### {heading}\n{cleaned}")
-
-        imported_any = False
-        for memory_path, bodies in imports.items():
-            if not bodies:
-                continue
-            path = self._file_path(memory_path)
-            content = self._read_text(path)
-            if content is None:
-                logger.warning(
-                    "Skipping legacy memory migration for missing profile %s", path
-                )
-                return False
-            body = "\n\n".join(bodies)
-            if not self._write_text(path, _append_imported_section(content, body)):
-                return False
-            imported_any = True
-
-        if not imported_any:
-            logger.debug("Legacy MEMORY.md contained no real content to migrate")
-
-        return self._delete_legacy_memory(legacy_path)
-
-    def _read_bootstrapped_profile_records(self) -> list[tuple[str, str]]:
-        records = self._ensure_profile_files()
-        if self._migrate_legacy_memory():
-            records = [
-                (memory_path, self._read_text(self._file_path(memory_path)) or "")
-                for memory_path, _ in records
-            ]
-        return records
-
     def _read_profile_records(self) -> list[tuple[str, str]]:
-        """Load all profile files after bootstrapping and legacy migration."""
-        if not self._enable_observation_memory:
-            return self._read_bootstrapped_profile_records()
-
-        self._ensure_observation_dirs()
-        return self._read_bootstrapped_profile_records()
+        """Load all profile files, creating any that are missing."""
+        if self._enable_observation_memory:
+            self._ensure_observation_dirs()
+        return self._ensure_profile_files()
 
     def _profile_context_from_records(self, records: list[tuple[str, str]]) -> str:
         """Inline profile files, truncating only those over their share of the budget."""
@@ -820,7 +733,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return PROFILE_BOOTSTRAP_RETRY
         return ""
 
-    def _refresh_observation_index_context(self) -> str:
+    def _refresh_observation_index_context(
+        self, *, include_search_hints: bool = True
+    ) -> str:
         """Refresh the prompt observation index from current memory files."""
         if not self._enable_observation_memory:
             return ""
@@ -829,6 +744,8 @@ class EvoMemoryMiddleware(AgentMiddleware):
             context = build_observation_index_context(
                 memory_dir=self._memory_dir,
                 project_id=self._project_id,
+                include_search_hints=include_search_hints,
+                rows_per_session=self._inline_rows_per_session,
             )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
@@ -839,9 +756,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._observation_index_context = context
         return context
 
-    def _observation_memory_instructions(self) -> str:
+    def _observation_memory_instructions(self, *, tools_available: bool = True) -> str:
         if not self._enable_observation_memory:
             return ""
+        if not tools_available:
+            # No tool directives (preflight / record) on a tool-less call.
+            return OBSERVATION_MEMORY_READ_INSTRUCTIONS_NO_TOOLS.format(
+                project_id=self._project_id
+            )
 
         instructions = OBSERVATION_MEMORY_READ_INSTRUCTIONS.format(
             project_id=self._project_id
@@ -850,14 +772,21 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return instructions
         return instructions + OBSERVATION_MEMORY_WRITE_INSTRUCTIONS
 
-    def _memory_instructions_context(self) -> str:
+    def _memory_instructions_context(self, *, tools_available: bool = True) -> str:
         """Return static memory instructions for enabled memory features."""
         instructions = []
         if self._enable_profile_memory:
-            instructions.append(
-                PROFILE_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
+            profile_instructions = (
+                PROFILE_MEMORY_INSTRUCTIONS
+                if tools_available
+                else PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS
             )
-        if observation_instructions := self._observation_memory_instructions():
+            instructions.append(
+                profile_instructions.format(project_id=self._project_id)
+            )
+        if observation_instructions := self._observation_memory_instructions(
+            tools_available=tools_available
+        ):
             instructions.append(observation_instructions)
         if not instructions:
             return ""
@@ -887,12 +816,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
         observation_index_context: str,
         profile_content: str,
         bootstrap_context: str = "",
+        tools_available: bool = True,
     ) -> str:
         """Build request memory context ordered from static to dynamic."""
         return "\n\n".join(
             part
             for part in (
-                self._memory_instructions_context(),
+                self._memory_instructions_context(tools_available=tools_available),
                 observation_index_context,
                 self._profile_memory_context(profile_content),
                 bootstrap_context.strip(),
@@ -916,6 +846,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             observation_index_context=observation_index_context,
             profile_content=profile_content,
             bootstrap_context=bootstrap_context,
+            tools_available=_request_has_tools(request),
         )
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
@@ -930,7 +861,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
         profile_content = self._profile_context_for_request()
         return self._inject_memory_context(
             request,
-            observation_index_context=self._refresh_observation_index_context(),
+            observation_index_context=self._refresh_observation_index_context(
+                include_search_hints=_request_has_tools(request)
+            ),
             profile_content=profile_content,
             bootstrap_context=self._bootstrap_context(
                 thread_id=_current_thread_id(),
@@ -946,16 +879,18 @@ class EvoMemoryMiddleware(AgentMiddleware):
         # Resolved on the event-loop thread: get_config() reads a contextvar.
         thread_id = _current_thread_id()
         human_messages = _count_human_messages(request.state)
+        refresh_index = functools.partial(
+            self._refresh_observation_index_context,
+            include_search_hints=_request_has_tools(request),
+        )
 
         if self._enable_observation_memory and self._enable_profile_memory:
             observation_index_context, profile_context = await asyncio.gather(
-                asyncio.to_thread(self._refresh_observation_index_context),
+                asyncio.to_thread(refresh_index),
                 asyncio.to_thread(self._read_profile_memory),
             )
         elif self._enable_observation_memory:
-            observation_index_context = await asyncio.to_thread(
-                self._refresh_observation_index_context
-            )
+            observation_index_context = await asyncio.to_thread(refresh_index)
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
 
@@ -1003,6 +938,7 @@ def create_memory_middleware(
     enable_observation_tool: bool = True,
     memory_scheduler: MemoryScheduler | None = None,
     enable_profile_bootstrap: bool = False,
+    inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -1020,4 +956,5 @@ def create_memory_middleware(
         enable_observation_tool=enable_observation_tool,
         memory_scheduler=memory_scheduler,
         enable_profile_bootstrap=enable_profile_bootstrap,
+        inline_rows_per_session=inline_rows_per_session,
     )

@@ -8,6 +8,7 @@ from ..types import (
     ObservationSearchMode,
 )
 from .index import (
+    DEFAULT_INLINE_ROWS_PER_SESSION,
     DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
     build_observation_index_context,
     build_observation_linker_index_context,
@@ -38,6 +39,7 @@ from .tools import (
 )
 
 __all__ = [
+    "DEFAULT_INLINE_ROWS_PER_SESSION",
     "DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS",
     "OBSERVATION_DIR",
     "LinkObservationsArgs",

@@ -132,12 +132,14 @@ class StreamEventEmitter:
         )
 
     @staticmethod
-    def subagent_end(name: str, instance_id: str) -> StreamEvent:
-        """Sub-agent delegation completed."""
-        return StreamEvent(
-            "subagent_end",
-            {"type": "subagent_end", "name": name, "instance_id": instance_id},
-        )
+    def subagent_end(
+        name: str, instance_id: str, *, paused: bool = False
+    ) -> StreamEvent:
+        """Sub-agent delegation completed, or stopped at a pause (``paused``)."""
+        data = {"type": "subagent_end", "name": name, "instance_id": instance_id}
+        if paused:
+            data["paused"] = True
+        return StreamEvent("subagent_end", data)
 
     @staticmethod
     def panel_dispatch_start(
@@ -207,11 +209,122 @@ class StreamEventEmitter:
         )
 
     @staticmethod
-    def done(response: str = "") -> StreamEvent:
-        """Done event."""
+    def rubric_evaluation_start(*, iteration: int) -> StreamEvent:
+        """The acceptance grader started a pass over the finished work."""
         return StreamEvent(
-            "done", {"type": "done", "content": response, "response": response}
+            "rubric_evaluation_start",
+            {"type": "rubric_evaluation_start", "iteration": iteration},
         )
+
+    @staticmethod
+    def rubric_evaluation(
+        *,
+        iteration: int,
+        result: str,
+        explanation: str,
+        criteria: list[dict],
+        unverified: bool,
+    ) -> StreamEvent:
+        """The verdict of one grading pass."""
+        return StreamEvent(
+            "rubric_evaluation",
+            {
+                "type": "rubric_evaluation",
+                "iteration": iteration,
+                "result": result,
+                "explanation": explanation,
+                "criteria": criteria,
+                "unverified": unverified,
+            },
+        )
+
+    @staticmethod
+    def goal_state(
+        *,
+        change: str,
+        status: str = "",
+        note: str = "",
+        objective: str = "",
+        criteria: str = "",
+        message: str = "",
+        unreviewed: bool = False,
+    ) -> StreamEvent:
+        """Something happened to the thread's goal (drafted, accepted, paused, ...)."""
+        data = {
+            "type": "goal_state",
+            "change": change,
+            "status": status,
+            "note": note,
+            "objective": objective,
+            "criteria": criteria,
+            "message": message,
+        }
+        if unreviewed:
+            # Present only for a draft adopted without a review (auto mode).
+            data["unreviewed"] = True
+        return StreamEvent("goal_state", data)
+
+    @staticmethod
+    def rubric_evaluation_deferred(*, tasks: int, processes: int) -> StreamEvent:
+        """Grading waits for this thread's background sub-agents or processes."""
+        return StreamEvent(
+            "rubric_evaluation_deferred",
+            {
+                "type": "rubric_evaluation_deferred",
+                "tasks": tasks,
+                "processes": processes,
+            },
+        )
+
+    @staticmethod
+    def model_retry(
+        *,
+        attempt: int,
+        wait_seconds: float,
+        reason: str,
+        budget_left_seconds: float,
+        cause: str,
+        instance_id: str,
+        subagent: str,
+        discarded: dict[str, Any],
+    ) -> StreamEvent:
+        return StreamEvent(
+            "model_retry",
+            {
+                "type": "model_retry",
+                "attempt": attempt,
+                "wait_seconds": wait_seconds,
+                "reason": reason,
+                "budget_left_seconds": budget_left_seconds,
+                "cause": cause,
+                "instance_id": instance_id,
+                "subagent": subagent,
+                "discarded": discarded,
+            },
+        )
+
+    @staticmethod
+    def model_output_discarded(
+        *, instance_id: str, discarded: dict[str, Any]
+    ) -> StreamEvent:
+        return StreamEvent(
+            "model_output_discarded",
+            {
+                "type": "model_output_discarded",
+                "instance_id": instance_id,
+                "discarded": discarded,
+            },
+        )
+
+    @staticmethod
+    def done(
+        response: str = "", *, last_pass_response: str | None = None
+    ) -> StreamEvent:
+        """Done event; ``last_pass_response`` only for a run that was graded."""
+        data = {"type": "done", "content": response, "response": response}
+        if last_pass_response is not None:
+            data["last_pass_response"] = last_pass_response
+        return StreamEvent("done", data)
 
     @staticmethod
     def usage_stats(input_tokens: int, output_tokens: int) -> StreamEvent:

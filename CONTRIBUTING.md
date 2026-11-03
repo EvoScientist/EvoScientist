@@ -29,13 +29,15 @@ If you want to add a niche or specialized workflow, consider contributing to the
 
 2. **Install dependencies** (requires [uv](https://docs.astral.sh/uv/)):
    ```bash
-   uv sync --dev
+   uv sync --dev --extra all-channels
    ```
+   The channel extras let the channel tests run; without them they are skipped.
 
-3. **Run the test suite** (no API keys needed):
+3. **Run the test suite** (no API keys or network needed):
    ```bash
-   uv run pytest
+   uv run pytest -n auto --dist worksteal
    ```
+   `-n auto` runs one worker per CPU; plain `uv run pytest` runs serially.
 
 4. **Run the linter:**
    ```bash
@@ -49,6 +51,19 @@ If you want to add a niche or specialized workflow, consider contributing to the
 3. Ensure `uv run ruff check .` and `uv run pytest` pass locally — these also run in CI.
 4. Open a PR against `main` and fill in the PR template.
 5. A maintainer will review your PR. Please be responsive to feedback.
+
+## Releases
+
+The release PR (`release: vX.Y.Z`) also refreshes `constraints.txt`, which pins every dependency to its version in `uv.lock`, so installs from the release tag get the tested set:
+
+```bash
+uv lock
+uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate -o constraints.txt
+```
+
+The file is generated; never edit it by hand. A check on the release PR flags a `uv.lock` that is out of date or a `constraints.txt` that does not match it, and the publish workflows refuse such a release. Other PRs do not need to regenerate it.
+
+Installs read the file from the release tag. A release that the publish guard refuses, or that shipped a wrong `constraints.txt`, is fixed by a new patch release. The repository uses immutable releases: a published release's tag never moves, and its name cannot be reused even after the release is deleted. jsDelivr also caches tagged files for a year.
 
 ## Code style
 
@@ -67,7 +82,7 @@ EvoScientist is a multi-agent AI system for automated scientific experimentation
 | Language | Python 3.11+ |
 | License | Apache 2.0 |
 | Framework | [DeepAgents](https://github.com/langchain-ai/deepagents) + [LangChain](https://python.langchain.com/) + [LangGraph](https://langchain-ai.github.io/langgraph/) |
-| Default model | `claude-sonnet-4-6` (Anthropic) |
+| Default model | `claude-sonnet-5-5` (Anthropic) |
 | Tests | ~890 across 36 files, no API keys needed |
 | Config file | `~/.config/evoscientist/config.yaml` |
 
