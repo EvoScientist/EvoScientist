@@ -60,9 +60,7 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
     ]
 
-    # Map legacy values to current ones
-    _legacy_map = {"textual": "tui", "rich": "cli"}
-    default_backend = _legacy_map.get(config.ui_backend, config.ui_backend)
+    default_backend = config.ui_backend
     if default_backend not in ("tui", "cli", "webui"):
         default_backend = "tui"
 

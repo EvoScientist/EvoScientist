@@ -21,9 +21,8 @@ def pytest_configure(config):
     """Point the home folder at an empty one before EvoScientist is imported.
 
     ``EvoScientist.paths`` resolves the data and config folders from it at
-    import, and the import itself migrates files there, so a fixture would
-    act too late. ``XDG_CONFIG_HOME`` and ``EVOSCIENTIST_DATA_DIR`` would
-    override it, so they go too.
+    import, so a fixture would act too late. ``XDG_CONFIG_HOME`` and
+    ``EVOSCIENTIST_DATA_DIR`` would override it, so they go too.
     """
     global _test_home
     if "EvoScientist" in sys.modules:

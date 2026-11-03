@@ -188,17 +188,14 @@ class CompositeGraphGateway:
         if _is_uuid(thread_id):
             try:
                 exec_ok = await self._execute.delete_thread(thread_id, target)
-            except Exception:  # server hiccup must not block the local delete
-                # WARNING, not DEBUG: the call still returns success off the
-                # local delete, so a thread the server still holds reports as
-                # deleted. Without a breadcrumb at a normal log level the
-                # divergence is invisible in any real deployment. The full fix
-                # (report failure only when neither side deleted) is a tracked
-                # follow-up; this keeps the current behavior self-reporting.
+            except Exception:  # a server error must not override the local result
+                # WARNING: a successful local delete still returns True although
+                # the server may keep the thread.
                 logger.warning(
                     "composite: server-side delete failed for thread %s; "
-                    "local delete succeeded",
+                    "local delete %s",
                     thread_id,
+                    "succeeded" if read_ok else "failed",
                     exc_info=True,
                 )
         return read_ok or exec_ok

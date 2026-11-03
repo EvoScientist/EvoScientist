@@ -1573,7 +1573,7 @@ class TestStepChannels:
             mock_q.checkbox.return_value.ask.return_value = []
             result = _step_channels(config)
 
-        assert result == {"channel_enabled": "", "imessage_enabled": False}
+        assert result == {"channel_enabled": ""}
 
     def test_returns_enabled_when_setup_passes(self):
         """Test channels step returns enabled when iMessage setup succeeds."""
@@ -1593,7 +1593,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
 
     def test_returns_enabled_with_senders(self):
         """Test channels step returns enabled with specific senders."""
@@ -1613,7 +1612,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
         assert result["imessage_allowed_senders"] == "+1234567890,+0987654321"
 
     def test_setup_fails_user_declines(self):
@@ -1634,7 +1632,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == ""
-        assert result["imessage_enabled"] is False
 
     def test_setup_fails_user_enables_anyway(self):
         """Test channels step enables iMessage when setup fails but user confirms."""
@@ -1655,7 +1652,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test channels step raises KeyboardInterrupt on cancel."""

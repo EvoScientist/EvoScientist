@@ -107,22 +107,11 @@ async def get_teams(request: Request) -> JSONResponse:
     """Return installed expert skills as ``{teams: [...]}`` for the WebUI gallery.
 
     A "team" in the WebUI vocabulary is an installed expert skill — a skill
-    directory carrying a sibling ``EXPERT.md`` (or, on the deprecated path,
-    ``type: expert`` SKILL.md frontmatter). The response is a curated,
-    gallery-safe projection: name + description, plus optional ``byline`` /
-    ``capability_tags`` / ``avatar_hint`` when the skill populates them.
+    directory carrying a sibling ``EXPERT.md``. The response is a curated,
+    gallery-safe projection.
 
-    Cards for experts on the current contract carry name + description only:
-    the decoration fields were actor metadata in SKILL.md frontmatter, which
-    that contract removes rather than relocates (``EXPERT.md`` has no
-    frontmatter to hold them). The omit-when-unpopulated projection below is
-    what makes those cards degrade rather than break; restoring richer cards
-    means sourcing decoration from index metadata, not re-adding frontmatter
-    fields.
-
-    Backend implementation details (SKILL.md body / system prompt, role
-    line, tool list, source tier, filesystem path,
-    tags) are intentionally NOT projected. The gallery only needs
+    Backend implementation details (system prompt, tool list, source tier,
+    filesystem path, tags) are intentionally NOT projected. The gallery only needs
     identity + descriptor fields to render the card; anything richer
     belongs in a dedicated info endpoint.
 
@@ -134,8 +123,8 @@ async def get_teams(request: Request) -> JSONResponse:
     filesystem walking + yaml parsing, which langgraph-dev's
     ``blockbuster`` middleware refuses on the async event loop.
 
-    Response shape (each entry): ``{name, description, byline?,
-    capability_tags?, avatar_hint?}`` — the WebUI gallery consumes these.
+    Response shape (each entry): ``{name, description}`` — the WebUI gallery
+    consumes these.
 
     The ``workspace_dir`` query parameter names the project whose installs
     count (``400`` when it is not a readable absolute path, ``404`` when that
@@ -158,23 +147,7 @@ async def get_teams(request: Request) -> JSONResponse:
             return JSONResponse({"error": "not_served"}, status_code=404)
 
     experts = await asyncio.to_thread(list_expert_skills, True, workspace=workspace)
-    teams = []
-    for info in experts:
-        entry = {
-            "name": info.name,
-            "description": info.description,
-        }
-        # Optional gallery fields — omit when unpopulated so the WebUI
-        # card degrades gracefully (SkillInfo defaults `byline` /
-        # `avatar_hint` to "" and `capability_tags` to [], which we
-        # treat as "not declared").
-        if info.byline:
-            entry["byline"] = info.byline
-        if info.capability_tags:
-            entry["capability_tags"] = list(info.capability_tags)
-        if info.avatar_hint:
-            entry["avatar_hint"] = info.avatar_hint
-        teams.append(entry)
+    teams = [{"name": info.name, "description": info.description} for info in experts]
     return JSONResponse({"teams": teams})
 
 
