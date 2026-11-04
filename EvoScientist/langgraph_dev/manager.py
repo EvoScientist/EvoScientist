@@ -209,12 +209,15 @@ _DEFAULT_HOST = server_record.DEFAULT_HOST
 def _probe_host(host: str = _DEFAULT_HOST) -> str:
     """Map a bind address to one a client can actually connect to.
 
-    A wildcard bind includes loopback, so clients use ``127.0.0.1``: you
-    cannot meaningfully *connect* to it (0.0.0.0 is routed to loopback on
-    Linux and outright rejected on Windows). A specific interface is
-    returned as-is — loopback would not reach it.
+    A wildcard bind includes loopback, so clients use loopback: you cannot
+    meaningfully *connect* to it (0.0.0.0 is routed to loopback on Linux
+    and outright rejected on Windows). ``::`` maps to ``::1``, as an IPv6
+    socket may not take IPv4 (it does not by default on Windows). A
+    specific interface is returned as-is — loopback would not reach it.
     """
-    return "127.0.0.1" if boundary.is_wildcard_host(host) else host
+    if not boundary.is_wildcard_host(host):
+        return host
+    return "::1" if host.strip().strip("[]") == "::" else "127.0.0.1"
 
 
 def _format_hostport(host: str, port: int) -> str:

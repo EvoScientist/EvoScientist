@@ -42,9 +42,12 @@ class TestProbeHost:
     uses the configured interface, every client falls back to something
     actually reachable."""
 
-    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", ""])
-    def test_wildcards_map_to_loopback(self, wildcard):
-        assert manager._probe_host(wildcard) == "127.0.0.1"
+    @pytest.mark.parametrize(
+        ("wildcard", "loopback"),
+        [("0.0.0.0", "127.0.0.1"), ("", "127.0.0.1"), ("::", "::1"), ("[::]", "::1")],
+    )
+    def test_wildcards_map_to_loopback(self, wildcard, loopback):
+        assert manager._probe_host(wildcard) == loopback
 
     @pytest.mark.parametrize(
         "host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"]

@@ -150,7 +150,7 @@ def test_server_running_counts_lock_another_prober_holds_briefly_as_free(home):
     prober.start()
     assert held.wait(5)
     try:
-        assert server_home.lock_state() == server_home.FREE
+        assert server_home.lock_state(wait=2) == server_home.FREE
     finally:
         prober.join(5)
 

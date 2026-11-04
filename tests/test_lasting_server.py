@@ -620,13 +620,16 @@ def test_server_status_names_configured_host_other_than_recorded(
     assert ("configured host: 10.0.0.5" in output) is shown
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
-def test_server_status_names_wildcard_bind_next_to_address(monkeypatch, host):
+@pytest.mark.parametrize(
+    ("host", "address"),
+    [("0.0.0.0", "http://127.0.0.1:6174"), ("::", "http://[::1]:6174")],
+)
+def test_server_status_names_wildcard_bind_next_to_address(monkeypatch, host, address):
     _status_server(monkeypatch, projects=[], record=_record(host=host))
 
     output = _status_output()
 
-    assert "http://127.0.0.1:6174" in output
+    assert address in output
     assert f"listens on {host}" in output
 
 
