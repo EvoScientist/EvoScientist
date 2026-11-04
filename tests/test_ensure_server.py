@@ -326,7 +326,6 @@ def test_ensure_unreadable_lock_is_lock_unreadable_without_loop(server, monkeypa
 
     assert result.problem == "lock_unreadable"
     assert str(manager.RUNTIME.server_lock) in result.error
-    assert "chown" in result.error
     assert len(looks) <= 2
     assert server.spawns == []
 

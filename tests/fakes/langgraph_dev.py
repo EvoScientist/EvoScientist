@@ -3,6 +3,7 @@ locks and its spawn."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import threading
@@ -49,8 +50,9 @@ class LockHolder:
 
 class Processes:
     """The processes psutil sees, by PID: a live langgraph dev on a port,
-    created at :data:`CREATED` unless told otherwise. Any other PID is gone.
-    The command line of a PID in ``denied`` cannot be read."""
+    created at :data:`CREATED` unless told otherwise. Any other PID is gone,
+    and holding it fails as on Windows. The command line of a PID in
+    ``denied`` cannot be read."""
 
     def __init__(self, monkeypatch) -> None:
         self.live: dict[int, tuple[float, list[str]]] = {}
@@ -58,6 +60,7 @@ class Processes:
         monkeypatch.setattr(manager, "_create_time", self._create_time)
         monkeypatch.setattr(manager, "_process_cmdline", self._process_cmdline)
         monkeypatch.setattr(manager, "_langgraph_cmdline", self._cmdline)
+        monkeypatch.setattr(manager, "_hold_pid", self._hold_pid)
 
     def add(
         self,
@@ -74,6 +77,12 @@ class Processes:
 
     def end(self, pid: int) -> None:
         self.live.pop(pid, None)
+
+    @contextlib.contextmanager
+    def _hold_pid(self, pid: int):
+        if pid not in self.live:
+            raise psutil.NoSuchProcess(pid)
+        yield
 
     def _create_time(self, pid: int) -> float | None:
         entry = self.live.get(pid)

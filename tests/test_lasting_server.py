@@ -3,6 +3,7 @@ offer after onboarding, and the setup stage after an upgrade."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 
@@ -451,6 +452,7 @@ def _recorded_server(monkeypatch, record, stopped: list) -> None:
     *stopped*."""
     monkeypatch.setattr(manager, "read_record", lambda **_k: record)
     monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
+    monkeypatch.setattr(manager, "_hold_pid", lambda pid: contextlib.nullcontext())
     monkeypatch.setattr(
         manager, "_end_server_tree", lambda *a, **k: stopped.append("server")
     )
