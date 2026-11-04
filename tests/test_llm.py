@@ -2905,8 +2905,10 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("configured", "sent"), [("", "high"), ("low", "low"), ("none", "none")]
+    ("configured", "sent"),
+    [("", "high"), ("low", "low"), ("none", "none"), ("turbo", "high")],
 )
+@pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
 def test_deepseek_sends_the_configured_reasoning_effort(monkeypatch, configured, sent):
     import json
 
@@ -4431,10 +4433,11 @@ class TestReasoningEffortAcrossProviders:
             ("openrouter", "gpt-6.1-sol", "max", "max"),
             ("openrouter", "gpt-6.1-sol", "minimal", "minimal"),
             ("openrouter", "gpt-6.1-sol", "none", "none"),
-            ("openai", "gpt-6-sol", "turbo", "turbo"),
-            ("openrouter", "gpt-6.1-sol", "turbo", "turbo"),
+            ("openai", "gpt-6-sol", "turbo", "high"),
+            ("openrouter", "gpt-6.1-sol", "turbo", "high"),
         ],
     )
+    @pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
     def test_api_key_routes_get_the_stored_level(
         self, monkeypatch, provider, model, stored, sent
     ):

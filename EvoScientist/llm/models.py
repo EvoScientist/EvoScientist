@@ -91,9 +91,9 @@ def _resolve_reasoning_effort(default: str, route: str) -> str:
     configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "")
     effort = configured.strip().lower() or default
     levels = _ROUTE_REASONING_LEVELS.get(route, ())
-    # A route with a level list never gets a value off the scale; native Claude
-    # would not even build.
-    if levels and effort not in _REASONING_SCALE:
+    # A value off the scale runs at the default: native Claude would not build,
+    # and other routes would have every request refused.
+    if effort not in _REASONING_SCALE:
         if effort not in _UNKNOWN_EFFORT_WARNED:
             _UNKNOWN_EFFORT_WARNED.add(effort)
             warnings.warn(
