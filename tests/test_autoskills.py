@@ -1306,6 +1306,44 @@ def test_revert_keeps_mark_shared_by_another_decided_draft(tmp_path, other):
     assert "cluster-1" in processed_cluster_hashes(memory_dir)
 
 
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        b"---\nname: focused-validation\ndescription: caf\xe9\n---\n",
+        b"---\nname: focused-validation\ndescription: d\n"
+        b"metadata: {created: 2026-13-45}\n---\n",
+        b"---\nname: focused-validation\ndescription: d\nmetadata: "
+        + b"[" * 5000
+        + b"]" * 5000
+        + b"\n---\n",
+    ],
+    ids=["not-utf-8", "bad-date", "too-deep"],
+)
+def test_unreadable_skill_md_is_refused_not_raised(tmp_path, skill_md):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    path.write_bytes(skill_md)
+
+    approved = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+    resubmitted = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="focused-validation",
+        cluster_hash="cluster-1",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Again.",
+        skills_dir=skills_dir,
+    )
+
+    assert approved["approved"] is False
+    assert approved["error"] == "Proposal skill folder is invalid"
+    assert resubmitted["submitted"] is False
+    assert not (skills_dir / "focused-validation").exists()
+
+
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

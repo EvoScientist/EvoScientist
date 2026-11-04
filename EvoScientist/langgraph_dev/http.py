@@ -4,8 +4,8 @@ The langgraph-api host supports a top-level ``http`` key in
 ``langgraph.json`` that names an ASGI app to mount on the same
 process as the graph. It hosts the project registry and registration
 (``/api/workspaces``), the settings and local-secret routes, the
-AutoSkills reconcile, and the model registry the WebUI's ``/model``
-picker needs.
+AutoSkills reconcile and draft review, and the model registry the WebUI's
+``/model`` picker needs.
 
 Why this lives here and not as a separate sidecar: the WebUI talks to
 ``EvoSci deploy``'s langgraph endpoint anyway, so one server keeps the
@@ -435,6 +435,33 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
     return JSONResponse({"projects": count, "failed": failed})
 
 
+async def list_autoskill_proposals(request: Request) -> JSONResponse:
+    """Every registered project's AutoSkills drafts, with their texts and
+    files (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    status, payload = await asyncio.to_thread(
+        autoskills_api.list_drafts, request.query_params.get("status") or None
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+async def get_autoskill_proposal_file(request: Request) -> Response:
+    """One file of a draft as text; ``installed=1`` reads the installed copy
+    the approval would start from, for an update's diff."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    status, body = await asyncio.to_thread(
+        autoskills_api.read_draft_file,
+        request.path_params["proposal_id"],
+        request.query_params.get("path", ""),
+        installed=request.query_params.get("installed") == "1",
+    )
+    if isinstance(body, str):
+        return Response(body, media_type="text/plain; charset=utf-8")
+    return JSONResponse(body, status_code=status)
+
+
 async def _unregister(workspace: Workspace) -> JSONResponse:
     from EvoScientist.langgraph_dev import server_crons, server_runs
     from EvoScientist.langgraph_dev.registry import REGISTRY
@@ -632,6 +659,14 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
             Route("/api/workspaces/move", move_workspace, methods=["POST"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
+            Route(
+                "/api/autoskills/proposals", list_autoskill_proposals, methods=["GET"]
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/file",
+                get_autoskill_proposal_file,
+                methods=["GET"],
+            ),
             Route("/api/ccproxy/ensure", ensure_ccproxy, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),

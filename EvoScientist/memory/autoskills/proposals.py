@@ -112,7 +112,7 @@ def proposal_virtual_path(skill_name: str) -> str:
 def _read_manifest(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -432,7 +432,7 @@ def unmark_cluster_processed(memory_dir: str | Path, cluster_hash: str) -> None:
 def _read_skill_markdown(skill_md: Path) -> tuple[str | None, str | None]:
     try:
         return skill_md.read_text(encoding="utf-8"), None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         return None, f"Cannot read SKILL.md: {exc}"
 
 
@@ -444,7 +444,8 @@ def _parse_skill_frontmatter(
         return None, "SKILL.md must start with YAML frontmatter delimited by ---", None
     try:
         frontmatter = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError, RecursionError) as exc:
+        # An impossible date or a very deep nesting fails outside YAMLError.
         return None, f"Invalid YAML frontmatter: {exc}", None
     if not isinstance(frontmatter, dict):
         return None, "SKILL.md frontmatter must be a YAML mapping", None
