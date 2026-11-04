@@ -611,7 +611,7 @@ def test_memory_runs_take_memory_step_limit(workspace, tmp_path, monkeypatch):
     client.threads.create.return_value = {"thread_id": "t3"}
     client.runs.create.return_value = {"run_id": "r1"}
     monkeypatch.setattr(schedule, "get_langgraph_sync_client", lambda **_k: client)
-    monkeypatch.setattr(schedule, "langgraph_dev_url", lambda _c: "http://x")
+    monkeypatch.setattr(schedule, "configured_langgraph_dev_url", lambda _c: "http://x")
     config = SimpleNamespace(
         memory_skill_synthesis_mode=SimpleNamespace(value="propose"),
         memory_skill_synthesis_cadence=SimpleNamespace(value="daily"),
@@ -637,7 +637,7 @@ def test_manual_autoskills_runs_forward_the_root(workspace, monkeypatch):
         memory_skill_synthesis_cadence=SimpleNamespace(value="daily"),
         memory_skill_synthesis_time="03:00",
     )
-    monkeypatch.setattr(schedule, "langgraph_dev_url", lambda _c: "http://x")
+    monkeypatch.setattr(schedule, "configured_langgraph_dev_url", lambda _c: "http://x")
     schedule.run_autoskill_now(config, workspace_dir=workspace.root)
 
     run = client.runs.create.call_args.kwargs

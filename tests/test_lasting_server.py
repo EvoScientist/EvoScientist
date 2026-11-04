@@ -583,18 +583,49 @@ def test_server_status_lists_projects_of_server_on_another_port(monkeypatch):
     assert "/p/a" in output
 
 
-@pytest.mark.parametrize(("answer", "flagged"), [("refused", True), ("own", False)])
-def test_server_status_names_server_configured_address_does_not_reach(
-    monkeypatch, answer, flagged
-):
-    """langgraph_dev_host changed while the server ran: the configured
-    address is asked whose server answers."""
-    _status_server(monkeypatch, projects=[], record=_record(host="192.168.1.5"))
-    monkeypatch.setattr(manager, "ask", lambda url: answer)
+def test_server_status_shows_recorded_address_and_probes_only_it(monkeypatch):
+    """Whatever host is configured, status names the address the recorded
+    server listens on, and asks only there."""
+    urls = _status_server(monkeypatch, projects=[], record=_record(host="192.168.1.5"))
+    monkeypatch.setattr(manager, "configured_address", lambda _c: (6174, "10.0.0.5"))
+    probed: list = []
+    monkeypatch.setattr(
+        manager,
+        "is_langgraph_dev_running",
+        lambda **kw: probed.append((kw.get("port"), kw.get("host"))) or True,
+    )
 
     output = _status_output()
 
-    assert ("does not reach" in output) is flagged
+    assert "http://192.168.1.5:6174" in output
+    assert probed == [(6174, "192.168.1.5")]
+    assert urls == ["http://192.168.1.5:6174"]
+    assert "listens on" not in output
+
+
+@pytest.mark.parametrize(
+    ("host", "shown"),
+    [("192.168.1.5", True), ("0.0.0.0", True), ("10.0.0.5", False)],
+)
+def test_server_status_names_configured_host_other_than_recorded(
+    monkeypatch, host, shown
+):
+    _status_server(monkeypatch, projects=[], record=_record(host=host))
+    monkeypatch.setattr(manager, "configured_address", lambda _c: (6174, "10.0.0.5"))
+
+    output = _status_output()
+
+    assert ("configured host: 10.0.0.5" in output) is shown
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_server_status_names_wildcard_bind_next_to_address(monkeypatch, host):
+    _status_server(monkeypatch, projects=[], record=_record(host=host))
+
+    output = _status_output()
+
+    assert "http://127.0.0.1:6174" in output
+    assert f"listens on {host}" in output
 
 
 def test_server_status_says_to_restart_older_releases_server(monkeypatch):
@@ -1054,35 +1085,6 @@ def test_stop_idle_server_asks_nothing(busy_server, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert busy_server == ["server"]
-
-
-@pytest.mark.parametrize(
-    ("answer", "said", "unsaid"),
-    [
-        ("silent", "does not answer", "does not reach"),
-        ("older", "older EvoScientist release", "does not reach"),
-        ("other", "does not reach", "does not answer"),
-    ],
-)
-def test_server_status_says_how_configured_address_answers(
-    monkeypatch, answer, said, unsaid
-):
-    _status_server(monkeypatch, projects=[], record=_record(host="192.168.1.5"))
-    monkeypatch.setattr(manager, "ask", lambda url: answer)
-
-    output = _status_output()
-
-    assert said in output
-    assert unsaid not in output
-
-
-def test_server_status_refused_at_records_own_address_is_no_mismatch(
-    monkeypatch,
-):
-    _status_server(monkeypatch, projects=[], record=_record())
-    monkeypatch.setattr(manager, "ask", lambda url: "refused")
-
-    assert "does not reach" not in _status_output()
 
 
 def test_server_stop_stops_nothing_when_another_server_replaced_asked_one(

@@ -32,11 +32,15 @@ Events:
     folder answers on it) or ``older_server`` (a backend too old to say whose
     it is answers on it).
   - ``ccproxy_failed``: empty.
-  - ``backend_start_failed``: ``log_file`` (and ``exit_code`` when the
-    started backend exited) when the start failed or the backend never
-    answered, or ``lock_file``: the start lock another EvoScientist process
-    held too long, or the data folder's server lock, held without a record
-    by a server that is stopping.
+  - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
+    ``lock_file``: the start lock another EvoScientist process held too
+    long or that could not be used, or the data folder's server lock, held
+    without a record or unreadable. ``log_file`` (and ``exit_code`` when the
+    started backend exited): the started backend failed or never answered,
+    or the recorded backend is stopping, does not answer at its address, or
+    another program or EvoScientist server answers there. Neither when no
+    log was written: the server home could not be created, or the start
+    failed before the backend was launched.
   - ``sign_in_required``: ``provider``, and ``problem`` when there is one.
   - ``backend_exited``: ``log_file``; ``exit_code`` when the owned process
     ended; ``url`` when an owned backend stopped listening or an attached one

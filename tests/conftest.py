@@ -258,8 +258,9 @@ def _fresh_langgraph_dev_state(monkeypatch):
     in module globals; a test that leaves one set (a fake ``Popen`` among
     them) changes what the next test's ``ensure_server`` does.
     """
-    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.langgraph_dev import manager, sdk
 
+    monkeypatch.setattr(sdk, "_SERVED_URL", None)
     for name, value in {
         "_PROCESS": None,
         "SERVER_UNAVAILABLE": False,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 
+import httpx
 import pytest
 
 from EvoScientist.langgraph_dev import manager, registration, server_record
@@ -124,36 +125,53 @@ def test_ensure_serving_record_is_refused_without_reuse(server):
     assert server.spawns == []
 
 
-def test_ensure_serving_record_is_asked_at_configured_address(server, monkeypatch):
-    """The session's clients use the configured address: that is the one
-    asked, whatever interface the record names."""
-    server.run(host="0.0.0.0")
+def test_ensure_serving_record_is_asked_at_its_own_address_only(server, monkeypatch):
+    """Whatever host is configured, the recorded server is asked where it
+    records itself, once per look, and the session uses that address. The
+    first look, before any record was read, asks the configured address;
+    the record it reads sends the next probe to its own at once."""
+    from EvoScientist.langgraph_dev import sdk
+
+    server.run(host="10.0.0.5")
     asked: list = []
     monkeypatch.setattr(
         manager, "ask", lambda url: asked.append(url) or server._ask(url)
     )
     cfg = _config()
     cfg.langgraph_dev_host = "192.168.1.5"
+    waits: list = []
 
-    result = manager.ensure_server(cfg)
+    result = manager.ensure_server(cfg, on_wait=waits.append)
 
-    assert asked == ["http://192.168.1.5:6174"]
-    assert result.url == "http://192.168.1.5:6174"
+    assert asked == ["http://192.168.1.5:6174", "http://10.0.0.5:6174"]
+    assert True not in waits
+    assert result.url == "http://10.0.0.5:6174"
+    assert sdk.configured_langgraph_dev_url() == "http://10.0.0.5:6174"
 
 
-@pytest.mark.parametrize("answer", ["refused", "other"])
-def test_ensure_serving_record_configured_address_does_not_reach_is_unreachable(
-    server, monkeypatch, answer
+def test_ensure_serving_record_answered_by_another_server_is_unreachable(
+    server, monkeypatch
 ):
     server.run(host="10.0.0.5")
-    monkeypatch.setattr(manager, "ask", lambda url: answer)
+    monkeypatch.setattr(manager, "ask", lambda url: "other")
 
     result = manager.ensure_server(_config())
 
     assert result.problem == "unreachable"
     assert "http://10.0.0.5:6174" in result.error
-    assert "http://127.0.0.1:6174" in result.error
     assert server.stopped == []
+
+
+def test_ensure_served_url_falls_back_to_config_without_server(server):
+    from EvoScientist.langgraph_dev import sdk
+
+    server.occupied.add(6174)
+    cfg = _config()
+
+    result = manager.ensure_server(cfg)
+
+    assert result.available is False
+    assert sdk.configured_langgraph_dev_url(cfg) == sdk.langgraph_dev_url(cfg)
 
 
 def test_ensure_serving_record_that_misses_one_probe_is_reused(server, monkeypatch):
@@ -393,26 +411,10 @@ def test_ensure_free_port_answering_as_ours_is_refused_without_reuse(server):
     assert result.problem == "running"
 
 
-def test_ask_tells_answers_apart(monkeypatch, runtime_paths):
-    import httpx
-
-    def _get(url, **_kw):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(manager.httpx, "get", _get)
-    assert manager.ask("http://127.0.0.1:1") == "refused"
-
-    def _slow(url, **_kw):
-        raise httpx.ReadTimeout("slow")
-
-    monkeypatch.setattr(manager.httpx, "get", _slow)
-    assert manager.ask("http://127.0.0.1:1") == "silent"
-
-    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(404))
-    assert manager.ask("http://127.0.0.1:1") == "foreign"
-
+def test_ask_ok_answer_is_judged_by_instance(monkeypatch, runtime_paths):
     monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(200))
     monkeypatch.setattr(manager, "_whose_server", lambda url: "other")
+
     assert manager.ask("http://127.0.0.1:1") == "other"
 
 
@@ -812,18 +814,8 @@ def test_ensure_serving_record_refused_at_its_own_address_every_time_is_stopping
     result = manager.ensure_server(_config())
 
     assert result.problem == "stopping"
+    assert result.record.url in result.error
     assert server.stopped == []
-
-
-def test_ensure_serving_record_silent_at_another_address_is_unreachable(
-    server, monkeypatch
-):
-    server.run(host="10.0.0.5")
-    monkeypatch.setattr(manager, "ask", lambda url: "silent")
-
-    result = manager.ensure_server(_config())
-
-    assert result.problem == "unreachable"
 
 
 def test_ensure_serving_record_answering_as_older_release_is_older_server(
@@ -948,19 +940,14 @@ def test_ensure_silent_serving_record_is_unresponsive_after_three_probes(
 
 
 def test_ensure_starting_record_waited_for_at_its_own_address(server, monkeypatch):
-    """The configured address does not reach it: the wait is at its own
-    address, and once it serves the configured one is asked."""
     server.run(host="10.0.0.5", phase=server_record.STARTING)
-    asked: list = []
-    answers = {"http://10.0.0.5:6174": "own", "http://127.0.0.1:6174": "refused"}
-    monkeypatch.setattr(manager, "ask", lambda url: asked.append(url) or answers[url])
+    answers = iter(["refused", "refused", "own"])
+    monkeypatch.setattr(manager, "ask", lambda url: next(answers))
 
     result = manager.ensure_server(_config())
 
-    assert result.problem == "unreachable"
-    # The first look asks the configured address; the record read after it
-    # sends the next look to its own address first.
-    assert asked[-2:] == ["http://10.0.0.5:6174", "http://127.0.0.1:6174"]
+    assert result.available is True
+    assert result.url == "http://10.0.0.5:6174"
 
 
 def test_ensure_starting_record_at_configured_address_reused_once_it_answers(server):
@@ -1032,7 +1019,8 @@ def test_ensure_start_budget_covers_record_and_first_answer(server, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("whose", "problem"), [("other", "unreachable"), ("older", "older_server")]
+    ("whose", "problem"),
+    [("other", "unreachable"), ("older", "older_server"), ("foreign", "unreachable")],
 )
 def test_ensure_spawned_child_stopped_when_its_address_answers_otherwise(
     server, monkeypatch, whose, problem
@@ -1250,20 +1238,181 @@ def test_ensure_foreign_answer_at_record_address_is_unreachable(server, monkeypa
     assert result.problem == "unreachable"
 
 
-def test_ask_tells_foreign_server_from_silent_one(monkeypatch, runtime_paths):
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [(400, "foreign"), (404, "foreign"), (500, "silent"), (503, "silent")],
+)
+def test_ask_ok_error_status_answer(monkeypatch, runtime_paths, status, answer):
+    """A 4xx is not an EvoScientist server's answer; a 5xx is a busy or
+    failing server's, asked again."""
+    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(status))
+
+    assert manager.ask("http://127.0.0.1:1") == answer
+
+
+def test_ensure_spawned_child_exiting_is_exited(server, monkeypatch):
+    spawn = server._spawn
+
+    def _exits(**kwargs):
+        proc = spawn(**kwargs)
+        proc.exit(3)
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _exits)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "exited"
+    assert result.exit_code == 3
+
+
+@pytest.mark.parametrize("missed", ["silent", "refused"])
+def test_ensure_spawned_child_not_answering_within_budget_is_stopped(
+    server, monkeypatch, missed
+):
+    spawn = server._spawn
+
+    def _quiet(**kwargs):
+        proc = spawn(**kwargs)
+        server.answering.clear()
+        (server.silent if missed == "silent" else server.unbindable).add(kwargs["port"])
+        return proc
+
+    monkeypatch.setattr(manager, "_spawn_server", _quiet)
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "start_failed"
+    assert server.stopped == [server.pid]
+
+
+def test_ensure_spawned_child_answering_counts_without_its_record(server, monkeypatch):
+    """Once the started server recorded itself, only its process and its
+    answer count: a record that cannot be read meanwhile changes nothing."""
+    from EvoScientist.langgraph_dev import server_home
+
+    spawn = server._spawn
+
+    def _quiet(**kwargs):
+        proc = spawn(**kwargs)
+        server.answering.clear()
+        return proc
+
+    def _record_lost_then_answers(n):
+        if server.spawns:
+            manager.RUNTIME.record.unlink(missing_ok=True)
+            monkeypatch.setattr(
+                server_home, "lock_state", lambda wait=0: server_home.UNKNOWN
+            )
+            server.answering.add(6174)
+
+    monkeypatch.setattr(manager, "_spawn_server", _quiet)
+    server.on_pause = _record_lost_then_answers
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert result.available is True
+    # The record read before it answered.
+    assert result.record.pid == server.pid
+    assert server.stopped == []
+
+
+_FAILURES = {
+    "timeout": lambda: httpx.ReadTimeout("slow"),
+    "lost": lambda: httpx.ReadError("connection reset"),
+    "unsent": lambda: httpx.WriteError("broken pipe"),
+    "refused": lambda: httpx.ConnectError("refused"),
+    "not_http": lambda: httpx.RemoteProtocolError("not HTTP"),
+    "undecodable": lambda: httpx.DecodingError("bad encoding"),
+}
+
+
+@pytest.mark.parametrize("request_path", ["/ok", "/api/instance"])
+@pytest.mark.parametrize(
+    ("failure", "answer"),
+    [
+        ("timeout", "silent"),
+        ("lost", "silent"),
+        ("unsent", "silent"),
+        ("refused", "refused"),
+        ("not_http", "silent"),
+        ("undecodable", "silent"),
+    ],
+)
+def test_ask_request_failure_answer(
+    monkeypatch, runtime_paths, request_path, failure, answer
+):
+    """Either request failing the same way gives the same answer."""
     import httpx
 
-    def _not_http(url, **_kw):
-        raise httpx.RemoteProtocolError("not HTTP")
+    def _get(url, **_kw):
+        if url.endswith(request_path):
+            raise _FAILURES[failure]()
+        return httpx.Response(200)
 
-    monkeypatch.setattr(manager.httpx, "get", _not_http)
-    assert manager.ask("http://127.0.0.1:1") == "foreign"
+    monkeypatch.setattr(manager.httpx, "get", _get)
 
-    monkeypatch.setattr(manager.httpx, "get", lambda url, **_kw: httpx.Response(404))
-    assert manager.ask("http://127.0.0.1:1") == "foreign"
+    assert manager.ask("http://127.0.0.1:1") == answer
 
-    def _slow(url, **_kw):
-        raise httpx.ReadTimeout("slow")
 
-    monkeypatch.setattr(manager.httpx, "get", _slow)
-    assert manager.ask("http://127.0.0.1:1") == "silent"
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [(404, "older"), (400, "silent"), (403, "silent"), (500, "silent")],
+)
+def test_ask_instance_error_status_answer(monkeypatch, runtime_paths, status, answer):
+    """``/ok`` answered as a server's: an error on ``/api/instance`` other
+    than 404 is asked again."""
+
+    def _get(url, **_kw):
+        return httpx.Response(200 if url.endswith("/ok") else status)
+
+    monkeypatch.setattr(manager.httpx, "get", _get)
+
+    assert manager.ask("http://127.0.0.1:1") == answer
+
+
+def test_ensure_started_result_carries_serving_record(server, monkeypatch):
+    """The record as the server rewrote it once serving, with what it added
+    then, not the first one the start read."""
+    spawn = server._spawn
+
+    def _starting(**kwargs):
+        proc = spawn(**kwargs)
+        write_record(proc.pid, port=kwargs["port"], phase=server_record.STARTING)
+        server.answering.clear()
+        return proc
+
+    def _serving(n):
+        if server.spawns and not server.answering:
+            write_record(server.pid, python="/usr/bin/python3")
+            server.answering.add(6174)
+
+    monkeypatch.setattr(manager, "_spawn_server", _starting)
+    server.on_pause = _serving
+
+    result = manager.ensure_server(_config())
+
+    assert result.started is True
+    assert result.record.phase == server_record.SERVING
+    assert result.record.fields["python"] == "/usr/bin/python3"
+
+
+def test_configured_langgraph_dev_url_prefers_served_url():
+    from EvoScientist.langgraph_dev import sdk
+
+    cfg = _config()
+    assert sdk.configured_langgraph_dev_url(cfg) == "http://127.0.0.1:6174"
+
+    sdk.set_served_url("http://10.0.0.5:6174")
+    assert sdk.configured_langgraph_dev_url(cfg) == "http://10.0.0.5:6174"
+
+
+def test_ask_malformed_url_raises(monkeypatch, runtime_paths):
+    def _get(url, **_kw):
+        raise httpx.InvalidURL("bad host")
+
+    monkeypatch.setattr(manager.httpx, "get", _get)
+
+    with pytest.raises(httpx.InvalidURL):
+        manager.ask("http://bad host:1")

@@ -268,14 +268,31 @@ def check_server(
         configured_address,
         is_langgraph_dev_running,
         is_lasting,
-        read_record,
+        lock_unreadable_message,
+        read_record_and_lock,
+        reread_record,
         stop_server,
+        unrecorded_lock_message,
     )
+    from .langgraph_dev.server_home import HELD, UNKNOWN
 
     config = get_effective_config()
     port, host = configured_address(config)
     go_on = before_stop or (lambda: None)
-    record = read_record(older=True)
+    record, lock = read_record_and_lock()
+    if record is None and lock == HELD:
+        raise UpdateError(
+            "server_running",
+            f"{unrecorded_lock_message(then='run EvoSci update again')} "
+            "Nothing was changed.",
+        )
+    if record is None and lock == UNKNOWN and not opts.yes:
+        # Whether a server runs cannot be told: --yes updates anyway.
+        raise UpdateError(
+            "server_running",
+            f"{lock_unreadable_message()} Nothing was changed. Pass --yes to "
+            "update anyway.",
+        )
     if record is None and not is_langgraph_dev_running(port=port, host=host):
         go_on()
         _stop_service_ccproxy(emit)
@@ -312,18 +329,18 @@ def check_server(
                 )
             # The answer may have taken a while: stop only the server asked
             # about.
-            current = read_record(older=True)
-            if current is None:
-                go_on()
-                _stop_service_ccproxy(emit)
-                return
-            if not record.same_server(current):
+            current, _, same = reread_record(record)
+            if not same:
                 raise UpdateError(
                     "server_running",
                     f"Another server (pid {current.pid}) took the place of the "
                     "one you were asked about; nothing was changed. Run EvoSci "
                     "update again.",
                 )
+            if current is None:
+                go_on()
+                _stop_service_ccproxy(emit)
+                return
         go_on()
         # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
         # is started again by the setup after the update, and serves every

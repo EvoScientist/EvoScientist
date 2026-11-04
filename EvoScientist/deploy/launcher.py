@@ -630,12 +630,14 @@ _CONFLICTS = {
 def server_error(result: ServerResult) -> LauncherError:
     """The :class:`LauncherError` for a ``ensure_server`` result without a
     server: ``port_conflict`` with its ``reason``, ``cancelled``, or
-    ``backend_start_failed``, with the log of a server it started (and its
-    exit code), or the lock that stayed held: the start lock another process
-    held too long, or this data folder's server lock held without a
-    record."""
-    from ..langgraph_dev.manager import RUNTIME
-
+    ``backend_start_failed``. That one carries the lock in the way: the
+    start lock another process held too long or this call could not use,
+    or this data folder's server lock, held without a record or unreadable;
+    otherwise the log, when the result names one: of a server this call
+    started (and its exit code), or of the recorded server that is
+    stopping, did not answer, or at whose address another server or program
+    answers. A start that failed before its log was written names
+    neither."""
     message = result.error or "No backend is available."
     if result.problem in _CONFLICTS:
         hint = _CONFLICTS[result.problem].format(port=result.port or "")
@@ -644,17 +646,21 @@ def server_error(result: ServerResult) -> LauncherError:
         )
     if result.problem == "cancelled":
         return LauncherError("cancelled", "Launch cancelled by shutdown.")
-    if result.problem == "busy":
-        fields: dict[str, Any] = {"lock_file": str(RUNTIME.lock_file)}
-    elif result.problem in ("stopping", "unrecorded_lock", "lock_unreadable"):
-        fields = {"lock_file": str(RUNTIME.server_lock)}
+    if result.lock_file is not None:
+        fields: dict[str, Any] = {"lock_file": str(result.lock_file)}
     else:
-        fields = {"log_file": str(RUNTIME.log_file)}
+        fields = {}
+        if result.log_file is not None:
+            fields["log_file"] = str(result.log_file)
         if result.exit_code is not None:
             fields["exit_code"] = result.exit_code
+    # Only a start this call made can have failed; otherwise the server
+    # found was not usable.
+    start_failed = result.problem in ("start_failed", "exited")
+    prefix = "startup failed" if start_failed else "server unavailable"
     return LauncherError(
         "backend_start_failed",
-        f"langgraph dev startup failed: {message}",
+        f"langgraph dev {prefix}: {message}",
         fields=fields,
     )
 
@@ -667,7 +673,7 @@ def reuse_warnings(result: ServerResult, port: int) -> list[str]:
     warnings: list[str] = []
     if result.started:
         return warnings
-    if result.older or (result.record is not None and result.record.older):
+    if result.from_older_release:
         warnings.append(OLDER_SERVER_MESSAGE)
     if result.port is not None and result.port != port:
         warnings.append(

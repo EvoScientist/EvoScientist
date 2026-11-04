@@ -781,7 +781,9 @@ def test_ccproxy_failure(h, capsys, monkeypatch):
     assert h.started is None
 
 
-def test_start_failure_is_backend_start_failed_with_the_log(h, capsys, monkeypatch):
+def test_start_failure_before_launch_is_backend_start_failed_without_file(
+    h, capsys, monkeypatch
+):
     from EvoScientist.langgraph_dev import manager as lgm
 
     def _fail(**_kw):
@@ -792,7 +794,7 @@ def test_start_failure_is_backend_start_failed_with_the_log(h, capsys, monkeypat
     assert code == 1
     assert _events(lines) == ["starting", "error"]
     assert lines[-1]["code"] == "backend_start_failed"
-    assert lines[-1]["detail"] == {"log_file": str(lgm.RUNTIME.log_file)}
+    assert lines[-1]["detail"] == {}
 
 
 def test_backend_that_exits_while_it_starts_reports_its_code_and_log(h, capsys):
@@ -847,9 +849,16 @@ def test_internal_error_after_start_stops_the_backend_first(h, capsys, monkeypat
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", "error"))
 
 
-def test_owned_backend_dying_is_backend_exited(h, capsys):
+def test_owned_backend_dying_is_backend_exited(h, capsys, monkeypatch):
     h.stdin_kind = "devnull"
-    h.proc.returncode = 3
+    emit = json_mode._Events.__call__
+
+    def _dies_once_ready(events, event, **fields):
+        emit(events, event, **fields)
+        if event == "ready":
+            h.proc.returncode = 3
+
+    monkeypatch.setattr(json_mode._Events, "__call__", _dies_once_ready)
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "backend_exited"
@@ -1017,11 +1026,11 @@ def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatc
 def test_stdin_closed_before_start_starts_nothing(h, capsys, monkeypatch):
     from EvoScientist.langgraph_dev import manager as lgm
 
-    def _occupied(*_a, **_k):
+    def _bindable(*_a, **_k):
         _wait_for_stdin_watcher()
-        return False
+        return True
 
-    monkeypatch.setattr(lgm, "_is_port_occupied", _occupied)
+    monkeypatch.setattr(lgm, "_wait_for_port_bindable", _bindable)
     h.stdin_kind = "eof-now"
     code, lines = h.run(capsys)
     assert code == 0

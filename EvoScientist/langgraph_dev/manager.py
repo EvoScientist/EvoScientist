@@ -55,6 +55,7 @@ from EvoScientist.config.settings import (
 from EvoScientist.langgraph_dev import (
     boundary,
     registration,
+    sdk,
     server_home,
     server_record,
 )
@@ -204,19 +205,16 @@ _DEFAULT_PORT = 6174
 # BIND banner while it is exposed.
 _DEFAULT_HOST = server_record.DEFAULT_HOST
 
-# Wildcard bind addresses: the server listens on every interface, but you
-# cannot meaningfully *connect* to them (0.0.0.0 is routed to loopback on
-# Linux and outright rejected on Windows), so clients target loopback instead.
-_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
-
 
 def _probe_host(host: str = _DEFAULT_HOST) -> str:
     """Map a bind address to one a client can actually connect to.
 
-    A wildcard bind includes loopback, so clients use ``127.0.0.1``; a
-    specific interface is returned as-is — loopback would not reach it.
+    A wildcard bind includes loopback, so clients use ``127.0.0.1``: you
+    cannot meaningfully *connect* to it (0.0.0.0 is routed to loopback on
+    Linux and outright rejected on Windows). A specific interface is
+    returned as-is — loopback would not reach it.
     """
-    return "127.0.0.1" if host in _WILDCARD_HOSTS else host
+    return "127.0.0.1" if boundary.is_wildcard_host(host) else host
 
 
 def _format_hostport(host: str, port: int) -> str:
@@ -923,6 +921,26 @@ def _hold_pid(pid: int):
         kernel32.CloseHandle(handle)
 
 
+def read_record_and_lock() -> tuple[ServerRecord | None, str]:
+    """The record (``read_record(older=True)``) and the server lock state it
+    was read under (:func:`lock_problem` says what a lock without a record
+    means)."""
+    lock = server_home.lock_state()
+    return read_record(older=True, lock=lock), lock
+
+
+def reread_record(
+    asked: ServerRecord | None,
+) -> tuple[ServerRecord | None, str, bool]:
+    """The record read again after a wait (a question to the user) about the
+    server *asked* names, the lock state it was read under, and whether it
+    is still that server or none: a server that appeared meanwhile, or took
+    its place, is not."""
+    current, lock = read_record_and_lock()
+    same = current is None or (asked is not None and asked.same_server(current))
+    return current, lock, same
+
+
 # What :func:`stop_server` takes when its caller has not read the record.
 _UNREAD = object()
 
@@ -1449,13 +1467,14 @@ class ServerResult:
     (another data folder's server answers on it), ``older_server`` (a server
     too old to say whose it is answers on it), ``other_port`` (this data
     folder's server runs on another port than the configured one),
-    ``unreachable`` (the address asked does not reach this data folder's
-    server), ``running`` (this data folder's server runs, and the call does
-    not reuse one), ``busy`` (another process held the start lock longer
-    than :func:`start_budget`), ``stopping`` (the recorded server does not
-    listen, past :data:`_DRAIN_WAIT`), ``unrecorded_lock`` (a server holds
-    the lock without a record), ``lock_unreadable`` (the lock cannot be
-    opened), ``unresponsive`` (the recorded server did not answer), ``start_failed``, ``exited`` (the server this call started exited, with
+    ``unreachable`` (another server or program answers at the recorded
+    server's address), ``running`` (this data folder's server runs, and the
+    call does not reuse one), ``busy`` (another process held the start lock
+    longer than :func:`start_budget`), ``stopping`` (the recorded server does
+    not listen, past :data:`_DRAIN_WAIT`), ``unrecorded_lock`` (a server
+    holds the lock without a record), ``lock_unreadable`` (the lock cannot
+    be opened), ``unresponsive`` (the recorded server did not answer),
+    ``start_failed``, ``exited`` (the server this call started exited, with
     ``exit_code``), ``cancelled`` or ``unregistered`` (the server did not
     register the project).
     """
@@ -1474,11 +1493,21 @@ class ServerResult:
     proc: subprocess.Popen | None = None
     # A server an older release started, without a record here.
     older: bool = False
+    # The lock in the way (the start lock or the server lock).
+    lock_file: Path | None = None
+    # The log of the server the result is about, when it has one.
+    log_file: Path | None = None
 
     @property
     def started(self) -> bool:
         """This call started the server."""
         return self.proc is not None
+
+    @property
+    def from_older_release(self) -> bool:
+        """An older release started the server: one without a record here,
+        or one whose record that release kept."""
+        return self.older or (self.record is not None and self.record.older)
 
     @property
     def reason(self) -> str | None:
@@ -1513,12 +1542,13 @@ def ensure_server(
 
     What runs decides, read again at every look:
 
-    - A record that is ``serving``: the address the caller uses (*port* and
-      *host*, or the record's with *any_port*) is asked whose server answers
-      (``/ok`` and ``GET /api/instance``). This data folder's is reused, and
-      never killed; one that misses :data:`_SERVING_PROBES` probes in a row
-      is ``unresponsive``; any other answer is ``unreachable``. A record on
-      another port than *port* is ``other_port``.
+    - A record that is ``serving``: the address it records is asked whose
+      server answers (``/ok`` and ``GET /api/instance``), and the session
+      uses that address
+      (:func:`~EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url`). This data folder's is reused,
+      and never killed; one that misses :data:`_SERVING_PROBES` probes in a
+      row is ``unresponsive``; any other answer is ``unreachable``. A record
+      on another port than *port* is ``other_port`` (unless *any_port*).
     - A record that is ``starting``: the call waits up to
       :func:`start_budget` for the server to answer.
     - A ``serving`` record whose address refuses: its server has not bound
@@ -1532,7 +1562,7 @@ def ensure_server(
       starts one under the start lock, once the port can be bound, which
       outlives this process for every session to share until ``EvoSci
       server stop`` (unless *lasting* is False), and waits for its record,
-      then for its answer, or for its exit.
+      then for its answer at the address it records, or for its exit.
 
     Then the server registers *workspace_dir*, after the start lock is
     released (a registration restores the project's threads).
@@ -1568,8 +1598,8 @@ def ensure_server(
             after *before_start*, only for a start.
         reuse: False refuses a running server (``running``) instead of
             reusing it.
-        any_port: Use this data folder's server at the address it records;
-            otherwise *port* and *host*, the address a session's clients use.
+        any_port: Use this data folder's server on whatever port it records;
+            otherwise only on *port*.
         before_start: Called under the start lock right before the start.
         cancelled: Checked during every wait; True ends the call
             (``cancelled``), stopping a server it started.
@@ -1588,12 +1618,11 @@ def ensure_server(
         global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE
         _ASYNC_SUBAGENTS_AVAILABLE = result.available
         CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = result.drift, result.shell_drift
-        OLDER_SERVER = result.older or (
-            result.record is not None and result.record.older
-        )
+        OLDER_SERVER = result.from_older_release
         SERVER_UNAVAILABLE = needed and not result.available
         SERVER_UNAVAILABLE_REASON = result.reason if SERVER_UNAVAILABLE else None
         SERVER_EXPOSURE = exposure
+        sdk.set_served_url(result.url if result.available else None)
         return replace(result, served=not SERVER_UNAVAILABLE)
 
     if not needs_langgraph_dev(config, backend=backend):
@@ -1633,7 +1662,7 @@ def ensure_server(
             settle(result)
             raise registration.OlderServerError()
         return settle(result)
-    if result.older or (result.record is not None and result.record.older):
+    if result.from_older_release:
         # INFO: the CLI prints it after startup and the TUI shows it.
         logger.info(OLDER_SERVER_MESSAGE)
     if workspace_dir is None:
@@ -1775,8 +1804,7 @@ def _find_or_start(
 
 @dataclass(frozen=True)
 class _Look:
-    """What one :func:`ensure_server` call looks for. ``own_url`` is set for
-    the server this call started, which is asked at its own address."""
+    """What one :func:`ensure_server` call looks for."""
 
     asked_url: str
     port: int
@@ -1784,17 +1812,17 @@ class _Look:
     any_port: bool
     reuse: bool
     fingerprint: str
-    own_url: str | None = None
 
 
 @dataclass(frozen=True)
 class _Seen:
-    """One look: the record read after the probes, whether the server lock
-    is held, and how each address asked answered (:func:`ask`)."""
+    """One look: the record read after the probe, whether the server lock
+    is held, and how the address asked (*url*) answered (:func:`ask`)."""
 
     record: ServerRecord | None
     lock: str
-    answers: dict[str, str]
+    url: str
+    answer: str
 
 
 class _Clock:
@@ -1805,9 +1833,6 @@ class _Clock:
     def __init__(self) -> None:
         self._deadlines: dict[tuple, float] = {}
         self._counts: dict[tuple, int] = {}
-
-    def set(self, key: tuple, deadline: float) -> None:
-        self._deadlines[key] = deadline
 
     def waited_out(self, key: tuple, seconds: float) -> bool:
         now = time.monotonic()
@@ -1825,61 +1850,48 @@ def _identity(record: ServerRecord) -> tuple:
     return record.pid, record.created
 
 
-def _find(look: _Look, waits: _Waits, clock: _Clock | None = None) -> object:
+def _find(look: _Look, waits: _Waits) -> object:
     """Look until the state decides: a :class:`ServerResult`, or ``"free"``
     when no server runs and the port can be started on."""
-    clock = clock or _Clock()
+    clock = _Clock()
     last: ServerRecord | None = None
     while True:
         if waits.cancelled():
             return ServerResult(problem="cancelled", error="Cancelled.")
         seen = _observe(look, last)
         last = seen.record
+        if seen.url != _url_to_ask(seen.record, look):
+            # The record changed since the probe: ask where it says.
+            continue
         decided = _decide(seen, look, clock)
         if decided != "wait":
             return decided
-        waits.pause(for_other=look.own_url is None)
+        waits.pause(for_other=True)
+
+
+def _url_to_ask(record: ServerRecord | None, look: _Look) -> str:
+    """A recorded server is asked at its own address, the one sessions then
+    use; without a record, the caller's."""
+    return record.url if record is not None else look.asked_url
 
 
 def _observe(look: _Look, last: ServerRecord | None) -> _Seen:
     """Probe first and read the record after, so a record that says a
     server serves was written by the server that answered (it marks itself
     serving before it answers). Where to ask follows the record of the look
-    before (*last*): a record that asks for another address than the one
-    asked leaves its answer missing, and the next look asks there."""
-    answers: dict[str, str] = {}
-    for url in _urls_to_ask(last, look):
-        answers[url] = ask(url)
-        if answers[url] != "own":
-            break
+    before (*last*)."""
+    url = _url_to_ask(last, look)
+    answer = ask(url)
     lock = server_home.lock_state()
     record = read_record(older=True, lock=lock)
-    return _Seen(record=record, lock=lock, answers=answers)
-
-
-def _urls_to_ask(record: ServerRecord | None, look: _Look) -> list[str]:
-    """Where to ask: the record's own address first while its server starts
-    (or for a caller that uses it), then the caller's address."""
-    if look.own_url is not None:
-        return [look.own_url]
-    if record is None:
-        return [look.asked_url]
-    if look.any_port:
-        return [record.url]
-    if record.phase == server_record.STARTING and record.url != look.asked_url:
-        return [record.url, look.asked_url]
-    return [look.asked_url]
+    return _Seen(record=record, lock=lock, url=url, answer=answer)
 
 
 def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
     """What one look means: a :class:`ServerResult`, ``"wait"`` to look
     again, or ``"free"`` when no server runs."""
-    record = seen.record
+    record, answer = seen.record, seen.answer
     if record is None:
-        if look.own_url is not None:
-            # The started server's record went away: it is exiting.
-            return ServerResult(problem="start_failed", error="Its record went away.")
-        answer = seen.answers.get(look.asked_url)
         if seen.lock == server_home.UNKNOWN:
             # Nothing can be told of the lock: only a server that answers as
             # this data folder's is used, and none is started.
@@ -1896,56 +1908,31 @@ def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
                 return _unrecorded_lock()
             return replace(_no_record(answer, look), older=True)
         return _no_record(answer, look)
+    refusal = _refuse_recorded(
+        record, port=look.port, reuse=look.reuse, any_port=look.any_port
+    )
+    if refusal is not None:
+        return refusal
     key = _identity(record)
-    if look.own_url is None:
-        refusal = _refuse_recorded(
-            record, port=look.port, reuse=look.reuse, any_port=look.any_port
-        )
-        if refusal is not None:
-            return refusal
-    own = record.url
-    target = look.own_url or (own if look.any_port else look.asked_url)
-    starting = look.own_url is not None or record.phase == server_record.STARTING
-    if starting and target != own:
-        # Waited for at its own address; the caller's is asked once it
-        # answers there.
-        at_own = seen.answers.get(own)
-        if at_own == "own":
-            starting = False
-        elif at_own in ("other", "older", "foreign"):
-            return _answered(at_own, record, own, look)
-        elif at_own is None:
-            return "wait"
-        elif clock.waited_out(("starting", key), start_budget()):
-            return _unresponsive(record, own, _NOT_SERVING)
-        else:
-            return "wait"
-    answer = seen.answers.get(target)
-    if answer is None:
-        return "wait"
     if answer != "silent":
         # The probes a server missed count in a row.
         clock.reset(("silent", key))
     if answer in ("own", "other", "older", "foreign"):
-        return _answered(answer, record, target, look)
-    if target != own:
-        return _unreachable(record, target)
-    if starting:
+        return _answered(answer, record, look.fingerprint)
+    if record.phase == server_record.STARTING:
         if clock.waited_out(("starting", key), start_budget()):
-            return _unresponsive(record, own, _NOT_SERVING)
+            return _unresponsive(record, _NOT_SERVING)
         return "wait"
     if answer == "silent":
         # A live server that does not answer in time.
         missed = clock.count(("silent", key))
         if missed >= _SERVING_PROBES:
-            return _unresponsive(
-                record, own, f"did not answer {missed} probes in a row"
-            )
+            return _unresponsive(record, f"did not answer {missed} probes in a row")
         return "wait"
     # Nothing listens while it holds the lock and its record: not bound yet,
     # or stopping, draining its requests before it exits.
     if clock.waited_out(("drain", key), _DRAIN_WAIT):
-        return _stopping()
+        return _stopping(record)
     return "wait"
 
 
@@ -1954,15 +1941,21 @@ def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
 _NOT_SERVING = "did not answer as serving"
 
 
-def _answered(answer: str, record: ServerRecord, url: str, look: _Look) -> ServerResult:
-    """The result of an answer at *url* from a recorded server."""
+def _answered(answer: str, record: ServerRecord, fingerprint: str) -> ServerResult:
+    """The result of an answer at the recorded server's address."""
     if answer == "own":
-        return _reused(record, url, look.fingerprint)
+        return _reused(record, fingerprint)
+    return _conflict(answer, record)
+
+
+def _conflict(answer: str, record: ServerRecord) -> ServerResult:
+    """Another server (``other``, ``older``) or program (``foreign``)
+    answers at the recorded server's address."""
     if answer == "older":
         return ServerResult(
             record=record, problem="older_server", error=str(OlderServerError())
         )
-    return _unreachable(record, url)
+    return _unreachable(record, answer)
 
 
 def _no_record(answer: str | None, look: _Look) -> object:
@@ -2045,9 +2038,9 @@ def _refuse_recorded(
     return None
 
 
-def unrecorded_lock_message() -> str:
+def unrecorded_lock_message(then: str = "start again") -> str:
     """What to say of a server lock held without a record, and how to stop
-    its holder by hand."""
+    its holder by hand, *then* what to do."""
     lock = RUNTIME.server_lock
     if os.name == "nt":
         find = (
@@ -2062,7 +2055,7 @@ def unrecorded_lock_message() -> str:
         f"A server holds this data folder's lock ({lock}) without a record of "
         "itself, so EvoSci can neither use nor stop it: one an older release "
         f"started, or one that could not write its record. {find[0].upper()}"
-        f"{find[1:]}, then start again."
+        f"{find[1:]}, then {then}."
     )
 
 
@@ -2080,51 +2073,79 @@ def lock_unreadable_message() -> str:
     )
 
 
+def lock_problem(lock: str) -> str | None:
+    """What to say when there is no record because of the server lock in
+    state *lock* (:func:`server_home.lock_state`): held without one, or
+    unreadable; None when it is free."""
+    if lock == server_home.HELD:
+        return unrecorded_lock_message()
+    if lock == server_home.UNKNOWN:
+        return lock_unreadable_message()
+    return None
+
+
 def _lock_unreadable() -> ServerResult:
-    return ServerResult(problem="lock_unreadable", error=lock_unreadable_message())
-
-
-def _unrecorded_lock() -> ServerResult:
-    return ServerResult(problem="unrecorded_lock", error=unrecorded_lock_message())
-
-
-def _stopping() -> ServerResult:
     return ServerResult(
-        problem="stopping",
-        error=(
-            f"A server of this data folder is stopping, or holds its lock "
-            f"({RUNTIME.server_lock}) without serving; see {RUNTIME.log_file}. "
-            "Try again in a moment."
-        ),
+        problem="lock_unreadable",
+        error=lock_unreadable_message(),
+        lock_file=RUNTIME.server_lock,
     )
 
 
-def _unreachable(record: ServerRecord, url: str) -> ServerResult:
+def _unrecorded_lock() -> ServerResult:
+    return ServerResult(
+        problem="unrecorded_lock",
+        error=unrecorded_lock_message(),
+        lock_file=RUNTIME.server_lock,
+    )
+
+
+def _stopping(record: ServerRecord) -> ServerResult:
+    """The recorded server refused at its own address past :data:`_DRAIN_WAIT`."""
+    return ServerResult(
+        record=record,
+        problem="stopping",
+        error=(
+            f"This data folder's background agent server (pid {record.pid}) "
+            f"is stopping, or does not answer at {record.url}. Try again in a "
+            "moment, or run EvoSci server stop if it persists; see "
+            f"{RUNTIME.log_file}."
+        ),
+        log_file=RUNTIME.log_file,
+    )
+
+
+def _unreachable(record: ServerRecord, answer: str) -> ServerResult:
+    """Another server or program answers at the recorded server's address."""
+    who = "another EvoScientist server" if answer == "other" else "another program"
     return ServerResult(
         record=record,
         problem="unreachable",
         error=(
-            f"This data folder's background agent server runs at {record.url}, "
-            f"and {url} does not reach it. Stop it with EvoSci server stop, or "
-            "set langgraph_dev_host to an address that reaches it."
+            f"This data folder's background agent server (pid {record.pid}) is "
+            f"recorded at {record.url}, but {who} answers there. Stop it with "
+            "EvoSci server stop."
         ),
+        log_file=RUNTIME.log_file,
     )
 
 
-def _unresponsive(record: ServerRecord, url: str, what: str) -> ServerResult:
+def _unresponsive(record: ServerRecord, what: str) -> ServerResult:
     return ServerResult(
         record=record,
         problem="unresponsive",
         error=(
             f"This data folder's background agent server (pid {record.pid}) at "
-            f"{url} {what}; see {RUNTIME.log_file}. EvoSci server stop stops it."
+            f"{record.url} {what}; see {RUNTIME.log_file}. EvoSci server stop "
+            "stops it."
         ),
+        log_file=RUNTIME.log_file,
     )
 
 
-def _reused(record: ServerRecord, url: str, fingerprint: str) -> ServerResult:
-    """The recorded server answered at *url* as this data folder's."""
-    port, host = record.port, record.host
+def _reused(record: ServerRecord, fingerprint: str) -> ServerResult:
+    """The recorded server answered as this data folder's."""
+    url, port, host = record.url, record.port, record.host
     recorded_fp = record.fields.get("config_fingerprint")
     drift = isinstance(recorded_fp, str) and recorded_fp != fingerprint
     if drift:
@@ -2155,24 +2176,29 @@ def _reused(record: ServerRecord, url: str, fingerprint: str) -> ServerResult:
 
 def ask(url: str) -> str:
     """Whose server answers at *url*: ``own`` (this data folder's local
-    secret), ``other``, ``older`` (too old to say), ``foreign`` (something
-    answered, not as an EvoScientist server), ``silent`` (it took the
-    connection, with no answer within :data:`_PROBE_TIMEOUT`) or
-    ``refused`` (nothing listens there)."""
+    secret), ``other``, ``older`` (too old to say), ``foreign``, ``silent``
+    or ``refused``.
+
+    ``foreign``: ``/ok`` answered with a status that is neither 200 nor a
+    5xx. ``other``: ``GET /api/instance`` answered with an instance that is
+    not this data folder's, or with none. ``older``: a 404 on
+    ``/api/instance``. ``refused``: either request could not connect.
+    Everything else is ``silent``, asked again: no answer within
+    :data:`_PROBE_TIMEOUT`, a connection lost or broken after it was taken
+    (a listener that does not speak HTTP among them), a 5xx on ``/ok``, any
+    other error status on ``/api/instance``. A malformed *url* raises."""
     try:
         response = httpx.get(f"{url}/ok", timeout=_PROBE_TIMEOUT, trust_env=False)
-    except httpx.ConnectError:
-        return "refused"
-    except httpx.TimeoutException:
+    except (httpx.HTTPError, OSError) as exc:
+        return "refused" if isinstance(exc, httpx.ConnectError) else "silent"
+    if response.status_code >= 500:
         return "silent"
-    except (httpx.TransportError, OSError):
-        return "foreign"
     if response.status_code != 200:
         return "foreign"
     try:
         return _whose_server(url)
-    except RegistrationError:
-        return "foreign"
+    except RegistrationError as exc:
+        return "refused" if isinstance(exc.__cause__, httpx.ConnectError) else "silent"
 
 
 def _foreign(port: int) -> ServerResult:
@@ -2238,11 +2264,18 @@ def _spawn(
     lock = FileLock(str(RUNTIME.lock_file))
     try:
         server_home.ensure_server_home()
+    except OSError as exc:
+        return ServerResult(
+            problem="start_failed",
+            error=f"Cannot create the server home {paths.SERVER_HOME}: {exc}",
+        )
+    try:
         held = waits.acquire(lock)
     except OSError as exc:
         return ServerResult(
             problem="start_failed",
             error=f"Cannot use the start lock {RUNTIME.lock_file}: {exc}",
+            lock_file=RUNTIME.lock_file,
         )
     if held is False:
         return ServerResult(problem="cancelled", error="Cancelled.")
@@ -2253,6 +2286,7 @@ def _spawn(
                 f"Another EvoScientist process has been starting a server for "
                 f"over {start_budget():.0f} s; it holds {RUNTIME.lock_file}."
             ),
+            lock_file=RUNTIME.lock_file,
         )
     try:
         lock_now = server_home.lock_state()
@@ -2302,22 +2336,48 @@ def _spawn(
     if isinstance(record, ServerResult):
         return record
     try:
-        clock = _Clock()
-        clock.set(("starting", _identity(record)), spawned_at + start_budget())
-        found = _find(replace(look, own_url=record.url), waits, clock)
+        return _answer_of(proc, record, spawned_at, waits)
     except BaseException:
         stop_langgraph_dev(proc, clean=False)
         raise
-    assert isinstance(found, ServerResult)  # with its own address, never free
-    if found.available:
-        logger.info("langgraph dev started on %s (pid=%d)", found.url, proc.pid)
-        return replace(found, proc=proc, drift=False, shell_drift=None)
-    if proc.poll() is not None:
-        return _exited(proc)
-    if found.problem in ("unresponsive", "start_failed"):
-        return _not_ready(proc, spawned_at)
-    stop_langgraph_dev(proc, clean=False)
-    return found
+
+
+def _answer_of(
+    proc: subprocess.Popen, record: ServerRecord, spawned_at: float, waits: _Waits
+) -> ServerResult:
+    """Wait for the server this call started to answer at its recorded
+    address, within :func:`start_budget` of its start: started once it
+    answers as this data folder's. Its exit, another server or program
+    answering there, or the budget spent ends the wait, and the process is
+    stopped. Only the process and the answer count; the record is read again
+    once it answers, for what the server added as it marked itself serving,
+    and kept as first read when that read fails."""
+    url = record.url
+    while True:
+        if proc.poll() is not None:
+            return _exited(proc)
+        if waits.cancelled():
+            return _give_up(proc, problem="cancelled", error="Cancelled.")
+        answer = ask(url)
+        if answer == "own":
+            serving = read_record()
+            if record.same_server(serving):
+                record = serving
+            logger.info("langgraph dev started on %s (pid=%d)", url, proc.pid)
+            return ServerResult(
+                available=True,
+                url=url,
+                port=record.port,
+                host=record.host,
+                record=record,
+                proc=proc,
+            )
+        if answer in ("other", "older", "foreign"):
+            stop_langgraph_dev(proc, clean=False)
+            return _conflict(answer, record)
+        if time.monotonic() >= spawned_at + start_budget():
+            return _not_ready(proc, spawned_at)
+        waits.pause()
 
 
 def _record_of(
@@ -2353,11 +2413,13 @@ def _spawned_pids(proc: subprocess.Popen) -> set[int]:
 def _give_up(
     proc: subprocess.Popen | None, *, problem: str, error: str
 ) -> ServerResult:
-    """A failure; a server this call started is stopped first."""
-    if proc is not None:
-        # Still starting: no run to put back in the queue.
-        stop_langgraph_dev(proc, clean=False)
-    return ServerResult(problem=problem, error=error)
+    """A failure; a server this call started is stopped first, and its log
+    named."""
+    if proc is None:
+        return ServerResult(problem=problem, error=error)
+    # Still starting: no run to put back in the queue.
+    stop_langgraph_dev(proc, clean=False)
+    return ServerResult(problem=problem, error=error, log_file=RUNTIME.log_file)
 
 
 def _not_ready(proc: subprocess.Popen, spawned_at: float) -> ServerResult:
@@ -2383,6 +2445,7 @@ def _exited(proc: subprocess.Popen) -> ServerResult:
             f"langgraph dev exited immediately with code {proc.returncode}.\n"
             f"Log tail:\n{_log_tail()}"
         ),
+        log_file=RUNTIME.log_file,
     )
 
 

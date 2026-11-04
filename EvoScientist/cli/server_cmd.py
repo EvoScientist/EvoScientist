@@ -128,24 +128,25 @@ def server_status() -> None:
     serves."""
     from ..config import get_effective_config
     from ..langgraph_dev import server_record
+    from ..langgraph_dev.boundary import is_wildcard_host
     from ..langgraph_dev.manager import (
         OLDER_SERVER_MESSAGE,
-        _base_url,
         configured_address,
         is_langgraph_dev_running,
-        read_record,
+        lock_problem,
+        read_record_and_lock,
     )
     from ..langgraph_dev.sdk import langgraph_dev_url
 
     config = get_effective_config()
     configured_port, configured_host = configured_address(config)
-    record = read_record(older=True)
+    record, lock = read_record_and_lock()
     port, host = configured_port, configured_host
     if record is not None:
         port, host = record.port, record.host
     running = is_langgraph_dev_running(port=port, host=host)
 
-    problem = _lock_problem() if record is None else None
+    problem = lock_problem(lock) if record is None else None
     if problem is not None:
         console.print(f"[yellow]⚠ {escape(problem)}[/yellow]")
         return
@@ -160,17 +161,20 @@ def server_status() -> None:
         state = "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
     if record is not None:
-        console.print(f"  pid:          {record.pid}")
+        console.print(f"  pid:              {record.pid}")
+        address = record.url
+        if is_wildcard_host(record.host):
+            # A wildcard bind is reached over loopback.
+            address = f"{address} (listens on {record.host})"
+        console.print(f"  address:          {escape(address)}")
+        if record.host != configured_host:
+            console.print(f"  configured host:  {escape(configured_host)}")
         if record.port != configured_port:
             # langgraph_dev_port changed while it ran.
             console.print(
                 f"  [yellow]The configured port is {configured_port}; sessions "
                 "do not use this server until it runs there (EvoSci server "
                 "stop, and the next session starts it there).[/yellow]"
-            )
-        elif running:
-            _print_configured_answer(
-                record, _base_url(configured_port, configured_host)
             )
         if record.older:
             console.print(f"  [yellow]{escape(OLDER_SERVER_MESSAGE)}[/yellow]")
@@ -181,47 +185,6 @@ def server_status() -> None:
         )
     if running:
         _print_projects(langgraph_dev_url(port=port, host=host))
-
-
-def _lock_problem() -> str | None:
-    """What to say when the record is missing because of the lock: held
-    without a record, or unreadable; None when it is free."""
-    from ..langgraph_dev import manager, server_home
-
-    state = server_home.lock_state()
-    if state == server_home.HELD:
-        return manager.unrecorded_lock_message()
-    if state == server_home.UNKNOWN:
-        return manager.lock_unreadable_message()
-    return None
-
-
-def _print_configured_answer(record, configured_url: str) -> None:
-    """Say how the recorded server answers at the configured address, the
-    one sessions use, when that is not as this data folder's server."""
-    from ..langgraph_dev.manager import ask
-
-    answer = ask(configured_url)
-    if answer == "own":
-        return
-    if answer == "silent":
-        console.print(
-            f"  [yellow]It does not answer at {escape(configured_url)}.[/yellow]"
-        )
-    elif answer == "older":
-        console.print(
-            f"  [yellow]{escape(configured_url)} answers as an older "
-            "EvoScientist release.[/yellow]"
-        )
-    elif configured_url != record.url:
-        # langgraph_dev_host changed while it ran.
-        console.print(
-            f"  [yellow]It listens on {escape(record.host)}, which the "
-            f"configured {escape(configured_url)} does not reach; "
-            "sessions do not use this server until it runs there "
-            "(EvoSci server stop, and the next session starts it "
-            "there).[/yellow]"
-        )
 
 
 def _print_projects(url: str) -> None:
@@ -238,16 +201,16 @@ def _print_projects(url: str) -> None:
         projects = served_projects(url)
     except OtherServerError as exc:
         console.print(
-            f"  projects:     [yellow]not listed. {escape(str(exc))}[/yellow]"
+            f"  projects:         [yellow]not listed. {escape(str(exc))}[/yellow]"
         )
         return
     except (OlderServerError, RegistrationError) as exc:
         console.print(
-            f"  projects:     [yellow]could not be read. {escape(str(exc))}[/yellow]"
+            f"  projects:         [yellow]could not be read. {escape(str(exc))}[/yellow]"
         )
         return
     if not projects:
-        console.print("  projects:     none")
+        console.print("  projects:         none")
         return
     console.print("  projects:")
     for project in projects:
@@ -339,7 +302,7 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
         owned_by_its_starter,
     )
 
-    record = manager.read_record(older=True)
+    record, lock = manager.read_record_and_lock()
     # A server service stop leaves running needs no question about its work.
     kept = keep_owned and owned_by_its_starter(record)
     if not yes and not kept:
@@ -347,14 +310,14 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
             return True
         # The question may have taken a while: stop only the server it was
         # about, never one that appeared meanwhile.
-        current = manager.read_record(older=True)
-        if current is not None and record is None:
+        current, lock, same = manager.reread_record(record)
+        if not same and record is None:
             console.print(
                 f"[yellow]⚠ A server (pid {current.pid}) is starting now; nothing "
                 "was stopped. Run the stop again once it is up.[/yellow]"
             )
             raise typer.Exit(1)
-        if current is not None and not record.same_server(current):
+        if not same:
             console.print(
                 f"[yellow]⚠ A server (pid {current.pid}) that was not the one "
                 "asked about runs now; nothing was stopped. Run the stop "
@@ -362,7 +325,7 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
             )
             raise typer.Exit(1)
         record = current
-    problem = _lock_problem() if record is None else None
+    problem = manager.lock_problem(lock) if record is None else None
     if problem is not None:
         console.print(f"[yellow]⚠ {escape(problem)}[/yellow]")
         raise typer.Exit(1)

@@ -2079,17 +2079,65 @@ def test_update_names_server_older_release_started(server):
     assert server["stopped"] == 1
 
 
-def test_update_goes_on_while_lock_is_held_without_record(server, monkeypatch):
-    """A server only just taking its lock, or exiting: nothing to stop."""
+@pytest.fixture
+def lock(monkeypatch):
+    """The server lock's state, as a test sets it."""
+    from EvoScientist.langgraph_dev import server_home
+
+    state = {"lock": server_home.FREE}
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: state["lock"])
+    return state
+
+
+def test_update_refuses_lock_held_without_record(server, lock):
     from EvoScientist.langgraph_dev import server_home
 
     server["owned"] = False
     server["running"] = False
-    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
+    lock["lock"] = server_home.HELD
+    went_on: list = []
 
-    updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(
+            updater.UpdateOptions(yes=True),
+            _emits(),
+            lambda q: True,
+            before_stop=lambda: went_on.append(1),
+        )
 
+    assert exc.value.code == "server_running"
+    assert "EvoSci update again" in exc.value.message
+    assert went_on == []
     assert server["stopped"] == 0
+
+
+@pytest.mark.parametrize("yes", [True, False])
+def test_update_unreadable_lock_goes_on_only_with_yes(server, lock, yes):
+    from EvoScientist.langgraph_dev import server_home
+
+    server["owned"] = False
+    server["running"] = False
+    lock["lock"] = server_home.UNKNOWN
+    asked: list = []
+    went_on: list = []
+
+    def check():
+        updater.check_server(
+            updater.UpdateOptions(yes=yes),
+            _emits(),
+            lambda q: asked.append(q) or True,
+            before_stop=lambda: went_on.append(1),
+        )
+
+    if yes:
+        check()
+    else:
+        with pytest.raises(updater.UpdateError) as exc:
+            check()
+        assert exc.value.code == "server_running"
+
+    assert bool(went_on) is yes
+    assert asked == []
 
 
 @pytest.mark.parametrize("running", [True, False])

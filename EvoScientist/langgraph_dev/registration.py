@@ -349,9 +349,9 @@ def apply_autoskills_settings(config: object) -> str | None:
     could not. Without a running server each project follows at its next
     setup."""
     from .manager import is_langgraph_dev_running
-    from .sdk import langgraph_dev_url
+    from .sdk import configured_langgraph_dev_url
 
-    url = langgraph_dev_url(config)
+    url = configured_langgraph_dev_url(config)
     if not is_langgraph_dev_running(base_url=url):
         return None
     try:

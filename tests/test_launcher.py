@@ -58,16 +58,41 @@ def test_server_error_names_port_conflict(reason):
     assert error.detail
 
 
+@pytest.mark.parametrize(
+    "result", [lgm._unrecorded_lock, lgm._lock_unreadable], ids=lambda f: f.__name__
+)
+def test_server_error_for_server_lock_names_it(result):
+    error = lm.server_error(result())
+    assert error.code == "backend_start_failed"
+    assert error.fields == {"lock_file": str(lgm.RUNTIME.server_lock)}
+
+
 def test_server_error_for_start_lock_held_too_long_names_it():
-    error = lm.server_error(lgm.ServerResult(problem="busy", error="held"))
+    """As the start reports another process holding the start lock."""
+    error = lm.server_error(
+        lgm.ServerResult(problem="busy", error="held", lock_file=lgm.RUNTIME.lock_file)
+    )
     assert error.code == "backend_start_failed"
     assert error.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
 
 
-def test_server_error_for_stopping_server_names_server_lock():
-    error = lm.server_error(lgm.ServerResult(problem="stopping", error="held"))
+_RECORD = lgm.ServerRecord(pid=4242, port=6174, host="127.0.0.1")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        lambda: lgm._stopping(_RECORD),
+        lambda: lgm._unresponsive(_RECORD, "did not answer"),
+        lambda: lgm._unreachable(_RECORD, "foreign"),
+    ],
+    ids=["stopping", "unresponsive", "unreachable"],
+)
+def test_server_error_for_found_server_names_its_log(result):
+    """Nothing was started: the recorded server's log, no exit code."""
+    error = lm.server_error(result())
     assert error.code == "backend_start_failed"
-    assert error.fields == {"lock_file": str(lgm.RUNTIME.server_lock)}
+    assert error.fields == {"log_file": str(lgm.RUNTIME.log_file)}
 
 
 @pytest.mark.parametrize(
@@ -75,7 +100,12 @@ def test_server_error_for_stopping_server_names_server_lock():
 )
 def test_server_error_for_failed_start_names_log(problem, exit_code):
     error = lm.server_error(
-        lgm.ServerResult(problem=problem, error="boom", exit_code=exit_code)
+        lgm.ServerResult(
+            problem=problem,
+            error="boom",
+            exit_code=exit_code,
+            log_file=lgm.RUNTIME.log_file,
+        )
     )
     assert error.code == "backend_start_failed"
     assert error.message.startswith("langgraph dev startup failed: ")
@@ -409,7 +439,27 @@ def test_start_lock_os_error_is_backend_start_failed(
         lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
     assert ei.value.code == "backend_start_failed"
     assert ei.value.message.startswith("langgraph dev startup failed: ")
+    # Only a lock that exists is named; the server home that cannot be
+    # created is in the message.
+    if step == "acquire":
+        assert ei.value.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
+    else:
+        assert ei.value.fields == {}
+        assert str(lgm.paths.SERVER_HOME) in ei.value.message
     assert server.spawns == []
+
+
+def test_spawn_failing_before_launch_names_no_file(server, monkeypatch):
+    """The langgraph CLI is missing: nothing ran, so no log was written."""
+
+    def _missing(**_kw):
+        raise FileNotFoundError("langgraph")
+
+    monkeypatch.setattr(lgm, "_spawn_server", _missing)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.fields == {}
 
 
 def test_start_tells_caller_nothing_when_nobody_else_starts(server):
