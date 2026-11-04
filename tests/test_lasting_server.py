@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from EvoScientist import paths
 from EvoScientist.cli._app import app
 from EvoScientist.config.settings import get_config_path
-from EvoScientist.langgraph_dev import manager, registration
+from EvoScientist.langgraph_dev import manager, registration, server_home
 from EvoScientist.langgraph_dev.registration import OlderServerError
 from EvoScientist.setup import server as server_stage
 
@@ -524,6 +524,31 @@ def test_service_stop_stops_server_nobody_else_owns(monkeypatch, record, expecte
 
     assert result.exit_code == 0, result.output
     assert stopped == expected
+
+
+def test_server_stop_reports_recorded_server_it_could_not_open(monkeypatch):
+    """A recorded server the stop could not open is looked for at its own
+    address, not the configured one, and is not called unrecorded."""
+    asked = []
+    monkeypatch.setattr(
+        manager,
+        "read_record_and_lock",
+        lambda: (_record(port=7000), server_home.FREE),
+    )
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: None)
+    monkeypatch.setattr(
+        manager,
+        "is_langgraph_dev_running",
+        lambda *, port, host: asked.append(port) or port == 7000,
+    )
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert asked == [7000]
+    output = " ".join(result.output.split())
+    assert "4242" in output
+    assert "no ownership record" not in output
 
 
 def test_server_stop_stops_deploy_owned_server(monkeypatch):

@@ -341,8 +341,18 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     if pid is not None:
         console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")
         return False
+    if record is not None:
+        port, host = record.port, record.host
     left_running = is_langgraph_dev_running(port=port, host=host)
-    if left_running:
+    if left_running and record is not None:
+        # Recorded, but its process could not be opened: another user's, as
+        # after a sudo EvoSci.
+        console.print(
+            f"[yellow]⚠ The background agent server (pid {record.pid}, port "
+            f"{port}) could not be stopped: its process belongs to another user, "
+            "as after a sudo EvoSci. Stop it as that user.[/yellow]"
+        )
+    elif left_running:
         # A server without ownership records (crashed session, deleted state
         # files) can't be verified as ours — refuse to guess, hand the user
         # the manual path instead of a silent no-op.
