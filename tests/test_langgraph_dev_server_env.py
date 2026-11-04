@@ -331,20 +331,24 @@ def test_failing_node_check_does_not_block_start(monkeypatch, caplog):
     assert "Could not check Node.js" in caplog.text
 
 
-def test_ensure_installs_node_only_for_start(monkeypatch, runtime_paths):
+def test_ensure_installs_node_once_before_start(monkeypatch, runtime_paths):
+    """Node is installed before the server is spawned, whose PATH has to carry
+    it, and not again for a server that is reused."""
     from tests.fakes.langgraph_dev import Server
 
     server = Server(monkeypatch)
-    installs: list = []
+    spawned_at_install: list = []
     monkeypatch.setattr(
-        manager, "_install_node_for_mcp", lambda waits: installs.append(1)
+        manager,
+        "_install_node_for_mcp",
+        lambda waits: spawned_at_install.append(len(server.spawns)),
     )
     config = manager.EvoScientistConfig(enable_async_subagents=True)
 
     manager.ensure_server(config)
     manager.ensure_server(config)
 
-    assert installs == [1]
+    assert spawned_at_install == [0]
     assert len(server.spawns) == 1
 
 

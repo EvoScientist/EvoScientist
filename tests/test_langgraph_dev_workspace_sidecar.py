@@ -2,9 +2,10 @@
 server, and the stop of the recorded one.
 
 The server records itself in the server home; clients read the record, never
-write or delete it. A record counts while its process is the live langgraph
-dev it names, created when it says. A record an older release kept in the
-shared folder still counts, for this data folder only.
+write or delete it. A record counts while the server lock is held and the
+process it names exists; a stop checks that the process is still the one
+recorded. A record an older release kept in the shared folder still counts,
+for this data folder only.
 """
 
 from __future__ import annotations
