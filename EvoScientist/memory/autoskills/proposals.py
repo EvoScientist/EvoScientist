@@ -354,6 +354,29 @@ def list_skill_proposals(
     return proposals
 
 
+def find_skill_proposal(
+    memory_dir: str | Path, proposal_id: str
+) -> SkillProposal | None:
+    """The draft whose id is exactly ``proposal_id``, in any project."""
+    if not isinstance(proposal_id, str) or not _SKILL_NAME_RE.fullmatch(proposal_id):
+        return None
+    root = _proposal_root(memory_dir)
+    proposal_dir = root / proposal_id
+    manifest_path = proposal_dir / "manifest.json"
+    resolved_root = root.resolve()
+    if not _resolves_within_root(
+        proposal_dir, resolved_root
+    ) or not _resolves_within_root(manifest_path, resolved_root):
+        return None
+    manifest = _read_manifest(manifest_path)
+    if manifest is None:
+        return None
+    proposal = _proposal_from_manifest(proposal_dir, manifest)
+    if proposal is None or proposal.proposal_id != proposal_id:
+        return None
+    return proposal
+
+
 def pending_skill_proposal_count(
     memory_dir: str | Path,
     *,
@@ -887,9 +910,15 @@ def _proposal_dir_by_id(
     requested = proposal_id.strip()
     if not requested:
         return None
+    proposals = list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
+    # The draft folder named exactly by the id wins, as in find_skill_proposal,
+    # so a draft stays reachable when another one's name extends it.
+    for proposal in proposals:
+        if proposal.proposal_id == requested and proposal.path.name == requested:
+            return proposal.path
     matches = [
         proposal.path
-        for proposal in list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
+        for proposal in proposals
         if proposal.proposal_id.startswith(requested)
     ]
     return matches[0] if len(matches) == 1 else None
@@ -899,6 +928,315 @@ def _notify_approved_skill() -> None:
     from ...tools.skills_manager import _notify_skills_changed
 
     _notify_skills_changed()
+
+
+@dataclass(frozen=True)
+class InstallTarget:
+    """Where approving a draft would write, resolved without writing.
+
+    ``base_path`` is the installed folder the result starts from: the skill an
+    in-place update changes, or the global skill a project fork copies first.
+    """
+
+    scope: str | None
+    path: Path | None
+    base_path: Path | None
+    workspace_shadow: Path | None
+    error: str | None
+
+
+def _resolve_install(
+    memory_dir: str | Path,
+    manifest: dict[str, Any],
+    *,
+    skills_dir: str | Path,
+    scope: str | None,
+) -> tuple[InstallTarget, dict[str, Any] | None]:
+    """Run every check an approval makes before writing.
+
+    Returns the target and, when approving would be refused, the exact result
+    ``approve_skill_proposal`` returns for it.
+    """
+    target_scope: str | None = None
+
+    def refuse(failure: dict[str, Any]) -> tuple[InstallTarget, dict[str, Any]]:
+        error = str(failure.get("error"))
+        if failure.get("errors"):
+            error += ": " + "; ".join(str(item) for item in failure["errors"])
+        refused = InstallTarget(
+            scope=target_scope,
+            path=None,
+            base_path=None,
+            workspace_shadow=None,
+            error=error,
+        )
+        return refused, failure
+
+    if manifest.get("status") != "pending":
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "status": manifest.get("status"),
+                "error": "Only pending proposals can be approved",
+            }
+        )
+    if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "error": "Proposal records an invalid cluster hash",
+            }
+        )
+
+    skill_name = str(manifest.get("skill_name", "")).strip()
+    if sanitize_skill_name(skill_name) != skill_name:
+        return refuse({"approved": False, "error": "Proposal skill name is invalid"})
+    operation = _normalize_operation(manifest.get("operation")) or "create"
+    target_skill_name = str(manifest.get("target_skill_name") or skill_name).strip()
+    valid, errors, _description = _validate_skill_proposal_dir(
+        memory_dir=memory_dir,
+        skill_name=skill_name,
+    )
+    if not valid:
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest["proposal_id"],
+                "error": "Proposal skill folder is invalid",
+                "errors": errors,
+            }
+        )
+    # The tier the proposal installs into: an explicit override wins, then
+    # the tier recorded at submit time, then the workspace tier for a
+    # proposal written before scopes existed.
+    requested_scope, scope_valid = _requested_scope(scope)
+    if not scope_valid:
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "error": "scope must be 'workspace' or 'global'",
+            }
+        )
+    raw_scope = manifest.get("scope")
+    recorded_scope, recorded_scope_valid = _requested_scope(raw_scope)
+    if raw_scope is not None and not recorded_scope_valid:
+        # A recorded scope that is neither absent nor a known tier is a
+        # broken manifest, not a legacy one: installing into the workspace
+        # would silently ignore what the manifest says.
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "error": f"Proposal records an unknown scope {raw_scope!r}",
+            }
+        )
+    # A proposal written before scopes existed records none. It keeps the
+    # old workspace behaviour and never writes to the global tier unless
+    # the approval names that tier explicitly.
+    legacy = recorded_scope is None
+    target_scope = requested_scope or recorded_scope or _SCOPE_WORKSPACE
+    destination_root = _scope_root(target_scope, skills_dir=skills_dir)
+    destination = destination_root / skill_name
+    base_skill_dir: Path | None = None
+    workspace_shadow: Path | None = None
+    if operation == "create":
+        other_root = _scope_root(
+            _SCOPE_GLOBAL if target_scope == _SCOPE_WORKSPACE else _SCOPE_WORKSPACE,
+            skills_dir=skills_dir,
+        )
+        existing_skill = _find_installed_user_skill(
+            skill_name, roots=[destination_root]
+        ) or _find_installed_user_skill(skill_name, roots=[other_root])
+        if (
+            destination.exists()
+            or destination.is_symlink()
+            or existing_skill is not None
+        ):
+            collision = existing_skill or destination
+            return refuse(
+                {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": f"Skill already exists: {collision}",
+                }
+            )
+    if operation == "update":
+        if target_skill_name != skill_name:
+            return refuse(
+                {
+                    "approved": False,
+                    "proposal_id": manifest["proposal_id"],
+                    "error": "Update proposal target must match the proposed skill name",
+                }
+            )
+        if (
+            target_scope == _SCOPE_WORKSPACE
+            and recorded_scope == _SCOPE_GLOBAL
+            and requested_scope == _SCOPE_WORKSPACE
+        ):
+            # A workspace approval may fork the global target. Refuse a
+            # destination or matching workspace alias that would remain the
+            # runtime-visible copy instead of the fork.
+            existing_local = _find_installed_user_skill(
+                skill_name,
+                roots=[destination_root],
+            )
+            if (
+                destination.exists()
+                or destination.is_symlink()
+                or existing_local is not None
+            ):
+                return refuse(
+                    {
+                        "approved": False,
+                        "proposal_id": manifest["proposal_id"],
+                        "error": (
+                            f"Workspace skill path already exists; refusing to "
+                            f"retarget global skill {skill_name!r}"
+                        ),
+                        "scope": target_scope,
+                    }
+                )
+            existing_global = _find_installed_user_skill(
+                skill_name,
+                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
+            )
+            if existing_global is None:
+                return refuse(
+                    {
+                        "approved": False,
+                        "proposal_id": manifest["proposal_id"],
+                        "error": (
+                            f"No installed global skill named {skill_name!r} "
+                            "to use as the workspace fork source"
+                        ),
+                        "scope": target_scope,
+                    }
+                )
+            base_skill_dir = existing_global
+        elif legacy and target_scope == _SCOPE_WORKSPACE:
+            # Legacy proposals retain their historical workspace shadow
+            # behaviour; only an explicit global approval writes globally.
+            local_match = _find_installed_user_skill(
+                skill_name,
+                roots=[destination_root],
+            )
+            if local_match is not None:
+                destination = local_match
+            else:
+                existing_global = _find_installed_user_skill(
+                    skill_name,
+                    roots=[Path(paths.GLOBAL_SKILLS_DIR)],
+                )
+                if existing_global is None:
+                    return refuse(
+                        {
+                            "approved": False,
+                            "proposal_id": manifest["proposal_id"],
+                            "error": (
+                                f"No installed workspace/global skill named "
+                                f"{skill_name!r} to update"
+                            ),
+                        }
+                    )
+                if destination.exists() or destination.is_symlink():
+                    return refuse(
+                        {
+                            "approved": False,
+                            "proposal_id": manifest["proposal_id"],
+                            "error": (
+                                f"Local skill path already exists but does not match "
+                                f"{skill_name!r}: {destination}"
+                            ),
+                        }
+                    )
+                base_skill_dir = existing_global
+        else:
+            # Re-check the target in the tier this proposal records. A skill
+            # that moved, or was removed, is an error rather than a reason
+            # to install into the other tier.
+            local_match = _find_installed_user_skill(
+                skill_name,
+                roots=[destination_root],
+            )
+            if local_match is not None:
+                destination = local_match
+            else:
+                return refuse(
+                    {
+                        "approved": False,
+                        "proposal_id": manifest["proposal_id"],
+                        "error": (
+                            f"No installed {target_scope} skill named "
+                            f"{skill_name!r} to update"
+                        ),
+                        "scope": target_scope,
+                    }
+                )
+            if target_scope == _SCOPE_GLOBAL:
+                workspace_root = _scope_root(
+                    _SCOPE_WORKSPACE,
+                    skills_dir=skills_dir,
+                )
+                workspace_shadow = _find_installed_user_skill(
+                    skill_name,
+                    roots=[workspace_root],
+                )
+                if workspace_shadow is None:
+                    candidate = workspace_root / destination.name
+                    resolved_workspace = workspace_root.resolve()
+                    if (
+                        candidate.is_dir()
+                        and candidate != destination
+                        and _resolves_within_root(candidate, resolved_workspace)
+                        and _resolves_within_root(
+                            candidate / "SKILL.md", resolved_workspace
+                        )
+                    ):
+                        workspace_shadow = candidate
+
+    base_path = base_skill_dir
+    if base_path is None and operation == "update":
+        base_path = destination
+    target = InstallTarget(
+        scope=target_scope,
+        path=destination,
+        base_path=base_path,
+        workspace_shadow=workspace_shadow,
+        error=None,
+    )
+    return target, None
+
+
+def proposal_install_target(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    skills_dir: str | Path,
+    scope: str | None = None,
+) -> InstallTarget:
+    """Where approving the draft named exactly ``proposal_id`` would write."""
+    proposal = find_skill_proposal(memory_dir, proposal_id)
+    manifest = (
+        _read_manifest(proposal.path / "manifest.json")
+        if proposal is not None
+        else None
+    )
+    if manifest is None:
+        return InstallTarget(
+            scope=None,
+            path=None,
+            base_path=None,
+            workspace_shadow=None,
+            error=f"No proposal named {proposal_id!r}",
+        )
+    target, _failure = _resolve_install(
+        memory_dir, manifest, skills_dir=skills_dir, scope=scope
+    )
+    return target
 
 
 def approve_skill_proposal(
@@ -932,207 +1270,20 @@ def approve_skill_proposal(
     manifest = _read_manifest(manifest_path)
     if manifest is None:
         return {"approved": False, "error": "Proposal manifest is missing or invalid"}
-    if manifest.get("status") != "pending":
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "status": manifest.get("status"),
-            "error": "Only pending proposals can be approved",
-        }
-    if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": "Proposal records an invalid cluster hash",
-        }
-
-    skill_name = str(manifest.get("skill_name", "")).strip()
-    if sanitize_skill_name(skill_name) != skill_name:
-        return {"approved": False, "error": "Proposal skill name is invalid"}
-    operation = _normalize_operation(manifest.get("operation")) or "create"
-    target_skill_name = str(manifest.get("target_skill_name") or skill_name).strip()
-    valid, errors, _description = _validate_skill_proposal_dir(
-        memory_dir=memory_dir,
-        skill_name=skill_name,
+    target, failure = _resolve_install(
+        memory_dir, manifest, skills_dir=skills_dir, scope=scope
     )
-    if not valid:
-        return {
-            "approved": False,
-            "proposal_id": manifest["proposal_id"],
-            "error": "Proposal skill folder is invalid",
-            "errors": errors,
-        }
-    # The tier the proposal installs into: an explicit override wins, then
-    # the tier recorded at submit time, then the workspace tier for a
-    # proposal written before scopes existed.
-    requested_scope, scope_valid = _requested_scope(scope)
-    if not scope_valid:
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": "scope must be 'workspace' or 'global'",
-        }
-    raw_scope = manifest.get("scope")
-    recorded_scope, recorded_scope_valid = _requested_scope(raw_scope)
-    if raw_scope is not None and not recorded_scope_valid:
-        # A recorded scope that is neither absent nor a known tier is a
-        # broken manifest, not a legacy one: installing into the workspace
-        # would silently ignore what the manifest says.
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Proposal records an unknown scope {raw_scope!r}",
-        }
-    # A proposal written before scopes existed records none. It keeps the
-    # old workspace behaviour and never writes to the global tier unless
-    # the approval names that tier explicitly.
-    legacy = recorded_scope is None
-    target_scope = requested_scope or recorded_scope or _SCOPE_WORKSPACE
-    destination_root = _scope_root(target_scope, skills_dir=skills_dir)
-    destination = destination_root / skill_name
-    base_skill_dir: Path | None = None
-    workspace_shadow: Path | None = None
-    if operation == "create":
-        other_root = _scope_root(
-            _SCOPE_GLOBAL if target_scope == _SCOPE_WORKSPACE else _SCOPE_WORKSPACE,
-            skills_dir=skills_dir,
-        )
-        existing_skill = _find_installed_user_skill(
-            skill_name, roots=[destination_root]
-        ) or _find_installed_user_skill(skill_name, roots=[other_root])
-        if (
-            destination.exists()
-            or destination.is_symlink()
-            or existing_skill is not None
-        ):
-            collision = existing_skill or destination
-            return {
-                "approved": False,
-                "proposal_id": manifest["proposal_id"],
-                "error": f"Skill already exists: {collision}",
-            }
-    if operation == "update":
-        if target_skill_name != skill_name:
-            return {
-                "approved": False,
-                "proposal_id": manifest["proposal_id"],
-                "error": "Update proposal target must match the proposed skill name",
-            }
-        if (
-            target_scope == _SCOPE_WORKSPACE
-            and recorded_scope == _SCOPE_GLOBAL
-            and requested_scope == _SCOPE_WORKSPACE
-        ):
-            # A workspace approval may fork the global target. Refuse a
-            # destination or matching workspace alias that would remain the
-            # runtime-visible copy instead of the fork.
-            existing_local = _find_installed_user_skill(
-                skill_name,
-                roots=[destination_root],
-            )
-            if (
-                destination.exists()
-                or destination.is_symlink()
-                or existing_local is not None
-            ):
-                return {
-                    "approved": False,
-                    "proposal_id": manifest["proposal_id"],
-                    "error": (
-                        f"Workspace skill path already exists; refusing to "
-                        f"retarget global skill {skill_name!r}"
-                    ),
-                    "scope": target_scope,
-                }
-            existing_global = _find_installed_user_skill(
-                skill_name,
-                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
-            )
-            if existing_global is None:
-                return {
-                    "approved": False,
-                    "proposal_id": manifest["proposal_id"],
-                    "error": (
-                        f"No installed global skill named {skill_name!r} "
-                        "to use as the workspace fork source"
-                    ),
-                    "scope": target_scope,
-                }
-            base_skill_dir = existing_global
-        elif legacy and target_scope == _SCOPE_WORKSPACE:
-            # Legacy proposals retain their historical workspace shadow
-            # behaviour; only an explicit global approval writes globally.
-            local_match = _find_installed_user_skill(
-                skill_name,
-                roots=[destination_root],
-            )
-            if local_match is not None:
-                destination = local_match
-            else:
-                existing_global = _find_installed_user_skill(
-                    skill_name,
-                    roots=[Path(paths.GLOBAL_SKILLS_DIR)],
-                )
-                if existing_global is None:
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest["proposal_id"],
-                        "error": (
-                            f"No installed workspace/global skill named "
-                            f"{skill_name!r} to update"
-                        ),
-                    }
-                if destination.exists() or destination.is_symlink():
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest["proposal_id"],
-                        "error": (
-                            f"Local skill path already exists but does not match "
-                            f"{skill_name!r}: {destination}"
-                        ),
-                    }
-                base_skill_dir = existing_global
-        else:
-            # Re-check the target in the tier this proposal records. A skill
-            # that moved, or was removed, is an error rather than a reason
-            # to install into the other tier.
-            local_match = _find_installed_user_skill(
-                skill_name,
-                roots=[destination_root],
-            )
-            if local_match is not None:
-                destination = local_match
-            else:
-                return {
-                    "approved": False,
-                    "proposal_id": manifest["proposal_id"],
-                    "error": (
-                        f"No installed {target_scope} skill named "
-                        f"{skill_name!r} to update"
-                    ),
-                    "scope": target_scope,
-                }
-            if target_scope == _SCOPE_GLOBAL:
-                workspace_root = _scope_root(
-                    _SCOPE_WORKSPACE,
-                    skills_dir=skills_dir,
-                )
-                workspace_shadow = _find_installed_user_skill(
-                    skill_name,
-                    roots=[workspace_root],
-                )
-                if workspace_shadow is None:
-                    candidate = workspace_root / destination.name
-                    resolved_workspace = workspace_root.resolve()
-                    if (
-                        candidate.is_dir()
-                        and candidate != destination
-                        and _resolves_within_root(candidate, resolved_workspace)
-                        and _resolves_within_root(
-                            candidate / "SKILL.md", resolved_workspace
-                        )
-                    ):
-                        workspace_shadow = candidate
+    if failure is not None:
+        return failure
+    assert target.path is not None
+    assert target.scope is not None
+    skill_name = str(manifest["skill_name"]).strip()
+    operation = _normalize_operation(manifest.get("operation")) or "create"
+    destination = target.path
+    target_scope = target.scope
+    workspace_shadow = target.workspace_shadow
+    # A fork copies the global skill first; an in-place update starts from itself.
+    base_skill_dir = target.base_path if target.base_path != destination else None
 
     blocked_path = _copy_proposed_skill(
         proposal_dir, destination, base_dir=base_skill_dir

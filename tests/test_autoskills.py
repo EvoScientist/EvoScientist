@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,8 +23,10 @@ from EvoScientist.memory.autoskills.candidates import autoskill_candidates
 from EvoScientist.memory.autoskills.proposals import (
     approve_skill_proposal,
     autoskill_proposals_dir,
+    find_skill_proposal,
     list_skill_proposals,
     pending_skill_proposal_count,
+    proposal_install_target,
     reject_skill_proposal,
     submit_autoskill_proposal,
 )
@@ -397,6 +400,336 @@ def test_manifest_without_decision_fields_reads_as_none(tmp_path):
     assert proposal.approved_by is None
     assert proposal.approved_at is None
     assert proposal.rejected_at is None
+
+
+def _submit_create(memory_dir, skills_dir, skill_name, *, cluster_hash=None):
+    _write_skill_folder(
+        memory_dir,
+        skill_name,
+        f"Use when testing the {skill_name} draft.",
+        f"# {skill_name}\n\nSteps.",
+    )
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=skill_name,
+        cluster_hash=cluster_hash or f"cluster-{skill_name}",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale=f"Observations describe {skill_name}.",
+        skills_dir=skills_dir,
+    )
+    assert result["submitted"] is True
+    return result
+
+
+def _submit_update(memory_dir, skills_dir, skill_name):
+    _write_skill_folder(
+        memory_dir,
+        skill_name,
+        f"Use when testing the updated {skill_name}.",
+        f"# {skill_name}\n\nUpdated steps.",
+    )
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=skill_name,
+        cluster_hash=f"cluster-update-{skill_name}",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale=f"New observations refine {skill_name}.",
+        operation="update",
+        target_skill_name=skill_name,
+        skills_dir=skills_dir,
+    )
+    assert result["submitted"] is True
+    return result
+
+
+def test_find_skill_proposal_matches_exact_id_only(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    _submit_create(memory_dir, skills_dir, "paper-review-v2")
+
+    assert find_skill_proposal(memory_dir, "paper-review").proposal_id == "paper-review"
+    assert (
+        find_skill_proposal(memory_dir, "paper-review-v2").proposal_id
+        == "paper-review-v2"
+    )
+    assert find_skill_proposal(memory_dir, "paper-rev") is None
+
+
+def test_find_skill_proposal_refuses_bad_ids_without_reading(tmp_path):
+    memory_dir = tmp_path / "memories"
+    bad_ids = ["", "../paper-review", "a/b", "Paper-Review", "paper-review\n", "-x"]
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._proposal_root",
+        side_effect=AssertionError("read the filesystem"),
+    ):
+        for bad in bad_ids:
+            assert find_skill_proposal(memory_dir, bad) is None
+
+
+def test_find_skill_proposal_needs_the_folder_to_match_the_id(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    root = autoskill_proposals_dir(memory_dir)
+    shutil.copytree(root / "paper-review", root / "paper-copy")
+
+    assert find_skill_proposal(memory_dir, "paper-copy") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_find_skill_proposal_refuses_folders_outside_the_root(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    root = autoskill_proposals_dir(memory_dir)
+    manifest = json.loads((root / "paper-review" / "manifest.json").read_text())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "manifest.json").write_text(
+        json.dumps({**manifest, "proposal_id": "paper-link"}), encoding="utf-8"
+    )
+    (root / "paper-link").symlink_to(outside, target_is_directory=True)
+    linked_manifest = tmp_path / "linked-manifest.json"
+    linked_manifest.write_text(
+        json.dumps({**manifest, "proposal_id": "paper-manifest"}), encoding="utf-8"
+    )
+    (root / "paper-manifest").mkdir()
+    (root / "paper-manifest" / "manifest.json").symlink_to(linked_manifest)
+
+    assert find_skill_proposal(memory_dir, "paper-link") is None
+    assert find_skill_proposal(memory_dir, "paper-manifest") is None
+    assert find_skill_proposal(memory_dir, "paper-review") is not None
+
+
+def test_approve_and_reject_prefer_exact_id_over_prefix(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    _submit_create(memory_dir, skills_dir, "paper-review-v2")
+    _submit_create(memory_dir, skills_dir, "data-check")
+    _submit_create(memory_dir, skills_dir, "data-check-v2")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "paper-review", skills_dir=skills_dir
+        )
+    rejected = reject_skill_proposal(memory_dir, "data-check")
+
+    assert approved["approved"] is True
+    assert approved["proposal_id"] == "paper-review"
+    assert rejected["rejected"] is True
+    assert rejected["proposal_id"] == "data-check"
+    statuses = {p.proposal_id: p.status for p in list_skill_proposals(memory_dir)}
+    assert statuses == {
+        "data-check": "rejected",
+        "data-check-v2": "pending",
+        "paper-review": "approved",
+        "paper-review-v2": "pending",
+    }
+
+
+def test_approve_ignores_a_copied_folder_that_claims_the_id(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    root = autoskill_proposals_dir(memory_dir)
+    shutil.copytree(root / "paper-review", root / "a-copy")
+    copy_md = root / "a-copy" / "SKILL.md"
+    copy_md.write_text(copy_md.read_text(encoding="utf-8") + "\nTODO\n", "utf-8")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "paper-review", skills_dir=skills_dir
+        )
+
+    assert approved["approved"] is True
+    installed = (skills_dir / "paper-review" / "SKILL.md").read_text(encoding="utf-8")
+    assert "TODO" not in installed
+    copy_manifest = json.loads((root / "a-copy" / "manifest.json").read_text())
+    assert copy_manifest["status"] == "pending"
+    assert _manifest(memory_dir, "paper-review")["status"] == "approved"
+
+
+def test_unique_prefix_still_resolves(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review-v2")
+
+    rejected = reject_skill_proposal(memory_dir, "paper-rev")
+
+    assert rejected["rejected"] is True
+    assert rejected["proposal_id"] == "paper-review-v2"
+
+
+def test_install_target_for_create_is_new_folder_in_recorded_tier(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert target.error is None
+    assert target.scope == "workspace"
+    assert target.path == skills_dir / "focused-validation"
+    assert target.base_path is None
+    assert target.workspace_shadow is None
+    assert not target.path.exists()
+    assert list_skill_proposals(memory_dir)[0].status == "pending"
+
+
+def test_install_target_follows_scope_override(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir, scope="global"
+    )
+    bad = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir, scope="gloabl"
+    )
+
+    assert target.scope == "global"
+    assert target.path == global_skills / "focused-validation"
+    assert bad.path is None
+    assert bad.error == "scope must be 'workspace' or 'global'"
+
+
+def test_install_target_for_update_is_the_installed_skill(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir,
+        "focused-validation",
+        "Use when validating code changes with staged checks.",
+        "# Focused validation\n\nOld workflow.",
+    )
+    _submit_update(memory_dir, skills_dir, "focused-validation")
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert target.error is None
+    assert target.scope == "workspace"
+    assert target.path == installed.resolve()
+    assert target.base_path == installed.resolve()
+    assert "Old workflow." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_install_target_for_project_fork_starts_from_global_skill(
+    tmp_path, monkeypatch
+):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    global_skill = _write_installed_skill(
+        global_skills,
+        "paper-review",
+        "Use when reviewing papers.",
+        "# Paper review\n\nGlobal workflow.",
+    )
+    proposal = _submit_update(memory_dir, skills_dir, "paper-review")
+    assert proposal["scope"] == "global"
+
+    target = proposal_install_target(
+        memory_dir, "paper-review", skills_dir=skills_dir, scope="workspace"
+    )
+
+    assert target.error is None
+    assert target.scope == "workspace"
+    assert target.path == skills_dir / "paper-review"
+    assert target.base_path == global_skill.resolve()
+    assert not target.path.exists()
+
+
+def test_install_target_for_legacy_update_forks_global_skill(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    global_skill = _write_installed_skill(
+        global_skills,
+        "paper-review",
+        "Use when reviewing papers.",
+        "# Paper review\n\nGlobal workflow.",
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+    manifest_path = (
+        autoskill_proposals_dir(memory_dir) / "paper-review" / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["scope"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    target = proposal_install_target(memory_dir, "paper-review", skills_dir=skills_dir)
+
+    assert target.error is None
+    assert target.scope == "workspace"
+    assert target.path == skills_dir / "paper-review"
+    assert target.base_path == global_skill.resolve()
+
+
+def test_install_target_reports_collision_without_writing(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+    installed = _write_installed_skill(
+        skills_dir,
+        "focused-validation",
+        "Use when validating code changes with staged checks.",
+        "# Focused validation\n\nHand-written.",
+    )
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert target.path is None
+    assert target.base_path is None
+    assert "already exists" in target.error
+    assert "Hand-written." in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert list_skill_proposals(memory_dir)[0].status == "pending"
+
+
+def test_install_target_reports_invalid_draft_folder(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+    skill_md = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    skill_md.write_text(skill_md.read_text(encoding="utf-8") + "\nTODO\n", "utf-8")
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert target.path is None
+    assert target.error.startswith("Proposal skill folder is invalid")
+    assert "TODO" in target.error
+
+
+def test_install_target_for_unknown_or_decided_draft(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+    reject_skill_proposal(memory_dir, "focused-validation")
+
+    missing = proposal_install_target(memory_dir, "no-such", skills_dir=skills_dir)
+    decided = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert missing.path is None
+    assert missing.error
+    assert decided.path is None
+    assert decided.error == "Only pending proposals can be approved"
 
 
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
