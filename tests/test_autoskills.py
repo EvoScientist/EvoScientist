@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,8 +27,10 @@ from EvoScientist.memory.autoskills.proposals import (
     find_skill_proposal,
     list_skill_proposals,
     pending_skill_proposal_count,
+    processed_cluster_hashes,
     proposal_install_target,
     reject_skill_proposal,
+    revert_skill_proposal,
     submit_autoskill_proposal,
 )
 from EvoScientist.memory.autoskills.schedule import (
@@ -293,7 +296,7 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     assert list_skill_proposals(memory_dir)[0].status == "approved"
 
 
-def _submit_focused_validation(memory_dir, skills_dir, *, cluster_hash="cluster-1"):
+def _submit_focused_validation(memory_dir, skills_dir):
     _write_skill_folder(
         memory_dir,
         "focused-validation",
@@ -303,10 +306,11 @@ def _submit_focused_validation(memory_dir, skills_dir, *, cluster_hash="cluster-
     result = submit_autoskill_proposal(
         memory_dir=memory_dir,
         skill_name="focused-validation",
-        cluster_hash=cluster_hash,
+        cluster_hash="cluster-1",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Three observations describe the same staged validation practice.",
         skills_dir=skills_dir,
+        workspace_dir=Path(skills_dir).parent,
     )
     assert result["submitted"] is True
     return result
@@ -402,7 +406,9 @@ def test_manifest_without_decision_fields_reads_as_none(tmp_path):
     assert proposal.rejected_at is None
 
 
-def _submit_create(memory_dir, skills_dir, skill_name, *, cluster_hash=None):
+def _submit_create(
+    memory_dir, skills_dir, skill_name, *, cluster_hash=None, workspace_dir=None
+):
     _write_skill_folder(
         memory_dir,
         skill_name,
@@ -416,6 +422,7 @@ def _submit_create(memory_dir, skills_dir, skill_name, *, cluster_hash=None):
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale=f"Observations describe {skill_name}.",
         skills_dir=skills_dir,
+        workspace_dir=workspace_dir or Path(skills_dir).parent,
     )
     assert result["submitted"] is True
     return result
@@ -730,6 +737,573 @@ def test_install_target_for_unknown_or_decided_draft(tmp_path):
     assert missing.error
     assert decided.path is None
     assert decided.error == "Only pending proposals can be approved"
+
+
+def _approve_quietly(memory_dir, proposal_id, skills_dir, **kwargs):
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = approve_skill_proposal(
+            memory_dir, proposal_id, skills_dir=skills_dir, **kwargs
+        )
+    assert result["approved"] is True
+    return result
+
+
+def _approved_create_with_script(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    script = autoskill_proposals_dir(memory_dir) / "focused-validation" / "scripts"
+    script.mkdir()
+    (script / "check.py").write_text("print('check')\n", encoding="utf-8")
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    installed = skills_dir / "focused-validation"
+    assert (installed / "scripts" / "check.py").is_file()
+    return memory_dir, skills_dir, installed
+
+
+def test_revert_rejected_returns_to_pending_and_unmarks_cluster(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    reject_skill_proposal(memory_dir, "focused-validation")
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["updated_at"] = "2000-01-01T00:00:00Z"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result == {
+        "reverted": True,
+        "proposal_id": "focused-validation",
+        "status": "pending",
+    }
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+    proposal = list_skill_proposals(memory_dir)[0]
+    assert proposal.status == "pending"
+    assert proposal.rejected_at is None
+    assert proposal.updated_at != "2000-01-01T00:00:00Z"
+
+
+def test_revert_without_a_processed_mark(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    reject_skill_proposal(memory_dir, "focused-validation")
+    for mark in (memory_dir / "autoskills" / "processed").glob("*.json"):
+        mark.unlink()
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+
+
+def test_revert_approved_create_removes_installed_skill(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
+    ) as notify:
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert not installed.exists()
+    notify.assert_called_once_with()
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert manifest["status"] == "pending"
+    for key in ("approved_by", "approved_at", "approved_skill_path"):
+        assert key not in manifest
+    assert manifest["scope"] == "workspace"
+
+
+@pytest.mark.parametrize("change", ["edit", "same_size_edit", "add", "add_folder"])
+def test_revert_refuses_changed_skill(tmp_path, change):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    if change == "edit":
+        skill_md = installed / "SKILL.md"
+        skill_md.write_text(skill_md.read_text(encoding="utf-8") + "\nMore.\n")
+    elif change == "same_size_edit":
+        (installed / "scripts" / "check.py").write_text(
+            "print('chock')\n", encoding="utf-8"
+        )
+    elif change == "add":
+        (installed / "notes.md").write_text("Mine.\n", encoding="utf-8")
+    else:
+        (installed / "data").mkdir()
+        (installed / "data" / "run.csv").write_text("a,b\n", encoding="utf-8")
+
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
+    ) as notify:
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result == {
+        "reverted": False,
+        "proposal_id": "focused-validation",
+        "error": "skill_changed",
+    }
+    assert (installed / "SKILL.md").is_file()
+    notify.assert_not_called()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+
+def test_revert_deletes_nothing_when_a_later_file_changed(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    (installed / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (installed / "SKILL.md").is_file()
+
+
+def test_revert_rechecks_each_file_right_before_deleting_it(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._same_bytes",
+        side_effect=[True, True, False],
+    ):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "scripts" / "check.py").is_file()
+
+
+def test_revert_finishes_a_partly_removed_skill(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    (installed / "SKILL.md").unlink()
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert not installed.exists()
+
+
+def test_revert_reports_a_failed_removal_and_a_retry_finishes(tmp_path, monkeypatch):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    real_unlink = Path.unlink
+
+    def held_open(self, *args, **kwargs):
+        if self.name == "check.py":
+            raise PermissionError("held open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", held_open)
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        failed = revert_skill_proposal(memory_dir, "focused-validation")
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+
+    assert failed["reverted"] is False
+    assert failed["error"] == "revert_failed"
+    assert "held open" in failed["detail"]
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        retried = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert retried["reverted"] is True
+    assert not installed.exists()
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+
+def test_revert_reports_a_failed_unmark_and_keeps_the_decision(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    reject_skill_proposal(memory_dir, "focused-validation")
+
+    with patch(
+        "EvoScientist.memory.autoskills.proposals.unmark_cluster_processed",
+        side_effect=PermissionError("read-only"),
+    ):
+        failed = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert failed["error"] == "revert_failed"
+    assert _manifest(memory_dir, "focused-validation")["status"] == "rejected"
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+    retried = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert retried["reverted"] is True
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+
+@pytest.mark.parametrize("step", ["rmdir", "manifest"])
+def test_revert_reports_a_failed_late_step_and_a_retry_finishes(
+    tmp_path, monkeypatch, step
+):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    if step == "rmdir":
+        real_rmdir = Path.rmdir
+
+        def failing(self):
+            if self.name == "scripts":
+                raise PermissionError("busy")
+            return real_rmdir(self)
+
+        monkeypatch.setattr(Path, "rmdir", failing)
+        target = None
+    else:
+        target = patch(
+            "EvoScientist.memory.autoskills.proposals._write_manifest",
+            side_effect=PermissionError("busy"),
+        )
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        if target is None:
+            failed = revert_skill_proposal(memory_dir, "focused-validation")
+        else:
+            with target:
+                failed = revert_skill_proposal(memory_dir, "focused-validation")
+    monkeypatch.undo()
+
+    assert failed["error"] == "revert_failed"
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        retried = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert retried["reverted"] is True
+    assert not installed.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+@pytest.mark.parametrize("unreadable", ["skill", "subfolder"])
+def test_revert_reports_a_folder_it_cannot_list(tmp_path, unreadable):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    (installed / "scripts" / "mine.py").write_text("print('mine')\n", "utf-8")
+    locked = installed if unreadable == "skill" else installed / "scripts"
+    locked.chmod(0o300)
+    try:
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+    finally:
+        locked.chmod(0o755)
+
+    assert result["error"] == "revert_failed"
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "scripts" / "mine.py").is_file()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_revert_refuses_a_folder_symlink_inside_the_skill(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    outside = tmp_path / "outside-scripts"
+    shutil.move(installed / "scripts", outside)
+    (installed / "scripts").symlink_to(outside, target_is_directory=True)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (outside / "check.py").is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_revert_never_deletes_through_a_folder_swapped_after_the_scan(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals as proposals_module
+
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    outside = tmp_path / "outside-scripts"
+    real_scan = proposals_module._regular_files
+
+    def scan_then_swap(root):
+        files = real_scan(root)
+        shutil.move(installed / "scripts", outside)
+        (installed / "scripts").symlink_to(outside, target_is_directory=True)
+        return files
+
+    monkeypatch.setattr(proposals_module, "_regular_files", scan_then_swap)
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is False
+    assert (outside / "check.py").is_file()
+    assert (installed / "SKILL.md").is_file()
+
+
+def test_plain_entries_exclude_windows_reparse_points():
+    from EvoScientist.memory.autoskills.proposals import _plain
+
+    folder = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=0)
+    junction = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o755,
+        st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        st_reparse_tag=0xA0000003,
+    )
+    # A OneDrive placeholder is a reparse point but no link.
+    cloud_file = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o644,
+        st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        st_reparse_tag=0x9000001A,
+    )
+    regular = SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+
+    assert _plain(folder, directory=True) is True
+    assert _plain(junction, directory=True) is False
+    assert _plain(cloud_file, directory=False) is True
+    assert _plain(regular, directory=False) is True
+    assert _plain(regular, directory=True) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_revert_refuses_a_symlink_inside_the_skill(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    target = tmp_path / "check.py"
+    shutil.move(installed / "scripts" / "check.py", target)
+    (installed / "scripts" / "check.py").symlink_to(target)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert target.is_file()
+    assert (installed / "SKILL.md").is_file()
+
+
+def test_revert_refuses_a_recorded_path_outside_the_tier(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    backup = tmp_path / "backup" / "focused-validation"
+    shutil.copytree(installed, backup)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["approved_skill_path"] = str(backup)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (backup / "SKILL.md").is_file()
+    assert (installed / "SKILL.md").is_file()
+
+
+def _edit_manifest(memory_dir, proposal_id, **changes):
+    path = autoskill_proposals_dir(memory_dir) / proposal_id / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in changes.items():
+        if value is None:
+            manifest.pop(key, None)
+        else:
+            manifest[key] = value
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_revert_refuses_a_twin_folder_in_the_same_tier(tmp_path):
+    memory_dir, skills_dir, installed = _approved_create_with_script(tmp_path)
+    twin = skills_dir / "focused-validation-copy"
+    shutil.copytree(installed, twin)
+    _edit_manifest(memory_dir, "focused-validation", approved_skill_path=str(twin))
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (twin / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"workspace_dir": None},
+        {"approved_skill_path": ["not", "a", "path"]},
+    ],
+)
+def test_revert_refuses_a_manifest_it_cannot_check(tmp_path, changes):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    _edit_manifest(memory_dir, "focused-validation", **changes)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (installed / "SKILL.md").is_file()
+
+
+def test_revert_of_an_approval_that_recorded_no_scope(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    _edit_manifest(memory_dir, "focused-validation", scope=None, submitted_scope=None)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert not installed.exists()
+
+
+def test_revert_refuses_an_installed_path_that_is_a_file(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    shutil.rmtree(installed)
+    installed.write_text("not a folder\n", encoding="utf-8")
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert installed.is_file()
+
+
+def test_revert_of_an_approval_with_no_recorded_path(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest["approved_skill_path"]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert (installed / "SKILL.md").is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_revert_refuses_installed_path_replaced_by_symlink(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    moved = tmp_path / "moved"
+    shutil.move(installed, moved)
+    installed.symlink_to(moved, target_is_directory=True)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert installed.is_symlink()
+    assert (moved / "SKILL.md").is_file()
+
+
+def test_revert_approved_create_whose_folder_is_gone(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    shutil.rmtree(installed)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert list_skill_proposals(memory_dir)[0].status == "pending"
+
+
+def test_revert_restores_the_submitted_scope(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _approve_quietly(memory_dir, "focused-validation", skills_dir, scope="global")
+    assert _manifest(memory_dir, "focused-validation")["scope"] == "global"
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert not (global_skills / "focused-validation").exists()
+    proposal = list_skill_proposals(memory_dir)[0]
+    assert proposal.scope == "workspace"
+    assert proposal.submitted_scope == "workspace"
+
+
+def test_revert_drops_scope_a_legacy_draft_never_had(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest["scope"]
+    del manifest["submitted_scope"]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    assert _manifest(memory_dir, "focused-validation")["scope"] == "workspace"
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert "scope" not in _manifest(memory_dir, "focused-validation")
+
+
+def test_reverted_draft_can_be_decided_again(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    reject_skill_proposal(memory_dir, "focused-validation")
+    revert_skill_proposal(memory_dir, "focused-validation")
+
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert manifest["status"] == "approved"
+    assert manifest["approved_by"] == "user"
+    assert "rejected_at" not in manifest
+    assert (skills_dir / "focused-validation" / "SKILL.md").is_file()
+
+
+def test_revert_refuses_update_approval(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir,
+        "focused-validation",
+        "Use when validating code changes with staged checks.",
+        "# Focused validation\n\nOld workflow.",
+    )
+    _submit_update(memory_dir, skills_dir, "focused-validation")
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is False
+    assert result["error"] == "revert_unavailable"
+    assert (installed / "SKILL.md").is_file()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
+
+
+def test_revert_refuses_pending_and_unknown(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+
+    pending = revert_skill_proposal(memory_dir, "focused-validation")
+    unknown = revert_skill_proposal(memory_dir, "focused")
+
+    assert pending == {
+        "reverted": False,
+        "proposal_id": "focused-validation",
+        "error": "not_decided",
+    }
+    assert unknown == {
+        "reverted": False,
+        "proposal_id": "focused",
+        "error": "not_found",
+    }
+
+
+@pytest.mark.parametrize("other", ["approved", "rejected", "rejected_elsewhere"])
+def test_revert_keeps_mark_shared_by_another_decided_draft(tmp_path, other):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    elsewhere = tmp_path / "other-project"
+    _submit_create(
+        memory_dir,
+        skills_dir,
+        "other-validation",
+        cluster_hash="cluster-1",
+        workspace_dir=elsewhere if other == "rejected_elsewhere" else None,
+    )
+    reject_skill_proposal(memory_dir, "focused-validation")
+    if other == "approved":
+        _approve_quietly(memory_dir, "other-validation", skills_dir)
+    else:
+        reject_skill_proposal(memory_dir, "other-validation")
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
 
 
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):

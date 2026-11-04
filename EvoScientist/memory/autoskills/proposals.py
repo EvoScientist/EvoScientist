@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -419,6 +420,15 @@ def mark_cluster_processed(memory_dir: str | Path, cluster_hash: str) -> None:
     _write_manifest(path, payload)
 
 
+def unmark_cluster_processed(memory_dir: str | Path, cluster_hash: str) -> None:
+    if not _CLUSTER_HASH_RE.fullmatch(cluster_hash):
+        raise ValueError("Invalid cluster hash")
+    try:
+        (_processed_root(memory_dir) / f"{cluster_hash}.json").unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _read_skill_markdown(skill_md: Path) -> tuple[str | None, str | None]:
     try:
         return skill_md.read_text(encoding="utf-8"), None
@@ -659,6 +669,19 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
             pass
 
 
+def copied_files(proposal_dir: Path) -> list[Path]:
+    """The draft's files an approval copies, relative to the draft folder."""
+    files: list[Path] = []
+    for source_path in proposal_dir.rglob("*"):
+        if not source_path.is_file():
+            continue
+        relative = source_path.relative_to(proposal_dir)
+        if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+            continue
+        files.append(relative)
+    return sorted(files)
+
+
 def _copy_proposed_skill(
     proposal_dir: Path,
     destination: Path,
@@ -666,14 +689,10 @@ def _copy_proposed_skill(
     base_dir: Path | None = None,
 ) -> Path | None:
     """Copy proposal files, returning a blocked path before any unsafe write."""
-    copies: list[tuple[Path, Path]] = []
-    for source_path in proposal_dir.rglob("*"):
-        if not source_path.is_file():
-            continue
-        relative = source_path.relative_to(proposal_dir)
-        if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
-            continue
-        copies.append((source_path, destination / relative))
+    copies = [
+        (proposal_dir / relative, destination / relative)
+        for relative in copied_files(proposal_dir)
+    ]
 
     if not destination.exists():
         if base_dir is not None:
@@ -1341,6 +1360,172 @@ def approve_skill_proposal(
             upstream_provenance.get("commit") if upstream_provenance else None
         ),
     }
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+# Windows reparse tags that name another path: junctions and symlinks, not cloud files.
+_NAME_SURROGATE_TAG = 0x20000000
+
+
+def _plain(entry: os.stat_result, *, directory: bool) -> bool:
+    """A real folder or file: no symlink or junction."""
+    if getattr(entry, "st_reparse_tag", 0) & _NAME_SURROGATE_TAG:
+        return False
+    return stat.S_ISDIR(entry.st_mode) if directory else stat.S_ISREG(entry.st_mode)
+
+
+def _regular_files(root: Path) -> dict[str, Path] | None:
+    """Every file under ``root`` by relative path; None unless all are plain."""
+    files: dict[str, Path] = {}
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
+        base = Path(dirpath)
+        for name in dirnames:
+            if not _plain((base / name).lstat(), directory=True):
+                return None
+        for name in filenames:
+            path = base / name
+            if not _plain(path.lstat(), directory=False):
+                return None
+            files[path.relative_to(root).as_posix()] = path
+    return files
+
+
+def _same_bytes(installed: Path, copied: Path) -> bool:
+    if installed.lstat().st_size != copied.stat().st_size:
+        return False
+    return installed.read_bytes() == copied.read_bytes()
+
+
+def _still_plain(installed: Path, path: Path) -> bool:
+    """Whether ``path`` and every folder up to ``installed`` are still plain."""
+    if not _plain(path.lstat(), directory=False):
+        return False
+    folder = path.parent
+    while True:
+        if not _plain(folder.lstat(), directory=True):
+            return False
+        if folder == installed:
+            return True
+        if folder == folder.parent:
+            return False
+        folder = folder.parent
+
+
+def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
+    """Delete a new skill's files while each is still one the approval copied.
+
+    Files already gone count as removed, so a revert cut short can run again;
+    a file added or edited since keeps the whole folder.
+    """
+    try:
+        top = installed.lstat()
+    except FileNotFoundError:
+        return True
+    if not _plain(top, directory=True):
+        return False
+    copied = {
+        relative.as_posix(): proposal_dir / relative
+        for relative in copied_files(proposal_dir)
+    }
+    present = _regular_files(installed)
+    if present is None or not present.keys() <= copied.keys():
+        return False
+    if not all(
+        _still_plain(installed, path) and _same_bytes(path, copied[name])
+        for name, path in present.items()
+    ):
+        return False
+    for name, path in present.items():
+        # Re-checked right before each delete, so a change made meanwhile survives.
+        if not _still_plain(installed, path) or not _same_bytes(path, copied[name]):
+            return False
+        path.unlink()
+    for dirpath, _dirnames, _filenames in os.walk(
+        installed, topdown=False, onerror=_raise
+    ):
+        Path(dirpath).rmdir()
+    return True
+
+
+def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
+    """Whether ``installed`` is the ``<tier>/<skill>`` folder the manifest names."""
+    # An approval made before scopes existed installed into the workspace tier.
+    scope = manifest.get("scope") or _SCOPE_WORKSPACE
+    if scope == _SCOPE_GLOBAL:
+        root = Path(paths.GLOBAL_SKILLS_DIR)
+    elif scope == _SCOPE_WORKSPACE and manifest.get("workspace_dir"):
+        try:
+            root = paths.Workspace(str(manifest["workspace_dir"])).skills_dir
+        except paths.PATH_ERRORS:
+            return False
+    else:
+        return False
+    return (
+        installed.is_absolute()
+        and installed.name == manifest.get("skill_name")
+        and installed.parent.resolve() == root.resolve()
+    )
+
+
+def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any]:
+    """Put a rejected draft, or a new skill's approval, back to pending.
+
+    An approved update is refused: its approval overwrote the installed
+    files and kept no copy to restore. Each step can be retried: the manifest
+    keeps its decision until the skill and the processed mark are gone.
+    """
+    proposal = find_skill_proposal(memory_dir, proposal_id)
+    manifest_path = proposal.path / "manifest.json" if proposal else None
+    manifest = _read_manifest(manifest_path) if manifest_path else None
+    if proposal is None or manifest_path is None or manifest is None:
+        return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+
+    def refused(code: str) -> dict[str, Any]:
+        return {"reverted": False, "proposal_id": proposal.proposal_id, "error": code}
+
+    status = manifest.get("status")
+    if status not in ("approved", "rejected"):
+        return refused("not_decided")
+    if status == "approved" and proposal.operation != "create":
+        return refused("revert_unavailable")
+    installed = manifest.get("approved_skill_path") if status == "approved" else None
+    if installed is not None and not isinstance(installed, str):
+        return refused("skill_changed")
+    try:
+        if installed:
+            if not _installed_in_its_tier(manifest, Path(installed)):
+                return refused("skill_changed")
+            if not _remove_unchanged_copy(Path(installed), proposal.path):
+                return refused("skill_changed")
+        if status == "approved":
+            _notify_approved_skill()
+        cluster_hash = str(manifest.get("cluster_hash", ""))
+        shared = any(
+            other.cluster_hash == cluster_hash
+            and other.status in ("approved", "rejected")
+            and other.path != proposal.path
+            for other in list_skill_proposals(memory_dir)
+        )
+        if _CLUSTER_HASH_RE.fullmatch(cluster_hash) and not shared:
+            unmark_cluster_processed(memory_dir, cluster_hash)
+
+        for key in ("approved_by", "approved_at", "approved_skill_path", "rejected_at"):
+            manifest.pop(key, None)
+        if status == "approved":
+            manifest.pop("workspace_shadow", None)
+            if manifest.get("submitted_scope"):
+                manifest["scope"] = manifest["submitted_scope"]
+            else:
+                manifest.pop("scope", None)
+        manifest["status"] = "pending"
+        manifest["updated_at"] = _now()
+        _write_manifest(manifest_path, manifest)
+    except OSError as exc:
+        return {**refused("revert_failed"), "detail": str(exc)}
+    return {"reverted": True, "proposal_id": proposal.proposal_id, "status": "pending"}
 
 
 def reject_skill_proposal(
