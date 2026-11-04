@@ -858,6 +858,14 @@ class TestStepReasoningEffort:
         """Routes outside these providers then keep their own default."""
         assert self._run(provider, "", picked="high")[0] == ""
         assert self._run(provider, "", picked="low")[0] == "low"
+        assert self._run(provider, "low", picked="high")[0] == ""
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_a_stored_default_level_stays_when_accepted(self, provider):
+        """Enter on a stored high keeps it for routes that only send a set level."""
+        assert self._run(provider, "high", picked="high")[0] == "high"
 
     @pytest.mark.parametrize(
         "provider", ["openai", "openrouter", "anthropic", "deepseek"]

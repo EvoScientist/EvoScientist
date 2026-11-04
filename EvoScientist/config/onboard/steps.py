@@ -999,7 +999,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
         provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        The selected level, or "" for the default level.
+        The selected level; "" for the default level unless it is already stored.
     """
     levels = _REASONING_EFFORT_CHOICES[provider]
     effort_choices = [Choice(title=title, value=value) for value, title in levels]
@@ -1021,8 +1021,11 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     if effort is None:
         raise KeyboardInterrupt()
 
-    # The default level is stored as "not set", so other routes keep their own.
-    return "" if effort == DEFAULT_REASONING_EFFORT else effort
+    # The default level is stored as "not set", so other routes keep their own;
+    # a high already stored stays.
+    if effort == DEFAULT_REASONING_EFFORT and config.reasoning_effort != effort:
+        return ""
+    return effort
 
 
 def _step_tavily_key(
