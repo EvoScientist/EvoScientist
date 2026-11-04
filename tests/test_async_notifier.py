@@ -1607,6 +1607,35 @@ async def test_bg_reader_reports_nothing_until_the_mark_is_written():
     assert gateway.process_status_calls == ["proc-1", "proc-1"]
 
 
+async def test_bg_reader_does_not_report_a_mark_written_since_the_read(monkeypatch):
+    # Another EvoSci process marked the record after this reader read the
+    # registry; that process reports it, so this one writes and reports nothing.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    stored = _bg_running_registry()
+    stored["bg_processes"]["proc-1"]["status"] = async_notifier.UNTRACKED_STATUS
+
+    async def snapshot(target, thread_id):
+        return SimpleNamespace(next=(), values=stored)
+
+    monkeypatch.setattr(gateway, "get_state_snapshot", snapshot)
+    target = GraphTarget(local_graph=MagicMock())
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert active == 0
+    assert gateway.updated_states == []
+    assert drain_notifications("cli-tid") == []
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert gateway.process_status_calls == ["proc-1"]  # not polled again
+
+
 async def test_bg_reader_does_not_mark_over_an_exit_stored_since_the_read(
     monkeypatch,
 ):

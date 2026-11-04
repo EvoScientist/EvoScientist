@@ -457,7 +457,9 @@ async def _mark_untracked(
 
     Returns ``"never"`` for a legacy (non-UUID) thread on the server backend:
     the gateway refuses every write and every run on it, so neither the mark
-    nor the agent turn a notice starts can happen.
+    nor the agent turn a notice starts can happen. Also returns ``"never"`` when
+    the snapshot's record is already ``untracked``: another EvoSci process
+    marked it since the poll read it and reports it itself.
 
     Returns ``"retry"`` when the mark cannot be written yet, so the caller
     retries on a later poll and reports the process only once the mark is in
@@ -505,6 +507,8 @@ async def _mark_untracked(
         current = ((snapshot.values or {}).get("bg_processes") or {}).get(process_id)
         if not current or current.get("status") in TERMINAL_STATUSES:
             return "retry"  # the next poll skips it as terminal
+        if current.get("status") == UNTRACKED_STATUS:
+            return "never"  # marked and reported by another EvoSci process
         await gateway.update_state_values(
             target,
             thread_id,
