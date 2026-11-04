@@ -33,7 +33,8 @@ def manual_stop_command(port: int) -> str:
             f"-LocalPort {port} -State Listen | Select-Object "
             f'-ExpandProperty OwningProcess -Unique) -Force"'
         )
-    return f"kill $(lsof -ti :{port})"
+    # Listeners only: a client connected to the port (a session) is not it.
+    return f"kill $(lsof -ti tcp:{port} -sTCP:LISTEN)"
 
 
 @server_app.command("start")
@@ -345,12 +346,13 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
         port, host = record.port, record.host
     left_running = is_langgraph_dev_running(port=port, host=host)
     if left_running and record is not None:
-        # Recorded, but its process could not be opened: another user's, as
-        # after a sudo EvoSci.
+        # Recorded, but the stop sent no signal: its process could not be
+        # opened (most likely another user's, as after a sudo EvoSci), or it
+        # is gone and something else answers there.
         console.print(
-            f"[yellow]⚠ The background agent server (pid {record.pid}, port "
-            f"{port}) could not be stopped: its process belongs to another user, "
-            "as after a sudo EvoSci. Stop it as that user.[/yellow]"
+            f"[yellow]⚠ A server still answers on port {port}, and the recorded "
+            f"one (pid {record.pid}) could not be stopped. If another user "
+            "started it (as after a sudo EvoSci), stop it as that user.[/yellow]"
         )
     elif left_running:
         # A server without ownership records (crashed session, deleted state

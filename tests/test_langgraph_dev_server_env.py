@@ -6,6 +6,7 @@ process and a plain ``import EvoScientist`` leave it unset.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -239,6 +240,21 @@ def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
 # =============================================================================
 
 
+@contextlib.contextmanager
+def _reloaded_manager():
+    """``manager`` imported again, then put back as it was: a reload makes
+    new classes (``ServerRecord``, the errors), and objects of the old ones,
+    built by other tests at collection, would no longer pass their checks."""
+    import importlib
+
+    saved = dict(vars(manager))
+    try:
+        yield importlib.reload(manager)
+    finally:
+        vars(manager).clear()
+        vars(manager).update(saved)
+
+
 def test_async_subagents_available_init_true_in_server(monkeypatch):
     """In the server (``paths.SERVER_PROCESS``, read from
     ``EVOSCIENTIST_SERVER_PROCESS`` at import), ``_ASYNC_SUBAGENTS_AVAILABLE``
@@ -246,37 +262,23 @@ def test_async_subagents_available_init_true_in_server(monkeypatch):
     deployed main agent's ``_maybe_swap_async_subagents`` swaps eagerly
     without waiting for ``ensure_server`` to flip the flag (which it
     can't — the server never calls that function on itself)."""
-    # Re-import the module to re-run the module-level initialization.
-    import importlib
-
-    import EvoScientist.langgraph_dev.manager as mgr
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", True)
-    reloaded = importlib.reload(mgr)
-    try:
+    with _reloaded_manager() as reloaded:
         assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is True
         assert reloaded.is_async_subagents_available() is True
-    finally:
-        # Restore: reload again as a CLI process so subsequent tests see
-        # the normal initialization.
-        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
-        importlib.reload(mgr)
 
 
 def test_async_subagents_available_init_false_without_env(monkeypatch):
     """In a CLI process, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to False —
     the pre-existing safety behavior (fall back to sync if langgraph dev
     isn't reachable)."""
-    import importlib
-
-    import EvoScientist.langgraph_dev.manager as mgr
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", False)
-
-    reloaded = importlib.reload(mgr)
-    assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
+    with _reloaded_manager() as reloaded:
+        assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
 
 
 def test_tunnel_true_appends_flag(monkeypatch, tmp_path, runtime_paths):
