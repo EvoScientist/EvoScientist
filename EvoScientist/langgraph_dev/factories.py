@@ -136,6 +136,17 @@ def _build(graph_id: str, dirs: SessionDirs) -> Any:
     return graph
 
 
+def _mcp_tools_generation() -> int:
+    """The MCP tool-cache generation the served graphs must match.
+
+    A graph built from an MCP load in which a server failed is rebuilt
+    once that server recovers, because recovery bumps the generation.
+    """
+    from EvoScientist.EvoScientist import _mcp_tools_cache_generation
+
+    return _mcp_tools_cache_generation()
+
+
 class GraphCache:
     """Built graphs by (graph, project, run folder).
 
@@ -145,7 +156,9 @@ class GraphCache:
     built; graphs built for a run folder are dropped, least recently used
     first, past ``RUN_FOLDER_GRAPHS``. An unregistered project's graphs stay
     too: resolving an access refuses that project before its graph is asked
-    for.
+    for. A graph built from an older MCP tool-cache generation (a server
+    whose load failed has since recovered, or the MCP config changed) is
+    rebuilt on its next access.
     """
 
     RUN_FOLDER_GRAPHS = 32
@@ -154,10 +167,20 @@ class GraphCache:
         self._build_lock = threading.Lock()
         self._lock = threading.Lock()
         self._graphs: OrderedDict[tuple[str, str, str | None], Any] = OrderedDict()
+        self._generations: dict[tuple[str, str, str | None], int] = {}
 
     def _cached(self, key: tuple[str, str, str | None]) -> Any:
         with self._lock:
             graph = self._graphs.get(key)
+            if (
+                graph is not None
+                and self._generations.get(key) != _mcp_tools_generation()
+            ):
+                # Built from a tool set the MCP cache has since replaced —
+                # e.g. a server that failed its first load has recovered.
+                del self._graphs[key]
+                self._generations.pop(key, None)
+                return None
             if graph is not None and key[2] is not None:
                 self._graphs.move_to_end(key)
             return graph
@@ -174,11 +197,14 @@ class GraphCache:
             if (graph := self._cached(key)) is not None:
                 return graph
             graph = _build(graph_id, dirs)
+            generation = _mcp_tools_generation()
             with self._lock:
                 self._graphs[key] = graph
+                self._generations[key] = generation
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]
                 for stale in run_folder_keys[: -self.RUN_FOLDER_GRAPHS]:
                     del self._graphs[stale]
+                    self._generations.pop(stale, None)
             return graph
 
 

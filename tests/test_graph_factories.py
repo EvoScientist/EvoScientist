@@ -136,3 +136,27 @@ def test_build_failure_names_the_graph(monkeypatch, tmp_path):
     monkeypatch.setitem(factories.BUILDERS, "scheduler", fail)
     with pytest.raises(RuntimeError, match=r"'scheduler' failed to build.*bad yaml"):
         factories._build("scheduler", SessionDirs(Workspace(tmp_path)))
+
+
+def test_graph_cache_rebuilds_when_the_mcp_generation_changes(
+    builds, monkeypatch, tmp_path
+):
+    """A graph built from a failed MCP load is rebuilt once the failed
+    server recovers and the tool cache bumps its generation (#696)."""
+    generation = {"value": 3}
+    monkeypatch.setattr(
+        factories, "_mcp_tools_generation", lambda: generation["value"]
+    )
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+
+    first = graphs.get("EvoScientist", dirs)
+    assert graphs.get("EvoScientist", dirs) is first
+
+    generation["value"] = 4
+    rebuilt = graphs.get("EvoScientist", dirs)
+
+    assert rebuilt is not first
+    assert len(builds) == 2
+    assert graphs.get("EvoScientist", dirs) is rebuilt
+    assert len(builds) == 2

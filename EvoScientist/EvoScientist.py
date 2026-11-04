@@ -19,6 +19,7 @@ Usage:
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -95,6 +96,24 @@ _auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
 # to MCP servers on every `/new` when config is unchanged.
 _MCP_TOOLS_CACHE_KEY: str | None = None
 _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
+# Servers whose most recent load failed (or timed out). They contributed no
+# tools to the cache and are retried by later calls — see
+# ``_load_mcp_tools_cached`` — instead of staying tool-less until the
+# process restarts.
+_MCP_TOOLS_CACHE_FAILED: set[str] = set()
+_MCP_TOOLS_CACHE_LAST_ATTEMPT = 0.0
+# Bumped whenever the cached tool set changes after graphs may already have
+# been built from it (a config change, or a failed server recovering), so
+# ``GraphCache`` can rebuild graphs that were built from a failed load.
+_MCP_TOOLS_CACHE_GENERATION = 0
+# A failed server is retried at most once per this delay, so a broken server
+# doesn't slow every graph build.
+_MCP_FAILED_SERVER_RETRY_SECONDS = 30.0
+
+
+def _mcp_tools_cache_generation() -> int:
+    """The current MCP tool-cache generation (see ``_MCP_TOOLS_CACHE_GENERATION``)."""
+    return _MCP_TOOLS_CACHE_GENERATION
 
 # Default agent (no checkpointer) — used by LangSmith / notebooks; the server
 # builds its graphs per project (``build_main_graph``).
@@ -267,6 +286,70 @@ def _load_mcp_config_once() -> tuple[str, dict]:
     return sig, cfg
 
 
+def _track_mcp_failures(on_progress, failed: set[str]):
+    """Wrap *on_progress*, recording the servers that report an error."""
+
+    def _callback(event: str, name: str, detail: str = "") -> None:
+        if event == "error":
+            failed.add(name)
+        if on_progress is not None:
+            on_progress(event, name, detail)
+
+    return _callback
+
+
+def _mcp_cache_copies() -> dict[str, list]:
+    return {k: list(v) for k, v in (_MCP_TOOLS_CACHE_VALUE or {}).items()}
+
+
+def _retry_failed_mcp_servers(
+    cfg: dict,
+    on_progress=None,
+    *,
+    runtime: "AsyncRuntime | None" = None,
+) -> dict[str, list]:
+    """Reload the servers whose last load failed and merge what now loads.
+
+    Servers that already loaded keep their cached tools — only the failed
+    ones are loaded again. A server that recovers is merged into the cache
+    and bumps the cache generation, so graphs built from the failed load
+    get rebuilt.
+    """
+    global _MCP_TOOLS_CACHE_FAILED, _MCP_TOOLS_CACHE_GENERATION
+    global _MCP_TOOLS_CACHE_LAST_ATTEMPT, _MCP_TOOLS_CACHE_VALUE
+
+    from .mcp import load_mcp_tools
+
+    subset = {name: cfg[name] for name in _MCP_TOOLS_CACHE_FAILED if name in cfg}
+    if not subset:
+        _MCP_TOOLS_CACHE_FAILED = set()
+        return _mcp_cache_copies()
+
+    failed: set[str] = set()
+    loaded = load_mcp_tools(
+        config=subset,
+        on_progress=_track_mcp_failures(on_progress, failed),
+        runtime=runtime,
+    )
+    _MCP_TOOLS_CACHE_LAST_ATTEMPT = time.monotonic()
+    if not loaded:
+        # The load failed as a whole; every retried server stays failed.
+        _MCP_TOOLS_CACHE_FAILED = set(subset)
+        return _mcp_cache_copies()
+
+    recovered = set(subset) - failed
+    if recovered:
+        # A failed server contributed no tools, so its tools simply append
+        # to whatever the successful servers already provided per agent.
+        merged = _mcp_cache_copies()
+        for agent_name, tools in loaded.items():
+            merged.setdefault(agent_name, []).extend(tools)
+        _MCP_TOOLS_CACHE_VALUE = merged
+        _MCP_TOOLS_CACHE_GENERATION += 1
+    _MCP_TOOLS_CACHE_FAILED = failed
+    return _mcp_cache_copies()
+
+
 def _load_mcp_tools_cached(
     on_progress=None,
     *,
@@ -278,8 +361,16 @@ def _load_mcp_tools_cached(
         on_progress: Optional per-server progress callback forwarded to
             :func:`EvoScientist.mcp.load_mcp_tools`.  Only invoked on a
             cache miss — cached replays don't re-emit progress events.
+
+    A server whose load fails (or times out) is not cached as tool-less
+    for the life of the process: a later call, once
+    ``_MCP_FAILED_SERVER_RETRY_SECONDS`` has passed since the last
+    attempt, loads just the failed servers again and merges in whatever
+    they now provide.
     """
-    global _MCP_TOOLS_CACHE_KEY, _MCP_TOOLS_CACHE_VALUE
+    global _MCP_TOOLS_CACHE_FAILED, _MCP_TOOLS_CACHE_GENERATION
+    global _MCP_TOOLS_CACHE_KEY, _MCP_TOOLS_CACHE_LAST_ATTEMPT
+    global _MCP_TOOLS_CACHE_VALUE
 
     from .mcp import load_mcp_tools
 
@@ -287,19 +378,35 @@ def _load_mcp_tools_cached(
     if not cfg_key:
         _MCP_TOOLS_CACHE_KEY = ""
         _MCP_TOOLS_CACHE_VALUE = {}
+        _MCP_TOOLS_CACHE_FAILED = set()
         return {}
 
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
-        return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
+        if not _MCP_TOOLS_CACHE_FAILED:
+            return _mcp_cache_copies()
+        if (
+            time.monotonic() - _MCP_TOOLS_CACHE_LAST_ATTEMPT
+            < _MCP_FAILED_SERVER_RETRY_SECONDS
+        ):
+            return _mcp_cache_copies()
+        return _retry_failed_mcp_servers(cfg, on_progress, runtime=runtime)
 
+    failed: set[str] = set()
     loaded = load_mcp_tools(
         config=cfg,
-        on_progress=on_progress,
+        on_progress=_track_mcp_failures(on_progress, failed),
         runtime=runtime,
     )
+    if not loaded:
+        # The load failed as a whole (``load_mcp_tools`` returns {} only
+        # when loading raised); every configured server counts as failed.
+        failed = set(cfg)
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
-    return {k: list(v) for k, v in loaded.items()}
+    _MCP_TOOLS_CACHE_FAILED = failed
+    _MCP_TOOLS_CACHE_LAST_ATTEMPT = time.monotonic()
+    _MCP_TOOLS_CACHE_GENERATION += 1
+    return _mcp_cache_copies()
 
 
 # =============================================================================
