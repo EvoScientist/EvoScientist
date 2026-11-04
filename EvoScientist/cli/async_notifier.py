@@ -419,9 +419,9 @@ UNTRACKED_HINT: Final = (
     "be reported. It may still be running. The pid may have been reused: confirm "
     "it against the command and started_at above. The pid is the shell that ran "
     "the command, or the command itself; processes the command started have other "
-    "pids and can outlive it. On Windows it is a Windows pid, which Git Bash's ps "
-    "does not list. Its output log is .bg_processes/<task_id>.log in the folder it "
-    "ran in.)"
+    "pids and can outlive it. On Windows it is a Windows pid: Git Bash lists it "
+    "with `ps -W`, not `ps`. Its output log is .bg_processes/<task_id>.log in the "
+    "folder it ran in.)"
 )
 """Closing line of a synthetic message that reports an ``untracked`` process."""
 
