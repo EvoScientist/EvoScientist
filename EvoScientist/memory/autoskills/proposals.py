@@ -527,6 +527,13 @@ def _validate_skill_proposal_dir(
     if re.search(r"\[TODO:|\bTODO\b", body):
         errors.append("SKILL.md body must not contain TODO placeholders")
 
+    # An approval copies a linked file's target; one outside the draft would be
+    # installed without being part of what is reviewed.
+    resolved_dir = proposal_dir.resolve()
+    for relative in copied_files(proposal_dir):
+        if not _resolves_within_root(proposal_dir / relative, resolved_dir):
+            errors.append(f"Proposal file links outside its folder: {relative}")
+
     return not errors, errors, description_text
 
 

@@ -1344,6 +1344,79 @@ def test_unreadable_skill_md_is_refused_not_raised(tmp_path, skill_md):
     assert not (skills_dir / "focused-validation").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_draft_linking_outside_its_folder_is_refused(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not for the skill\n", encoding="utf-8")
+    (folder / "notes.txt").symlink_to(outside / "secret.txt")
+
+    approved = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+    resubmitted = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="focused-validation",
+        cluster_hash="cluster-1",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Again.",
+        skills_dir=skills_dir,
+    )
+
+    assert approved["approved"] is False
+    assert any("outside its folder" in error for error in approved["errors"])
+    assert "outside its folder" in target.error
+    assert resubmitted["submitted"] is False
+    assert not (skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_draft_folder_link_is_not_followed(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not for the skill\n", encoding="utf-8")
+    (folder / "data").symlink_to(outside, target_is_directory=True)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert approved["approved"] is True
+    assert not (skills_dir / "focused-validation" / "data").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_draft_linking_inside_its_folder_is_approved(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")
+    (folder / "check-link.py").symlink_to(folder / "scripts" / "check.py")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert approved["approved"] is True
+    installed = skills_dir / "focused-validation" / "check-link.py"
+    assert installed.read_text(encoding="utf-8") == "print(1)\n"
+
+
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
