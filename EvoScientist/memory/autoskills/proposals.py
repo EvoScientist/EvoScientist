@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -54,6 +54,9 @@ class SkillProposal:
     upstream_source: str | None = None
     upstream_commit: str | None = None
     workspace_shadow: str | None = None
+    approved_by: str | None = None
+    approved_at: str | None = None
+    rejected_at: str | None = None
 
     @property
     def effective_scope(self) -> str:
@@ -311,6 +314,11 @@ def _proposal_from_manifest(
                 if manifest.get("workspace_shadow")
                 else None
             ),
+            approved_by=(
+                str(manifest["approved_by"]) if manifest.get("approved_by") else None
+            ),
+            approved_at=_manifest_timestamp(manifest, "approved_at"),
+            rejected_at=_manifest_timestamp(manifest, "rejected_at"),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -900,6 +908,7 @@ def approve_skill_proposal(
     skills_dir: str | Path,
     workspace_dir: str | Path | None = None,
     scope: str | None = None,
+    approved_by: Literal["user", "auto"] = "user",
 ) -> dict[str, Any]:
     """Promote one pending proposal into the tier its manifest records.
 
@@ -1152,6 +1161,8 @@ def approve_skill_proposal(
 
     manifest["status"] = "approved"
     manifest["updated_at"] = _now()
+    manifest["approved_by"] = approved_by
+    manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
     # The tier the skill was actually installed into. An approval may
     # override the tier the proposal recorded, and the manifest has to show
@@ -1217,6 +1228,7 @@ def reject_skill_proposal(
         }
     manifest["status"] = "rejected"
     manifest["updated_at"] = _now()
+    manifest["rejected_at"] = manifest["updated_at"]
     _write_manifest(manifest_path, manifest)
     mark_cluster_processed(memory_dir, str(manifest["cluster_hash"]))
     return {

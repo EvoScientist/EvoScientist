@@ -290,6 +290,115 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     assert list_skill_proposals(memory_dir)[0].status == "approved"
 
 
+def _submit_focused_validation(memory_dir, skills_dir, *, cluster_hash="cluster-1"):
+    _write_skill_folder(
+        memory_dir,
+        "focused-validation",
+        "Use when validating code changes with staged checks.",
+        "# Focused validation\n\nRun narrow checks before broad ones.",
+    )
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="focused-validation",
+        cluster_hash=cluster_hash,
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Three observations describe the same staged validation practice.",
+        skills_dir=skills_dir,
+    )
+    assert result["submitted"] is True
+    return result
+
+
+def _manifest(memory_dir, proposal_id):
+    path = autoskill_proposals_dir(memory_dir) / proposal_id / "manifest.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_approval_records_user_and_time(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert approved["approved"] is True
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert manifest["approved_by"] == "user"
+    assert manifest["approved_at"].endswith("Z")
+    proposal = list_skill_proposals(memory_dir)[0]
+    assert proposal.approved_by == "user"
+    assert proposal.approved_at == manifest["approved_at"]
+
+
+def test_auto_mode_approval_records_auto(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    workspace = Workspace(tmp_path)
+    _write_skill_folder(
+        memory_dir,
+        "auto-new",
+        "Use when testing the auto mode.",
+        "# Auto skill\n",
+    )
+    tool = create_submit_autoskill_proposal_tool(
+        memory_dir=memory_dir,
+        workspace=workspace,
+        project_id="P-1",
+    )
+    with patch("EvoScientist.memory.autoskills.tools.get_effective_config") as config:
+        config.return_value = SimpleNamespace(
+            memory_skill_synthesis_mode=MemorySkillSynthesisMode.AUTO
+        )
+        result = json.loads(
+            tool.invoke(
+                {
+                    "skill_name": "auto-new",
+                    "cluster_hash": "cluster-auto-new",
+                    "source_observation_ids": ["O-1", "O-2", "O-3"],
+                    "rationale": "Auto mode installs without review.",
+                }
+            )
+        )
+
+    assert result["auto_approval"]["approved"] is True
+    assert _manifest(memory_dir, "auto-new")["approved_by"] == "auto"
+    assert list_skill_proposals(memory_dir)[0].approved_by == "auto"
+
+
+def test_reject_records_time(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+
+    rejected = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert rejected["rejected"] is True
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert manifest["rejected_at"].endswith("Z")
+    assert "approved_by" not in manifest
+    assert list_skill_proposals(memory_dir)[0].rejected_at == manifest["rejected_at"]
+
+
+def test_manifest_without_decision_fields_reads_as_none(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["status"] = "approved"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    proposal = list_skill_proposals(memory_dir)[0]
+
+    assert proposal.status == "approved"
+    assert proposal.approved_by is None
+    assert proposal.approved_at is None
+    assert proposal.rejected_at is None
+
+
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
