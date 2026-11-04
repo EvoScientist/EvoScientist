@@ -463,9 +463,10 @@ async def _mark_untracked(
     retries on a later poll and reports the process only once the mark is in
     state:
 
-    - the thread has pending tasks (``next``): a state write on a thread paused
-      at an interrupt drops the interrupt, so the thread is left alone until the
-      user answers it;
+    - the thread has pending tasks (``next``) or task writes not yet committed
+      (``tasks``, left by a kill before the step checkpoint): a state write
+      drops a pending interrupt and those writes, so the thread is left alone
+      until the user answers it or the next run commits them;
     - the record in the snapshot is already terminal (or gone): the next poll
       skips it, so nothing is retried;
     - the write fails: the server refuses ``update_state`` while a run is in
@@ -485,10 +486,11 @@ async def _mark_untracked(
     process once more.
     """
     from ..gateway.composite import LegacyThreadServerExecutionError
+    from ..stream.events import _snapshot_needs_recovery
 
     try:
         snapshot = await gateway.get_state_snapshot(target, thread_id)
-        if snapshot.next:
+        if _snapshot_needs_recovery(snapshot):
             return "retry"
         # The record read at the top of the poll may be stale by now: another
         # EvoSci process that tracks the process may have stored its exit.

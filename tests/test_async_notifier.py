@@ -1559,6 +1559,30 @@ async def test_bg_reader_leaves_a_paused_thread_alone_until_it_resumes(monkeypat
     assert [n.status for n in drain_notifications("cli-tid")] == ["untracked"]
 
 
+async def test_bg_reader_does_not_mark_over_uncommitted_task_writes(monkeypatch):
+    # A kill after a tool step wrote its results, before its checkpoint, leaves
+    # ``next`` empty and the tools in ``tasks``; a write would drop the results.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+
+    async def snapshot(target, thread_id):
+        return SimpleNamespace(
+            next=(), tasks=(SimpleNamespace(name="tools"),), values=gateway.state_values
+        )
+
+    monkeypatch.setattr(gateway, "get_state_snapshot", snapshot)
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert active == 1
+    assert gateway.updated_states == []
+    assert drain_notifications("cli-tid") == []
+
+
 async def test_bg_reader_reports_nothing_until_the_mark_is_written():
     # The server refuses the write while a run is in flight on the thread; the
     # process is reported only after a later poll has written the mark.
