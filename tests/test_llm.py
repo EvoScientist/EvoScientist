@@ -3057,6 +3057,27 @@ class TestDeepseekReasoningPassback:
 
         assert "reasoning_content" not in payload["messages"][1]
 
+    def test_effort_none_omits_reasoning_passback(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        model = EvoChatDeepSeek(model="deepseek-v4-flash", reasoning_effort="none")
+        messages = [
+            HumanMessage("q1"),
+            AIMessage("a1", additional_kwargs={"reasoning_content": "rc1"}),
+            HumanMessage("q2"),
+        ]
+
+        payload = model._get_request_payload(messages)
+
+        assert "reasoning_content" not in payload["messages"][1]
+        # A call-time level turns thinking back on, so the passback returns.
+        payload = model._get_request_payload(messages, reasoning_effort="high")
+
+        assert payload["messages"][1]["reasoning_content"] == "rc1"
+
 
 # =============================================================================
 # Test _patch_openai_capture_reasoning_content (module-level monkey-patch)

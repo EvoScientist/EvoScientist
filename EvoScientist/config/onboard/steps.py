@@ -973,7 +973,7 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("medium", "medium — balances speed and depth"),
         ("low", "low    — fastest, for simple tasks"),
     ],
-    # https://api-docs.deepseek.com/guides/thinking_mode
+    # https://api-docs.deepseek.com/api/create-chat-completion
     "deepseek": [
         ("max", "max    — deepest reasoning"),
         ("high", "high   — DeepSeek's default depth (recommended)"),
