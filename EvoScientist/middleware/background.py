@@ -54,7 +54,9 @@ class BgProcessRecord(TypedDict, total=False):
     name: str
     command: str
     pid: int
-    status: str  # "running" | terminal (success/error/interrupted)
+    # "running" | terminal (success/error/interrupted) | "untracked" (written by
+    # the client reader when no registry it can ask has the process)
+    status: str
     returncode: int | None
     started_at: str
     origin_thread_id: str | None

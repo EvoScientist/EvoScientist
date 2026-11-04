@@ -111,7 +111,7 @@ def poll_status(process_id: str) -> str:
 
     Records the exit first (like :func:`status`), then returns ``"running"`` or the
     terminal status. Returns ``"unknown"`` when the process is not in the registry
-    (e.g. a server restart cleared it) so the reader treats it as not-yet-notifiable.
+    (e.g. a server restart cleared it); the reader then reports it as untracked.
     """
     with _LOCK:
         proc = _PROCESSES.get(process_id)
