@@ -288,10 +288,10 @@ def _stop_busy_server_anyway(record) -> bool:
 def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     """``EvoSci server stop``; with *keep_owned* (``EvoSci service stop``), a
     server that ``EvoSci deploy`` or the desktop app owns is left running.
-    Either command leaves a server it could not open, for a reason other than
-    access denied, running, says to try again and exits 1. A busy server is
-    stopped only after asking, or with *yes*; a server that took the place
-    of the one asked about, or appeared meanwhile, is not stopped.
+    Either command leaves a server it may not end (another user's or an
+    elevated one) or could not open running, says why and exits 1. A busy
+    server is stopped only after asking, or with *yes*; a server that took
+    the place of the one asked about, or appeared meanwhile, is not stopped.
     Whether it was left running."""
     from ..config import get_effective_config
     from ..langgraph_dev import manager
@@ -345,16 +345,7 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     if record is not None:
         port, host = record.port, record.host
     left_running = is_langgraph_dev_running(port=port, host=host)
-    if left_running and record is not None:
-        # Recorded, but the stop sent no signal: its process could not be
-        # opened (most likely another user's, as after a sudo EvoSci), or it
-        # is gone and something else answers there.
-        console.print(
-            f"[yellow]⚠ A server still answers on port {port}, and the recorded "
-            f"one (pid {record.pid}) could not be stopped. If another user "
-            "started it (as after a sudo EvoSci), stop it as that user.[/yellow]"
-        )
-    elif left_running:
+    if left_running:
         # A server without ownership records (crashed session, deleted state
         # files) can't be verified as ours — refuse to guess, hand the user
         # the manual path instead of a silent no-op.

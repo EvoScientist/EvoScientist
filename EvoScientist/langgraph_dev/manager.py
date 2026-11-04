@@ -719,14 +719,30 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
 class ServerKeptError(RuntimeError):
     """The stop left the recorded server running. ``EvoSci service stop``
     keeps a server that ``EvoSci deploy`` or the desktop app owns; any stop
-    raises :class:`ServerStopFailedError` when it could not open the server
-    for a reason other than it being gone or refusing access."""
+    raises :class:`ServerStopFailedError` when it could not end the server
+    for a reason other than it being gone."""
 
 
 class ServerStopFailedError(ServerKeptError):
-    """The stop could not open the recorded server, for a reason other than
-    the server being gone or refusing access (on Windows, out of resources),
-    so it stopped nothing. A retry finds it again."""
+    """The stop could not end the recorded server, for a reason other than
+    the server being gone: access refused (another user's or an elevated
+    server), or on Windows out of resources. It stopped nothing; the record
+    stays."""
+
+
+def _stop_failed(pid: int, cause: str) -> ServerStopFailedError:
+    """The error of a stop that left the server *pid* running, and why."""
+    return ServerStopFailedError(f"Could not stop langgraph dev (pid {pid}): {cause}.")
+
+
+def _refused_cause() -> str:
+    """Why a stop that was refused access stopped nothing, and what to do."""
+    if os.name == "nt":
+        return (
+            "it runs elevated or as another user; stop it from an "
+            "Administrator terminal"
+        )
+    return "it belongs to another user (as after a sudo EvoSci); stop it as that user"
 
 
 def owned_by_its_starter(record: ServerRecord | None) -> bool:
@@ -958,14 +974,13 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
     first when the record says the server leads its process group). Waits
     for it to exit; the server removes its record itself as it exits, also
     one that hung in its shutdown. Returns the stopped pid, or ``None`` when
-    nothing was stopped (no record, or a server that is gone or refuses
-    access).
+    nothing was stopped (no record, or a server that is gone).
 
     *record* is what the caller read (``read_record(older=True)``); read here
     when not given. With *keep_owned* (``EvoSci service stop``), a server
     that ``EvoSci deploy`` or the desktop app owns is left running:
-    :class:`ServerKeptError`. One the stop could not open for another reason
-    is left running too: :class:`ServerStopFailedError`.
+    :class:`ServerKeptError`. One the stop may not end (access refused) or
+    could not open is left running too: :class:`ServerStopFailedError`.
     """
     if record is _UNREAD:
         record = read_record(older=True)
@@ -981,24 +996,29 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
         own = _PROCESS if _PROCESS is not None and _PROCESS.pid == record.pid else None
     with contextlib.ExitStack() as hold:
         try:
-            hold.enter_context(_hold_pid(record.pid))
-            if not _still_recorded(record):
-                raise psutil.NoSuchProcess(record.pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            if record.older:
-                _forget_older_record()
-            return None
-        except OSError as exc:
-            # Neither gone nor refused (the hold, or an OS error psutil passes
-            # through): the server may be running, so it gets no signal.
-            raise ServerStopFailedError(
-                f"Could not stop langgraph dev (pid {record.pid}): "
-                f"{str(exc).rstrip('.')}. It keeps running; try again."
-            ) from exc
-        try:
-            _end_server_tree(record.pid, own, break_group=record.break_group)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+            try:
+                hold.enter_context(_hold_pid(record.pid))
+                if not _still_recorded(record):
+                    raise psutil.NoSuchProcess(record.pid)
+            except psutil.NoSuchProcess:
+                if record.older:
+                    _forget_older_record()
+                return None
+            except OSError as exc:
+                # Neither gone nor refused (the hold, or an OS error psutil
+                # passes through): the server may be running, so it gets no
+                # signal.
+                raise _stop_failed(
+                    record.pid, f"{str(exc).rstrip('.')}. It keeps running; try again"
+                ) from exc
+            try:
+                _end_server_tree(record.pid, own, break_group=record.break_group)
+            except psutil.NoSuchProcess:
+                pass
+        except psutil.AccessDenied as exc:
+            # Opening, inspecting or signalling it refused: another user's
+            # or an elevated server.
+            raise _stop_failed(record.pid, _refused_cause()) from exc
     if own is not None:
         stop_langgraph_dev(own)
     if record.older:

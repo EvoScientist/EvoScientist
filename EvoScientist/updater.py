@@ -353,7 +353,7 @@ def check_server(
         try:
             pid = stop_server(record=record)
         except ServerStopFailedError as exc:
-            # Running the update again retries.
+            # Its message says what keeps the server running.
             pid, failed = None, f"{exc} Nothing was changed."
         else:
             failed = (

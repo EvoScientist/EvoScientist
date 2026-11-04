@@ -736,6 +736,8 @@ def server(monkeypatch):
                 "Could not stop langgraph dev (pid 42): out of resources. It "
                 "keeps running; try again."
             )
+        if state["stop_fails"] == "refused":
+            raise manager._stop_failed(42, manager._refused_cause())
         if state["stop_fails"] or not state["owned"]:
             return None
         state["stopped"] += 1
@@ -861,6 +863,19 @@ def test_owned_server_that_does_not_stop(server):
     assert exc.value.code == "server_running"
     assert "Could not stop" in exc.value.message
     assert "ownership record" not in exc.value.message
+
+
+def test_owned_server_the_stop_may_not_end(server):
+    """Another user's or an elevated server: the update says why it is left
+    running and changes nothing."""
+    from EvoScientist.langgraph_dev import manager
+
+    server["stop_fails"] = "refused"
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+    assert exc.value.code == "server_running"
+    assert manager._refused_cause().split(";")[0] in exc.value.message
+    assert "Nothing was changed" in exc.value.message
 
 
 def test_owned_server_the_stop_could_not_open(server):

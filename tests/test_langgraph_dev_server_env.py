@@ -6,7 +6,6 @@ process and a plain ``import EvoScientist`` leave it unset.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import subprocess
@@ -15,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from EvoScientist.langgraph_dev import boundary, manager
-from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs
+from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs, reloaded
 
 
 @pytest.mark.parametrize("inherited", [None, "", "0"])
@@ -240,21 +239,6 @@ def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
 # =============================================================================
 
 
-@contextlib.contextmanager
-def _reloaded_manager():
-    """``manager`` imported again, then put back as it was: a reload makes
-    new classes (``ServerRecord``, the errors), and objects of the old ones,
-    built by other tests at collection, would no longer pass their checks."""
-    import importlib
-
-    saved = dict(vars(manager))
-    try:
-        yield importlib.reload(manager)
-    finally:
-        vars(manager).clear()
-        vars(manager).update(saved)
-
-
 def test_async_subagents_available_init_true_in_server(monkeypatch):
     """In the server (``paths.SERVER_PROCESS``, read from
     ``EVOSCIENTIST_SERVER_PROCESS`` at import), ``_ASYNC_SUBAGENTS_AVAILABLE``
@@ -265,9 +249,9 @@ def test_async_subagents_available_init_true_in_server(monkeypatch):
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", True)
-    with _reloaded_manager() as reloaded:
-        assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is True
-        assert reloaded.is_async_subagents_available() is True
+    with reloaded(manager) as module:
+        assert module._ASYNC_SUBAGENTS_AVAILABLE is True
+        assert module.is_async_subagents_available() is True
 
 
 def test_async_subagents_available_init_false_without_env(monkeypatch):
@@ -277,8 +261,8 @@ def test_async_subagents_available_init_false_without_env(monkeypatch):
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", False)
-    with _reloaded_manager() as reloaded:
-        assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
+    with reloaded(manager) as module:
+        assert module._ASYNC_SUBAGENTS_AVAILABLE is False
 
 
 def test_tunnel_true_appends_flag(monkeypatch, tmp_path, runtime_paths):

@@ -526,9 +526,31 @@ def test_service_stop_stops_server_nobody_else_owns(monkeypatch, record, expecte
     assert stopped == expected
 
 
-def test_server_stop_reports_recorded_server_it_could_not_open(monkeypatch):
-    """A recorded server the stop could not open is looked for at its own
-    address, not the configured one, and is not called unrecorded."""
+def test_server_stop_refused_access_exits_without_claiming_stop(monkeypatch):
+    """Another user's or an elevated server: the stop says why it is left
+    running and exits 1, and never reports it stopped."""
+    monkeypatch.setattr(
+        manager, "read_record_and_lock", lambda: (_record(), server_home.FREE)
+    )
+
+    def refused(**_k):
+        raise manager._stop_failed(4242, manager._refused_cause())
+
+    monkeypatch.setattr(manager, "stop_server", refused)
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert "4242" in output
+    assert manager._refused_cause().split(";")[0] in output
+    assert "Stopped" not in output
+    assert "no ownership record" not in output
+
+
+def test_server_stop_looks_for_gone_server_at_its_recorded_address(monkeypatch):
+    """A recorded server that is gone is looked for at its own address, not
+    the configured one."""
     asked = []
     monkeypatch.setattr(
         manager,
@@ -539,16 +561,13 @@ def test_server_stop_reports_recorded_server_it_could_not_open(monkeypatch):
     monkeypatch.setattr(
         manager,
         "is_langgraph_dev_running",
-        lambda *, port, host: asked.append(port) or port == 7000,
+        lambda *, port, host: asked.append(port) or False,
     )
 
     result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 0, result.output
     assert asked == [7000]
-    output = " ".join(result.output.split())
-    assert "4242" in output
-    assert "no ownership record" not in output
 
 
 def test_server_stop_stops_deploy_owned_server(monkeypatch):
@@ -1034,6 +1053,15 @@ def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monke
     assert "ownership record" not in output
     assert "kill" not in output
     assert "Stop-Process" not in output
+
+
+def test_manual_stop_command_ends_only_listener(monkeypatch):
+    """A session connected to the port is not the server it means."""
+    from EvoScientist.cli import server_cmd
+
+    monkeypatch.setattr(server_cmd.sys, "platform", "linux")
+
+    assert "-sTCP:LISTEN" in server_cmd.manual_stop_command(6174)
 
 
 def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):

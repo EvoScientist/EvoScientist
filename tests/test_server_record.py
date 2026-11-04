@@ -197,13 +197,13 @@ def test_write_record_without_address_records_langgraph_defaults(
 def test_server_record_registers_removal_at_import_not_at_write(server_env):
     """Exit handlers run in reverse order: registered when the module is
     imported, before the server's others, the removal runs last."""
-    import importlib
+    from tests.fakes.langgraph_dev import reloaded
 
     server_record.write_record()
     assert server_env == []
 
-    importlib.reload(server_record)
-    assert server_env == [server_record.remove_record]
+    with reloaded(server_record) as module:
+        assert server_env == [module.remove_record]
 
 
 def test_write_record_retries_while_reader_holds_old_record(server_env, monkeypatch):

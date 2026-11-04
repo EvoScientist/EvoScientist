@@ -1096,28 +1096,68 @@ def test_stop_server_releases_pid_when_stop_fails(monkeypatch, runtime_paths):
             victim.wait()
 
 
-@pytest.mark.parametrize("refused", [psutil.NoSuchProcess, psutil.AccessDenied])
-def test_stop_server_stops_nothing_it_cannot_find_or_may_not_open(
-    monkeypatch, runtime_paths, refused
-):
-    """``OpenProcess`` says no process has the PID, or refuses access:
-    nothing is stopped, and the record stays."""
+def test_stop_server_refused_signal_leaves_server_running(monkeypatch, runtime_paths):
+    """Another user's or an elevated server: inspecting it works, signalling
+    it is refused, so the stop fails and the record stays for a retry."""
+    Processes(monkeypatch).add(4242)
+    write_record(4242)
+
+    def _refused(pid, popen=None, *, break_group=False):
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr(manager, "_end_server_tree", _refused)
+
+    with pytest.raises(manager.ServerStopFailedError, match="4242"):
+        manager.stop_server()
+    assert runtime_paths.record.exists()
+
+
+@pytest.fixture
+def held_victim(monkeypatch, runtime_paths):
+    """A recorded langgraph dev, and the list of pids the stop signals
+    (none is ever signalled for real)."""
     victim = _sleeper("langgraph")
     try:
         assert _wait_for_child_argv(victim.pid, "langgraph")
         _record_live(victim.pid)
-        _fake_hold(monkeypatch, [], refused=refused)
         ended: list = []
         monkeypatch.setattr(
-            manager, "_end_server_tree", lambda pid, **_kw: ended.append(pid)
+            manager,
+            "_end_server_tree",
+            lambda pid, popen=None, **_kw: ended.append(pid),
         )
-        assert manager.stop_server() is None
-        assert ended == []
-        assert runtime_paths.record.exists()
-        assert victim.poll() is None
+        yield victim, ended
     finally:
         victim.kill()
         victim.wait()
+
+
+def test_stop_server_finds_nothing_for_unknown_pid(
+    monkeypatch, runtime_paths, held_victim
+):
+    """``OpenProcess`` says no process has the PID: nothing to stop."""
+    victim, ended = held_victim
+    _fake_hold(monkeypatch, [], refused=psutil.NoSuchProcess)
+
+    assert manager.stop_server() is None
+    assert ended == []
+    assert runtime_paths.record.exists()
+    assert victim.poll() is None
+
+
+def test_stop_server_refused_hold_fails_without_signal(
+    monkeypatch, runtime_paths, held_victim
+):
+    """``OpenProcess`` refuses access: the stop fails, sends no signal, and
+    the record stays."""
+    victim, ended = held_victim
+    _fake_hold(monkeypatch, [], refused=psutil.AccessDenied)
+
+    with pytest.raises(manager.ServerStopFailedError):
+        manager.stop_server()
+    assert ended == []
+    assert runtime_paths.record.exists()
+    assert victim.poll() is None
 
 
 def test_stop_server_keeps_server_it_could_not_open(monkeypatch, runtime_paths):

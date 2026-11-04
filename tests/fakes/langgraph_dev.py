@@ -4,6 +4,7 @@ locks and its spawn."""
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import subprocess
 import threading
@@ -16,6 +17,19 @@ from EvoScientist.langgraph_dev import manager, server_home, server_record
 
 # The creation time the fake processes report.
 CREATED = 1_700_000_000.0
+
+
+@contextlib.contextmanager
+def reloaded(module):
+    """*module* imported again, then put back as it was: a reload makes new
+    classes and functions, and objects of the old ones, built by other tests
+    at collection, would no longer pass checks against them."""
+    saved = dict(vars(module))
+    try:
+        yield importlib.reload(module)
+    finally:
+        vars(module).clear()
+        vars(module).update(saved)
 
 
 class LockHolder:
