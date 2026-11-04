@@ -287,6 +287,7 @@ def test_format_batch_message_single_notification():
     assert obj["agent"] == "writing-agent"
     assert obj["task_id"] == "tid-1"
     assert obj["status"] == "success"
+    assert async_notifier.UNTRACKED_HINT not in msg
 
 
 def test_format_batch_message_multiple():
