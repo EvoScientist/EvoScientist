@@ -1763,6 +1763,83 @@ async def test_bg_reader_marks_untracked_on_the_real_graph_when_the_dev_server_i
     assert client.http.get.await_count == 2  # polled once more, still unknown
 
 
+@pytest.mark.usefixtures("no_mcp")
+async def test_bg_reader_mark_leaves_no_step_pending_after_a_closed_approval(
+    tmp_path, monkeypatch
+):
+    # Closing a declined approval ends with an ``__end__`` clear, after which the
+    # node the mark is attributed to is not the end; nothing may stay pending.
+    from langchain_core.messages import AIMessage
+
+    from EvoScientist.backends import close_parked_checkpoint
+    from tests.fakes.goal import cli_goal_agent, message_input, run, tool_call
+
+    agent, _ = cli_goal_agent(tmp_path)
+    await run(agent, message_input("hi"), thread="cli-tid")
+    config = {"configurable": {"thread_id": "cli-tid"}}
+    call = tool_call("execute", command="ls")
+    records = {
+        **_bg_running_registry("p1")["bg_processes"],
+        **_bg_running_registry("p2")["bg_processes"],
+    }
+    await agent.aupdate_state(
+        config,
+        {"bg_processes": records, "messages": [AIMessage("", tool_calls=[call])]},
+        as_node="model",
+    )
+    gateway = LocalGraphGateway()
+    target = GraphTarget(local_graph=agent)
+    await close_parked_checkpoint(gateway, target, "cli-tid", reason="rejected")
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config", lambda: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        "EvoScientist.gateway.local.needs_langgraph_dev", lambda *a, **k: False
+    )
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    state = await agent.aget_state(config)
+    assert (active, state.next) == (0, ())
+    assert {k: r["status"] for k, r in state.values["bg_processes"].items()} == {
+        "p1": "untracked",
+        "p2": "untracked",
+    }
+    assert sorted(n.task_id for n in drain_notifications("cli-tid")) == ["p1", "p2"]
+
+
+async def test_bg_reader_keeps_a_pause_that_appears_after_the_mark(monkeypatch):
+    # Another client paused the thread between the mark and the re-read: its
+    # pending step is that pause, so nothing is cleared.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    snapshots = iter(
+        [
+            SimpleNamespace(next=(), tasks=(), values=gateway.state_values),
+            SimpleNamespace(
+                next=("tools",), tasks=(), interrupts=("pause",), values={}
+            ),
+        ]
+    )
+
+    async def snapshot(target, thread_id):
+        return next(snapshots)
+
+    monkeypatch.setattr(gateway, "get_state_snapshot", snapshot)
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert [as_node for *_, as_node in gateway.updated_states] == [None]
+    assert [n.status for n in drain_notifications("cli-tid")] == ["untracked"]
+
+
 async def test_bg_reader_throttle_rate_limits(monkeypatch):
     gateway = FakeGraphGateway(
         state_values=_bg_running_registry(),

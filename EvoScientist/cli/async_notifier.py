@@ -477,16 +477,24 @@ async def _mark_untracked(
     narrows the window to the gap between the snapshot and the write; the
     channel's reducer is last-write-per-key, so there is no compare-and-set.
 
-    ``as_node`` is left to the graph to infer: with no pending tasks that is the
-    node that ended the last run, and the write leaves ``next`` empty.
+    ``as_node`` is left to the graph, which infers the node that ran last. An
+    ``__end__`` clear counts the tasks it drops as run, and a closed approval and
+    the recovery after a failed run both end with one, so a mark right after
+    them leaves a step pending. It is cleared unless a pause has appeared since,
+    so the server does not show the thread as interrupted until its next run.
 
     An in-process run has no in-flight check, and the idle reader does not hold
     the turn lock: a run that starts between the snapshot and the write builds
     its next checkpoint without the mark, so a later EvoSci process reports the
-    process once more.
+    process once more. The clear has the same window: a run that starts before
+    it and fails or is cut before its next checkpoint is left with its step
+    cleared.
     """
     from ..gateway.composite import LegacyThreadServerExecutionError
-    from ..stream.events import _snapshot_needs_recovery
+    from ..stream.events import (
+        _snapshot_has_pending_interrupt,
+        _snapshot_needs_recovery,
+    )
 
     try:
         snapshot = await gateway.get_state_snapshot(target, thread_id)
@@ -523,6 +531,18 @@ async def _mark_untracked(
         )
         return "retry"
     _bg_mark_failed_ids.discard(process_id)
+    try:
+        written = await gateway.get_state_snapshot(target, thread_id)
+        if written.next and not _snapshot_has_pending_interrupt(written):
+            await gateway.update_state_values(
+                target, thread_id, None, as_node="__end__"
+            )
+    except Exception:
+        logger.debug(
+            "Could not clear the step the untracked mark left on thread %s",
+            thread_id,
+            exc_info=True,
+        )
     return "marked"
 
 
