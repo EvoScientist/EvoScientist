@@ -1361,19 +1361,19 @@ class TestDotenvIsolation:
     ):
         """The snapshot must protect every ``EVOSCIENTIST_*`` key in the shell,
         not just the ones declared in ``_ENV_MAPPINGS``: a workspace ``.env``
-        must not clobber a parent-injected value such as the launcher's
-        project the manager names."""
+        must not clobber a parent-injected value such as the run folder a
+        parent names."""
         env_file = tmp_path / ".env"
-        env_file.write_text("EVOSCIENTIST_LAUNCHER_WORKSPACE=\n")
+        env_file.write_text("EVOSCIENTIST_RUN_DIR=\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("EVOSCIENTIST_LAUNCHER_WORKSPACE", "/proj")
+        monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/proj/runs/r1")
 
         get_effective_config()
 
-        assert os.environ["EVOSCIENTIST_LAUNCHER_WORKSPACE"] == "/proj"
+        assert os.environ["EVOSCIENTIST_RUN_DIR"] == "/proj/runs/r1"
 
     def test_empty_shell_evoscientist_key_defers_to_dotenv(
         self, temp_config_dir, tmp_path, monkeypatch

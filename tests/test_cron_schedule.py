@@ -226,12 +226,11 @@ requirements = [
 
     runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
     monkeypatch.setattr(manager, "RUNTIME", runtime)
-    workspace = tmp_path / "workspace-écho"
-    manager._write_workspace_sidecar(workspace, 12345)
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "données-écho")
+    manager._write_workspace_sidecar(12345)
     assert manager._read_workspace_sidecar() == {
-        "workspace": str(workspace),
         "pid": 12345,
-        "data_dir": str(paths.DATA_DIR),
+        "data_dir": str(tmp_path / "données-écho"),
         "config_dir": str(paths.CONFIG_DIR),
     }
 

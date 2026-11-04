@@ -80,6 +80,7 @@ class Harness:
         self.tunnel_url: str | None = None
         # What a reused backend answers the registration.
         self.exposure = registration.ServerExposure()
+        self.registered: list[Workspace] = []
         self.job: Any = None
         # "eof": a pipe closed right after ``ready``; "eof-now": already
         # closed; "devnull"; or a file object.
@@ -152,8 +153,9 @@ class Harness:
         self.log.append(("backend stop", proc))
         self.clean_stops.append(clean)
 
-    def _register(self, _workspace, *, url):
+    def _register(self, workspace, *, url):
         """The backend's answer: one this run started reports its options."""
+        self.registered.append(workspace)
         if self.started is None:
             return self.exposure
         return registration.ServerExposure.of(
@@ -308,7 +310,7 @@ def test_start_gets_the_resolved_options(h, capsys):
     assert h.started["port"] == 7001
     assert h.started["host"] == "0.0.0.0"
     assert h.started["allowed_origins"] == "https://smith.langchain.com"
-    assert str(h.started["workspace_dir"]) == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started["job"] is None  # no job off Windows
 
 
@@ -355,6 +357,28 @@ def test_tunnel_url_is_read_in_short_waits(h, capsys, monkeypatch):
 def test_tunnel_without_url_reports_null(h, capsys):
     _, lines = h.run(capsys, tunnel=True)
     assert _by_event(lines, "ready")["public_url"] is None
+
+
+def test_tunnel_failure_reports_null_and_the_reason(h, capsys, monkeypatch):
+    """cloudflared could not create the tunnel: ``ready`` follows the first
+    read, with no URL and cloudflared's reason among the warnings."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    reads: list[float] = []
+
+    def _read(timeout=35.0, **_k):
+        reads.append(timeout)
+        raise lgm.TunnelFailedError("failed to request quick Tunnel: i/o timeout")
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _read)
+    _, lines = h.run(capsys, tunnel=True)
+    ready = _by_event(lines, "ready")
+    assert ready["public_url"] is None
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in ready["warnings"]
+    )
+    assert reads == [json_mode._TICK]
 
 
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5"])
@@ -468,7 +492,7 @@ def test_job_is_closed_after_a_failed_start(h, capsys):
 # --------------------------------------------------------------------------- #
 def _attach(h, **record):
     h.occupied = True
-    h.sidecar = {"workspace": h.workspace, "pid": 1, **record}
+    h.sidecar = {"pid": 1, **record}
 
 
 def test_attached_run_reports_the_running_backend_and_leaves_it(h, capsys):
@@ -620,15 +644,16 @@ def test_record_for_another_port_is_port_conflict(h, capsys):
     assert lines[-1]["detail"]["reason"] == "record_mismatch"
 
 
-def test_backend_started_from_another_project_is_workspace_conflict(h, capsys):
-    """The app gets the backend's default project from calls that name none."""
-    h.occupied = True
-    h.sidecar = {"workspace": str(h.tmp_path / "other"), "pid": 1}
+def test_older_record_of_another_project_attaches_and_registers(h, capsys):
+    """The backend serves every registered project: the project an older
+    record names does not matter, and this run registers its own."""
+    _attach(h, workspace=str(h.tmp_path / "other"))
     code, lines = h.run(capsys)
-    assert code == 1
-    assert lines[-1]["code"] == "workspace_conflict"
-    assert lines[-1]["detail"]["workspace"] == str(h.tmp_path / "other")
-    assert "hint" in lines[-1]["detail"]
+    assert code == 0
+    ready = _by_event(lines, "ready")
+    assert ready["owned"] is False
+    assert ready["workspace"] == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started is None
 
 

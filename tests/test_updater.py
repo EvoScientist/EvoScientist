@@ -789,10 +789,12 @@ def test_failing_before_stop_leaves_the_server_running(server, monkeypatch):
     monkeypatch.setattr(
         manager,
         "_read_workspace_sidecar",
-        lambda: {"pid": 42, "workspace": "/proj", "lasting": True},
+        lambda: {"pid": 42, "lasting": True},
     )
     recorded: list = []
-    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+    monkeypatch.setattr(
+        server_stage, "remember_for_restart", lambda: recorded.append(True)
+    )
     monkeypatch.setattr(
         updater, "_stop_service_ccproxy", lambda emit: pytest.fail("ccproxy stopped")
     )
@@ -871,20 +873,25 @@ def test_owned_server_the_stop_could_not_open(server):
 
 
 @pytest.mark.parametrize("stop_fails", [False, True, "unopened"])
-def test_lasting_server_is_recorded_for_restart(server, monkeypatch, stop_fails):
-    """The setup after the update starts it again, from the same project;
-    a server that did not stop leaves no record."""
+@pytest.mark.parametrize(
+    "sidecar",
+    [{"pid": 42, "lasting": True}, {"pid": 42, "workspace": "/proj", "lasting": True}],
+    ids=["current", "older_record_with_project"],
+)
+def test_lasting_server_is_recorded_for_restart(
+    server, monkeypatch, stop_fails, sidecar
+):
+    """The setup after the update starts it again; a server that did not
+    stop leaves no record."""
     import EvoScientist.langgraph_dev.manager as manager
     from EvoScientist.setup import server as server_stage
 
-    monkeypatch.setattr(
-        manager,
-        "_read_workspace_sidecar",
-        lambda: {"pid": 42, "workspace": "/proj", "lasting": True},
-    )
+    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: sidecar)
     server["stop_fails"] = stop_fails
     recorded: list = []
-    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+    monkeypatch.setattr(
+        server_stage, "remember_for_restart", lambda: recorded.append(True)
+    )
     monkeypatch.setattr(server_stage, "forget_restart", lambda: recorded.clear())
 
     if stop_fails:
@@ -893,7 +900,7 @@ def test_lasting_server_is_recorded_for_restart(server, monkeypatch, stop_fails)
         assert recorded == []
     else:
         updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
-        assert recorded == ["/proj"]
+        assert recorded == [True]
 
 
 def test_has_busy_thread_asks_for_busy_threads_only(monkeypatch):
@@ -2040,10 +2047,12 @@ def test_deploy_owned_server_is_not_restarted(server, monkeypatch):
     monkeypatch.setattr(
         manager,
         "_read_workspace_sidecar",
-        lambda: {"pid": 42, "workspace": "/proj", "lasting": False},
+        lambda: {"pid": 42, "lasting": False},
     )
     recorded: list = []
-    monkeypatch.setattr(server_stage, "remember_for_restart", recorded.append)
+    monkeypatch.setattr(
+        server_stage, "remember_for_restart", lambda: recorded.append(True)
+    )
 
     updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
 

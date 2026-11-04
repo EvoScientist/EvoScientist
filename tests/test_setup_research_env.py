@@ -1184,7 +1184,7 @@ def test_decision_is_logged_once_with_a_setup_hint(env, caplog):
         ({re_env.SIDECAR_KEY: None}, None, True),
         ({re_env.SIDECAR_KEY: None}, "/usr/bin/python", False),
         # No record (older server) or no reuse: our own decision.
-        ({"workspace": "/w"}, None, True),
+        ({"pid": 1}, None, True),
         (None, None, True),
         (None, "/usr/bin/python", False),
     ],
@@ -1225,7 +1225,7 @@ def test_python_drift_message(monkeypatch, recorded, current, warns):
 
 def test_python_drift_message_none_without_a_record():
     """A server started by an older version has no record."""
-    assert re_env.python_drift_message({"workspace": "/w"}) is None
+    assert re_env.python_drift_message({"pid": 1}) is None
 
 
 def test_python_used_is_logged_once(env, caplog):

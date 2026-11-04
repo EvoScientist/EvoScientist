@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -138,6 +138,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 > Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
+- **[03 Nov 2026]** 🖥️ The **EvoScientist desktop app** is out for Windows! [**Download**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe) 👈
 - **[03 Jun 2026]** 🥈 Ranked #2 overall — and 🥇 #1 among `GPT-5.4`-based agents — on [ResearchClawBench](https://github.com/InternScience/ResearchClawBench) (Agent Mode)! [**Leaderboard**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[18 Apr 2026]** 🥇 Ranked #1 on [DeepResearch Bench](https://deepresearch-bench.github.io/) at submission time! [**Leaderboard**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
 - **[13 Apr 2026]** 🥇 Reclaimed #1 on [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) at submission time! [**Leaderboard**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
@@ -151,6 +152,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[03 Nov 2026]** **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** — The WebUI and the desktop app share the one background server from any project (WebUI 0.5); on Windows a run cut by a server stop runs again at the next start; cancelling a run on the server stops its shell command; clearer tool errors; fixes for resumed scheduled tasks, background-process checks and `EvoSci deploy --tunnel`; compatibility code for data older than v0.3.8 removed.
 - **[31 Oct 2026]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — One background service for every project (stop it with `EvoSci server stop`); new model: GPT-6.1 Terra (OpenAI + OpenRouter); a project `.env` now holds only `EvoSci` command settings; hardened setup, a stricter shell sandbox and a safer `EvoSci update`; Apple silicon only on macOS; fixes for memory workers, serve turns and standalone channels.
 - **[24 Oct 2026]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — Desktop groundwork: `EvoSci deploy --json` and a settings API for the WebUI; new models: Kimi K3.1 Pro (Moonshot + OpenRouter) and MiniMax M3.1 Flash (MiniMax + OpenRouter), with the Kimi and MiniMax lists trimmed to K3.1 Pro / K3 and M3.1 Flash / M3; routed providers use only their own API key; bounded memory worker writes; tool selection keeps the built-in tools; fixes for scheduled tasks after restarts, Windows output, hangs at exit, standalone channels and unresponsive MCP servers; deepagents 0.7.32.
 - **[17 Oct 2026]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — One-line install for macOS, Windows and Linux, and `EvoSci update` to move an install between releases; acceptance criteria and goals: `--rubric`, `/rubric` and `/goal` grade work against criteria you set; proactivity: `EvoSci serve` follows up in channel chats on its own (`/proactive`); sign in with ChatGPT directly; the backend answers browser requests only from trusted pages; transient model failures retry within a wait budget; new models: Claude Haiku 5.5 (Anthropic), Gemini 4 Argon, Muse Wonder and Muse Spark Open (OpenRouter), with the Claude lists trimmed to the four current models and Claude Sonnet 5.5 as the default; Windows channel attachments and `@file` mentions open in the file tools; deepagents 0.7.28.
@@ -204,12 +206,30 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 - [🔌 MCP Integration](#-mcp-integration)
 - [📱 Channels](#-channels)
 - [📚 Acknowledgments](#-acknowledgments)
-- [🎯 Roadmap](#-ᯓ-roadmap)
 - [🌍 Project Roles](#-project-roles)
 - [🤝 Contributing](#-contributing)
 - [📝 Citation](#-citation)
 
 ## 📦 Installation
+
+### Desktop App
+
+Download it for your platform:
+
+<p align="center">
+<a href="https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-dark.svg">
+  <img alt="Download for Windows" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg" width="220" height="44">
+</picture></a>&nbsp;<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-dark.svg">
+  <img alt="macOS coming soon" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg" width="220" height="44">
+</picture>
+</p>
+
+> [!NOTE]
+> The installer is not signed yet: Windows SmartScreen may ask you to confirm (More info → Run anyway).
 
 ### Quick Install
 
@@ -460,7 +480,7 @@ Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yam
 
 Every agent takes its keys from `config.yaml` or the environment. A project `.env` holds only settings of the `EvoSci` command started in that folder, such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`; `EvoSci` warns about, and ignores, any key or other setting EvoScientist reads in it. Other variables in it, such as `HF_TOKEN`, are ignored too: export them in your shell before starting EvoSci.
 
-The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs (the project is the one the WebUI and the desktop app open), and after changing that, run `EvoSci service stop` and start it again.
+The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs, and after changing that, run `EvoSci service stop` and start it again.
 
 </details>
 
@@ -507,7 +527,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a 
 <details>
 <summary>Desktop WebUI</summary>
 
-Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal. The server keeps running after the WebUI closes, for every EvoSci session, until `EvoSci service stop`; `EvoSci --ui webui` opens only the project that server was started from, so stop it first to open another:
+Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal. The server keeps running after the WebUI closes, for every EvoSci session, until `EvoSci service stop`; the WebUI shows every project registered with that server:
 
 ```bash
 EvoSci config set ui_backend webui   # persist; or one-off with `EvoSci --ui webui`
@@ -728,26 +748,6 @@ This project builds upon the following outstanding open-source works:
 
 
 We thank the authors for their valuable contributions to the open-source community.
-
-<p align="right"><a href="#top">🔝Back to top</a></p>
-
-## 🎯 ᯓ➤ Roadmap
-
-Coming soon:
-- [x] 🖥️ Full-screen TUI and classic CLI interfaces
-- [x] 📻 EvoMemory v1.0 shipped
-- [x] ⚒️ 200+ predefined skills built in
-- [x] 🧩 Built-in research-lifecycle skills shipped
-- [x] 👋 Human-in-the-loop action approval
-- [x] 🦾 Agent-initiated human clarification
-- [x] 📑 Technical report on the way
-- [x] 🔐 OAuth sign-in (CLI coding agent subscribers)
-- [x] 📺 Web app with workspace UI
-- [x] ⏰ Scheduled tasks (cron-style, via `/schedule`)
-- [ ] 📹 Demo and tutorial in the works
-- [ ] 📊 Benchmark suite to be released
-
-Stay tuned — more features are on the way!
 
 <p align="right"><a href="#top">🔝Back to top</a></p>
 

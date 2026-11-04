@@ -100,7 +100,7 @@ class LauncherError(Exception):
     panel, other front-ends to their own error display. ``message`` is
     human-readable and actionable; ``detail`` is an optional secondary line.
     ``fields`` carries the same facts for a program, e.g. ``{"workspace": ...}``
-    on ``folder_missing`` and ``workspace_mismatch``.
+    on ``folder_missing``.
     """
 
     def __init__(
@@ -676,7 +676,6 @@ class WebUILauncher:
         self._backend_start_initiated = True
         try:
             self._backend_proc = start_langgraph_dev(
-                workspace_dir=Path(self._cfg.workspace_dir),
                 port=self._cfg.backend_port,
                 host=self._cfg.backend_host,
                 file_persistence=file_persistence,
@@ -760,13 +759,6 @@ def _resolve_backend(
     is a warning, not an error. A reuse carries the ownership record it was
     decided on. With ``require_record``, a server without one is a
     ``port_conflict`` instead of a reuse.
-
-    A backend started from another project is ``workspace_mismatch``: the
-    front-ends launched here (the WebUI, the desktop app behind ``deploy
-    --json``) do not name their project in every call, so they get the
-    backend's default one, the project of the client that started it
-    (``GET /api/workspace``). A client that names its project, as the CLI
-    does, shares any backend.
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
@@ -824,19 +816,6 @@ def _resolve_backend(
             f"'EvoSci server stop' stops EvoSci's recorded server on another "
             f"port or interface, not this one.",
             fields={"reason": "record_mismatch"},
-        )
-    from ..paths import command_arg, normalize_path
-
-    if normalize_path(sidecar["workspace"]) != normalize_path(cfg.workspace_dir):
-        raise LauncherError(
-            "workspace_mismatch",
-            f"Port {cfg.backend_port} is serving the backend started from "
-            f"{sidecar['workspace']}, and this front-end shows the project of "
-            "the client that started the backend.",
-            f"Launch from that folder (--workdir {command_arg(sidecar['workspace'])}), or "
-            "stop the backend with `EvoSci server stop` and launch again; that "
-            "ends the background work of every EvoSci session using it.",
-            fields={"workspace": sidecar["workspace"]},
         )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
