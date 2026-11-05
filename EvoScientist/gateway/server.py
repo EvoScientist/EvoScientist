@@ -967,7 +967,7 @@ class LangGraphServerGateway:
             )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
-                return await self._respond_to_interrupt(
+                return await self._resume_interrupt(
                     stream,
                     request.thread_id,
                     request.message.resume,
@@ -994,7 +994,7 @@ class LangGraphServerGateway:
         run_id = result.get("run_id") if isinstance(result, Mapping) else None
         return str(run_id) if run_id else None
 
-    async def _respond_to_interrupt(
+    async def _resume_interrupt(
         self,
         stream: AsyncThreadStream,
         thread_id: str,

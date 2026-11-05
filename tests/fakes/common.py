@@ -627,7 +627,6 @@ class FakeLangGraphThreadStream:
         self.interrupts = interrupts or []
         self.interrupted = interrupted
         self.run = FakeLangGraphRunModule()
-        self.subscribed_channels: list[list[str]] = []
         self.entered = False
         self.exited = False
         # ``events`` only: earlier runs' envelopes sent first on every new
@@ -657,20 +656,6 @@ class FakeLangGraphThreadStream:
         envelopes (and, with ``stay_open``, the stream never ends).
         """
         self.event_streams_opened += 1
-        # langgraph_sdk/_async/stream.py ``_ALL_CHANNELS``
-        self.subscribed_channels.append(
-            [
-                "values",
-                "updates",
-                "messages",
-                "tools",
-                "lifecycle",
-                "input",
-                "checkpoints",
-                "tasks",
-                "custom",
-            ]
-        )
         return self._thread_events()
 
     async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:

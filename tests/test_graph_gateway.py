@@ -1293,8 +1293,6 @@ async def test_langgraph_server_gateway_delivers_custom_middleware_events():
         "text",
         "done",
     ]
-    # The subscription must include the custom channel or nothing arrives.
-    assert "custom" in stream.subscribed_channels[0]
 
 
 async def test_langgraph_server_gateway_ignores_untagged_custom_events():
@@ -2996,7 +2994,7 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
 
 
 @pytest.mark.parametrize(
-    ("active_after_respond", "expected_run_ids"),
+    ("active_after_resume", "expected_run_ids"),
     [
         (
             [
@@ -3117,7 +3115,7 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
     ],
 )
 async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
-    active_after_respond: list[dict[str, Any]],
+    active_after_resume: list[dict[str, Any]],
     expected_run_ids: list[str],
     caplog: pytest.LogCaptureFixture,
     monkeypatch,
@@ -3161,7 +3159,7 @@ async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             runs = [{"run_id": "other-run", "status": "running"}]
             if stream.run.starts:
-                runs.extend(active_after_respond)
+                runs.extend(active_after_resume)
             return [run for run in runs if run["status"] == status][
                 offset : offset + limit
             ]
@@ -3272,7 +3270,7 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
     ],
 )
 @pytest.mark.parametrize("has_neighbour", [False, True])
-async def test_server_gateway_cleans_up_resume_accepted_before_respond_finishes(
+async def test_server_gateway_cleans_up_resume_accepted_before_start_finishes(
     failure, run_status, multiple_interrupts, response, has_neighbour, monkeypatch
 ):
     """Record resume identity before the awaited start can fail or cancel."""
