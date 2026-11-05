@@ -1280,3 +1280,436 @@ def test_decisions_run_off_the_event_loop(server, served, secret, monkeypatch):
     _decide(server, "focused-validation", "reject", secret)
 
     assert on_loop == [False]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/autoskills/run
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_runs(monkeypatch):
+    """Stand-ins for starting and finding AutoSkills runs on the server."""
+    from unittest.mock import AsyncMock
+
+    from EvoScientist.memory.autoskills import schedule
+
+    start = AsyncMock(return_value={"thread_id": "t-new", "run_id": "r-new"})
+    find = AsyncMock(return_value=None)
+    monkeypatch.setattr(schedule, "arun_autoskill_now", start)
+    monkeypatch.setattr(schedule, "afind_running_autoskill", find)
+    return start, find
+
+
+def _run(server, headers=None, **body):
+    return server.post("/api/autoskills/run", json=body, headers=headers or {})
+
+
+def test_run_route_needs_the_secret(server, served, fake_runs):
+    start, _find = fake_runs
+
+    response = _run(server, workspace_dir=str(served.root))
+
+    assert response.status_code == 403
+    start.assert_not_called()
+
+
+def test_run_route_starts_a_run_for_the_project(server, served, secret, fake_runs):
+    start, find = fake_runs
+
+    response = _run(server, secret, workspace_dir=str(served.root) + "/")
+
+    assert response.status_code == 200
+    assert response.json() == {"thread_id": "t-new", "run_id": "r-new"}
+    assert start.await_args.kwargs["workspace_dir"] == served.key
+    assert find.await_args.kwargs["workspace_dir"] == served.key
+
+
+def test_run_route_names_the_run_already_in_flight(server, served, secret, fake_runs):
+    start, find = fake_runs
+    find.return_value = {"thread_id": "t-old", "run_id": "r-old"}
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "already_running",
+        "thread_id": "t-old",
+        "run_id": "r-old",
+    }
+    start.assert_not_called()
+
+
+def test_run_route_not_served(server, served, secret, projects, fake_runs):
+    start, _find = fake_runs
+    projects.set_registered(served.key, False)
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_served"}
+    start.assert_not_called()
+
+
+def test_run_route_when_autoskills_is_off(
+    server, served, secret, fake_runs, monkeypatch
+):
+    from EvoScientist import config as config_module
+    from EvoScientist.config import EvoScientistConfig
+
+    start, _find = fake_runs
+    monkeypatch.setattr(
+        config_module,
+        "get_effective_config",
+        lambda *args, **kwargs: EvoScientistConfig(
+            memory_skill_synthesis_enabled=False
+        ),
+    )
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "autoskills_off"}
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [None, "", "relative/path", 5])
+def test_run_route_refuses_a_path_it_cannot_read(
+    server, served, secret, fake_runs, value
+):
+    response = _run(server, secret, workspace_dir=value)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_path"}
+
+
+def test_run_route_refuses_a_body_that_is_not_an_object(
+    server, served, secret, fake_runs
+):
+    response = server.post(
+        "/api/autoskills/run",
+        content=b"[1]",
+        headers={**secret, "content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_body"}
+
+
+@pytest.mark.parametrize("failing", ["start", "find"])
+def test_run_route_reports_a_failed_start(server, served, secret, fake_runs, failing):
+    start, find = fake_runs
+    (start if failing == "start" else find).side_effect = RuntimeError("down")
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 502
+    assert response.json() == {"error": "run_failed", "detail": "down"}
+    if failing == "find":
+        start.assert_not_called()
+
+
+def test_run_route_sends_a_detail_holding_a_lone_surrogate(
+    server, served, secret, fake_runs, caplog
+):
+    import logging
+
+    start, _find = fake_runs
+    start.side_effect = RuntimeError("down \udce9")
+    # The logged traceback would hold the surrogate, which pytest-xdist cannot send.
+    caplog.set_level(logging.ERROR, logger="EvoScientist.langgraph_dev.autoskills_api")
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 502
+    assert response.json() == {"error": "run_failed", "detail": "down \\udce9"}
+
+
+def test_run_route_reports_a_config_it_cannot_read(
+    server, served, secret, fake_runs, monkeypatch
+):
+    from EvoScientist import config as config_module
+
+    start, _find = fake_runs
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(config_module, "get_effective_config", unreadable)
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "run_failed"
+    start.assert_not_called()
+
+
+def test_a_slow_start_in_one_project_does_not_hold_another(
+    server, served, secret, fake_runs, projects, tmp_path
+):
+    import asyncio
+    import threading
+
+    other = Workspace(tmp_path / "other")
+    other.root.mkdir()
+    projects.set_registered(other.key, True)
+    start, _find = fake_runs
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def start_run(_config, *, workspace_dir):
+        if workspace_dir == served.key:
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+        return {"thread_id": f"t-{workspace_dir}", "run_id": "r"}
+
+    start.side_effect = start_run
+    slow = threading.Thread(
+        target=lambda: _run(server, secret, workspace_dir=str(served.root))
+    )
+    slow.start()
+    assert entered.wait(5)
+    fast_done = []
+    fast = threading.Thread(
+        target=lambda: fast_done.append(
+            _run(server, secret, workspace_dir=str(other.root)).status_code
+        )
+    )
+    fast.start()
+    fast.join(5)
+    done_while_held = list(fast_done)
+    release.set()
+    slow.join(5)
+    fast.join(5)
+
+    assert done_while_held == [200]
+
+
+def test_run_route_checks_served_before_off_and_off_before_running(
+    server, served, secret, fake_runs, projects, monkeypatch
+):
+    from EvoScientist import config as config_module
+    from EvoScientist.config import EvoScientistConfig
+
+    start, find = fake_runs
+    find.return_value = {"thread_id": "t-old", "run_id": "r-old"}
+    monkeypatch.setattr(
+        config_module,
+        "get_effective_config",
+        lambda *args, **kwargs: EvoScientistConfig(
+            memory_skill_synthesis_enabled=False
+        ),
+    )
+
+    off = _run(server, secret, workspace_dir=str(served.root))
+    projects.set_registered(served.key, False)
+    unserved = _run(server, secret, workspace_dir=str(served.root))
+
+    assert off.json() == {"error": "autoskills_off"}
+    find.assert_not_called()
+    assert unserved.status_code == 404
+    assert unserved.json() == {"error": "not_served"}
+    start.assert_not_called()
+
+
+def test_run_route_treats_a_project_it_cannot_stat_as_not_served(
+    server, served, secret, fake_runs, monkeypatch
+):
+    from EvoScientist.langgraph_dev import folder_check
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(folder_check, "is_served", unreadable)
+
+    response = _run(server, secret, workspace_dir=str(served.root))
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_served"}
+
+
+def test_run_locks_are_dropped_once_unused(server, served, secret, fake_runs):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _start, find = fake_runs
+    _run(server, secret, workspace_dir=str(served.root))
+    assert autoskills_api._RUN_LOCKS == {}
+
+    find.side_effect = RuntimeError("down")
+    assert _run(server, secret, workspace_dir=str(served.root)).status_code == 502
+    assert autoskills_api._RUN_LOCKS == {}
+
+
+async def test_run_locks_are_dropped_when_their_users_are_cancelled():
+    import asyncio
+    import contextlib
+
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    held = asyncio.Event()
+
+    async def holder():
+        async with autoskills_api._run_lock("project"):
+            held.set()
+            await asyncio.sleep(30)
+
+    async def waiter():
+        async with autoskills_api._run_lock("project"):
+            pass
+
+    holding = asyncio.create_task(holder())
+    await held.wait()
+    waiting = asyncio.create_task(waiter())
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+    holding.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await holding
+
+    assert autoskills_api._RUN_LOCKS == {}
+
+
+def test_two_run_requests_at_once_start_one_run(server, served, secret, fake_runs):
+    import asyncio
+    import threading
+
+    start, find = fake_runs
+    started = []
+
+    async def slow_start(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+        started.append({"thread_id": "t-1", "run_id": "r-1"})
+        return started[-1]
+
+    async def find_started(*_args, **_kwargs):
+        return started[0] if started else None
+
+    start.side_effect = slow_start
+    find.side_effect = find_started
+    responses = []
+
+    def request():
+        responses.append(_run(server, secret, workspace_dir=str(served.root)))
+
+    threads = [threading.Thread(target=request) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(r.status_code for r in responses) == [200, 409]
+    assert len(started) == 1
+
+
+def test_run_route_reads_its_files_off_the_event_loop(
+    server, served, secret, fake_runs, monkeypatch
+):
+    import asyncio
+
+    from EvoScientist import config as config_module
+
+    on_loop = []
+    real = config_module.get_effective_config
+
+    def recording(function):
+        def call(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                on_loop.append(False)
+            else:
+                on_loop.append(True)
+            return function(*args, **kwargs)
+
+        return call
+
+    from EvoScientist.langgraph_dev import autoskills_api, folder_check
+
+    monkeypatch.setattr(config_module, "get_effective_config", recording(real))
+    monkeypatch.setattr(
+        folder_check,
+        "read_workspace_or_none",
+        recording(folder_check.read_workspace_or_none),
+    )
+    monkeypatch.setattr(autoskills_api, "_served", recording(autoskills_api._served))
+    _run(server, secret, workspace_dir=str(served.root))
+
+    assert on_loop == [False, False, False]
+
+
+@pytest.fixture
+def runtime_sdk(runtime_store, monkeypatch):
+    """The SDK clients of the AutoSkills helpers, talking to the in-memory runtime."""
+    from contextlib import asynccontextmanager
+
+    import httpx
+    from langgraph_api.api.runs import runs_routes
+    from langgraph_api.api.threads import threads_routes
+    from langgraph_sdk.client import LangGraphClient
+    from starlette.applications import Starlette
+
+    from EvoScientist.memory.autoskills import schedule
+
+    app = Starlette(routes=[*threads_routes, *runs_routes])
+
+    def http_client():
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://lg"
+        )
+
+    @asynccontextmanager
+    async def scoped(_url, **_kwargs):
+        http = http_client()
+        try:
+            yield LangGraphClient(http)
+        finally:
+            await http.aclose()
+
+    monkeypatch.setattr(
+        schedule,
+        "get_langgraph_async_client",
+        lambda **_k: LangGraphClient(http_client()),
+    )
+    monkeypatch.setattr(schedule, "langgraph_async_client_scoped", scoped)
+    monkeypatch.setattr(
+        schedule, "configured_langgraph_dev_url", lambda _c: "http://lg"
+    )
+
+
+async def test_the_finder_ignores_a_cron_run_and_finds_a_manual_one(
+    runtime_sdk, runtime_store, workspace
+):
+    from langgraph_api.cron_scheduler import get_metadata_from_payload
+    from langgraph_api.models.run import create_valid_run
+    from langgraph_runtime.database import connect
+
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.langgraph_dev import server_crons
+    from EvoScientist.langgraph_dev.assistants import ensure_workspace_assistants
+    from EvoScientist.memory.autoskills import schedule
+
+    await ensure_workspace_assistants(workspace)
+    config = EvoScientistConfig()
+    config.scheduler_default_timezone = "UTC"
+    await server_crons.reconcile_autoskills(config, [workspace])
+    # Fire the AutoSkills cron as the cron scheduler does: a temporary thread
+    # whose run carries the cron's metadata.
+    (cron,) = runtime_store["crons"]
+    payload = cron["payload"]
+    payload["metadata"] = get_metadata_from_payload(cron, payload)
+    async with connect() as conn:
+        await create_valid_run(conn, thread_id=None, payload=payload, headers={})
+
+    assert (
+        await schedule.afind_running_autoskill(config, workspace_dir=workspace.key)
+        is None
+    )
+
+    started = await schedule.arun_autoskill_now(config, workspace_dir=workspace.key)
+
+    assert await schedule.afind_running_autoskill(
+        config, workspace_dir=workspace.key
+    ) == {"thread_id": str(started["thread_id"]), "run_id": str(started["run_id"])}

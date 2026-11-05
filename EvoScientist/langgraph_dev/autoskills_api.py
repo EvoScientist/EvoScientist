@@ -2,18 +2,22 @@
 
 Each function returns ``(status, payload)`` for a thin handler in
 :mod:`~EvoScientist.langgraph_dev.http`. They read and write files
-synchronously, so the handlers call them in a thread. Only drafts of served projects that
+synchronously, so the handlers call them in a thread; ``run_now`` is a
+coroutine that moves its own file work off the loop. Only drafts of served projects that
 :func:`~EvoScientist.memory.autoskills.proposals.find_skill_proposal` reaches
 are listed or read, so the page shows exactly what an approval would use.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
 import stat
 import threading
+from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -425,3 +429,68 @@ def decide(
                 "detail": str(exc) or type(exc).__name__,
             }
     return status, _sendable(payload)
+
+
+# One start at a time per project and event loop, so two Run now requests cannot
+# both start a run; an entry is dropped when unused, as a waited-on lock holds its loop.
+_RUN_LOCKS: dict[tuple[asyncio.AbstractEventLoop, str], tuple[asyncio.Lock, int]] = {}
+
+
+@contextlib.asynccontextmanager
+async def _run_lock(key: str) -> AsyncIterator[None]:
+    entry = (asyncio.get_running_loop(), key)
+    lock, users = _RUN_LOCKS.get(entry, (asyncio.Lock(), 0))
+    _RUN_LOCKS[entry] = (lock, users + 1)
+    try:
+        async with lock:
+            yield
+    finally:
+        lock, users = _RUN_LOCKS[entry]
+        if users == 1:
+            del _RUN_LOCKS[entry]
+        else:
+            _RUN_LOCKS[entry] = (lock, users - 1)
+
+
+def _served(workspace: paths.Workspace) -> bool:
+    try:
+        return folder_check.is_served(workspace, registry.REGISTRY)
+    except OSError:
+        return False
+
+
+async def run_now(workspace_dir: object) -> tuple[int, dict[str, Any]]:
+    """Start one manual AutoSkills run for a served project, unless one runs."""
+    from EvoScientist.config import get_effective_config
+    from EvoScientist.memory.autoskills import schedule
+
+    workspace = await asyncio.to_thread(
+        folder_check.read_workspace_or_none, workspace_dir
+    )
+    if workspace is None:
+        return 400, {"error": "invalid_path"}
+    try:
+        if not await asyncio.to_thread(_served, workspace):
+            return 404, {"error": "not_served"}
+        config = await asyncio.to_thread(get_effective_config)
+        if not config.memory_skill_synthesis_enabled:
+            return 409, {"error": "autoskills_off"}
+        async with _run_lock(workspace.key):
+            running = await schedule.afind_running_autoskill(
+                config, workspace_dir=workspace.key
+            )
+            if running is not None:
+                return 409, {"error": "already_running", **running}
+            started = await schedule.arun_autoskill_now(
+                config, workspace_dir=workspace.key
+            )
+    except Exception as exc:
+        logger.warning(
+            "Could not start AutoSkills for %s.", workspace.key, exc_info=True
+        )
+        detail = str(exc) or type(exc).__name__
+        return 502, _sendable({"error": "run_failed", "detail": detail})
+    return 200, {
+        "thread_id": str(started["thread_id"]),
+        "run_id": str(started["run_id"]),
+    }

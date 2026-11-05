@@ -4,8 +4,8 @@ The langgraph-api host supports a top-level ``http`` key in
 ``langgraph.json`` that names an ASGI app to mount on the same
 process as the graph. It hosts the project registry and registration
 (``/api/workspaces``), the settings and local-secret routes, the
-AutoSkills reconcile and draft review, and the model registry the WebUI's
-``/model`` picker needs.
+AutoSkills reconcile, draft review and Run now, and the model registry the
+WebUI's ``/model`` picker needs.
 
 Why this lives here and not as a separate sidecar: the WebUI talks to
 ``EvoSci deploy``'s langgraph endpoint anyway, so one server keeps the
@@ -463,6 +463,16 @@ async def get_autoskill_proposal_file(request: Request) -> Response:
     return JSONResponse(body, status_code=status)
 
 
+async def _json_object(request: Request) -> dict | None:
+    """The request's JSON object (an empty body counts as one), or None."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except (ValueError, RecursionError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
 async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
     """Approve, reject or revert one AutoSkills draft; needs the local secret.
 
@@ -472,12 +482,8 @@ async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
 
     if (denied := require_local_secret(request)) is not None:
         return denied
-    raw = await request.body()
-    try:
-        body = json.loads(raw) if raw.strip() else {}
-    except (ValueError, RecursionError):
-        body = None
-    if not isinstance(body, dict):
+    body = await _json_object(request)
+    if body is None:
         return JSONResponse({"error": "invalid_body"}, status_code=400)
     status, payload = await asyncio.to_thread(
         autoskills_api.decide,
@@ -498,6 +504,21 @@ async def reject_autoskill_proposal(request: Request) -> JSONResponse:
 
 async def revert_autoskill_proposal(request: Request) -> JSONResponse:
     return await _decide_on_proposal(request, "revert")
+
+
+async def post_autoskills_run(request: Request) -> JSONResponse:
+    """Run AutoSkills now for the project in the body's ``workspace_dir``;
+    needs the local secret. See
+    :func:`~EvoScientist.langgraph_dev.autoskills_api.run_now`."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    body = await _json_object(request)
+    if body is None:
+        return JSONResponse({"error": "invalid_body"}, status_code=400)
+    status, payload = await autoskills_api.run_now(body.get("workspace_dir"))
+    return JSONResponse(payload, status_code=status)
 
 
 async def _unregister(workspace: Workspace) -> JSONResponse:
@@ -697,6 +718,7 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
             Route("/api/workspaces/move", move_workspace, methods=["POST"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
+            Route("/api/autoskills/run", post_autoskills_run, methods=["POST"]),
             Route(
                 "/api/autoskills/proposals", list_autoskill_proposals, methods=["GET"]
             ),

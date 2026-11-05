@@ -2305,6 +2305,214 @@ def test_a_failed_mark_rollback_is_reported(tmp_path, monkeypatch):
     assert "the processed mark could not be removed" in failed["error"]
 
 
+def _fake_scoped_client(monkeypatch, *, pages, runs):
+    """A stand-in SDK client: busy-thread pages, and each thread's runs."""
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock, MagicMock
+
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    client = MagicMock()
+
+    async def search(*, offset=0, **_kwargs):
+        index = offset // schedule._THREAD_PAGE
+        return pages[index] if index < len(pages) else []
+
+    async def list_runs(thread_id, *, status=None, limit=10, offset=0, **_kwargs):
+        listed = runs.get(thread_id, [])
+        if isinstance(listed, Exception):
+            raise listed
+        matching = [run for run in listed if status is None or run["status"] == status]
+        return matching[offset : offset + limit]
+
+    client.threads.search = AsyncMock(side_effect=search)
+    client.runs.list = AsyncMock(side_effect=list_runs)
+
+    @asynccontextmanager
+    async def scoped(_url, **_kwargs):
+        yield client
+
+    monkeypatch.setattr(schedule, "langgraph_async_client_scoped", scoped)
+    monkeypatch.setattr(schedule, "configured_langgraph_dev_url", lambda _c: "http://x")
+    return client
+
+
+def _thread_gone():
+    import httpx
+    from langgraph_sdk.errors import NotFoundError
+
+    response = httpx.Response(404, request=httpx.Request("GET", "http://x"))
+    return NotFoundError("Thread not found", response=response, body=None)
+
+
+def _manual(run_id, status):
+    return {"run_id": run_id, "status": status, "metadata": {"schedule": "manual"}}
+
+
+@pytest.mark.parametrize(
+    ("pages", "runs", "expected"),
+    [
+        (
+            [[{"thread_id": "t-done"}, {"thread_id": "t-busy"}]],
+            {
+                "t-done": [_manual("r-old", "success")],
+                "t-busy": [_manual("r-busy", "running")],
+            },
+            {"thread_id": "t-busy", "run_id": "r-busy"},
+        ),
+        (
+            [[{"thread_id": "t-queued"}]],
+            {"t-queued": [_manual("r-queued", "pending")]},
+            {"thread_id": "t-queued", "run_id": "r-queued"},
+        ),
+        (
+            [[{"thread_id": "t-cron"}]],
+            {
+                "t-cron": [
+                    {"run_id": "r-cron", "status": "running", "metadata": {}},
+                    {
+                        "run_id": "r-cron2",
+                        "status": "pending",
+                        "metadata": {"schedule": "0 3 * * 0"},
+                    },
+                ]
+            },
+            None,
+        ),
+        (
+            [[{"thread_id": "t-gone"}, {"thread_id": "t-busy"}]],
+            {"t-gone": _thread_gone(), "t-busy": [_manual("r-busy", "running")]},
+            {"thread_id": "t-busy", "run_id": "r-busy"},
+        ),
+        ([[]], {}, None),
+    ],
+    ids=["running", "pending", "cron-run-ignored", "thread-gone", "none"],
+)
+async def test_find_running_autoskill(workspace, monkeypatch, pages, runs, expected):
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    client = _fake_scoped_client(monkeypatch, pages=pages, runs=runs)
+
+    found = await schedule.afind_running_autoskill(
+        SimpleNamespace(), workspace_dir=workspace.key
+    )
+
+    assert found == expected
+    search = client.threads.search.await_args_list[0].kwargs
+    assert search["metadata"] == {
+        "run_kind": schedule.AUTOSKILL_RUN_KIND,
+        "workspace_dir": workspace.key,
+    }
+    assert search["status"] == "busy"
+
+
+async def test_find_running_autoskill_reads_every_page_of_runs(workspace, monkeypatch):
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    queued = [
+        {"run_id": f"r-{i}", "status": "pending", "metadata": {"schedule": "0 3 * * 0"}}
+        for i in range(schedule._THREAD_PAGE)
+    ]
+    _fake_scoped_client(
+        monkeypatch,
+        pages=[[{"thread_id": "t-queue"}]],
+        runs={"t-queue": [*queued, _manual("r-manual", "pending")]},
+    )
+
+    found = await schedule.afind_running_autoskill(
+        SimpleNamespace(), workspace_dir=workspace.key
+    )
+
+    assert found == {"thread_id": "t-queue", "run_id": "r-manual"}
+
+
+async def test_find_running_autoskill_sees_a_run_that_starts_while_it_looks(
+    workspace, monkeypatch
+):
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    run = _manual("r-moving", "pending")
+    client = _fake_scoped_client(
+        monkeypatch, pages=[[{"thread_id": "t-new"}]], runs={"t-new": [run]}
+    )
+    real_list = client.runs.list.side_effect
+
+    async def list_then_start(*args, **kwargs):
+        listed = await real_list(*args, **kwargs)
+        # The queue claims the run right after this read.
+        run["status"] = "running"
+        return listed
+
+    client.runs.list.side_effect = list_then_start
+
+    found = await schedule.afind_running_autoskill(
+        SimpleNamespace(), workspace_dir=workspace.key
+    )
+
+    assert found == {"thread_id": "t-new", "run_id": "r-moving"}
+
+
+async def test_find_running_autoskill_reads_every_page(workspace, monkeypatch):
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    full = [{"thread_id": f"t-{i}"} for i in range(schedule._THREAD_PAGE)]
+    client = _fake_scoped_client(
+        monkeypatch,
+        pages=[full, [{"thread_id": "t-late"}]],
+        runs={"t-late": [_manual("r-late", "running")]},
+    )
+
+    found = await schedule.afind_running_autoskill(
+        SimpleNamespace(), workspace_dir=workspace.key
+    )
+
+    assert found == {"thread_id": "t-late", "run_id": "r-late"}
+    offsets = [call.kwargs["offset"] for call in client.threads.search.await_args_list]
+    assert offsets == [0, schedule._THREAD_PAGE]
+
+
+async def test_run_helpers_resolve_the_project_off_the_event_loop(
+    workspace, monkeypatch
+):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    import EvoScientist.memory.autoskills.schedule as schedule
+
+    _fake_scoped_client(monkeypatch, pages=[[]], runs={})
+    start_client = MagicMock()
+    start_client.threads.create = AsyncMock(return_value={"thread_id": "t"})
+    start_client.runs.create = AsyncMock(return_value={"run_id": "r"})
+    monkeypatch.setattr(
+        schedule, "get_langgraph_async_client", lambda **_k: start_client
+    )
+    on_loop = []
+    real = schedule.Workspace
+
+    def recording(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(schedule, "Workspace", recording)
+    config = SimpleNamespace(
+        memory_skill_synthesis_mode=SimpleNamespace(value="propose"),
+        memory_skill_synthesis_cadence=SimpleNamespace(value="daily"),
+        memory_skill_synthesis_time="03:00",
+    )
+
+    await schedule.afind_running_autoskill(config, workspace_dir=workspace.key)
+    await schedule.arun_autoskill_now(config, workspace_dir=workspace.key)
+
+    assert on_loop
+    assert not any(on_loop)
+    start_client.__aexit__.assert_awaited_once()
+
+
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

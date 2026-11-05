@@ -21,6 +21,7 @@ from ...langgraph_dev.sdk import (
     default_scheduler_timezone,
     get_langgraph_async_client,
     get_langgraph_sync_client,
+    langgraph_async_client_scoped,
     messages_input,
 )
 from ...paths import SessionDirs, Workspace
@@ -202,27 +203,98 @@ def run_autoskill_now(
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
 
 
+_THREAD_PAGE = 20
+
+
+def _project_folders(workspace_dir: str | Path) -> dict[str, str]:
+    return SessionDirs(Workspace(workspace_dir)).metadata()
+
+
+async def _manual_run_in_flight(client: Any, thread_id: str) -> str | None:
+    from langgraph_sdk.errors import NotFoundError
+
+    offset = 0
+    while True:
+        try:
+            # One read per page, so a run the queue claims meanwhile is not missed.
+            runs = await client.runs.list(
+                thread_id,
+                limit=_THREAD_PAGE,
+                offset=offset,
+                select=["run_id", "status", "metadata"],
+            )
+        except NotFoundError:
+            # A cron's temporary thread is deleted once its run ends.
+            return None
+        for run in runs:
+            manual = (run.get("metadata") or {}).get("schedule") == "manual"
+            if manual and run.get("status") in ("pending", "running"):
+                return str(run["run_id"])
+        if len(runs) < _THREAD_PAGE:
+            return None
+        offset += _THREAD_PAGE
+
+
+async def afind_running_autoskill(
+    config: EvoScientistConfig,
+    *,
+    workspace_dir: str | Path,
+) -> dict[str, str] | None:
+    """The manual AutoSkills run of this project still pending or running.
+
+    A run the cron fired is not one: its temporary thread disappears when the
+    run ends, so a page following it would lose it.
+    """
+    folders = await asyncio.to_thread(_project_folders, workspace_dir)
+    url = configured_langgraph_dev_url(config)
+    async with langgraph_async_client_scoped(url) as client:
+        offset = 0
+        while True:
+            # A run's thread turns busy as soon as the run is queued.
+            threads = await client.threads.search(
+                metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
+                status="busy",
+                limit=_THREAD_PAGE,
+                offset=offset,
+                select=["thread_id"],
+            )
+            for thread in threads:
+                thread_id = str(thread["thread_id"])
+                run_id = await _manual_run_in_flight(client, thread_id)
+                if run_id is not None:
+                    return {"thread_id": thread_id, "run_id": run_id}
+            if len(threads) < _THREAD_PAGE:
+                return None
+            offset += _THREAD_PAGE
+
+
 async def arun_autoskill_now(
     config: EvoScientistConfig,
     *,
     workspace_dir: str | Path,
 ) -> dict[str, Any]:
     """Async variant of :func:`run_autoskill_now`."""
-    client = get_langgraph_async_client(url=configured_langgraph_dev_url(config))
-    workspace = Workspace(workspace_dir)
+    # Resolving the folder touches the disk, which the server's loop refuses.
+    workspace = await asyncio.to_thread(Workspace, workspace_dir)
     folders = SessionDirs(workspace).metadata()
-    thread = await client.threads.create(
-        graph_id=AUTOSKILL_GRAPH_ID,
-        metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
-    )
-    run = await client.runs.create(
-        thread_id=str(thread["thread_id"]),
-        assistant_id=launch_assistant_id(AUTOSKILL_GRAPH_ID, workspace),
-        input=_autoskill_input(),
-        metadata={**_autoskill_metadata(config=config, schedule="manual"), **folders},
-        config={
-            **run_config(workspace, thread_id=str(thread["thread_id"])),
-            "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
-        },
-    )
+    client = get_langgraph_async_client(url=configured_langgraph_dev_url(config))
+    # A fresh client per start, closed after it, as the server calls this per click.
+    async with client:
+        thread = await client.threads.create(
+            graph_id=AUTOSKILL_GRAPH_ID,
+            metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
+        )
+        run = await client.runs.create(
+            thread_id=str(thread["thread_id"]),
+            assistant_id=launch_assistant_id(AUTOSKILL_GRAPH_ID, workspace),
+            input=_autoskill_input(),
+            metadata={
+                **_autoskill_metadata(config=config, schedule="manual"),
+                **folders,
+            },
+            config={
+                **run_config(workspace, thread_id=str(thread["thread_id"])),
+                "recursion_limit": MEMORY_AGENT_RECURSION_LIMIT,
+            },
+        )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
