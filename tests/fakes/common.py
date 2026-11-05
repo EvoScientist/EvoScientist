@@ -561,21 +561,25 @@ class FakeCheckpointAgent:
             self.values = {**self.values, "messages": messages}
 
 
-FAKE_THREAD_RUN_ID = "run-1"
-FAKE_THREAD_RUN_COMPLETED_EVENT_ID = f"synth:{FAKE_THREAD_RUN_ID}:lc::completed"
-
-
 def paused_thread_state(*interrupt_ids: str) -> dict[str, Any]:
     """``threads.get_state`` of a thread paused at *interrupt_ids*."""
     return {"values": {}, "interrupts": [{"id": i} for i in interrupt_ids]}
 
 
 class FakeLangGraphRunModule:
-    """Fake thread-stream run controller for server gateway tests."""
+    """Fake thread-stream run controller for server gateway tests.
+
+    Each ``start`` is a new run: ``run-1``, ``run-2``, ...
+    """
 
     def __init__(self) -> None:
         self.starts: list[dict[str, Any]] = []
         self.started = asyncio.Event()
+
+    @property
+    def run_id(self) -> str:
+        """The id of the latest run started."""
+        return f"run-{len(self.starts)}"
 
     async def start(
         self,
@@ -592,7 +596,7 @@ class FakeLangGraphRunModule:
             }
         )
         self.started.set()
-        return {"run_id": FAKE_THREAD_RUN_ID}
+        return {"run_id": self.run_id}
 
 
 def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
@@ -674,7 +678,7 @@ class FakeLangGraphThreadStream:
                 yield {
                     "method": "lifecycle",
                     "params": {"namespace": [], "data": {"event": "completed"}},
-                    "event_id": FAKE_THREAD_RUN_COMPLETED_EVENT_ID,
+                    "event_id": f"synth:{self.run.run_id}:lc::completed",
                 }
         if self.stay_open:
             await asyncio.Event().wait()

@@ -495,16 +495,27 @@ async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_valu
 
 
 async def test_retrying_the_same_resume_payload_resumes_again():
+    """Each resume turn is its own run: the retry reads the second run's events
+    and drops the first run's, which the thread stream sends again."""
     payload = {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     stream = FakeLangGraphThreadStream(
-        THREAD_ID, events=[_text("resumed: ok"), _finish()]
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("first run", "1-0"),
+            _lifecycle("run-1", "completed"),
+            _lifecycle("run-2", "running"),
+            _text("second run", "2-0"),
+            _lifecycle("run-2", "completed"),
+        ],
     )
     gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-1"}])
 
     first = await _turn(gateway, Command(resume=payload))
     second = await _turn(gateway, Command(resume=payload))
 
-    assert _texts(first) == _texts(second) == ["resumed: ok"]
+    assert _texts(first) == ["first run"]
+    assert _texts(second) == ["second run"]
     assert [start["input"] for start in stream.run.starts] == [payload, payload]
     assert stream.event_streams_opened == 2
 
