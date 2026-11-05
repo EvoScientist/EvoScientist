@@ -213,6 +213,24 @@ def test_a_long_failed_result_shows_its_start_and_end():
     assert "Exit code: 1" not in passed
 
 
+def test_a_failed_write_todos_shows_its_error():
+    """A rejected todo list is the call's error, not a checklist."""
+    error = (
+        "Error invoking tool 'write_todos' with kwargs {'todos': "
+        "[{'content': 'train baseline', 'status': 'done'}]} with error:\n"
+        " todos.0.status: Input should be 'pending', 'in_progress' or 'completed'"
+    )
+    todos = "Updated todo list to [{'content': 'train baseline', 'status': 'pending'}]"
+
+    def render(content, success):
+        rows = format_tool_result_compact("write_todos", content, success=success)
+        return "".join(_render_text(row) for row in rows)
+
+    assert "Input should be" in render(error, False)
+    assert "train baseline" in render(todos, True)
+    assert "1 pending" in render(todos, True)
+
+
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():
     """Ordinary tools use the same pending-tool behavior as memory reads."""
     narration = "I will inspect the files first."

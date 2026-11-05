@@ -409,8 +409,8 @@ def format_tool_result_compact(
                 elements.append(Text.from_markup(diff_markup))
                 return elements
 
-    # Special handling for write_todos
-    if _name == "write_todos":
+    # Special handling for write_todos (a failed call shows its error instead)
+    if _name == "write_todos" and ok:
         items = _parse_todo_items(content)
         if items:
             stats = _build_todo_stats(items)

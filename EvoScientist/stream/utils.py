@@ -96,6 +96,9 @@ def tool_result_succeeded(
     """Judge a tool result, preferring its structured signals over the text."""
     if status == "error":
         return False
+    # Its result echoes the todos, so its text cannot tell; a failed call sets the status.
+    if name == "write_todos":
+        return True
     # deepagents' ``execute`` reports ``status="success"`` whatever the command did.
     exit_code = artifact.get("exit_code") if isinstance(artifact, dict) else None
     if isinstance(exit_code, int) and not isinstance(exit_code, bool):

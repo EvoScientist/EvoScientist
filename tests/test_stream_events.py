@@ -775,6 +775,36 @@ class TestV3ProtocolStreaming:
         assert len(result["content"]) < 2100
         assert result["content"].endswith("the last words")
 
+    async def test_a_write_todos_result_is_judged_by_its_status(self):
+        """Its result echoes the todos, which may name an error."""
+        todos = (
+            "[{'content': 'Fix RuntimeError: CUDA out of memory', 'status': 'pending'}]"
+        )
+        updated = Command(
+            update={
+                "messages": [
+                    ToolMessage(f"Updated todo list to {todos}", tool_call_id="tc1")
+                ]
+            }
+        )
+        rejected = ToolMessage(
+            "Error invoking tool 'write_todos': todos.0.status: Input should be ...",
+            name="write_todos",
+            tool_call_id="tc2",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("write_todos", {}),
+                tool_finished(updated),
+                tool_started("write_todos", {}, tool_call_id="tc2"),
+                tool_finished(rejected, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [True, False]
+
     async def test_an_interpreter_result_is_judged_by_its_closing_tag(self):
         """The interpreter's error or result follows any stdout it printed."""
         failed = ToolMessage(
