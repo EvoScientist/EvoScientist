@@ -169,7 +169,6 @@ def test_scheduler_graph_id_matches_registration():
 
 def test_production_loaders_accept_utf8_content(tmp_path, monkeypatch):
     """Production config readers must handle localized UTF-8 content."""
-    import os
 
     from EvoScientist import paths
     from EvoScientist.langgraph_dev import manager
@@ -224,33 +223,13 @@ requirements = [
 
     assert uv_tool.read_receipt(venv).with_args() == ["--with", "mcp-écho>=1.0"]
 
-    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
-    monkeypatch.setattr(manager, "RUNTIME", runtime)
+    from tests.fakes.langgraph_dev import lock_follows_record, write_record
+
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "données-écho")
-    manager._write_workspace_sidecar(12345)
-    assert manager._read_workspace_sidecar() == {
-        "pid": 12345,
-        "data_dir": str(tmp_path / "données-écho"),
-        "config_dir": str(paths.CONFIG_DIR),
-    }
-
-    runtime.pid_file.write_text(str(os.getpid()), encoding="utf-8")
-
-    class _NotLanggraphProcess:
-        def __init__(self, pid):
-            self.pid = pid
-
-        def cmdline(self):
-            return ["python", "localized-test"]
-
-        def kill(self):
-            raise AssertionError("non-langgraph pid must not be killed")
-
-    monkeypatch.setattr(manager, "_list_pids_on_port", lambda port: [os.getpid()])
-    monkeypatch.setattr(manager.psutil, "Process", _NotLanggraphProcess)
-    assert manager._kill_owned_stale_process(6174) is False
-    assert not runtime.pid_file.exists()
-    assert not runtime.workspace_sidecar.exists()
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "données-écho" / "server")
+    lock_follows_record(monkeypatch)
+    write_record(12345)
+    assert manager.read_record().data_dir == str(tmp_path / "données-écho")
 
 
 # ---------------------------------------------------------------------------

@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, workspace_setup
+from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -486,6 +486,7 @@ async def _lifespan(_app: Starlette):
     # refuses it on the event loop.
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
+    await asyncio.to_thread(server_record.mark_serving)
     yield
 
 
@@ -527,9 +528,11 @@ def _build_app() -> Starlette:
 
 
 # langgraph-api imports this app before its runtime loads the store, so the
-# server (the process working in the server home) takes its data folder's lock
-# and backs the store up first; anything else importing this module does not.
+# server (the process working in the server home) takes its data folder's lock,
+# records itself for its clients and backs the store up first; anything else
+# importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
+    server_record.write_record()
     server_home.back_up_store()
 app = _build_app()
