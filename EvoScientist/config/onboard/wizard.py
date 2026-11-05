@@ -790,7 +790,10 @@ def _run_onboard(
                     config.model = _step_model(
                         config, provider, ollama_detected_models=ollama_detected_models
                     )
-                if _asks_reasoning_effort(provider) and _preset("model") is None:
+                if (
+                    _asks_reasoning_effort(config, provider)
+                    and _preset("model") is None
+                ):
                     config.reasoning_effort = _step_reasoning_effort(config, provider)
                 _autosave(config)
 
