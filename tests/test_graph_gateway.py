@@ -1540,21 +1540,34 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
     assert start["config"]["recursion_limit"] == 100
 
 
-async def test_server_gateway_streams_on_target_workspace_assistant():
-    """A turn names its project by the target's workspace assistant."""
+@pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
+async def test_server_gateway_streams_on_target_workspace_assistant(resume):
+    """A turn, a resume included, names its project by the target's workspace
+    assistant and forwards its folders as a new message does."""
+    from langgraph.types import Command
+
     from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 
     stream = FakeLangGraphThreadStream("abc12345", events=[])
     threads = FakeLangGraphThreadsClient(
         threads=[],
-        states={"abc12345": {"values": {}}},
+        states={
+            "abc12345": paused_thread_state("interrupt-1") if resume else {"values": {}}
+        },
         streams={"abc12345": stream},
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
     )
+    message = (
+        Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
+        if resume
+        else "hi"
+    )
     request = RunRequest(
-        message="hi", thread_id="abc12345", target=GraphTarget(workspace_dir="/ws")
+        message=message,
+        thread_id="abc12345",
+        target=GraphTarget(workspace_dir="/ws", run_dir="/ws/runs/r1"),
     )
     async for _event in gateway.stream_events(request):
         pass
@@ -1562,6 +1575,11 @@ async def test_server_gateway_streams_on_target_workspace_assistant():
     assert threads.stream_calls == [
         ("abc12345", workspace_assistant_id("EvoScientist", "/ws"))
     ]
+    (start,) = stream.run.starts
+    assert {
+        key: start["config"]["configurable"].get(key)
+        for key in ("workspace_dir", "run_dir")
+    } == {"workspace_dir": "/ws", "run_dir": "/ws/runs/r1"}
 
 
 async def test_server_gateway_target_without_workspace_runs_on_graph():
@@ -2267,7 +2285,9 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
 
 
 async def test_server_gateway_resume_carries_the_config_of_a_new_message_run():
-    """#482: a resume runs with the same per-run config as a new message."""
+    """#482: a resume runs with the same per-run config as a new message, read
+    when the answer is sent: a ``/model`` switch made while the thread is
+    parked reaches the resumed run."""
     from langgraph.types import Command
 
     gateway, stream = _resume_gateway("interrupt-1")
@@ -2283,19 +2303,30 @@ async def test_server_gateway_resume_carries_the_config_of_a_new_message_run():
         "hitl_approve_all": True,
     }
     with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
-        for message in (
-            "hi",
-            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
-        ):
-            await _resume(
-                gateway,
-                RunRequest(
-                    message=message, thread_id="abc12345", configurable_extra=extra
+        await _resume(
+            gateway,
+            RunRequest(message="hi", thread_id="abc12345", configurable_extra=extra),
+        )
+        # The session config is mutated in place, as ``/model`` does.
+        live_cfg.model = "switched-model"
+        await _resume(
+            gateway,
+            RunRequest(
+                message=Command(
+                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
                 ),
-            )
+                thread_id="abc12345",
+                configurable_extra=extra,
+            ),
+        )
 
     new_message, resume = (start["config"] for start in stream.run.starts)
-    assert resume == new_message
+    assert new_message["configurable"]["model"] == "live-model"
+    assert resume["configurable"]["model"] == "switched-model"
+    assert resume == {
+        **new_message,
+        "configurable": {**new_message["configurable"], "model": "switched-model"},
+    }
     assert resume["recursion_limit"] == 4242
     assert {
         key: resume["configurable"].get(key)
@@ -2308,7 +2339,7 @@ async def test_server_gateway_resume_carries_the_config_of_a_new_message_run():
             "hitl_approve_all",
         )
     } == {
-        "model": "live-model",
+        "model": "switched-model",
         "model_provider": "live-provider",
         "active_teams": ["code-agent"],
         "rubric_run": {"mode": "thread"},
@@ -2412,6 +2443,27 @@ async def test_langgraph_server_gateway_resume_raises_on_unkeyed_multiple_interr
             ),
         )
     assert stream.run.starts == []
+
+
+async def test_server_gateway_resume_skips_a_state_interrupt_without_an_id():
+    """Only interrupts with an ``id`` count as pending (``threads.get_state``
+    shape; ``stream.interrupts`` uses ``interrupt_id``)."""
+    from langgraph.types import Command
+
+    gateway, stream = _resume_gateway("interrupt-1")
+    state = gateway.thread_store.client.threads.states["abc12345"]
+    state["interrupts"].insert(0, {"interrupt_id": "not-a-state-id", "value": {}})
+
+    await _resume(
+        gateway,
+        RunRequest(
+            message=Command(resume={"status": "cancelled"}), thread_id="abc12345"
+        ),
+    )
+
+    assert [start["input"] for start in stream.run.starts] == [
+        {"interrupt-1": {"status": "cancelled"}}
+    ]
 
 
 async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
