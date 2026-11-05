@@ -431,9 +431,28 @@ async def test_resume_reads_its_run_from_the_thread_events():
     assert _texts(events) == ["resumed: ok"]
 
 
-async def test_resume_whose_run_pauses_again_ends_at_the_new_pause():
+@pytest.mark.parametrize(
+    "replayed_value",
+    [
+        # What the SDK keeps today: the server sends ``data.payload``.
+        pytest.param(None, id="replay-without-value"),
+        # Once the value is read (#706), the answered interrupt must not be
+        # prompted again.
+        pytest.param(
+            {
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "echo old"}, "id": "t0"}
+                ],
+                "review_configs": _REVIEW_CONFIGS,
+            },
+            id="replay-with-value",
+        ),
+    ],
+)
+async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_value):
     """#738: the replayed pause already set ``stream.interrupted``, so the turn
-    must end at the resumed run's own pause, not wait for a rising edge."""
+    must end at the resumed run's own pause, not wait for a rising edge; its
+    prompt is the thread's pending interrupt, not the replayed one."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[
@@ -443,7 +462,7 @@ async def test_resume_whose_run_pauses_again_ends_at_the_new_pause():
             _input_requested([]),
             _lifecycle("run-1", "interrupted"),
         ],
-        interrupts=[{"interrupt_id": "interrupt-0"}],
+        interrupts=[{"interrupt_id": "interrupt-0", "value": replayed_value}],
         interrupted=True,
         replay=[_lifecycle("run-0", "running"), _lifecycle("run-0", "interrupted")],
         stay_open=True,
@@ -755,8 +774,6 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
             return await real_get_state(thread_id)
         raise ConnectionError("state store unavailable")
 
-    # Force the paused-state fallback: no stream.interrupts, interrupted False.
-    stream.interrupts = []
     threads.get_state = boom  # type: ignore[method-assign]
 
     events: list[dict] = []
@@ -785,8 +802,8 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
 async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
     """When the interrupted flag is already set, a failing state read must not cancel.
 
-    ``_pending_interrupt_events`` owns that read; ``_paused_interrupt_events``
-    converts the failure so the resume path on ``_pending`` is untouched.
+    The flag is set before the run on a resume turn (the replayed pause), and
+    the pause is still read from state.
     """
     stream = FakeLangGraphThreadStream(
         THREAD_ID,

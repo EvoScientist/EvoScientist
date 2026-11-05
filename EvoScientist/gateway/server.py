@@ -1269,68 +1269,23 @@ class LangGraphServerGateway:
         )
         return data["status"]
 
-    async def _pending_interrupt_events(
-        self,
-        stream: AsyncThreadStream,
-        thread_id: str,
-        processor: _V3EventProcessor,
-    ) -> list[GraphEvent]:
-        events: list[GraphEvent] = []
-        for interrupt in stream.interrupts:
-            events.extend(
-                await processor.process(
-                    _input_requested_event_from_interrupt(interrupt)
-                )
-            )
-
-        if events or not stream.interrupted:
-            return events
-
-        try:
-            state = await self.thread_store.client.threads.get_state(thread_id)
-        except NotFoundError:
-            return events
-
-        for interrupt in _state_interrupts(state):
-            events.extend(
-                await processor.process(
-                    _input_requested_event_from_interrupt(interrupt)
-                )
-            )
-        return events
-
     async def _paused_interrupt_events(
         self,
-        stream: AsyncThreadStream,
         thread_id: str,
         processor: _V3EventProcessor,
         *,
         paused: bool,
     ) -> list[GraphEvent]:
-        """``_pending_interrupt_events`` for a turn that saw its own pause.
+        """The prompts of a turn that saw its own pause, read from thread state.
 
-        The server sends the interrupt as ``data.payload`` and the SDK sets
-        ``stream.interrupted`` from a separate SSE that can lag this one, so a
-        pause seen here reads thread state without waiting for the flag.
+        ``stream.interrupts`` is no source for them: a new stream replays
+        interrupts that were already answered, the SDK leaves their value empty
+        (the server sends it as ``data.payload``), and ``stream.interrupted``
+        comes from a separate SSE that can lag this one.
         """
         if not paused:
             return []
-        try:
-            events = await self._pending_interrupt_events(stream, thread_id, processor)
-        except Exception as exc:
-            # ``_pending`` may read state when the interrupted flag is set and
-            # ``stream.interrupts`` is empty. Keep that failure on the pause
-            # path (do not cancel) without changing ``_pending`` itself.
-            logger.warning(
-                "Pause state read failed for thread %s; leaving the pause",
-                thread_id,
-                exc_info=True,
-            )
-            raise _PauseStateReadError(
-                f"Could not read the pause state for thread {thread_id}"
-            ) from exc
-        if events or not paused or stream.interrupted:
-            return events
+        events: list[GraphEvent] = []
         try:
             state = await self.thread_store.client.threads.get_state(thread_id)
         except NotFoundError:
@@ -1560,7 +1515,6 @@ class LangGraphServerGateway:
                 run_completed = True
                 if not emitted_interrupt:
                     for event in await self._paused_interrupt_events(
-                        stream,
                         request.thread_id,
                         processor,
                         paused=paused,
