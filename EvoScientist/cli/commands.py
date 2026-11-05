@@ -871,8 +871,8 @@ def _print_server_notices() -> None:
     tunnel."""
     from ..langgraph_dev import manager as _lg_manager
 
-    if _lg_manager.OLDER_SERVER:
-        console.print(f"[yellow]⚠ {escape(_lg_manager.OLDER_SERVER_MESSAGE)}[/yellow]")
+    if _lg_manager.OLDER_SERVER is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.OLDER_SERVER)}[/yellow]")
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
         console.print(f"[yellow]⚠ {escape(_lg_manager.CONFIG_DRIFT_MESSAGE)}[/yellow]")
     if _lg_manager.AGENT_SHELL_DRIFT is not None:

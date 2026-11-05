@@ -161,7 +161,9 @@ def lock_follows_record(
             else server_home.FREE
         ),
     )
-    monkeypatch.setattr(manager, "_pid_alive", lambda pid: pid not in dead)
+    monkeypatch.setattr(
+        manager, "_runs_as_recorded", lambda record: record.pid not in dead
+    )
 
 
 def write_older_record(pid: int = 4141, *, port: int = 6174, **fields) -> Path:

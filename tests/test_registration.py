@@ -703,9 +703,9 @@ def test_tui_notices_name_older_releases_server(monkeypatch):
     from EvoScientist.cli.tui_interactive import _agent_shell_notices
     from EvoScientist.langgraph_dev import manager
 
-    monkeypatch.setattr(manager, "OLDER_SERVER", True)
+    monkeypatch.setattr(manager, "OLDER_SERVER", manager.OLDER_SERVER_MESSAGE)
     assert manager.OLDER_SERVER_MESSAGE in _agent_shell_notices()
-    monkeypatch.setattr(manager, "OLDER_SERVER", False)
+    monkeypatch.setattr(manager, "OLDER_SERVER", None)
     assert manager.OLDER_SERVER_MESSAGE not in _agent_shell_notices()
 
 

@@ -265,7 +265,7 @@ def _fresh_langgraph_dev_state(monkeypatch):
         "_PROCESS": None,
         "SERVER_UNAVAILABLE": False,
         "SERVER_UNAVAILABLE_REASON": None,
-        "OLDER_SERVER": False,
+        "OLDER_SERVER": None,
         "CONFIG_DRIFT_SINCE_LAUNCH": False,
         "AGENT_SHELL_DRIFT": None,
         "SERVER_EXPOSURE": None,

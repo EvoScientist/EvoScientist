@@ -84,7 +84,8 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
     if not result.served:
         console.print(
             "[red]The background agent server did not start or did not register "
-            f"{escape(str(project))}; see {escape(str(manager.RUNTIME.log_file))}."
+            f"{escape(str(project))}; see "
+            f"{escape(str(manager.log_file_of(result.record)))}."
             "[/red]"
         )
         if result.reason is not None:
@@ -259,13 +260,14 @@ def _stop_busy_server_anyway(record) -> bool:
     its runs and background jobs are not kept. Without a terminal to ask in,
     it is refused (exit 1), as ``EvoSci update`` does; ``--yes`` skips the
     question."""
-    from ..langgraph_dev.manager import is_langgraph_dev_running
+    from ..langgraph_dev.manager import _is_port_occupied
 
     # The server the stop ends is the recorded one, whatever its port; a
-    # server without a record is not touched.
+    # server without a record is not touched. Its work is asked while it
+    # listens, also when /ok misses its second: a busy server answers late.
     if record is None:
         return True
-    if not is_langgraph_dev_running(port=record.port, host=record.host):
+    if not _is_port_occupied(record.port, record.host):
         return True
     work = _busy_work(record.url)
     if work is None:
@@ -326,6 +328,12 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
             )
             raise typer.Exit(1)
         record = current
+    if record is None and manager.starting_without_record():
+        console.print(
+            "[yellow]⚠ Another EvoScientist process is starting the server; "
+            "nothing was stopped. Run the stop again once it is up.[/yellow]"
+        )
+        raise typer.Exit(1)
     problem = manager.lock_problem(lock) if record is None else None
     if problem is not None:
         console.print(f"[yellow]⚠ {escape(problem)}[/yellow]")

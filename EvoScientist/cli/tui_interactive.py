@@ -145,7 +145,7 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
         if lg_manager.CONFIG_DRIFT_SINCE_LAUNCH
         else None
     )
-    older = lg_manager.OLDER_SERVER_MESSAGE if lg_manager.OLDER_SERVER else None
+    older = lg_manager.OLDER_SERVER
     notices = [
         setup_hint(),
         older,

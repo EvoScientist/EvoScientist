@@ -216,7 +216,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 f"[bold]WebUI:[/bold]    "
                 f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
                 f"[dim]({browser_note})[/dim]\n"
-                f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
+                f"[bold]Logs:[/bold]     {_shorten(str(result.log_file or RUNTIME.log_file))}\n"
                 f"          {_shorten(str(webui_log))}\n"
                 f"{remote_backend_hint}\n"
                 f"[dim]Press Ctrl+C to stop.[/dim]"

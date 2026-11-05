@@ -725,7 +725,9 @@ def test_attached_backend_older_release_started_says_to_restart_it(h, capsys):
     _attach(h)
     h.record = lgm.ServerRecord(pid=1, port=6174, host="127.0.0.1", older=True)
     _, lines = h.run(capsys)
-    assert lgm.OLDER_SERVER_MESSAGE in _by_event(lines, "ready")["warnings"]
+    ready = _by_event(lines, "ready")
+    assert lgm.OLDER_SERVER_MESSAGE in ready["warnings"]
+    assert ready["log_file"] == str(lgm.OLDER_RUNTIME_DIR / "langgraph_dev.log")
 
 
 def test_attached_backend_registers_this_project(h, capsys):

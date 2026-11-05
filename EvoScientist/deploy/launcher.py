@@ -80,6 +80,8 @@ class LaunchResult:
     # How the backend can be reached from other machines, as it answered the
     # registration.
     exposure: ServerExposure | None = None
+    # The log of the backend: an older release's writes its own.
+    log_file: Path | None = None
 
 
 class LauncherError(Exception):
@@ -370,6 +372,7 @@ class WebUILauncher:
         self._on_lock_wait = on_lock_wait
         self._backend_proc: subprocess.Popen | None = None
         self._backend_started = False
+        self._log_file: Path | None = None
         # The backend's address: the configured one until start() finds this
         # data folder's server on another port.
         self._backend_port = cfg.backend_port
@@ -419,7 +422,7 @@ class WebUILauncher:
         stops mid-boot would orphan the backend holding the port.
         """
         from ..agent_shell import server_setup_hint
-        from ..langgraph_dev.manager import _is_port_occupied
+        from ..langgraph_dev.manager import _is_port_occupied, log_file_of
 
         self._runner.preflight(self._cfg)
 
@@ -431,6 +434,7 @@ class WebUILauncher:
             # the server log; the launching process shows it, for the server
             # it reuses or the one it starts.
             record = result.record
+            self._log_file = log_file_of(record)
             hint = server_setup_hint(record.fields if record is not None else None)
             if hint is not None:
                 self._warnings.append(hint)
@@ -614,6 +618,7 @@ class WebUILauncher:
             backend_started=self._backend_started,
             warnings=list(self._warnings),
             exposure=self._exposure,
+            log_file=self._log_file,
         )
 
 
@@ -623,7 +628,8 @@ _CONFLICTS = {
     "foreign": "Free it (lsof -i :{port}) or change it with 'EvoSci config set "
     "langgraph_dev_port <port>'.",
     "other_data_folder": "Stop that server, or use another port.",
-    "older_server": "Stop it with 'EvoSci server stop', then start again.",
+    "older_server": "Stop the process that listens on port {port}, then start again.",
+    "older_recorded": "Stop it with 'EvoSci server stop', then start again.",
 }
 
 
@@ -640,7 +646,11 @@ def server_error(result: ServerResult) -> LauncherError:
     neither."""
     message = result.error or "No backend is available."
     if result.problem in _CONFLICTS:
-        hint = _CONFLICTS[result.problem].format(port=result.port or "")
+        problem = result.problem
+        if result.record is not None and result.record.older:
+            # An older release's record: server stop stops it.
+            problem = "older_recorded"
+        hint = _CONFLICTS[problem].format(port=result.port or "")
         return LauncherError(
             "port_conflict", message, hint, fields={"reason": result.problem}
         )
@@ -668,13 +678,11 @@ def server_error(result: ServerResult) -> LauncherError:
 def reuse_warnings(result: ServerResult, port: int) -> list[str]:
     """Warnings about a backend ``ensure_server`` reused: one an older release
     started, one on another port than *port*, and drift since its launch."""
-    from ..langgraph_dev.manager import OLDER_SERVER_MESSAGE
-
     warnings: list[str] = []
     if result.started:
         return warnings
-    if result.from_older_release:
-        warnings.append(OLDER_SERVER_MESSAGE)
+    if result.older_message is not None:
+        warnings.append(result.older_message)
     if result.port is not None and result.port != port:
         warnings.append(
             f"This data folder's backend runs on port {result.port}, not on "

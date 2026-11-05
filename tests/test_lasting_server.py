@@ -695,7 +695,7 @@ def test_server_status_names_lock_held_without_record(monkeypatch):
     output = _status_output()
 
     assert "without a record" in output
-    assert "server.lock" in output
+    assert "server.lock" in "".join(output.split())
 
 
 def test_server_status_shows_starting_record_as_starting(monkeypatch):
@@ -994,6 +994,7 @@ def busy_server(monkeypatch):
     stopped: list = []
     monkeypatch.setattr(manager, "read_record", lambda **_k: _record())
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda port, host="": True)
     monkeypatch.setattr(busy, "backend_has_active_runs", lambda url: True)
     monkeypatch.setattr(busy, "running_bg_process_names", lambda url: ["train.py"])
     monkeypatch.setattr(busy, "has_busy_thread", lambda url: False)
@@ -1068,6 +1069,17 @@ def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):
     """EvoSci server stop ends a server EvoSci deploy or the desktop app owns
     too, so its work is asked about; without a terminal it is refused."""
     monkeypatch.setattr(manager, "owned_by_its_starter", lambda _record: True)
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 1
+    assert busy_server == []
+    assert "--yes" in " ".join(result.output.split())
+
+
+def test_server_stop_asks_about_busy_server_slow_to_answer(busy_server, monkeypatch):
+    """A busy server may miss /ok's second; its work is asked all the same."""
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
 
     result = CliRunner().invoke(app, ["server", "stop"])
 
@@ -1189,7 +1201,7 @@ def test_server_status_names_unreadable_lock(monkeypatch):
     output = _status_output()
 
     assert "cannot be opened" in output
-    assert "server.lock" in output
+    assert "server.lock" in "".join(output.split())
 
 
 @pytest.mark.parametrize("group", ["server", "service"])
@@ -1205,3 +1217,37 @@ def test_stop_names_unreadable_lock(monkeypatch, group):
     assert result.exit_code == 1
     output = " ".join(result.output.split())
     assert "cannot be opened" in output
+
+
+def test_server_stop_while_server_starts_stops_nothing(monkeypatch):
+    """A server being started has no record yet: the stop says so instead of
+    finding none."""
+    stopped = []
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: stopped.append(1))
+    monkeypatch.setattr(
+        manager, "read_record_and_lock", lambda: (None, server_home.FREE)
+    )
+    monkeypatch.setattr(manager, "start_in_progress", lambda: True)
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 1
+    assert "starting the server" in result.output
+    assert stopped == []
+
+
+def test_server_stop_after_starts_record_just_appeared_stops_nothing(monkeypatch):
+    """The start released its lock between the stop's two reads."""
+    stopped = []
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: stopped.append(1))
+    monkeypatch.setattr(
+        manager, "read_record_and_lock", lambda: (None, server_home.FREE)
+    )
+    monkeypatch.setattr(manager, "start_in_progress", lambda: False)
+    monkeypatch.setattr(manager, "read_record", lambda **_k: _record())
+
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
+
+    assert result.exit_code == 1
+    assert "starting the server" in result.output
+    assert stopped == []

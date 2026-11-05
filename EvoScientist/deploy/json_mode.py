@@ -283,6 +283,9 @@ class _Run:
         self.port = 0
         self.starting = False  # an owned backend may exist from here on
         self.proc: Any = None
+        # The log of the backend this command uses (an attached older
+        # release's writes its own).
+        self.log_file: Any = None
         self.ccproxy: Any = None
         self.job: Any = None
 
@@ -369,7 +372,7 @@ class _Run:
             "assistant_id": chat_assistant_id(Workspace(ws)),
             "data_dir": data_dir,
             "config_dir": config_dir,
-            "log_file": str(lgm.RUNTIME.log_file),
+            "log_file": str(self.log_file),
             "warnings": warnings,
         }
         if tunnel:
@@ -415,6 +418,7 @@ class _Run:
         if not result.available:
             with _launcher_failures():
                 raise server_error(result)
+        self.log_file = lgm.log_file_of(result.record)
         return result
 
     def _before_start(self, config: Any) -> None:
@@ -495,7 +499,7 @@ class _Run:
                     f"The backend on port {self.port} {what}.",
                     {
                         "url": lgm._base_url(self.port, self.host),
-                        "log_file": str(lgm.RUNTIME.log_file),
+                        "log_file": str(self.log_file),
                     },
                 )
 

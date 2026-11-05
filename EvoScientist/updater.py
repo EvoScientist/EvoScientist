@@ -265,12 +265,14 @@ def check_server(
     from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
         ServerStopFailedError,
+        _is_port_occupied,
         configured_address,
         is_langgraph_dev_running,
         is_lasting,
         lock_unreadable_message,
         read_record_and_lock,
         reread_record,
+        starting_without_record,
         stop_server,
         unrecorded_lock_message,
     )
@@ -279,20 +281,30 @@ def check_server(
     config = get_effective_config()
     port, host = configured_address(config)
     go_on = before_stop or (lambda: None)
+
     record, lock = read_record_and_lock()
-    if record is None and lock == HELD:
+    # Without a record: a start in progress, a lock held, or one that cannot
+    # be opened (but with --yes) leaves the update undone.
+    if record is None and starting_without_record():
         raise UpdateError(
             "server_running",
-            f"{unrecorded_lock_message(then='run EvoSci update again')} "
-            "Nothing was changed.",
+            "Another EvoScientist process is starting the server; nothing was "
+            "changed. Run EvoSci update again once it is up.",
         )
-    if record is None and lock == UNKNOWN and not opts.yes:
-        # Whether a server runs cannot be told: --yes updates anyway.
-        raise UpdateError(
-            "server_running",
-            f"{lock_unreadable_message()} Nothing was changed. Pass --yes to "
-            "update anyway.",
-        )
+    if record is None:
+        if lock == HELD:
+            raise UpdateError(
+                "server_running",
+                f"{unrecorded_lock_message(then='run EvoSci update again')} "
+                "Nothing was changed.",
+            )
+        if lock == UNKNOWN and not opts.yes:
+            # Whether a server runs cannot be told: --yes updates anyway.
+            raise UpdateError(
+                "server_running",
+                f"{lock_unreadable_message()} Nothing was changed. Pass --yes to "
+                "update anyway.",
+            )
     if record is None and not is_langgraph_dev_running(port=port, host=host):
         go_on()
         _stop_service_ccproxy(emit)
@@ -300,7 +312,9 @@ def check_server(
     if record is not None:
         port, url = record.port, record.url
         busy = []
-        if is_langgraph_dev_running(port=record.port, host=record.host):
+        # Asked while it listens, also when /ok missed its second: a busy
+        # server answers late.
+        if _is_port_occupied(record.port, record.host):
             jobs = running_bg_process_names(url)
             if jobs:
                 busy.append(f"background jobs still running: {', '.join(jobs)}")
@@ -338,9 +352,8 @@ def check_server(
                     "update again.",
                 )
             if current is None:
-                go_on()
-                _stop_service_ccproxy(emit)
-                return
+                # The server asked about is gone: look again from the start.
+                return check_server(opts, emit, confirm, before_stop)
         go_on()
         # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
         # is started again by the setup after the update, and serves every

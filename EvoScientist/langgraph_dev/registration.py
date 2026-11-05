@@ -51,9 +51,10 @@ class OlderServerError(ServerUnusableError):
 
     code = "server_outdated"
 
-    def __init__(self) -> None:
+    def __init__(self, message: str | None = None) -> None:
         super().__init__(
-            "The running server is from an older EvoScientist. Stop it with "
+            message
+            or "The running server is from an older EvoScientist. Stop it with "
             "`EvoSci server stop`, then start again."
         )
 

@@ -143,6 +143,20 @@ def test_reuse_warnings_name_drift_since_launch():
     assert any("EvoSci server stop" in w for w in warnings)
 
 
+def test_reused_older_releases_server_is_no_drift():
+    """Its version always differs: the older-release notice says it all."""
+    record = lgm.ServerRecord(
+        pid=1,
+        port=6174,
+        host="127.0.0.1",
+        older=True,
+        fields={"config_fingerprint": "old"},
+    )
+    result = lgm._reused(record, "new")
+    assert result.drift is False
+    assert lm.reuse_warnings(result, 6174) == [lgm.OLDER_SERVER_MESSAGE]
+
+
 def test_reuse_warnings_name_servers_shell():
     warnings = lm.reuse_warnings(_reused(shell_drift="keeps /conda/bin/python"), 6174)
     assert warnings == ["keeps /conda/bin/python"]
@@ -151,6 +165,30 @@ def test_reuse_warnings_name_servers_shell():
 def test_reuse_warnings_name_port_server_runs_on():
     warnings = lm.reuse_warnings(_reused(port=7000), 6174)
     assert any("7000" in w and "6174" in w for w in warnings)
+
+
+def test_older_server_conflict_names_port_not_server_stop():
+    """A server too old to say whose it is keeps no record server stop finds."""
+    result = lgm.ServerResult(problem="older_server", error="old", port=6174)
+    hint = lm.server_error(result).detail
+    assert "6174" in hint
+    assert "EvoSci server stop" not in hint
+
+
+def test_older_releases_recorded_server_conflict_names_server_stop():
+    """server stop stops a server by an older release's record."""
+    record = lgm.ServerRecord(pid=1, port=7000, host="127.0.0.1", older=True)
+    error = lm.server_error(lgm._conflict("older", record))
+    assert "EvoSci server stop" in error.detail
+    assert "EvoSci server stop" in error.message
+
+
+def test_older_server_at_recorded_address_names_its_port():
+    record = lgm.ServerRecord(pid=1, port=7000, host="127.0.0.1")
+    error = lm.server_error(lgm._conflict("older", record))
+    assert "port 7000," in error.detail
+    assert "port 7000," in error.message
+    assert "EvoSci server stop" not in error.message
 
 
 def test_reuse_warnings_name_older_releases_server():
@@ -501,7 +539,7 @@ def test_start_reuses_this_data_folders_backend_on_another_port(server, monkeypa
     """The front end and the registration follow the backend to its port."""
     from EvoScientist.langgraph_dev import registration
 
-    server.run(port=7000)
+    server.run(host="10.0.0.5", port=7000)
     urls: list = []
     monkeypatch.setattr(
         registration,
@@ -513,9 +551,9 @@ def test_start_reuses_this_data_folders_backend_on_another_port(server, monkeypa
 
     result = launcher.start()
 
-    assert result.backend_url == "http://127.0.0.1:7000"
+    assert result.backend_url == "http://10.0.0.5:7000"
     assert launcher.backend_port == 7000
-    assert urls == ["http://127.0.0.1:7000"]
+    assert urls == ["http://10.0.0.5:7000"]
     assert runner.env["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "7000"
     assert any("7000" in w for w in result.warnings)
     assert server.spawns == []

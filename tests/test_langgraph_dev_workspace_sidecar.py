@@ -1,11 +1,11 @@
 """Tests for the server's record (``read_record``), the reuse of a recorded
 server, and the stop of the recorded one.
 
-The server records itself in the server home; clients read the record, never
-write or delete it. A record counts while the server lock is held and the
-process it names exists; a stop checks that the process is still the one
-recorded. A record an older release kept in the shared folder still counts,
-for this data folder only.
+The server records itself in the server home; clients read the record and
+never write it, and a stop deletes the record of the server it ended. A
+record counts while the server lock is held and the process it names is
+still the one recorded; a stop checks that too. A record an older release
+kept in the shared folder still counts, for this data folder only.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import psutil
@@ -25,6 +26,7 @@ from EvoScientist import paths
 from EvoScientist.langgraph_dev import manager, registration, server_record
 from tests.fakes.langgraph_dev import (
     CREATED,
+    LockHolder,
     Processes,
     Server,
     lock_follows_record,
@@ -102,16 +104,80 @@ def test_read_record_ignores_record_without_server_lock(monkeypatch, runtime_pat
     assert runtime_paths.record.exists(), "a client never deletes the record"
 
 
-def test_read_record_counts_while_lock_is_held_whatever_pid(runtime_paths):
-    """The lock proves the server runs: no process check, so a server whose
-    process cannot be read (an elevated one on Windows), or whose creation
-    time does not match, still counts."""
+def test_read_record_counts_while_lock_is_held_and_process_runs(runtime_paths):
+    """The lock and a live PID that runs as recorded make a record count."""
     write_record(4242, created=1.0)
 
     record = manager.read_record()
 
     assert record.pid == 4242
     assert record.created == 1.0
+
+
+_REAL_RUNS_AS_RECORDED = manager._runs_as_recorded
+
+
+def _record_of_this_process(created: float) -> manager.ServerRecord:
+    return manager.ServerRecord(
+        pid=os.getpid(), port=6174, host="127.0.0.1", created=created
+    )
+
+
+def test_runs_as_recorded_while_pid_is_that_process():
+    created = psutil.Process().create_time()
+
+    assert _REAL_RUNS_AS_RECORDED(_record_of_this_process(created)) is True
+
+
+def test_read_record_ignores_record_whose_pid_went_to_another_process(
+    monkeypatch, runtime_paths
+):
+    """A record a stopped server left is not taken for a process that got
+    its PID later, also while a new server holds the lock."""
+    monkeypatch.setattr(manager, "_runs_as_recorded", _REAL_RUNS_AS_RECORDED)
+    monkeypatch.setattr(manager, "_serves_this_home", lambda pid: False)
+    created = psutil.Process().create_time() - 60
+    write_record(os.getpid(), created=created)
+
+    assert _REAL_RUNS_AS_RECORDED(_record_of_this_process(created)) is False
+    assert manager.read_record() is None
+
+
+def test_runs_as_recorded_for_this_homes_server_after_clock_step(monkeypatch):
+    """A clock step moves the creation time psutil reports for a live server."""
+    monkeypatch.setattr(manager, "_serves_this_home", lambda pid: True)
+    created = psutil.Process().create_time() - 60
+
+    assert _REAL_RUNS_AS_RECORDED(_record_of_this_process(created)) is True
+
+
+def test_runs_as_recorded_when_process_cannot_be_read(monkeypatch):
+    """An elevated server on Windows refuses its creation time."""
+    monkeypatch.setattr(manager, "_create_time", lambda pid: None)
+
+    assert _REAL_RUNS_AS_RECORDED(_record_of_this_process(1.0)) is True
+
+
+def test_serves_this_home_for_langgraph_dev_working_in_it(monkeypatch):
+    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
+    monkeypatch.setattr(paths, "SERVER_HOME", Path.cwd())
+
+    assert manager._serves_this_home(os.getpid()) is True
+
+
+def test_serves_this_home_not_for_langgraph_dev_of_another_home(monkeypatch, tmp_path):
+    """Another data folder's server that got the PID works elsewhere."""
+    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: ["langgraph"])
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
+
+    assert manager._serves_this_home(os.getpid()) is False
+
+
+def test_serves_this_home_not_for_other_process(monkeypatch):
+    monkeypatch.setattr(manager, "_langgraph_cmdline", lambda pid: None)
+    monkeypatch.setattr(paths, "SERVER_HOME", Path.cwd())
+
+    assert manager._serves_this_home(os.getpid()) is False
 
 
 def test_read_record_distrusts_record_when_lock_cannot_be_opened(
@@ -453,6 +519,15 @@ def test_server_config_fingerprint_tracks_relevant_fields():
     assert manager._server_config_fingerprint(cfg) != base
 
 
+def test_server_config_fingerprint_ignores_port():
+    """The port is checked on its own, so a server reused on another port
+    than the caller's is no drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.langgraph_dev_port += 1
+    assert manager._server_config_fingerprint(cfg) == base
+
+
 def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
     """The fingerprint covers launch settings only; a PATH difference is
     reported on its own (``AGENT_SHELL_DRIFT``)."""
@@ -531,7 +606,7 @@ def test_reuse_of_older_releases_server_says_to_restart_it(
 
     assert result.served is True
     assert result.record.older is True
-    assert manager.OLDER_SERVER is True
+    assert manager.OLDER_SERVER == manager.OLDER_SERVER_MESSAGE
     assert server.spawns == []
 
 
@@ -584,7 +659,7 @@ def test_stop_server_stops_recorded_server(runtime_paths):
         _record_live(victim.pid)
         assert manager.stop_server() == victim.pid
         assert victim.poll() is not None, "the recorded server must be stopped"
-        assert runtime_paths.record.exists(), "the server removes its record itself"
+        assert not runtime_paths.record.exists(), "the stop removes the record"
     finally:
         if victim.poll() is None:
             victim.kill()
@@ -651,14 +726,60 @@ def test_stop_server_stops_older_releases_server_and_forgets_it(
     assert not (folder / "langgraph_dev.pid").exists()
 
 
-def test_stop_langgraph_dev_leaves_record(monkeypatch, runtime_paths):
-    """The server removes its record itself as it exits."""
+def test_stop_langgraph_dev_removes_its_servers_record(monkeypatch, runtime_paths):
+    """The stop's signal ends the server before its own removal at exit."""
     write_record(4242)
     proc = SimpleNamespace(pid=4242, poll=lambda: 0)
 
     manager.stop_langgraph_dev(proc)
 
+    assert not runtime_paths.record.exists()
+
+
+def test_stop_langgraph_dev_keeps_record_while_server_holds_lock(runtime_paths):
+    write_record(4242)
+    holder = LockHolder(server=True)
+    try:
+        manager.stop_langgraph_dev(SimpleNamespace(pid=4242, poll=lambda: 0))
+    finally:
+        holder.done()
+
     assert runtime_paths.record.exists()
+
+
+def test_stop_server_stops_this_homes_server_after_clock_step(
+    monkeypatch, runtime_paths
+):
+    """What read_record takes after a clock step, the stop stops."""
+    processes = Processes(monkeypatch)
+    processes.add(4242, created=CREATED + 60)
+    write_record(4242)
+    monkeypatch.setattr(manager, "_serves_this_home", lambda pid: pid == 4242)
+    ended: list = []
+    monkeypatch.setattr(
+        manager, "_end_server_tree", lambda pid, *_a, **_k: ended.append(pid)
+    )
+
+    assert manager.stop_server() == 4242
+    assert ended == [4242]
+
+
+def test_stop_server_keeps_record_that_names_another_server(monkeypatch, runtime_paths):
+    """A server that took the lock and wrote its record by the time the
+    stopped one is gone keeps that record."""
+    processes = Processes(monkeypatch)
+    processes.add(4242)
+    write_record(4242)
+
+    def _end(pid, popen=None, *, break_group=False):
+        processes.end(pid)
+        processes.add(5151)
+        write_record(5151)
+
+    monkeypatch.setattr(manager, "_end_server_tree", _end)
+
+    assert manager.stop_server() == 4242
+    assert manager.read_record().pid == 5151
 
 
 # ---------------------------------------------------------------------------

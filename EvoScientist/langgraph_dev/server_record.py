@@ -5,9 +5,12 @@ The server writes it when :mod:`.http` is imported, right after it took its
 data folder's lock, as ``starting``, and exits when it cannot; it marks it
 ``serving`` just before it serves, and removes it only as the process exits,
 just before the lock goes with it. So a record names the server that holds
-the lock, also while it stops. Clients read it
-(:func:`~EvoScientist.langgraph_dev.manager.read_record`) and never write or
-delete it.
+the lock, also while it stops. A stop by signal (SIGTERM, Ctrl+Break) ends
+the process before that removal runs, as uvicorn raises the signal again
+once it has shut down; the stop that ended it then deletes the record
+(:func:`~EvoScientist.langgraph_dev.manager.stop_server`,
+:func:`~EvoScientist.langgraph_dev.manager.stop_langgraph_dev`). Clients read it
+(:func:`~EvoScientist.langgraph_dev.manager.read_record`) and never write it.
 
 What the server cannot know comes from the process that started it, in
 variables it removes once read: whether it outlives that process
@@ -183,7 +186,8 @@ def _write(record: dict) -> None:
 def write_record() -> None:
     """Write this server's record as ``starting``, right after it took the
     lock (so it replaces a record a crashed server left at once); it is
-    removed as the process exits (:func:`remove_record`).
+    removed as the process exits (:func:`remove_record`), or after a signal
+    by the stop that ended it.
 
     Raises when it cannot, after logging why: a server without its record
     would hold the lock unseen, so it must not start.

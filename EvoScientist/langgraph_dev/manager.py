@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -162,9 +163,9 @@ CONFIG_DRIFT_SINCE_LAUNCH = False
 # ``agent_shell.shell_drift_message``). The CLI prints it after startup.
 AGENT_SHELL_DRIFT: str | None = None
 
-# Set by ``ensure_server`` when it reuses a server an older release started
-# (:data:`OLDER_SERVER_MESSAGE`).
-OLDER_SERVER = False
+# Set by ``ensure_server`` to the notice when it reuses a server an older
+# release started (:attr:`ServerResult.older_message`).
+OLDER_SERVER: str | None = None
 
 # Set by ``ensure_server``: the session needs the server and does not
 # have it (it did not start, or did not register the project). The TUI shows
@@ -339,10 +340,11 @@ def read_record(*, older: bool = False, lock: str | None = None) -> ServerRecord
     """The record of this data folder's running server, or None.
 
     A record counts when it parses, the server lock is held and its PID is
-    alive: the server writes it right after it takes the lock and removes it
-    just before it exits, and a server that cannot write it exits. A record
-    a killed server left is ignored once its lock is free, or, while a new
-    server holds it, once its PID is gone. Without one in the
+    still the process it recorded (:func:`_runs_as_recorded`): the server
+    writes it right after it takes the lock, and a server that cannot write
+    it exits. A record a stopped or killed server left is ignored once its
+    lock is free, or, while a new server holds it, once its PID is gone or
+    names another process. Without one in the
     server home, and with *older*, the record an older release kept in
     :data:`OLDER_RUNTIME_DIR` counts when it names this data folder and a
     live langgraph dev that serves the port it recorded
@@ -355,13 +357,40 @@ def read_record(*, older: bool = False, lock: str | None = None) -> ServerRecord
         record = _current_record(data)
         if lock is None:
             lock = server_home.lock_state()
-        if record is not None and lock == server_home.HELD and _pid_alive(record.pid):
+        if (
+            record is not None
+            and lock == server_home.HELD
+            and _runs_as_recorded(record)
+        ):
             return record
     return _older_record() if older else None
 
 
-def _pid_alive(pid: int) -> bool:
-    return psutil.pid_exists(pid)
+def _runs_as_recorded(record: ServerRecord) -> bool:
+    """Whether the record's PID is alive and still the process it recorded:
+    the same creation time, one that cannot be read, or this server home's
+    langgraph dev (:func:`_serves_this_home`)."""
+    if not psutil.pid_exists(record.pid):
+        return False
+    if record.created is None:
+        return True
+    now = _create_time(record.pid)
+    if now is None or abs(now - record.created) <= _CREATE_TIME_TOLERANCE:
+        return True
+    return _serves_this_home(record.pid)
+
+
+def _serves_this_home(pid: int) -> bool:
+    """Whether *pid* is a langgraph dev working in this data folder's server
+    home, as every server is started: a clock step moves the creation time
+    psutil reports for it."""
+    if _langgraph_cmdline(pid) is None:
+        return False
+    try:
+        cwd = psutil.Process(pid).cwd()
+        return paths.normalize_path(cwd) == paths.normalize_path(paths.SERVER_HOME)
+    except (psutil.Error, OSError, ValueError):
+        return False
 
 
 def _current_record(data: dict) -> ServerRecord | None:
@@ -438,6 +467,14 @@ def _forget_older_record() -> None:
     for name in (_OLDER_PID_FILE, server_record.RECORD_FILE):
         with contextlib.suppress(OSError):
             (OLDER_RUNTIME_DIR / name).unlink()
+
+
+def log_file_of(record: ServerRecord | None) -> Path:
+    """The log the recorded server writes: an older release's in
+    :data:`OLDER_RUNTIME_DIR`, any other in the server home."""
+    if record is not None and record.older:
+        return OLDER_RUNTIME_DIR / "langgraph_dev.log"
+    return RUNTIME.log_file
 
 
 def is_lasting(record: ServerRecord | None) -> bool:
@@ -646,6 +683,7 @@ _SUBAGENTS_DIR = _PACKAGE_DIR / "subagents"
 # too, so a server started with such a flag is not drift, while a change in
 # the file still is.
 _FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
+_UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"})
 
 
 def _server_config_fingerprint(config: EvoScientistConfig) -> str:
@@ -655,7 +693,8 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     ``EvoScientist.py``), so a running server keeps serving those values
     until restarted. Iterates the full ``EvoScientistConfig`` field list
     minus the fields that never reach the server
-    (:func:`~EvoScientist.config.settings.is_client_only`) — a new config
+    (:func:`~EvoScientist.config.settings.is_client_only`) and the port,
+    which the record names and every caller compares on its own — a new config
     field counts toward drift by default — and folds in ``mcp.yaml`` plus the packaged
     ``subagents/*.yaml``, which are consumed at graph build too. The
     EvoScientist version is part of it, and for an editable install each
@@ -676,7 +715,7 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     parts = []
     for field in dataclass_fields(EvoScientistConfig):
         name = field.name
-        if is_client_only(name):
+        if is_client_only(name) or name in _UNFINGERPRINTED_FIELDS:
             continue
         from_file = name in _FINGERPRINT_FILE_FIELDS or _withheld_flag(
             _ENV_MAPPINGS.get(name, "")
@@ -960,6 +999,28 @@ def reread_record(
     return current, lock, same
 
 
+def starting_without_record() -> bool:
+    """With no record read: whether a server is starting, its start lock
+    held by another process, or its record written since the read."""
+    return start_in_progress() or read_record(older=True) is not None
+
+
+def start_in_progress() -> bool:
+    """Whether another process holds the start lock: it is starting a server
+    that has no record yet."""
+    if not paths.SERVER_HOME.is_dir():
+        return False
+    lock = FileLock(str(RUNTIME.lock_file))
+    try:
+        lock.acquire(timeout=0)
+    except FileLockTimeout:
+        return True
+    except OSError:
+        return False
+    lock.release()
+    return False
+
+
 # What :func:`stop_server` takes when its caller has not read the record.
 _UNREAD = object()
 
@@ -972,8 +1033,8 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
     the recorded process until the stop is done (:func:`_hold_pid`), and the
     whole process tree ends (:func:`_end_server_tree`: on Windows Ctrl+Break
     first when the record says the server leads its process group). Waits
-    for it to exit; the server removes its record itself as it exits, also
-    one that hung in its shutdown. Returns the stopped pid, or ``None`` when
+    for it to exit, then removes its record, which the server's own removal
+    at exit never reaches after a signal. Returns the stopped pid, or ``None`` when
     nothing was stopped (no record, or a server that is gone).
 
     *record* is what the caller read (``read_record(older=True)``); read here
@@ -1023,15 +1084,41 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
         stop_langgraph_dev(own)
     if record.older:
         _forget_older_record()
+    else:
+        _forget_record(record.pid)
     return record.pid
+
+
+def _forget_record(pid: int) -> None:
+    """Delete the record that names *pid*, a server a stop ended, while no
+    server holds the lock: the stop's signal ends the server before its own
+    removal at exit runs."""
+    data = _load_json(RUNTIME.record)
+    if data is None or data.get("pid") != pid:
+        return
+    lock = FileLock(str(RUNTIME.server_lock))
+    try:
+        lock.acquire(timeout=server_home.PROBE_WAIT)
+    except (FileLockTimeout, OSError):
+        return
+    try:
+        data = _load_json(RUNTIME.record)
+        if data is not None and data.get("pid") == pid:
+            with contextlib.suppress(OSError):
+                RUNTIME.record.unlink()
+    finally:
+        lock.release()
 
 
 def _still_recorded(record: ServerRecord) -> bool:
     """Whether the recorded process is still the one the record names: the
-    same creation time, or for a record without one (an older release's), a
-    langgraph dev."""
+    same creation time or this server home's langgraph dev
+    (:func:`_serves_this_home`, as :func:`read_record` takes it), or for a
+    record without one (an older release's), a langgraph dev."""
     if record.created is not None:
-        return _same_process(record.pid, record.created)
+        return _same_process(record.pid, record.created) or _serves_this_home(
+            record.pid
+        )
     return _langgraph_cmdline(record.pid) is not None
 
 
@@ -1416,7 +1503,7 @@ def stop_langgraph_dev(
     exit before that (:func:`_end_server_tree`); ``clean=False``
     skips that for a server that never became ready, which has no run to put
     back in the queue and would only finish loading first. Safe to call with
-    ``None``. The server removes its record itself as it exits.
+    ``None``. Then its record is removed (:func:`_forget_record`).
 
     Acquires ``_LOCK`` (reentrant) before mutating ``_PROCESS`` so
     concurrent ``ensure_server`` callers (which also hold ``_LOCK``)
@@ -1443,6 +1530,7 @@ def stop_langgraph_dev(
         _BREAK_GROUP_PIDS.discard(proc.pid)
         if proc is _PROCESS:
             _PROCESS = None
+    _forget_record(proc.pid)
 
 
 # =============================================================================
@@ -1531,6 +1619,15 @@ class ServerResult:
         """An older release started the server: one without a record here,
         or one whose record that release kept."""
         return self.older or (self.record is not None and self.record.older)
+
+    @property
+    def older_message(self) -> str | None:
+        """The notice to restart a server an older release started: with
+        ``EvoSci server stop`` when that release's record lets it stop the
+        server, by hand when it left none."""
+        if self.record is not None and self.record.older:
+            return OLDER_SERVER_MESSAGE
+        return older_unrecorded_message() if self.older else None
 
     @property
     def reason(self) -> str | None:
@@ -1641,7 +1738,7 @@ def ensure_server(
         global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE
         _ASYNC_SUBAGENTS_AVAILABLE = result.available
         CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = result.drift, result.shell_drift
-        OLDER_SERVER = result.from_older_release
+        OLDER_SERVER = result.older_message
         SERVER_UNAVAILABLE = needed and not result.available
         SERVER_UNAVAILABLE_REASON = result.reason if SERVER_UNAVAILABLE else None
         SERVER_EXPOSURE = exposure
@@ -1683,20 +1780,30 @@ def ensure_server(
         )
         if result.problem == "older_server" and workspace_dir is not None:
             settle(result)
-            raise registration.OlderServerError()
+            raise registration.OlderServerError(result.error)
         return settle(result)
-    if result.from_older_release:
+    if result.older_message is not None:
         # INFO: the CLI prints it after startup and the TUI shows it.
-        logger.info(OLDER_SERVER_MESSAGE)
+        logger.info(result.older_message)
     if workspace_dir is None:
         return settle(result)
 
     workspace = paths.Workspace(workspace_dir)
     try:
         exposure = registration.register_folder(workspace, url=result.url)
-    except registration.OlderServerError:
+    except registration.OlderServerError as exc:
         # Unusable for any project, the session's current one included.
         settle(ServerResult())
+        if result.older:
+            # It holds the lock without a record: server stop cannot stop it.
+            raise registration.OlderServerError(older_unrecorded_message()) from exc
+        if result.record is None:
+            # No record names it, nor does it hold the lock.
+            raise registration.OlderServerError(
+                "The running server is from an older EvoScientist and left no "
+                f"record EvoSci can stop it by; stop the process that listens on "
+                f"port {result.port}, then start again."
+            ) from exc
         raise
     except ServerUnusableError:
         # The session stays in its project: its state stays as it was.
@@ -1867,6 +1974,7 @@ class _Clock:
 
     def reset(self, key: tuple) -> None:
         self._counts.pop(key, None)
+        self._deadlines.pop(key, None)
 
 
 def _identity(record: ServerRecord) -> tuple:
@@ -1931,6 +2039,7 @@ def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
                 return _unrecorded_lock()
             return replace(_no_record(answer, look), older=True)
         return _no_record(answer, look)
+    clock.reset(("settle",))
     refusal = _refuse_recorded(
         record, port=look.port, reuse=look.reuse, any_port=look.any_port
     )
@@ -1974,11 +2083,22 @@ def _answered(answer: str, record: ServerRecord, fingerprint: str) -> ServerResu
 def _conflict(answer: str, record: ServerRecord) -> ServerResult:
     """Another server (``other``, ``older``) or program (``foreign``)
     answers at the recorded server's address."""
-    if answer == "older":
-        return ServerResult(
-            record=record, problem="older_server", error=str(OlderServerError())
+    if answer != "older":
+        return _unreachable(record, answer)
+    # An older release's record is one server stop stops by.
+    error = (
+        str(registration.OlderServerError())
+        if record.older
+        else (
+            f"A server of an older EvoScientist release answers at "
+            f"{record.url}, where this data folder's server is recorded; "
+            f"stop the process that listens on port {record.port}, then "
+            "start again."
         )
-    return _unreachable(record, answer)
+    )
+    return ServerResult(
+        record=record, port=record.port, problem="older_server", error=error
+    )
 
 
 def _no_record(answer: str | None, look: _Look) -> object:
@@ -2061,19 +2181,33 @@ def _refuse_recorded(
     return None
 
 
+def _stop_lock_holder_by_hand() -> str:
+    """How to find and stop the server that holds the lock without a record."""
+    lock = RUNTIME.server_lock
+    if os.name == "nt":
+        return (
+            f"find the process that holds {lock} (Resource Monitor, CPU tab, "
+            "Associated Handles) and end it by hand"
+        )
+    return f"find its process with lsof {lock} (or fuser {lock}) and stop it by hand"
+
+
+def older_unrecorded_message() -> str:
+    """The notice for a reused server an older release started and left no
+    record of: ``EvoSci server stop`` cannot stop it."""
+    return (
+        "The background agent server was started by an older EvoScientist "
+        "release that left no record EvoSci can stop it by; restart it to run "
+        f"this version: {_stop_lock_holder_by_hand()}; it starts again with "
+        "your next session."
+    )
+
+
 def unrecorded_lock_message(then: str = "start again") -> str:
     """What to say of a server lock held without a record, and how to stop
     its holder by hand, *then* what to do."""
     lock = RUNTIME.server_lock
-    if os.name == "nt":
-        find = (
-            f"find the process that holds {lock} (Resource Monitor, CPU tab, "
-            "Associated Handles) and end it by hand"
-        )
-    else:
-        find = (
-            f"find its process with lsof {lock} (or fuser {lock}) and stop it by hand"
-        )
+    find = _stop_lock_holder_by_hand()
     return (
         f"A server holds this data folder's lock ({lock}) without a record of "
         "itself, so EvoSci can neither use nor stop it: one an older release "
@@ -2132,9 +2266,9 @@ def _stopping(record: ServerRecord) -> ServerResult:
             f"This data folder's background agent server (pid {record.pid}) "
             f"is stopping, or does not answer at {record.url}. Try again in a "
             "moment, or run EvoSci server stop if it persists; see "
-            f"{RUNTIME.log_file}."
+            f"{log_file_of(record)}."
         ),
-        log_file=RUNTIME.log_file,
+        log_file=log_file_of(record),
     )
 
 
@@ -2149,7 +2283,7 @@ def _unreachable(record: ServerRecord, answer: str) -> ServerResult:
             f"recorded at {record.url}, but {who} answers there. Stop it with "
             "EvoSci server stop."
         ),
-        log_file=RUNTIME.log_file,
+        log_file=log_file_of(record),
     )
 
 
@@ -2159,10 +2293,10 @@ def _unresponsive(record: ServerRecord, what: str) -> ServerResult:
         problem="unresponsive",
         error=(
             f"This data folder's background agent server (pid {record.pid}) at "
-            f"{record.url} {what}; see {RUNTIME.log_file}. EvoSci server stop "
+            f"{record.url} {what}; see {log_file_of(record)}. EvoSci server stop "
             "stops it."
         ),
-        log_file=RUNTIME.log_file,
+        log_file=log_file_of(record),
     )
 
 
@@ -2170,7 +2304,9 @@ def _reused(record: ServerRecord, fingerprint: str) -> ServerResult:
     """The recorded server answered as this data folder's."""
     url, port, host = record.url, record.port, record.host
     recorded_fp = record.fields.get("config_fingerprint")
-    drift = isinstance(recorded_fp, str) and recorded_fp != fingerprint
+    drift = (
+        not record.older and isinstance(recorded_fp, str) and recorded_fp != fingerprint
+    )
     if drift:
         logger.warning(
             "Configuration or version changed since the running "
@@ -2465,8 +2601,13 @@ def _exited(proc: subprocess.Popen) -> ServerResult:
         problem="exited",
         exit_code=proc.returncode,
         error=(
-            f"langgraph dev exited immediately with code {proc.returncode}.\n"
-            f"Log tail:\n{_log_tail()}"
+            (
+                "langgraph dev was stopped (SIGTERM) before it answered, as by "
+                "EvoSci server stop from another terminal.\n"
+                if proc.returncode == -signal.SIGTERM
+                else f"langgraph dev exited immediately with code {proc.returncode}.\n"
+            )
+            + f"Log tail:\n{_log_tail()}"
         ),
         log_file=RUNTIME.log_file,
     )

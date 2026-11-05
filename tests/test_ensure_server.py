@@ -58,11 +58,9 @@ def test_ensure_serving_record_answering_as_ours_is_reused_and_never_killed(serv
     assert server.stopped == []
 
 
-def test_ensure_serving_record_counts_while_lock_is_held_whatever_its_create_time(
-    server,
-):
-    """The record parses and the server lock is held: that is a valid
-    record, also when its creation time names no live process."""
+def test_ensure_serving_record_counts_while_lock_is_held_and_process_runs(server):
+    """The record parses, the server lock is held and its process runs as
+    recorded: that is a valid record."""
     server.answering.add(6174)
     write_record(9999, created=1.0)
 
@@ -198,6 +196,46 @@ def test_ensure_serving_record_that_misses_every_probe_is_unresponsive(
     assert len(asked) == manager._SERVING_PROBES
     assert server.stopped == []
     assert server.spawns == []
+
+
+def test_settle_wait_starts_over_once_record_was_seen(monkeypatch):
+    """A server whose start fails removes its record before its lock goes:
+    that look gets a settle wait of its own, not the one already spent."""
+    from types import SimpleNamespace
+
+    from EvoScientist.langgraph_dev import server_home
+
+    now = [100.0]
+    monkeypatch.setattr(
+        manager,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None),
+    )
+    look = manager._Look(
+        asked_url="http://127.0.0.1:6174",
+        port=6174,
+        host="127.0.0.1",
+        any_port=False,
+        reuse=True,
+        fingerprint="fp",
+    )
+    clock = manager._Clock()
+    held = manager._Seen(
+        record=None, lock=server_home.HELD, url=look.asked_url, answer="refused"
+    )
+    starting = manager._Seen(
+        record=manager.ServerRecord(
+            pid=4242, port=6174, host="127.0.0.1", phase=server_record.STARTING
+        ),
+        lock=server_home.HELD,
+        url=look.asked_url,
+        answer="refused",
+    )
+
+    assert manager._decide(held, look, clock) == "wait"
+    now[0] += 10
+    assert manager._decide(starting, look, clock) == "wait"
+    assert manager._decide(held, look, clock) == "wait"
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +415,12 @@ def test_ensure_for_project_server_too_old_to_say_whose_it_is_raises(server, tmp
     server.answering.add(6174)
     server.whose[6174] = "older"
 
-    with pytest.raises(registration.OlderServerError):
+    with pytest.raises(registration.OlderServerError) as raised:
         manager.ensure_server(_config(), workspace_dir=tmp_path)
     assert manager.SERVER_UNAVAILABLE is True
+    # It left no record server stop could find it by.
+    assert "port 6174" in str(raised.value)
+    assert "EvoSci server stop" not in str(raised.value)
 
 
 def test_ensure_port_another_program_holds_is_foreign_after_bind_wait(server):
@@ -438,6 +479,31 @@ def test_whose_server_tells_this_data_folders_from_another(monkeypatch, runtime_
 
     monkeypatch.setattr(registration, "server_instance", _older)
     assert manager._whose_server("http://127.0.0.1:6174") == "older"
+
+
+@pytest.mark.parametrize("locked", [True, False])
+def test_ensure_for_project_older_server_without_record_names_its_stop(
+    server, monkeypatch, tmp_path, locked
+):
+    """An older server reused without a record that turns out too old for
+    the registry: by the lock it holds, or by its port when it holds none;
+    never EvoSci server stop, which cannot stop it."""
+    server.locked = locked
+    server.answering.add(6174)
+
+    def _older(workspace, *, url):
+        raise registration.OlderServerError()
+
+    monkeypatch.setattr(registration, "register_folder", _older)
+
+    with pytest.raises(registration.OlderServerError) as raised:
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+    message = str(raised.value)
+    assert "EvoSci server stop" not in message
+    if locked:
+        assert str(manager.RUNTIME.server_lock) in message
+    else:
+        assert "port 6174" in message
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +890,19 @@ def test_ensure_serving_record_answering_as_older_release_is_older_server(
     monkeypatch.setattr(manager, "ask", lambda url: "older")
 
     assert manager.ensure_server(_config()).problem == "older_server"
-    with pytest.raises(registration.OlderServerError):
+    with pytest.raises(registration.OlderServerError) as raised:
         manager.ensure_server(_config(), workspace_dir=tmp_path)
+    # server stop would end the recorded server, not the one answering.
+    assert "EvoSci server stop" not in str(raised.value)
+
+
+def test_unresponsive_older_releases_server_names_its_own_log():
+    record = manager.ServerRecord(pid=1, port=6174, host="127.0.0.1", older=True)
+
+    result = manager._unresponsive(record, "does not answer")
+
+    assert result.log_file == manager.OLDER_RUNTIME_DIR / "langgraph_dev.log"
+    assert str(result.log_file) in result.error
 
 
 def test_ensure_interrupt_while_waiting_for_start_stops_child(server):
@@ -1198,7 +1275,9 @@ def test_ensure_lock_held_without_record_answering_own_is_older_release(server):
 
     assert result.available is True
     assert result.older is True
-    assert manager.OLDER_SERVER is True
+    # It left no record server stop could stop it by.
+    assert manager.OLDER_SERVER == manager.older_unrecorded_message()
+    assert "EvoSci server stop" not in manager.OLDER_SERVER
 
 
 def test_ensure_foreign_answer_without_record_is_foreign_at_once(server, monkeypatch):
@@ -1415,3 +1494,38 @@ def test_ask_malformed_url_raises(monkeypatch, runtime_paths):
 
     with pytest.raises(httpx.InvalidURL):
         manager.ask("http://bad host:1")
+
+
+# ---------------------------------------------------------------------------
+# A start that another process stops, or still runs
+# ---------------------------------------------------------------------------
+
+
+def test_start_in_progress_while_another_process_holds_start_lock(server):
+    assert manager.start_in_progress() is False
+    starting = LockHolder()
+    try:
+        assert manager.start_in_progress() is True
+    finally:
+        starting.done()
+
+
+def test_ensure_server_reports_start_ended_by_sigterm_as_stopped(server):
+    """`EvoSci server stop` from another terminal ends a start this way (a
+    negative code: POSIX)."""
+    server.exit_code = -15
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "exited"
+    assert result.exit_code == -15
+    assert "stopped (SIGTERM)" in result.error
+    assert "exited immediately" not in result.error
+
+
+def test_ensure_server_reports_start_ended_by_other_signal_with_its_code(server):
+    server.exit_code = -11
+
+    result = manager.ensure_server(_config())
+
+    assert "exited immediately with code -11" in result.error
