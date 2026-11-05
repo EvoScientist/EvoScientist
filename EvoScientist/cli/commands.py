@@ -122,18 +122,6 @@ def _interactive_start(prompt: str | None) -> bool:
     return not prompt and all(s is not None and s.isatty() for s in streams)
 
 
-def _providers_in_use(config: Any) -> set[str]:
-    """Providers of the main, auxiliary and fallback models."""
-    from ..config.onboard.wizard import _active_llm_providers
-
-    fallbacks = {
-        entry.rsplit(":", 1)[1].strip()
-        for entry in (config.model_fallbacks or "").split(",")
-        if ":" in entry
-    }
-    return _active_llm_providers(config) | fallbacks
-
-
 def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
     """Stop startup when OpenAI uses ChatGPT sign-in and nobody is signed in.
 
@@ -3253,7 +3241,9 @@ def _main_callback(
     config = get_effective_config(cli_overrides)
     if auth_mode:
         # oauth only for subscriptions a configured model can use; api_key always.
-        in_use = _providers_in_use(config)
+        from ..config.settings import providers_in_use
+
+        in_use = providers_in_use(config)
         for provider in ("anthropic", "openai"):
             if auth_mode == "api_key" or provider in in_use:
                 setattr(config, f"{provider}_auth_mode", auth_mode)

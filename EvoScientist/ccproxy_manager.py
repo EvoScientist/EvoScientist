@@ -11,12 +11,14 @@ ccproxy is invoked via subprocess (not Python imports) so the
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from EvoScientist.config import EvoScientistConfig
 
@@ -179,9 +181,14 @@ def is_ccproxy_running(port: int) -> bool:
     import httpx
 
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/health/live", timeout=2.0)
+        # trust_env=False: a loopback probe must not go through the
+        # environment's or the system's proxy.
+        resp = httpx.get(
+            f"http://127.0.0.1:{port}/health/live", timeout=2.0, trust_env=False
+        )
         return resp.status_code == 200
-    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+    except (httpx.HTTPError, OSError):
+        # Also another program on the port that does not speak HTTP.
         return False
 
 
@@ -202,6 +209,18 @@ def start_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen:
             ``_CCPROXY_HEALTH_TIMEOUT_SECONDS``.
         FileNotFoundError: If ccproxy binary is not found.
     """
+    proc = spawn_ccproxy(port, detached=detached)
+    wait_for_ccproxy(proc, port)
+    return proc
+
+
+def spawn_ccproxy(
+    port: int, *, detached: bool = False, output: Any = subprocess.DEVNULL
+) -> subprocess.Popen:
+    """Start ``ccproxy serve`` without waiting for it to serve
+    (:func:`wait_for_ccproxy`). *output* is where its stdout and stderr go, as
+    ``Popen`` takes it: a file, or ``DEVNULL``. See :func:`start_ccproxy`
+    for *detached*."""
     exe = _ccproxy_exe() or "ccproxy"
     cmd = [exe, "serve", "--port", str(port)]
     logger.warning(
@@ -219,40 +238,64 @@ def start_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen:
             ) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         else:
             spawn["start_new_session"] = True
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=output,
+        stderr=output,
         **spawn,
     )
 
+
+def wait_for_ccproxy(proc: subprocess.Popen, port: int) -> None:
+    """Wait until the ccproxy *proc* serves on *port*.
+
+    Raises:
+        RuntimeError: When it exits first, or does not serve within
+            ``_CCPROXY_HEALTH_TIMEOUT_SECONDS``; it is stopped then, with
+            what it started (:func:`stop_ccproxy_tree`).
+    """
     deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
     try:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(
-                    f"ccproxy exited immediately with code {proc.returncode}"
+                    f"ccproxy exited with code {proc.returncode} before it answered"
                 )
             if is_ccproxy_running(port):
-                return proc
+                return
             time.sleep(0.3)
     except BaseException:
         # Ctrl+C or an error during the wait: the caller never gets the
         # handle, so nobody else could stop this process.
-        stop_ccproxy(proc)
+        stop_ccproxy_tree(proc)
         raise
 
     # Timed out — clean up
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    stop_ccproxy_tree(proc)
     raise RuntimeError(
         "ccproxy did not become healthy within "
         f"{_CCPROXY_HEALTH_TIMEOUT_SECONDS} seconds"
     )
+
+
+def stop_ccproxy_tree(proc: subprocess.Popen | None) -> None:
+    """Stop the ccproxy *proc* and what it started (on Windows
+    ``ccproxy.exe`` is a launcher whose child serves), then reap it. Safe to
+    call with None or a process already reaped."""
+    import psutil
+
+    if proc is None or proc.poll() is not None:
+        return
+    # Not reaped (poll() just said it runs), so its PID is still its own.
+    try:
+        end_tree(psutil.Process(proc.pid))
+    except psutil.Error:
+        # Cannot be found or inspected: stop it as a plain child.
+        stop_ccproxy(proc)
+        return
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=2)
 
 
 def stop_ccproxy(proc: subprocess.Popen | None) -> None:
@@ -312,6 +355,23 @@ def setup_ccproxy_env(port: int) -> None:
 # =============================================================================
 
 
+def check_ccproxy_ready() -> None:
+    """Raise :class:`RuntimeError`, saying what to do, when ccproxy is not
+    installed or not signed in to Anthropic."""
+    if not is_ccproxy_available():
+        raise RuntimeError(
+            "ccproxy is required for OAuth mode but not found. "
+            f"Install it with: {_oauth_install_hint()}"
+        )
+
+    authed, msg = check_ccproxy_auth("claude_api")
+    if not authed:
+        raise RuntimeError(
+            f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
+            "Run: ccproxy auth login claude_api"
+        )
+
+
 def maybe_start_ccproxy(
     config: EvoScientistConfig, *, lasting: bool = False
 ) -> subprocess.Popen | None:
@@ -333,18 +393,7 @@ def maybe_start_ccproxy(
     if not uses_oauth(config):
         return None
 
-    if not is_ccproxy_available():
-        raise RuntimeError(
-            "ccproxy is required for OAuth mode but not found. "
-            f"Install it with: {_oauth_install_hint()}"
-        )
-
-    authed, msg = check_ccproxy_auth("claude_api")
-    if not authed:
-        raise RuntimeError(
-            f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
-            "Run: ccproxy auth login claude_api"
-        )
+    check_ccproxy_ready()
 
     port = config.ccproxy_port
     if not (1 <= port <= 65535):
@@ -445,11 +494,17 @@ def _recorded_process():
     """The recorded ccproxy's process: ``None`` when it is gone (its pid
     unused, or used by another program now), ``...`` when it cannot be
     inspected."""
-    import psutil
-
     pid = recorded_ccproxy_pid()
     if pid is None:
         return None
+    return _ccproxy_process(pid)
+
+
+def _ccproxy_process(pid: int):
+    """*pid*'s process while it runs ccproxy: ``None`` when it is gone or
+    runs another program, ``...`` when it cannot be inspected."""
+    import psutil
+
     try:
         proc = psutil.Process(pid)
         cmdline = proc.cmdline()
@@ -472,9 +527,7 @@ def stop_recorded_ccproxy() -> int | None:
     """Stop the ccproxy a session started for every session (``EvoSci
     ccproxy stop``, ``EvoSci service stop``, ``EvoSci update``); its pid, or
     None when none runs. A pid whose process is not ccproxy (reused) is left
-    alone."""
-    import psutil
-
+    alone. Every server start stops it too."""
     record = _lasting_record()
     proc = _recorded_process()
     if proc is ...:
@@ -483,11 +536,50 @@ def stop_recorded_ccproxy() -> int | None:
     record.unlink(missing_ok=True)
     if proc is None:
         return None
-    pid = proc.pid
+    return proc.pid if end_tree(proc) else None
+
+
+def end_ccproxy(pid: int, created: float | None, port: int) -> bool:
+    """End the ccproxy *pid* (and what it started) when that process still
+    is the one created at *created*, or serves on *port* (its creation time
+    moves with a clock step, and may not have been readable), and runs
+    ccproxy; whether it did."""
+    from .langgraph_dev.manager import _same_process
+
+    proc = _ccproxy_process(pid)
+    if proc is None or proc is ...:
+        return False
+    same = created is not None and _same_process(pid, created)
+    if not same and not _serves_on(proc, port):
+        return False
+    return end_tree(proc)
+
+
+def _serves_on(proc, port: int) -> bool:
+    """Whether the ccproxy *proc* was started to serve on *port*."""
+    import psutil
+
+    try:
+        cmdline = proc.cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    return any(
+        flag == "--port" and value == str(port)
+        for flag, value in itertools.pairwise(cmdline)
+    )
+
+
+def end_tree(proc) -> bool:
+    """Terminate the psutil process *proc* and its descendants, killing what
+    is left after 5 seconds; False when it was already gone."""
+    import psutil
+
     try:
         tree = [*proc.children(recursive=True), proc]
     except psutil.NoSuchProcess:
-        return None
+        return False
+    except psutil.AccessDenied:
+        tree = [proc]
     for member in tree:
         with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             member.terminate()
@@ -495,4 +587,4 @@ def stop_recorded_ccproxy() -> int | None:
     for member in alive:
         with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             member.kill()
-    return pid
+    return True

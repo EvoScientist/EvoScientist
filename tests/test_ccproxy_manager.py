@@ -91,6 +91,13 @@ class TestIsCcproxyRunning:
         assert url == "http://127.0.0.1:8000/health/live"
 
     @patch("httpx.get")
+    def test_probe_bypasses_proxies(self, mock_get):
+        """A system or environment proxy would swallow the loopback probe."""
+        mock_get.return_value = MagicMock(status_code=200)
+        is_ccproxy_running(8000)
+        assert mock_get.call_args[1]["trust_env"] is False
+
+    @patch("httpx.get")
     def test_uses_custom_port(self, mock_get):
         mock_get.return_value = MagicMock(status_code=200)
         is_ccproxy_running(7777)
@@ -102,6 +109,13 @@ class TestIsCcproxyRunning:
         import httpx
 
         mock_get.side_effect = httpx.ConnectError("Connection refused")
+        assert is_ccproxy_running(8000) is False
+
+    @patch("httpx.get")
+    def test_listener_without_http_means_not_running(self, mock_get):
+        import httpx
+
+        mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
         assert is_ccproxy_running(8000) is False
 
     @patch("httpx.get")
@@ -134,10 +148,14 @@ class TestStartCcproxy:
             _CCPROXY_HEALTH_TIMEOUT_SECONDS,
         )
 
+    @patch("psutil.Process")
+    @patch("EvoScientist.ccproxy_manager.end_tree")
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running", return_value=False)
     @patch("EvoScientist.ccproxy_manager.time")
     @patch("subprocess.Popen")
-    def test_timeout(self, mock_popen, mock_time, mock_running):
+    def test_timeout(
+        self, mock_popen, mock_time, mock_running, mock_end_tree, mock_process
+    ):
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -151,11 +169,17 @@ class TestStartCcproxy:
 
         with pytest.raises(RuntimeError, match="did not become healthy"):
             start_ccproxy(8000)
+        # With what it started: on Windows ccproxy.exe is a launcher.
+        mock_end_tree.assert_called_once()
 
     @pytest.mark.parametrize("raised", [KeyboardInterrupt, OSError])
+    @patch("psutil.Process")
+    @patch("EvoScientist.ccproxy_manager.end_tree")
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
     @patch("subprocess.Popen")
-    def test_interrupted_wait_stops_the_process(self, mock_popen, mock_running, raised):
+    def test_interrupted_wait_stops_the_process(
+        self, mock_popen, mock_running, mock_end_tree, mock_process, raised
+    ):
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -163,7 +187,20 @@ class TestStartCcproxy:
 
         with pytest.raises(raised):
             start_ccproxy(8000)
-        proc.terminate.assert_called_once()
+        mock_end_tree.assert_called_once()
+        proc.wait.assert_called_once()
+
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running", return_value=False)
+    @patch("subprocess.Popen")
+    def test_exit_before_answering(self, mock_popen, mock_running):
+        """It may die late in the wait, not only at once."""
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.returncode = 1
+        mock_popen.return_value = proc
+
+        with pytest.raises(RuntimeError, match="before it answered"):
+            start_ccproxy(8000)
 
     @patch("subprocess.Popen", side_effect=FileNotFoundError)
     def test_missing_binary(self, mock_popen):

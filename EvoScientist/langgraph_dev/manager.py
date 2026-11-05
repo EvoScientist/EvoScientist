@@ -98,6 +98,11 @@ class LanggraphRuntimePaths:
         return paths.SERVER_HOME / "langgraph_dev.log"
 
     @property
+    def ccproxy_log(self) -> Path:
+        """The output of the ccproxy the server starts (Anthropic OAuth)."""
+        return paths.SERVER_HOME / "ccproxy.log"
+
+    @property
     def webui_log(self) -> Path:
         return paths.SERVER_HOME / "webui.log"
 
@@ -322,14 +327,6 @@ class ServerRecord:
         return str(self.fields.get("config_dir") or paths.CONFIG_DIR)
 
 
-def _load_json(path: Path) -> dict | None:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _positive_int(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
@@ -352,7 +349,7 @@ def read_record(*, older: bool = False, lock: str | None = None) -> ServerRecord
     (:func:`server_home.lock_state`); checked here when not given. A lock
     that cannot be checked proves nothing: the record is not trusted.
     """
-    data = _load_json(RUNTIME.record)
+    data = server_record.load_json(RUNTIME.record)
     if data is not None:
         record = _current_record(data)
         if lock is None:
@@ -430,7 +427,7 @@ def _older_record() -> ServerRecord | None:
     they name is gone (no process has its PID, or another one does); a
     record of another data folder's server is left, and so is one whose
     process refuses access, which this read then ignores."""
-    data = _load_json(OLDER_RUNTIME_DIR / server_record.RECORD_FILE)
+    data = server_record.load_json(OLDER_RUNTIME_DIR / server_record.RECORD_FILE)
     if data is None or not _same_folder(data.get("data_dir"), paths.DATA_DIR):
         return None
     pid = _positive_int(data.get("pid"))
@@ -1093,7 +1090,7 @@ def _forget_record(pid: int) -> None:
     """Delete the record that names *pid*, a server a stop ended, while no
     server holds the lock: the stop's signal ends the server before its own
     removal at exit runs."""
-    data = _load_json(RUNTIME.record)
+    data = server_record.load_json(RUNTIME.record)
     if data is None or data.get("pid") != pid:
         return
     lock = FileLock(str(RUNTIME.server_lock))
@@ -1102,7 +1099,7 @@ def _forget_record(pid: int) -> None:
     except (FileLockTimeout, OSError):
         return
     try:
-        data = _load_json(RUNTIME.record)
+        data = server_record.load_json(RUNTIME.record)
         if data is not None and data.get("pid") == pid:
             with contextlib.suppress(OSError):
                 RUNTIME.record.unlink()
@@ -1178,9 +1175,11 @@ def _set_by_flag(env_key: str) -> bool:
 # The flags a lasting server still takes from the session that starts it.
 # The auth mode picks the credentials its requests use, of which one server
 # has one set: the starter's choice stands, and a later session with another
-# one sees the drift warning. (--auth-mode for Anthropic writes no variable:
-# with OAuth, ccproxy's variables carry the choice to the server.)
-_FLAGS_SERVER_TAKES = frozenset({"EVOSCIENTIST_OPENAI_AUTH_MODE"})
+# one sees the drift warning. With Anthropic's OAuth the server starts its
+# ccproxy.
+_FLAGS_SERVER_TAKES = frozenset(
+    {"EVOSCIENTIST_ANTHROPIC_AUTH_MODE", "EVOSCIENTIST_OPENAI_AUTH_MODE"}
+)
 
 
 def _withheld_flag(env_key: str) -> bool:
