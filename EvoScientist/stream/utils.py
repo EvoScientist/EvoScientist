@@ -88,6 +88,22 @@ def is_success(content: str) -> bool:
     return not any(pattern in head for pattern in error_patterns)
 
 
+def tool_result_succeeded(
+    name: str, content: str, *, status: str | None = None, artifact: object = None
+) -> bool:
+    """Judge a tool result, preferring its structured signals over the text."""
+    if status == "error":
+        return False
+    # deepagents' ``execute`` reports ``status="success"`` whatever the command did.
+    exit_code = artifact.get("exit_code") if isinstance(artifact, dict) else None
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        return exit_code == 0
+    # The interpreter's result ends in ``<error ...>`` or ``<result ...>``, after any stdout.
+    if name == "code_interpreter":
+        return not content.rstrip().endswith("</error>")
+    return is_success(content)
+
+
 def truncate(content: str, max_length: int, suffix: str = "\n... (truncated)") -> str:
     """Truncate content to specified length."""
     if len(content) > max_length:

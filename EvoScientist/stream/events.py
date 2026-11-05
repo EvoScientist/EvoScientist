@@ -31,7 +31,7 @@ from .summarization import (
 )
 from .tool_results import _extract_command_tool_content, _extract_tool_content
 from .tool_selection import _ToolSelectionSuppressor
-from .utils import DisplayLimits, is_success
+from .utils import DisplayLimits, tool_result_succeeded
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
@@ -1165,13 +1165,13 @@ class _V3EventProcessor:
                         output = ToolMessage.model_validate(output_map)
                     except ValidationError:
                         pass
-                # A tool that handled its own error (an MCP error result) says so
-                # in its status, whatever its text.
-                status_error = False
+                status: str | None = None
+                artifact: object = None
                 if isinstance(output, ToolMessage):
                     name = output.name or name
                     raw_content, _ = _extract_tool_content(output)
-                    status_error = output.status == "error"
+                    status = output.status
+                    artifact = output.artifact
                 elif isinstance(output, Command):
                     command_content = _extract_command_tool_content(
                         output, tool_call_id
@@ -1184,7 +1184,9 @@ class _V3EventProcessor:
                 content = raw_content[: DisplayLimits.TOOL_RESULT_MAX]
                 if len(raw_content) > DisplayLimits.TOOL_RESULT_MAX:
                     content += "\n... (truncated)"
-                success = not status_error and is_success(content)
+                success = tool_result_succeeded(
+                    name, raw_content, status=status, artifact=artifact
+                )
 
             if subagent is not None:
                 events.append(

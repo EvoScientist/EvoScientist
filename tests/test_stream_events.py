@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, Interrupt
 
+from EvoScientist.backends import CustomSandboxBackend
 from EvoScientist.middleware.ask_user import AskUserMiddleware
 from EvoScientist.stream.events import stream_agent_events
 from EvoScientist.stream.summarization import (
@@ -702,6 +703,62 @@ class TestV3ProtocolStreaming:
             ("File content", True),
         ]
 
+    async def test_an_execute_result_is_judged_by_its_exit_code(self):
+        """``execute`` reports ``status="success"`` and puts the exit code in
+        ``artifact``; the text can say anything in its first lines."""
+        failed = ToolMessage(
+            name="execute",
+            content="l1\nl2\nl3\nl4\n[Command failed with exit code 3]",
+            tool_call_id="tc1",
+            artifact={"exit_code": 3, "truncated": False},
+        )
+        passed = {
+            "type": "tool",
+            "content": "Error: a line the command printed\n"
+            "[Command succeeded with exit code 0]",
+            "name": "execute",
+            "tool_call_id": "tc2",
+            "status": "success",
+            "artifact": {"exit_code": 0, "truncated": False},
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("execute", {"command": "build"}),
+                tool_finished(failed),
+                tool_started("execute", {"command": "check"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
+
+    async def test_an_interpreter_result_is_judged_by_its_closing_tag(self):
+        """The interpreter's error or result follows any stdout it printed."""
+        failed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nstarting\n</stdout>\n"
+            '<error type="TypeError">x is not a function</error>',
+            tool_call_id="tc1",
+        )
+        passed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nError: logged by the script\n</stdout>\n"
+            '<result kind="number">1</result>',
+            tool_call_id="tc2",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("code_interpreter", {"code": "x()"}),
+                tool_finished(failed),
+                tool_started("code_interpreter", {"code": "1"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
+
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
@@ -760,6 +817,47 @@ class TestV3ProtocolStreaming:
             "id": "call_probe_1",
         }
         assert done["content"] == "final answer"
+
+    @pytest.mark.filterwarnings(
+        "ignore:The v3 streaming protocol on Pregel is experimental"
+    )
+    async def test_live_execute_exit_code_reaches_the_tool_result(self, tmp_path):
+        """A real ``execute`` that exits non-zero is a failed tool result."""
+        model = _ToolCallingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "exit 3"},
+                            "id": "call_fail",
+                        },
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo ok"},
+                            "id": "call_ok",
+                        },
+                    ],
+                ),
+                AIMessage(content="final answer"),
+            ]
+        )
+        agent = create_deep_agent(
+            model=model,
+            backend=CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True),
+            system_prompt="Use tools when requested.",
+        )
+
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent, "run commands", "live-execute-exit-code"
+            )
+        ]
+
+        results = {e["id"]: e["success"] for e in events if e["type"] == "tool_result"}
+        assert results == {"call_fail": False, "call_ok": True}
 
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
