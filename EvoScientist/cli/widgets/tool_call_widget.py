@@ -234,8 +234,8 @@ class ToolCallWidget(Vertical):
                         output_w.update(diff_markup)
                     output_w.add_class("--visible")
                     return
-        if self._status == "error" or not self._should_collapse():
-            # Show full output for errors or short output
+        if not self._should_collapse():
+            # Short output is shown in full; a long one collapses, failed or not.
             self._collapsed = False
             style = "red dim" if self._status == "error" else "dim"
             # The stream already keeps a long result's start and end.

@@ -278,8 +278,8 @@ class TestToolCallWidget(unittest.TestCase):
         w.query_one = lambda selector, cls=None: output  # type: ignore[assignment]
         return output
 
-    def test_a_long_result_is_shown_as_the_stream_cut_it(self):
-        """The stream keeps a long result's start and end; the widget cuts nothing more."""
+    def test_a_long_result_collapses_and_expands_as_the_stream_cut_it(self):
+        """A long result collapses, failed or not, and expands uncut."""
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
         from EvoScientist.stream.utils import cut_middle
 
@@ -294,9 +294,19 @@ class TestToolCallWidget(unittest.TestCase):
             w._status = status
             output = self._fake_output(w)
             w._render_output()
-            if status == "success":
-                w.on_click(None)  # expand the collapsed output
+            assert output.updated.plain == "  [click to expand output]"
+            w.on_click(None)
             assert output.updated.plain == content
+
+    def test_a_short_failure_is_shown_in_full(self):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        w = ToolCallWidget("execute", {})
+        w._result_content = "Command blocked: contains '..' path traversal."
+        w._status = "error"
+        output = self._fake_output(w)
+        w._render_output()
+        assert output.updated.plain == "Command blocked: contains '..' path traversal."
 
     def test_a_failure_summary_says_why_without_guessing(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
