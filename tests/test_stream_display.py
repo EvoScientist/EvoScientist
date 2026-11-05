@@ -2,12 +2,15 @@
 
 from typing import Any, cast
 
+import pytest
 from rich.console import Console
 from rich.markdown import Markdown
 
 from EvoScientist.stream.display import (
     _fix_markdown_heading_spacing,
+    _render_tool_call_line,
     create_streaming_display,
+    format_tool_result_compact,
     resolve_final_status_footer,
 )
 from EvoScientist.stream.state import SubAgentState
@@ -131,6 +134,49 @@ def test_streaming_display_pairs_root_tool_results_by_id():
     assert "execute(python b.py)" in rendered
     assert rendered.index("execute(python a.py)") < rendered.index("Running")
     assert rendered.index("execute(python b.py)") < rendered.index("result from b")
+
+
+@pytest.mark.parametrize("is_final", [False, True], ids=["streaming", "final"])
+def test_rich_rows_follow_the_result_verdict(is_final):
+    """A row takes the event's ``success``, not a guess from the text."""
+    tool_calls = [
+        {"id": "tc-mcp", "name": "lookup_dataset", "args": {"name": "iris"}},
+        {"id": "tc-ok", "name": "execute", "args": {"command": "python check.py"}},
+    ]
+    tool_results = [
+        {
+            "id": "tc-mcp",
+            "name": "lookup_dataset",
+            "content": "dataset not found: iris",
+            "success": False,
+        },
+        {
+            "id": "tc-ok",
+            "name": "execute",
+            "content": "Error: a line the script printed\n"
+            "[Command succeeded with exit code 0]",
+            "success": True,
+        },
+    ]
+
+    rendered = _render_text(
+        create_streaming_display(
+            tool_calls=tool_calls, tool_results=tool_results, is_final=is_final
+        )
+    )
+
+    # Only a failed row prints its output under it.
+    assert "dataset not found: iris" in rendered
+    assert "a line the script printed" not in rendered
+    rows = [
+        _render_tool_call_line(tc, tr)
+        for tc, tr in zip(tool_calls, tool_results, strict=True)
+    ]
+    assert [row.spans[0].style for row in rows] == ["bold red", "bold green"]
+    detail = format_tool_result_compact(
+        "lookup_dataset", "dataset not found: iris", success=False
+    )
+    assert detail[0].style == "red dim"
 
 
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():

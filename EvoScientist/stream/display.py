@@ -371,11 +371,20 @@ def _format_single_todo(item: dict) -> Text:
 # ---------------------------------------------------------------------------
 
 
+def _result_succeeded(tr: dict) -> bool:
+    """The decoder's verdict; a result that has none is judged from its text."""
+    success = tr.get("success")
+    if isinstance(success, bool):
+        return success
+    return is_success(tr.get("content", ""))
+
+
 def format_tool_result_compact(
     _name: str,
     content: str,
     max_lines: int = 5,
     tool_args: dict | None = None,
+    success: bool | None = None,
 ) -> list:
     """Format tool result as tree output.
 
@@ -383,13 +392,14 @@ def format_tool_result_compact(
     Special handling for edit_file: shows color-coded unified diff.
     """
     elements = []
+    ok = is_success(content) if success is None else success
 
     if not content.strip():
         elements.append(Text("  \u2514 (empty)", style="dim"))
         return elements
 
     # Special handling for edit_file: show diff
-    if _name == "edit_file" and tool_args and is_success(content):
+    if _name == "edit_file" and tool_args and ok:
         old_str = tool_args.get("old_string", "")
         new_str = tool_args.get("new_string", "")
         path = tool_args.get("path", tool_args.get("file_path", ""))
@@ -428,7 +438,7 @@ def format_tool_result_compact(
         prefix = "\u2514" if i == 0 else " "
         if len(line) > 80:
             line = line[:77] + "\u2026"
-        style = "dim" if is_success(content) else "red dim"
+        style = "dim" if ok else "red dim"
         elements.append(Text(f"  {prefix} {line}", style=style))
 
     remaining = total_lines - max_lines
@@ -448,8 +458,7 @@ def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
     is_task = tc.get("name", "").lower() == "task"
 
     if tr is not None:
-        content = tr.get("content", "")
-        if is_success(content):
+        if _result_succeeded(tr):
             style = "bold green"
             indicator = "\u2713" if is_task else ToolStatus.SUCCESS.value
         else:
@@ -1047,12 +1056,13 @@ def create_streaming_display(
                 _append_narration_before_tool(tool_index)
                 elements.append(_render_tool_call_line(tc, tr))
                 content = tr.get("content", "") if tr else ""
-                if tr and (not is_success(content) or tc.get("name") == "edit_file"):
+                if tr and (not _result_succeeded(tr) or tc.get("name") == "edit_file"):
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=10,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1077,7 +1087,7 @@ def create_streaming_display(
             if hidden:
                 for tool_index, _, _ in hidden:
                     _append_narration_before_tool(tool_index)
-                ok = sum(1 for _, _, tr in hidden if is_success(tr.get("content", "")))
+                ok = sum(1 for _, _, tr in hidden if _result_succeeded(tr))
                 fail = len(hidden) - ok
                 summary = Text()
                 summary.append(f"\u2713 {ok} completed", style="dim green")
@@ -1120,12 +1130,13 @@ def create_streaming_display(
                     continue
 
                 content = tr.get("content", "")
-                if not is_success(content) or tc.get("name") == "edit_file":
+                if not _result_succeeded(tr) or tc.get("name") == "edit_file":
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=5,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1312,6 +1323,7 @@ def display_final_results(
                     content,
                     max_lines=10,
                     tool_args=tc.get("args"),
+                    success=_result_succeeded(tr),
                 )
                 for elem in result_elements:
                     console.print(elem)
@@ -2276,8 +2288,10 @@ async def _astream_to_console(
             continue
         tr = _tool_result_for_call(state.tool_results, tc)
         console.print(_render_tool_call_line(tc, tr))
-        if tr and not is_success(tr.get("content", "")):
-            for elem in format_tool_result_compact(tr["name"], tr.get("content", "")):
+        if tr and not _result_succeeded(tr):
+            for elem in format_tool_result_compact(
+                tr["name"], tr.get("content", ""), success=False
+            ):
                 console.print(elem)
 
     # 2) Task List panel — middle
