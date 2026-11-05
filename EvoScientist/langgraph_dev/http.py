@@ -443,6 +443,13 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
         await server_runs.cancel_project_runs(workspace)
     except BaseException:
         await workspace_setup.restore_registration(workspace, was_set_up=was_set_up)
+        try:
+            await workspace_setup.reconcile_autoskills_everywhere()
+        except Exception:
+            logger.exception(
+                "Could not reconcile AutoSkills after unregistering %s failed.",
+                workspace.key,
+            )
         raise
     return JSONResponse({"workspace_dir": workspace.key})
 

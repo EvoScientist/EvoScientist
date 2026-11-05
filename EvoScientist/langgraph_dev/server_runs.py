@@ -30,9 +30,10 @@ async def cancel_project_runs(workspace: Workspace) -> None:
         for assistant_id in workspace_assistant_ids(workspace):
             await Runs.cancel(conn, assistant_id=UUID(assistant_id))
 
-        for thread_id, binding in bound_threads.items():
+        for thread_key, binding in bound_threads.items():
             if binding.workspace != workspace:
                 continue
+            thread_id = UUID(thread_key)
             await asyncio.sleep(0)
             run_ids = []
             for status in ("pending", "running"):

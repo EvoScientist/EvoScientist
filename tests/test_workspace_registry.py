@@ -659,12 +659,19 @@ def test_unregister_restores_registration_when_cancel_fails(
     async def crons(_workspace):
         return []
 
+    reconciled = []
+
+    async def reconcile():
+        reconciled.append(True)
+        return 0, []
+
     async def fail(_workspace):
         assert not projects.is_registered(workspace.key)
         raise RuntimeError("cancellation failed")
 
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_runs, "cancel_project_runs", fail)
+    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
     response = server.delete(
         "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
     )
@@ -673,6 +680,7 @@ def test_unregister_restores_registration_when_cancel_fails(
     assert response.json()["detail"] == "cancellation failed"
     assert projects.is_registered(workspace.key)
     assert workspace.key in workspace_setup.SET_UP
+    assert reconciled == [True]
 
 
 def test_unregister_restores_registration_when_delete_crons_fails(
@@ -686,8 +694,15 @@ def test_unregister_restores_registration_when_delete_crons_fails(
     async def fail(_ids):
         raise RuntimeError("cron deletion failed")
 
+    reconciled = []
+
+    async def reconcile():
+        reconciled.append(True)
+        return 0, []
+
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_crons, "delete_crons", fail)
+    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
     response = server.delete(
         "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
     )
@@ -695,6 +710,7 @@ def test_unregister_restores_registration_when_delete_crons_fails(
     assert response.status_code == 500
     assert response.json()["detail"] == "cron deletion failed"
     assert projects.is_registered(workspace.key)
+    assert reconciled == [True]
 
 
 async def test_unregister_restores_registration_when_cancelled(
@@ -705,6 +721,7 @@ async def test_unregister_restores_registration_when_cancelled(
     projects.set_registered(workspace.key, True)
     workspace_setup.SET_UP.add(workspace.key)
     entered = asyncio.Event()
+    reconciled = []
 
     async def crons(_workspace):
         return []
@@ -713,9 +730,14 @@ async def test_unregister_restores_registration_when_cancelled(
         entered.set()
         await asyncio.Event().wait()
 
+    async def reconcile():
+        reconciled.append(True)
+        return 0, []
+
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_crons, "delete_crons", lambda _ids: asyncio.sleep(0))
     monkeypatch.setattr(server_runs, "cancel_project_runs", cancel)
+    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
     task = asyncio.create_task(http._unregister(workspace))
     await asyncio.wait_for(entered.wait(), 5)
     task.cancel()
@@ -724,6 +746,7 @@ async def test_unregister_restores_registration_when_cancelled(
 
     assert projects.is_registered(workspace.key)
     assert workspace.key in workspace_setup.SET_UP
+    assert reconciled == [True]
 
 
 async def test_cancel_project_runs_includes_bound_threads(
@@ -752,7 +775,7 @@ async def test_cancel_project_runs_includes_bound_threads(
             yield item
 
     async def search_runs(_conn, thread_id, *, status, limit, offset):
-        assert thread_id == str(threads[0])
+        assert thread_id == threads[0]
         return rows([{"run_id": r} for r in runs[status][offset : offset + limit]])
 
     async def cancel(_conn, run_ids=None, *, assistant_id=None, thread_id=None):
@@ -774,7 +797,7 @@ async def test_cancel_project_runs_includes_bound_threads(
 
     assert {str(a) for a, _, _ in cancelled if a} == workspace_assistant_ids(workspace)
     assert [(t, ids) for _, t, ids in cancelled if t] == [
-        (str(threads[0]), runs["pending"] + runs["running"])
+        (threads[0], runs["pending"] + runs["running"])
     ]
 
 
