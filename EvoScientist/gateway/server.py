@@ -218,6 +218,38 @@ def _is_id_keyed_hitl_resume(response: object) -> bool:
     return isinstance(value, Mapping) and "decisions" in value
 
 
+def _resume_target(
+    thread_id: str, response: object, pending: list[str]
+) -> tuple[str, object]:
+    """The pending interrupt *response* answers, and the answer itself.
+
+    A single-key payload keyed by a pending id answers that interrupt
+    (``build_hitl_resume`` keys approvals that way). A HITL payload keyed by
+    any other id is a client bug (stale or hand-built id) and raises. Any other
+    payload, ask_user's ``{"status": "cancelled"}`` included, answers the only
+    pending interrupt.
+    """
+    if not pending:
+        raise RuntimeError(
+            f"Thread {thread_id} has no pending interrupt; nothing to resume"
+        )
+    if isinstance(response, Mapping) and len(response) == 1:
+        (key,) = response
+        if str(key) in pending:
+            return str(key), response[key]
+        if _is_id_keyed_hitl_resume(response):
+            raise RuntimeError(
+                f"Resume payload key {key} does not match a pending interrupt "
+                f"on thread {thread_id}"
+            )
+    if len(pending) > 1:
+        raise RuntimeError(
+            f"Thread {thread_id} has {len(pending)} pending interrupts; "
+            "resume requires an id-keyed payload matching one of them"
+        )
+    return pending[0], response
+
+
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
 
@@ -710,7 +742,6 @@ class LangGraphServerGateway:
 
     thread_store: LangGraphServerThreadStore
     graph_id: str = DEFAULT_GRAPH_ID
-    interrupt_wait_seconds: float = 5.0
     events: SessionEvents | None = None
     """Frontend event sink — delivery point for middleware custom events.
 
@@ -946,23 +977,14 @@ class LangGraphServerGateway:
             )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
-                # Known divergence: the resume goes through run.respond,
-                # which takes no config, so the per-run overrides above
-                # (model / recursion_limit / the rubric marker / the
-                # model_retry tier) are NOT
-                # applied to a resumed turn - it runs with the thread's
-                # construction-time binding until the next fresh run
-                # re-applies them. The
-                # primitive that would carry config on a resume is
-                # run.start with Command(resume=...); switching to it needs
-                # live-server verification first.
-                await self._respond_to_interrupt(
+                return await self._respond_to_interrupt(
                     stream,
                     request.thread_id,
                     request.message.resume,
+                    config=config,
+                    metadata=run_metadata,
                     on_resume_attempt=on_resume_attempt,
                 )
-                return None
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -988,85 +1010,38 @@ class LangGraphServerGateway:
         thread_id: str,
         response: object,
         *,
+        config: dict[str, Any],
+        metadata: Mapping[str, object] | None,
         on_resume_attempt: Callable[[str, object], None],
-    ) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.interrupt_wait_seconds
-        while not stream.interrupts and loop.time() < deadline:
-            await asyncio.sleep(0.05)
+    ) -> str | None:
+        """Resume the thread's pending interrupt with this run's config.
 
-        # The server replays a parked thread's pending interrupts to a fresh
-        # stream within ~1s (verified against a live langgraph dev server),
-        # which is the only source for stream.interrupts. run.respond
-        # validates an explicit interrupt_id against stream.interrupts, so an
-        # id recovered from thread state would always be rejected - do not
-        # re-add a state lookup here. The one resume primitive that does not
-        # gate on stream.interrupts is run.start with Command(resume=...).
-        interrupts = list(stream.interrupts)
-
-        if len(interrupts) > 1:
-            # run.respond can target one of several outstanding interrupts by
-            # id, so an id-keyed build_hitl_resume payload whose key matches a
-            # replayed interrupt resumes that one (parallel sub-agent approvals
-            # arrive this way once #444 arms HITL on every run). An unmatched
-            # key is a client bug and still raises.
-            if _is_id_keyed_hitl_resume(response):
-                (key,) = response
-                ids = {
-                    str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
-                }
-                if str(key) in ids:
-                    on_resume_attempt(str(key), response[key])
-                    await stream.run.respond(response[key], interrupt_id=str(key))
-                    return
-            raise RuntimeError(
-                f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
-                "resume requires an id-keyed payload matching one of them"
-            )
-        if not interrupts:
-            raise RuntimeError(
-                f"No interrupt replayed to the stream on thread {thread_id} "
-                f"within {self.interrupt_wait_seconds}s; the thread may not "
-                "be in an interrupted state"
-            )
-
-        interrupt_id = str(
-            interrupts[0].get("interrupt_id") or interrupts[0].get("id") or ""
-        )
-        # build_hitl_resume produces Command(resume={interrupt_id: {decisions}}),
-        # keyed by id so the graph can route multi-interrupt resumes. The server's
-        # run.respond takes interrupt_id separately, so the id-keyed wrapper must
-        # be unwrapped to avoid double-wrapping the payload server-side (the
-        # input.respond handler re-wraps response into {interrupt_id: response}).
-        # A wrong-keyed id-keyed HITL resume is always a client bug (stale or
-        # hand-built interrupt id) and raises. Other single-key payloads are
-        # legitimate non-HITL resumes keyed by their own schema (ask_user's
-        # {"status": "cancelled"}), not the interrupt id - they forward unchanged.
-        resolved = response
-        if (
-            isinstance(response, Mapping)
-            and len(response) == 1
-            and interrupt_id
-            and interrupt_id in response
-        ):
-            resolved = response[interrupt_id]
-        elif _is_id_keyed_hitl_resume(response) and interrupt_id:
-            raise RuntimeError(
-                f"Resume payload key {next(iter(response))} does not match the "
-                f"pending interrupt {interrupt_id} on thread {thread_id}"
-            )
-        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
-            logger.warning(
-                "Resume payload key %s does not match pending interrupt %s on "
-                "thread %s; forwarding payload unchanged",
-                next(iter(response)),
-                interrupt_id,
-                thread_id,
-            )
-        # Record the resume identity before respond: it may be accepted by the server
+        ``run.respond`` sends no config, so the resume goes through
+        ``run.start``: on a thread with a pending interrupt the server turns
+        its input into ``Command(resume=input)``. The input is keyed by the
+        interrupt id, the shape ``input.respond`` builds, which also tells the
+        server which of several pending interrupts it answers. A thread with
+        nothing pending would take the same input as a new run, so the pending
+        ids are read from thread state first; ``stream.interrupts`` cannot
+        tell them apart from answered ones, which a new stream replays too.
+        """
+        state = await self.thread_store.client.threads.get_state(thread_id)
+        pending = [
+            str(interrupt_id)
+            for interrupt in _state_interrupts(state)
+            if (interrupt_id := interrupt.get("id"))
+        ]
+        interrupt_id, answer = _resume_target(thread_id, response, pending)
+        # Record the resume identity before the start: the server may accept it
         # even when this await raises or the consumer cancels the request.
-        on_resume_attempt(interrupt_id, resolved)
-        await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+        on_resume_attempt(interrupt_id, answer)
+        result = await stream.run.start(
+            input={interrupt_id: answer},
+            config=config,
+            metadata=dict(metadata) if metadata is not None else None,
+        )
+        run_id = result.get("run_id") if isinstance(result, Mapping) else None
+        return str(run_id) if run_id else None
 
     async def _list_active_runs(self, thread_id: str) -> list[Mapping[str, Any]] | None:
         """Return active runs on the thread, or ``None`` when listing fails."""
@@ -1503,10 +1478,14 @@ class LangGraphServerGateway:
         request_id = (
             uuid.uuid4().hex if not isinstance(request.message, Command) else None
         )
-        run_metadata: dict[str, object] | None = None
+        run_metadata: dict[str, object] | None = (
+            dict(request.metadata) if request.metadata else None
+        )
         if request_id is not None:
-            run_metadata = dict(request.metadata or {})
-            run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
+            run_metadata = {
+                **(run_metadata or {}),
+                _RUN_REQUEST_ID_METADATA_KEY: request_id,
+            }
         run_attempted = False
         run_id: str | None = None
         resume_identity: tuple[str, object] | None = None

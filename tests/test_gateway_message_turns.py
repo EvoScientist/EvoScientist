@@ -416,23 +416,17 @@ async def test_events_stream_ending_early_raises():
 
 async def test_resume_keeps_the_subscribe_path():
     stream = FakeLangGraphThreadStream(
-        THREAD_ID,
-        events=[_text("resumed: ok"), _finish()],
-        interrupts=[{"interrupt_id": "interrupt-1"}],
+        THREAD_ID, events=[_text("resumed: ok"), _finish()]
     )
-    gateway, _ = _gateway(stream)
+    gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-1"}])
 
     events = await _turn(
         gateway, Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
     )
 
     assert stream.event_streams_opened == 0
-    assert stream.run.starts == []
-    assert stream.run.responses == [
-        {
-            "response": {"decisions": [{"type": "approve"}]},
-            "interrupt_id": "interrupt-1",
-        }
+    assert [start["input"] for start in stream.run.starts] == [
+        {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
     assert _texts(events) == ["resumed: ok"]
 
@@ -440,17 +434,15 @@ async def test_resume_keeps_the_subscribe_path():
 async def test_retrying_the_same_resume_payload_resumes_again():
     payload = {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     stream = FakeLangGraphThreadStream(
-        THREAD_ID,
-        events=[_text("resumed: ok"), _finish()],
-        interrupts=[{"interrupt_id": "interrupt-1"}],
+        THREAD_ID, events=[_text("resumed: ok"), _finish()]
     )
-    gateway, _ = _gateway(stream)
+    gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-1"}])
 
     first = await _turn(gateway, Command(resume=payload))
     second = await _turn(gateway, Command(resume=payload))
 
     assert _texts(first) == _texts(second) == ["resumed: ok"]
-    assert len(stream.run.responses) == 2
+    assert [start["input"] for start in stream.run.starts] == [payload, payload]
     assert stream.event_streams_opened == 0
 
 

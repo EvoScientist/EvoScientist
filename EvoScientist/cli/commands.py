@@ -884,22 +884,19 @@ def warn_server_backend_hitl_caveats(
 ) -> None:
     """Warn that the server gateway backend is lossy for a HITL surface.
 
-    The interactive CLI and TUI create a per-session workspace and switch models
-    mid-session, but on the server backend neither reaches the run: execution
-    stays in the server's import-time workspace, and per-run config (model,
-    active teams, HITL suppression) is dropped when a turn resumes after a tool
-    approval. Both are gaps the server path has not closed yet, so a surface
-    that opts into the server backend surfaces this once at startup rather than
-    silently misrouting.
+    The interactive CLI and TUI create a per-session workspace, but on the
+    server backend it does not reach the run: execution stays in the server's
+    import-time workspace. That is a gap the server path has not closed yet, so
+    a surface that opts into the server backend surfaces this once at startup
+    rather than silently misrouting.
     """
     if backend != "langgraph_server":
         return
     console.print(
         f"[yellow]⚠ Server gateway backend active for the {surface_label}. "
-        "Until the remaining gaps close, the per-session workspace is not "
+        "Until the remaining gap closes, the per-session workspace is not "
         "applied server-side (execute / write_file run in the server's "
-        "workspace), and a model or team switch is dropped for the rest of a "
-        "turn that resumes after a tool approval.[/yellow]"
+        "workspace).[/yellow]"
     )
 
 
