@@ -302,7 +302,7 @@ class TestCutMiddle:
     def test_an_end_that_starts_on_a_line_keeps_that_line(self):
         reason = "Error: disk full\n"
         for filler in ("z", "\n"):
-            text = "x" * 300 + "\n" + reason + filler * (500 - len(reason))
+            text = "x" * 400 + "\n" + reason + filler * (500 - len(reason))
             assert "Error: disk full" in cut_middle(text, 800, 500)
 
     def test_a_long_last_line_is_kept_in_part(self):
@@ -311,11 +311,34 @@ class TestCutMiddle:
         text += "\nExit code: 1\n[Command failed with exit code 1]"
         end = cut_middle(text, 2000, 500).partition("\n... (truncated) ...\n")[2]
         assert not end.startswith("Exit code")
+        assert "[stderr] ValueError" not in end
         assert "detail END\nExit code: 1" in end
 
-    def test_an_end_cut_mid_line_is_kept_when_nothing_follows(self):
-        text = "x" * 300 + "\n" + "y" * 600 + "\n\n"
-        assert cut_middle(text, 800, 500).endswith("y" * 497 + "\n\n")
+    def test_a_short_line_across_the_boundary_is_kept_whole(self):
+        reason = "[stderr] OSError: disk full"
+        filler = "\n".join(f"log {i:03d}" for i in range(400))
+        trailer = "".join(f"step {i}\n" for i in range(60))
+        trailer += "\nExit code: 1\n[Command failed with exit code 1]"
+        for into in (1, 10, 20):
+            text = filler + "\n" + reason + ("\n" + trailer)[: 500 - len(reason) + into]
+            assert text[len(text) - 500 :].startswith(reason[into:])
+            end = cut_middle(text, 2000, 500).partition("\n... (truncated) ...\n")[2]
+            assert end.startswith(reason)
+
+    def test_an_end_never_repeats_the_start(self):
+        text = "a" * 1450 + "\n" + "b" * 620
+        out = cut_middle(text, 2000, 500)
+        assert "... (truncated) ..." in out
+        assert out.count("b") <= text.count("b")
+
+    def test_a_line_right_after_the_head_is_kept(self):
+        reason = "[stderr] OSError: disk full\n"
+        text = "h" * 1499 + "\n" + reason + "t" * (2026 - 1500 - len(reason))
+        assert "[stderr] OSError: disk full" in cut_middle(text, 2000, 500)
+
+    def test_a_cut_that_hides_almost_nothing_is_not_made(self):
+        text = "h" * 1500 + "\n" + "e" * 599
+        assert cut_middle(text, 2000, 500) == text
 
 
 # === _shorten_path ===

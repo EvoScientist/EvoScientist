@@ -113,12 +113,17 @@ def cut_middle(text: str, limit: int, tail: int) -> str:
     """Shorten ``text`` past ``limit`` chars by cutting its middle, keeping about ``tail`` of its end."""
     if len(text) <= limit:
         return text
+    head_end = limit - tail
     start = len(text) - tail
-    # Begin the kept end on a whole line when one starts soon; a long last line is kept in part.
-    newline = text.find("\n", start - 1, start + tail // 4)
-    if newline != -1 and text[newline + 1 :].strip():
-        start = newline + 1
-    return f"{text[: limit - tail]}\n... (truncated) ...\n{text[start:]}"
+    # Keep the whole line the end starts in when it began close by; a long line is kept in part.
+    line_start = text.rfind("\n", max(head_end - 1, 0), start) + 1
+    if line_start and start - line_start <= tail // 4:
+        start = line_start
+    marker = "\n... (truncated) ...\n"
+    # A cut that would hide no more than its own marker is not worth making.
+    if start - head_end <= len(marker):
+        return text
+    return f"{text[:head_end]}{marker}{text[start:]}"
 
 
 def truncate(content: str, max_length: int, suffix: str = "\n... (truncated)") -> str:
