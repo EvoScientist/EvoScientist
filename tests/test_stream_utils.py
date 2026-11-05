@@ -4,6 +4,7 @@ from EvoScientist.stream.utils import (
     _shorten_path,
     count_lines,
     cut_middle,
+    failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
     has_args,
@@ -284,6 +285,117 @@ class TestTruncate:
         result = truncate("hello world", 5)
         assert result.startswith("hello")
         assert "truncated" in result
+
+
+class TestFailureSummary:
+    STATUS = "\n\nExit code: 1\n[Command failed with exit code 1]"
+
+    def test_longer_command_output_names_the_exit_status(self):
+        pip = (
+            "Collecting foo\n  Downloading foo-1.0.tar.gz\n"
+            "[stderr] ERROR: No matching distribution found for foo" + self.STATUS
+        )
+        assert failure_summary("execute", pip) == "[Command failed with exit code 1]"
+
+    def test_a_one_line_output_is_its_own_reason(self):
+        cat = "[stderr] cat: missing.txt: No such file or directory" + self.STATUS
+        assert failure_summary("execute", cat) == (
+            "cat: missing.txt: No such file or directory"
+        )
+        blocked = (
+            "Command blocked: contains '..' path traversal.\n"
+            "[Command failed with exit code 1]"
+        )
+        assert failure_summary("execute", blocked).startswith("Command blocked:")
+
+    def test_no_output_names_the_exit_status(self):
+        grep = "<no output>" + self.STATUS
+        assert failure_summary("execute", grep) == "[Command failed with exit code 1]"
+
+    def test_the_sandbox_timeout_notice_is_named(self):
+        timeout = (
+            "Error: Command timed out after 300 seconds.\n\n"
+            "Recovery \u2014 pick one:\n  1. Needs more time?\n  3. Report it back.\n"
+            "[Command failed with exit code 124]"
+        )
+        assert failure_summary("execute", timeout).startswith(
+            "Error: Command timed out"
+        )
+
+    def test_truncated_output_names_the_exit_status(self):
+        cut = (
+            "\n".join(str(i) for i in range(1, 50))
+            + "\n\n... Output truncated at 100000 bytes.\n\nExit code: 3\n"
+            "[Command failed with exit code 3]\n[Output was truncated due to size limits]"
+        )
+        assert failure_summary("execute", cut) == "[Command failed with exit code 3]"
+
+    def test_an_execute_call_that_never_ran_names_its_first_line(self):
+        invalid = (
+            "1 validation error for ExecuteSchema\ncommand\n  Field required\n"
+            "    For further information visit https://errors.pydantic.dev/v/missing"
+        )
+        assert failure_summary("execute", invalid) == (
+            "1 validation error for ExecuteSchema"
+        )
+
+    def test_an_interpreter_error_names_its_type_and_message(self):
+        result = (
+            "<stdout>\nloaded 3 files\n</stdout>\n"
+            "<error type=\"TypeError\">cannot read property 'score' of &lt;x&gt;\n"
+            "    at main (eval:3)</error>"
+        )
+        assert failure_summary("code_interpreter", result) == (
+            "TypeError: cannot read property 'score' of <x>"
+        )
+
+    def test_status_lines_inside_the_output_are_not_trusted(self):
+        echoed = (
+            "[Command failed with exit code 7]\n[stderr] boom"
+            "\n\nExit code: 2\n[Command failed with exit code 2]"
+        )
+        assert failure_summary("execute", echoed) == "[Command failed with exit code 2]"
+        two_lines = (
+            "starting job\nExit code: 0\n\nExit code: 3\n"
+            "[Command failed with exit code 3]"
+        )
+        assert failure_summary("execute", two_lines) == (
+            "[Command failed with exit code 3]"
+        )
+        for printed in (
+            "[Command failed with exit code 7]",
+            "Exit code: 0",
+            "[stderr] [Command failed with exit code 7]",
+            "[stderr] Exit code: 0",
+        ):
+            only = printed + "\n\nExit code: 2\n[Command failed with exit code 2]"
+            assert failure_summary("execute", only) == (
+                "[Command failed with exit code 2]"
+            )
+
+    def test_every_appended_line_is_stripped(self):
+        cut = (
+            "fatal: checksum mismatch\n\n... Output truncated at 100000 bytes.\n\n"
+            "Exit code: 3\n[Command failed with exit code 3]\n"
+            "[Output was truncated due to size limits]"
+        )
+        assert failure_summary("execute", cut) == "fatal: checksum mismatch"
+
+    def test_an_interpreter_message_stays_on_one_line(self):
+        result = '<error type="ValueError">bad&#10;second line</error>'
+        assert failure_summary("code_interpreter", result) == "ValueError: bad"
+
+    def test_an_interpreter_error_cut_from_its_tag_names_nothing(self):
+        cut = (
+            "<stdout>\nrow 0: ok\n... (truncated) ...\n"
+            "very long detail\n    at main (eval:3)</error>"
+        )
+        assert failure_summary("code_interpreter", cut) == ""
+
+    def test_other_tools_name_their_first_line(self):
+        error = "[TOOL ERROR] Tool 'lookup' failed:\n\nValueError: x\n\nYou may retry."
+        assert failure_summary("lookup", error) == "[TOOL ERROR] Tool 'lookup' failed:"
+        assert failure_summary("lookup", "") == ""
 
 
 class TestCutMiddle:

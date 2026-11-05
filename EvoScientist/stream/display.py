@@ -41,6 +41,7 @@ from .state import (
 from .utils import (
     DisplayLimits,
     ToolStatus,
+    failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
     is_success,
@@ -590,11 +591,10 @@ def _render_subagent_section(sa: "SubAgentState", compact: bool = False) -> list
             tc_line.append(f"\u2713 {tc_name}", style="green")
         else:
             tc_line.append(f"\u2717 {tc_name}", style="red")
-            content = tr.get("content", "")
-            first_line = content.strip().split("\n")[0][:70]
-            if first_line:
+            reason = failure_summary(tc["name"], tr.get("content", ""))[:70]
+            if reason:
                 err_line = Text("\u2502   ", style=BORDER)
-                err_line.append(f"\u2514 {first_line}", style="red dim")
+                err_line.append(f"\u2514 {reason}", style="red dim")
                 elements.append(tc_line)
                 elements.append(err_line)
                 continue

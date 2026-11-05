@@ -5,6 +5,8 @@ Provides tool status indicators, display limits, and formatting helpers
 adapted for deepagents tool names.
 """
 
+import html
+import re
 import sys
 from enum import StrEnum
 from functools import lru_cache
@@ -107,6 +109,52 @@ def tool_result_succeeded(
     if name == "code_interpreter":
         return not content.rstrip().endswith("</error>")
     return is_success(content)
+
+
+# deepagents' status line for a failed ``execute``, and the lines it and the sandbox
+# append after a command's output, last first; each appears at most once.
+_EXECUTE_STATUS = "[Command failed with exit code "
+_EXECUTE_SUFFIXES = (
+    "[Output was truncated",
+    _EXECUTE_STATUS,
+    "Exit code: ",
+    "... Output truncated at ",
+)
+_INTERPRETER_ERROR = re.compile(r'<error type="([^"]*)">([^\n<]*)')
+
+
+def failure_summary(name: str, content: str) -> str:
+    """The one line that says why a failed tool call failed, without guessing."""
+    lines = [line.strip() for line in content.strip().splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if name == "code_interpreter":
+        errors = list(_INTERPRETER_ERROR.finditer(content))
+        if errors:
+            kind = errors[-1].group(1)
+            message = html.unescape(errors[-1].group(2)).strip()
+            return f"{kind}: {message.splitlines()[0]}" if message else kind
+        # The error's opening tag can fall in the part a long result loses.
+        return "" if lines[-1].endswith("</error>") else lines[0]
+    # deepagents appends the real status line after the command's own output.
+    status = next(
+        (line for line in reversed(lines) if line.startswith(_EXECUTE_STATUS)), None
+    )
+    if name != "execute" or status is None:
+        return lines[0]
+    body = list(lines)
+    for suffix in _EXECUTE_SUFFIXES:
+        if body and body[-1].startswith(suffix):
+            body.pop()
+    if body == ["<no output>"]:
+        body = []
+    # A one-line output, or the sandbox's timeout notice, says why; longer output is not
+    # guessed at, since its last line is often a footer or a warning.
+    first = body[0].removeprefix("[stderr] ") if body else ""
+    one_line = len(body) == 1 and not first.startswith(_EXECUTE_SUFFIXES)
+    if one_line or first.startswith("Error: Command timed out"):
+        return first
+    return status
 
 
 def cut_middle(text: str, limit: int, tail: int) -> str:

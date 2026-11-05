@@ -10,7 +10,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from ...stream.diff_format import build_edit_diff
-from ...stream.utils import format_tool_compact_with_result
+from ...stream.utils import failure_summary, format_tool_compact_with_result
 from .timestamp_mixin import show_timestamp_toast
 
 _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
@@ -143,13 +143,16 @@ class ToolCallWidget(Vertical):
             status_w.update(Text(f"\u2717 {summary}", style="red dim"))
 
     def _result_summary(self) -> str:
-        """One-line summary of the result."""
+        """One-line summary of the result; a failure's names its reason."""
         if not self._result_content:
             return "done"
-        first_line = self._result_content.strip().split("\n")[0]
-        if len(first_line) > 60:
-            first_line = first_line[:57] + "\u2026"
-        return first_line
+        if self._status == "error":
+            line = failure_summary(self._tool_name, self._result_content)
+        else:
+            line = self._result_content.strip().split("\n")[0]
+        if len(line) > 60:
+            line = line[:57] + "\u2026"
+        return line
 
     def _should_collapse(self) -> bool:
         lines = self._result_content.strip().split("\n")

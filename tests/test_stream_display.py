@@ -8,6 +8,7 @@ from rich.markdown import Markdown
 
 from EvoScientist.stream.display import (
     _fix_markdown_heading_spacing,
+    _render_subagent_section,
     _render_tool_call_line,
     create_streaming_display,
     format_tool_result_compact,
@@ -229,6 +230,24 @@ def test_a_failed_write_todos_shows_its_error():
     assert "Input should be" in render(error, False)
     assert "train baseline" in render(todos, True)
     assert "1 pending" in render(todos, True)
+
+
+def test_a_failed_subagent_row_names_the_reason():
+    subagent = SubAgentState("code-agent", "install deps", "task:code", "task1")
+    subagent.is_active = True
+    subagent.add_tool_call("execute", {"command": "pip install foo"}, "sa1")
+    subagent.add_tool_result(
+        "execute",
+        "Collecting foo\n[stderr] ERROR: Failed building wheel for foo\n\n"
+        "Exit code: 1\n[Command failed with exit code 1]",
+        False,
+        "sa1",
+    )
+
+    rendered = "".join(_render_text(e) for e in _render_subagent_section(subagent))
+
+    assert "└ [Command failed with exit code 1]" in rendered
+    assert "Collecting foo" not in rendered
 
 
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():

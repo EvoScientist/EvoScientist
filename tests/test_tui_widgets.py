@@ -298,6 +298,19 @@ class TestToolCallWidget(unittest.TestCase):
                 w.on_click(None)  # expand the collapsed output
             assert output.updated.plain == content
 
+    def test_a_failure_summary_says_why_without_guessing(self):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        w = ToolCallWidget("execute", {})
+        w._result_content = (
+            "Collecting foo\n[stderr] ERROR: No matching distribution found for foo"
+            "\n\nExit code: 1\n[Command failed with exit code 1]"
+        )
+        w._status = "error"
+        assert w._result_summary() == "[Command failed with exit code 1]"
+        w._status = "success"
+        assert w._result_summary() == "Collecting foo"
+
     def test_result_summary_empty(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 
