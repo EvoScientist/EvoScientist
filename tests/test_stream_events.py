@@ -1318,6 +1318,85 @@ class TestV3ProtocolStreaming:
         assert text["content"] == "Sub-agent finding."
         assert text["instance_id"] == "task:early"
 
+    async def test_whitespace_deltas_between_text_are_kept(self):
+        """Spaces and blank lines that arrive as their own deltas stay in the answer."""
+        chunks = ["F", " ", "10.6667", "\n\n", "Next", " ", "para", "."]
+        agent = FakeV3Agent([*(message_delta(c) for c in chunks), message_finish()])
+        events = await collect_events(agent)
+
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert "".join(texts) == "F 10.6667\n\nNext para."
+        assert not any(t.isspace() for t in texts)
+        done = next(e for e in events if e.get("type") == "done")
+        assert done["content"] == "F 10.6667\n\nNext para."
+
+    async def test_whitespace_at_a_message_edge_is_dropped(self):
+        """A message that opens with whitespace before its reasoning (OpenRouter)
+        shows no text until the answer, and trailing whitespace is dropped."""
+        reasoning = protocol_event(
+            "messages",
+            (
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "reasoning-delta", "reasoning": "thinking"},
+                },
+                {},
+            ),
+        )
+        agent = FakeV3Agent(
+            [
+                message_delta("\n\n"),
+                reasoning,
+                message_delta("Answer"),
+                message_delta("\n"),
+                message_finish(),
+                message_delta("\n"),
+                message_delta("Next"),
+                message_delta(" "),
+                protocol_event("messages", ({"event": "message-start"}, {})),
+                message_delta("Last"),
+                message_finish(),
+            ]
+        )
+        events = await collect_events(agent)
+
+        kinds = [e["type"] for e in events if e["type"] in ("thinking", "text")]
+        assert kinds == ["thinking", "text", "text", "text"]
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert texts == ["Answer", "Next", "Last"]
+
+    async def test_each_subagent_holds_its_own_whitespace(self):
+        """A held space belongs to the stream it arrived in."""
+        ns1 = ("task", "one")
+        ns2 = ("task", "two")
+        agent = FakeV3Agent(
+            [
+                message_delta("One", namespace=ns1),
+                message_delta("Two", namespace=ns2),
+                message_delta(" ", namespace=ns1),
+                message_delta("\n\n", namespace=ns2),
+                message_delta("Root"),
+                message_delta("more", namespace=ns2),
+                message_delta("more", namespace=ns1),
+            ],
+            subagents=[
+                FakeSubagent(ns1, "research-agent"),
+                FakeSubagent(ns2, "research-agent"),
+            ],
+        )
+        events = await collect_events(agent)
+
+        by_instance: dict[str, list[str]] = {}
+        for e in events:
+            if e.get("type") == "subagent_text":
+                by_instance.setdefault(e["instance_id"], []).append(e["content"])
+        assert by_instance == {
+            "task:one": ["One", " more"],
+            "task:two": ["Two", "\n\nmore"],
+        }
+        assert [e["content"] for e in events if e.get("type") == "text"] == ["Root"]
+
     async def test_parallel_same_name_subagent_events_carry_instance_ids(self):
         """Lifecycle and tool events distinguish same-name parallel subagents."""
         ns1 = ("task", "one")
@@ -1896,6 +1975,31 @@ class TestModelRetryRollback:
         assert "message_id" not in retry
         assert self._done(out)["response"] == "Full answer."
         assert [e["type"] for e in out if e["type"] == "model_call"] == []
+
+    async def test_a_new_call_does_not_inherit_held_whitespace(self):
+        """Whitespace a failed call held back is not put in front of the retry's answer."""
+        from tests.fakes.stream_v3 import (
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Half a sen"),
+                local_text_delta("\n\n"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                local_text_delta("Full answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._done(out)["response"] == "Full answer."
 
     async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
         """A graded run's last pass starts after the verdict; a failed call of

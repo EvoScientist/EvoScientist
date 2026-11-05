@@ -538,6 +538,9 @@ class _V3EventProcessor:
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
+        # Whitespace each message holds back until its next text (key: sub-agent
+        # instance, None for the main agent); no key yet = the message has no text.
+        self._held_space: dict[str | None, str] = {}
         self._records: dict[tuple[str, ...], _CallRecord] = {}
         self._namespace: tuple[str, ...] = ()
 
@@ -616,6 +619,7 @@ class _V3EventProcessor:
                         discarded=discarded,
                     ).data
                 )
+        self._end_text_message(subagent)
         self._records[self._namespace] = _CallRecord(
             call=call,
             full_response_len=len(self.full_response),
@@ -901,6 +905,7 @@ class _V3EventProcessor:
             if text:
                 self._seen_value_message_keys.add(parsed.key)
                 events.extend(self._emit_text(text, subagent=None))
+                self._end_text_message(None)
         return events
 
     def _process_message_event(
@@ -961,7 +966,12 @@ class _V3EventProcessor:
                 return self._process_message_tool_block(content, subagent, namespace)
             return []
 
+        if event_type == "message-start":
+            self._end_text_message(subagent)
+            return []
+
         if event_type == "message-finish":
+            self._end_text_message(subagent)
             events: list[dict[str, Any]] = []
             pending = self._selector.flush_pending_text()
             if pending and not pending.isspace():
@@ -1080,6 +1090,8 @@ class _V3EventProcessor:
                 self._emit_thinking(_reasoning_from_content(content), subagent)
             )
         events.extend(self._emit_text(_text_from_content(content), subagent))
+        if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
+            self._end_text_message(subagent)
 
         for raw_tool_call_block in msg.tool_calls:
             tool_call_block = _as_raw_map(raw_tool_call_block)
@@ -1297,14 +1309,26 @@ class _V3EventProcessor:
         self._emitted_interrupts.add(signature)
         return [event]
 
+    def _end_text_message(self, subagent: _SubagentInfo | None) -> None:
+        self._held_space.pop(subagent.instance_id if subagent else None, None)
+
     def _emit_text(
         self, text: str, subagent: _SubagentInfo | None
     ) -> list[dict[str, Any]]:
         if not text:
             return []
         cleaned = _strip_legacy_thinking_tags(text)
-        if not cleaned or cleaned.isspace():
+        if not cleaned:
             return []
+        # A whitespace-only delta waits for the text it separates, so a message
+        # that opens with "\n\n" before reasoning does not start the answer early.
+        key = subagent.instance_id if subagent else None
+        if cleaned.isspace():
+            if key in self._held_space:
+                self._held_space[key] += cleaned
+            return []
+        cleaned = self._held_space.get(key, "") + cleaned
+        self._held_space[key] = ""
         suppressed, events, emit_text = self._selector.process_text(cleaned)
         if suppressed:
             return events
