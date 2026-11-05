@@ -105,6 +105,15 @@ class MCPLoaderWidget(Static):
         if not progressed:
             self._dismiss()
             return
+        # A server that never reported was served from the MCP cache: a
+        # cache-hit retry emits progress events only for the servers it
+        # actually reloads, so the rest stay "pending" forever and the
+        # header under-counts (e.g. "✗ MCP 0/3 loaded, 1 failed" when
+        # only the one retried server failed). Count them as loaded
+        # instead of leaving frozen spinners behind.
+        for name, (state, detail) in list(self._progress.items()):
+            if state == "pending":
+                self._progress[name] = ("ok", detail)
         has_errors = any(state == "error" for state, _ in self._progress.values())
         delay = _AUTO_DISMISS_ON_ERROR_SECONDS if has_errors else _AUTO_DISMISS_SECONDS
         self._auto_dismiss_at = time.monotonic() + delay

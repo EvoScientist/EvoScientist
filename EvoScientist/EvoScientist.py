@@ -19,6 +19,7 @@ Usage:
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -101,7 +102,11 @@ _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
 # ``_load_mcp_tools_cached`` — instead of staying tool-less until the
 # process restarts.
 _MCP_TOOLS_CACHE_FAILED: set[str] = set()
-_MCP_TOOLS_CACHE_LAST_ATTEMPT = 0.0
+# When each failed server was last attempted, and how long to wait before
+# retrying it again. Both are keyed by server name: a server that stays
+# down is retried with exponential backoff instead of at a flat rate.
+_MCP_TOOLS_CACHE_LAST_ATTEMPT: dict[str, float] = {}
+_MCP_FAILED_SERVER_RETRY_DELAY: dict[str, float] = {}
 # Bumped whenever the cached tool set changes after graphs may already have
 # been built from it (a config change, or a failed server recovering), so
 # ``GraphCache`` can rebuild graphs that were built from a failed load.
@@ -109,11 +114,35 @@ _MCP_TOOLS_CACHE_GENERATION = 0
 # A failed server is retried at most once per this delay, so a broken server
 # doesn't slow every graph build.
 _MCP_FAILED_SERVER_RETRY_SECONDS = 30.0
+# Cap on the per-server retry delay (see ``_mcp_note_retry_result``).
+_MCP_FAILED_SERVER_RETRY_MAX_SECONDS = 600.0
+# Guards the MCP tool cache against concurrent loads: two callers retrying
+# at the same time would otherwise both load a recovering server and merge
+# its tools into the cache twice.
+_MCP_TOOLS_CACHE_LOCK = threading.Lock()
 
 
 def _mcp_tools_cache_generation() -> int:
     """The current MCP tool-cache generation (see ``_MCP_TOOLS_CACHE_GENERATION``)."""
     return _MCP_TOOLS_CACHE_GENERATION
+
+
+def _mcp_retry_delay(name: str) -> float:
+    """How long to wait before retrying *name* (base delay by default)."""
+    return _MCP_FAILED_SERVER_RETRY_DELAY.get(name, _MCP_FAILED_SERVER_RETRY_SECONDS)
+
+
+def _mcp_retry_due(name: str) -> bool:
+    """Whether *name*'s retry delay has passed since its last attempt."""
+    return time.monotonic() - _MCP_TOOLS_CACHE_LAST_ATTEMPT.get(
+        name, 0.0
+    ) >= _mcp_retry_delay(name)
+
+
+def _mcp_retry_due_servers() -> set[str]:
+    """The failed servers whose retry delay has passed (cheap to call)."""
+    return {name for name in _MCP_TOOLS_CACHE_FAILED if _mcp_retry_due(name)}
+
 
 # Default agent (no checkpointer) — used by LangSmith / notebooks; the server
 # builds its graphs per project (``build_main_graph``).
@@ -286,20 +315,81 @@ def _load_mcp_config_once() -> tuple[str, dict]:
     return sig, cfg
 
 
-def _track_mcp_failures(on_progress, failed: set[str]):
-    """Wrap *on_progress*, recording the servers that report an error."""
+def _mcp_cache_copies() -> dict[str, list]:
+    return {k: list(v) for k, v in (_MCP_TOOLS_CACHE_VALUE or {}).items()}
+
+
+def _track_mcp_load_events(on_progress, failed: set[str], succeeded: set[str]):
+    """Wrap *on_progress*, recording which servers report an error/success.
+
+    The ``succeeded`` set matters because a load can return ``{}`` without
+    having failed: a server that connects fine but routes no tools (e.g.
+    every server has an empty ``expose_to``) still reports ``success``.
+    """
 
     def _callback(event: str, name: str, detail: str = "") -> None:
         if event == "error":
             failed.add(name)
+        elif event == "success":
+            succeeded.add(name)
         if on_progress is not None:
             on_progress(event, name, detail)
 
     return _callback
 
 
-def _mcp_cache_copies() -> dict[str, list]:
-    return {k: list(v) for k, v in (_MCP_TOOLS_CACHE_VALUE or {}).items()}
+def _merge_mcp_tools(
+    merged: dict[str, list], loaded: dict[str, list]
+) -> dict[str, list]:
+    """Merge *loaded* into *merged* without duplicating a tool.
+
+    Tools are keyed by name where one is available (``create_agent`` keys
+    tools by name downstream, so two entries with the same name would be
+    the same tool twice); otherwise identity decides.
+    """
+    for agent_name, tools in loaded.items():
+        existing = merged.setdefault(agent_name, [])
+        seen_names = {
+            getattr(tool, "name", None)
+            for tool in existing
+            if getattr(tool, "name", None) is not None
+        }
+        seen_ids = {id(tool) for tool in existing}
+        for tool in tools:
+            name = getattr(tool, "name", None)
+            if name is not None:
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+            elif id(tool) in seen_ids:
+                continue
+            else:
+                seen_ids.add(id(tool))
+            existing.append(tool)
+    return merged
+
+
+def _mcp_note_retry_attempt(names) -> None:
+    """Stamp *names* as attempted now (before the load runs)."""
+    now = time.monotonic()
+    for name in names:
+        _MCP_TOOLS_CACHE_LAST_ATTEMPT[name] = now
+
+
+def _mcp_note_retry_result(attempted, failed: set[str]) -> None:
+    """Update per-server retry delays after an attempt.
+
+    A server that recovered goes back to the base delay; one that is
+    still failing doubles its delay (capped), so a server that is down
+    for good is retried less and less often.
+    """
+    for name in attempted:
+        if name in failed:
+            _MCP_FAILED_SERVER_RETRY_DELAY[name] = min(
+                _mcp_retry_delay(name) * 2, _MCP_FAILED_SERVER_RETRY_MAX_SECONDS
+            )
+        else:
+            _MCP_FAILED_SERVER_RETRY_DELAY.pop(name, None)
 
 
 def _retry_failed_mcp_servers(
@@ -307,46 +397,55 @@ def _retry_failed_mcp_servers(
     on_progress=None,
     *,
     runtime: "AsyncRuntime | None" = None,
+    only: set[str] | None = None,
 ) -> dict[str, list]:
     """Reload the servers whose last load failed and merge what now loads.
 
     Servers that already loaded keep their cached tools — only the failed
     ones are loaded again. A server that recovers is merged into the cache
     and bumps the cache generation, so graphs built from the failed load
-    get rebuilt.
+    get rebuilt. Callers must hold ``_MCP_TOOLS_CACHE_LOCK``.
     """
     global _MCP_TOOLS_CACHE_FAILED, _MCP_TOOLS_CACHE_GENERATION
-    global _MCP_TOOLS_CACHE_LAST_ATTEMPT, _MCP_TOOLS_CACHE_VALUE
+    global _MCP_TOOLS_CACHE_VALUE
 
     from .mcp import load_mcp_tools
 
-    subset = {name: cfg[name] for name in _MCP_TOOLS_CACHE_FAILED if name in cfg}
+    subset = {
+        name: cfg[name]
+        for name in (_MCP_TOOLS_CACHE_FAILED if only is None else only)
+        if name in cfg
+    }
     if not subset:
         _MCP_TOOLS_CACHE_FAILED = set()
         return _mcp_cache_copies()
 
     failed: set[str] = set()
+    succeeded: set[str] = set()
+    _mcp_note_retry_attempt(subset)
     loaded = load_mcp_tools(
         config=subset,
-        on_progress=_track_mcp_failures(on_progress, failed),
+        on_progress=_track_mcp_load_events(on_progress, failed, succeeded),
         runtime=runtime,
     )
-    _MCP_TOOLS_CACHE_LAST_ATTEMPT = time.monotonic()
+    # Servers that were not due for a retry stay failed; only the ones
+    # actually retried can leave the set.
+    still_failed = _MCP_TOOLS_CACHE_FAILED - set(subset)
     if not loaded:
-        # The load failed as a whole; every retried server stays failed.
-        _MCP_TOOLS_CACHE_FAILED = set(subset)
-        return _mcp_cache_copies()
+        # A load that returns {} is a whole-load failure only when no
+        # server reported success: a healthy server can also route to
+        # nothing (e.g. an empty ``expose_to``) and still report success.
+        _MCP_TOOLS_CACHE_FAILED = (failed if succeeded else set(subset)) | still_failed
+    else:
+        _MCP_TOOLS_CACHE_FAILED = failed | still_failed
+    _mcp_note_retry_result(subset, _MCP_TOOLS_CACHE_FAILED)
 
-    recovered = set(subset) - failed
-    if recovered:
+    recovered = set(subset) - _MCP_TOOLS_CACHE_FAILED
+    if recovered and loaded:
         # A failed server contributed no tools, so its tools simply append
         # to whatever the successful servers already provided per agent.
-        merged = _mcp_cache_copies()
-        for agent_name, tools in loaded.items():
-            merged.setdefault(agent_name, []).extend(tools)
-        _MCP_TOOLS_CACHE_VALUE = merged
+        _MCP_TOOLS_CACHE_VALUE = _merge_mcp_tools(_mcp_cache_copies(), loaded)
         _MCP_TOOLS_CACHE_GENERATION += 1
-    _MCP_TOOLS_CACHE_FAILED = failed
     return _mcp_cache_copies()
 
 
@@ -359,52 +458,79 @@ def _load_mcp_tools_cached(
 
     Args:
         on_progress: Optional per-server progress callback forwarded to
-            :func:`EvoScientist.mcp.load_mcp_tools`.  Only invoked on a
-            cache miss — cached replays don't re-emit progress events.
+            :func:`EvoScientist.mcp.load_mcp_tools`. Invoked on a cache
+            miss, and for failed servers when they are retried; a plain
+            cached replay emits nothing.
 
     A server whose load fails (or times out) is not cached as tool-less
-    for the life of the process: a later call, once
-    ``_MCP_FAILED_SERVER_RETRY_SECONDS`` has passed since the last
-    attempt, loads just the failed servers again and merges in whatever
-    they now provide.
+    for the life of the process: a later call, once that server's retry
+    delay has passed since its last attempt, loads just the failed
+    servers again and merges in whatever they now provide. The retry
+    delay doubles per server after each failed attempt (capped), and
+    resets when the server recovers.
+
+    Behaviour in the CLI/TUI: a cache-hit retry emits progress events
+    only for the servers it actually reloads — servers served from the
+    cache report nothing — so a load that only retries one server does
+    not re-print the whole server list.
     """
+    from .mcp import load_mcp_tools
+
+    with _MCP_TOOLS_CACHE_LOCK:
+        return _load_mcp_tools_cached_locked(load_mcp_tools, on_progress, runtime)
+
+
+def _load_mcp_tools_cached_locked(
+    load_mcp_tools, on_progress, runtime
+) -> dict[str, list]:
+    """``_load_mcp_tools_cached`` with ``_MCP_TOOLS_CACHE_LOCK`` held."""
     global _MCP_TOOLS_CACHE_FAILED, _MCP_TOOLS_CACHE_GENERATION
     global _MCP_TOOLS_CACHE_KEY, _MCP_TOOLS_CACHE_LAST_ATTEMPT
-    global _MCP_TOOLS_CACHE_VALUE
-
-    from .mcp import load_mcp_tools
+    global _MCP_TOOLS_CACHE_VALUE, _MCP_FAILED_SERVER_RETRY_DELAY
 
     cfg_key, cfg = _load_mcp_config_once()
     if not cfg_key:
+        if _MCP_TOOLS_CACHE_KEY:
+            # Tools were cached from a previous (non-empty) config; graphs
+            # built from them must be rebuilt without them.
+            _MCP_TOOLS_CACHE_GENERATION += 1
         _MCP_TOOLS_CACHE_KEY = ""
         _MCP_TOOLS_CACHE_VALUE = {}
         _MCP_TOOLS_CACHE_FAILED = set()
+        _MCP_TOOLS_CACHE_LAST_ATTEMPT = {}
+        _MCP_FAILED_SERVER_RETRY_DELAY = {}
         return {}
 
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
-        if not _MCP_TOOLS_CACHE_FAILED:
+        due = _mcp_retry_due_servers()
+        if not due:
             return _mcp_cache_copies()
-        if (
-            time.monotonic() - _MCP_TOOLS_CACHE_LAST_ATTEMPT
-            < _MCP_FAILED_SERVER_RETRY_SECONDS
-        ):
-            return _mcp_cache_copies()
-        return _retry_failed_mcp_servers(cfg, on_progress, runtime=runtime)
+        return _retry_failed_mcp_servers(cfg, on_progress, runtime=runtime, only=due)
 
     failed: set[str] = set()
+    succeeded: set[str] = set()
+    _mcp_note_retry_attempt(cfg)
     loaded = load_mcp_tools(
         config=cfg,
-        on_progress=_track_mcp_failures(on_progress, failed),
+        on_progress=_track_mcp_load_events(on_progress, failed, succeeded),
         runtime=runtime,
     )
-    if not loaded:
-        # The load failed as a whole (``load_mcp_tools`` returns {} only
-        # when loading raised); every configured server counts as failed.
+    if not loaded and not succeeded:
+        # The load failed as a whole (``load_mcp_tools`` returns {} with
+        # no server reporting success); every configured server counts
+        # as failed. A server that connected fine but routed no tools
+        # (e.g. an empty ``expose_to``) reports success, so it is not
+        # marked failed here.
         failed = set(cfg)
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     _MCP_TOOLS_CACHE_FAILED = failed
-    _MCP_TOOLS_CACHE_LAST_ATTEMPT = time.monotonic()
+    # A fresh full load resets per-server retry delays to the base: the
+    # first retry of a newly failed server waits the base delay, and the
+    # delay only doubles after a retry itself fails (see
+    # ``_retry_failed_mcp_servers``).
+    for name in cfg:
+        _MCP_FAILED_SERVER_RETRY_DELAY.pop(name, None)
     _MCP_TOOLS_CACHE_GENERATION += 1
     return _mcp_cache_copies()
 

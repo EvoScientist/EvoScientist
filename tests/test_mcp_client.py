@@ -2587,11 +2587,11 @@ class TestLoadToolsProgressCallback:
             ),
         ]
 
-    async def test_unresolved_node_server_in_langgraph_dev_names_server_stop(
+    async def test_unresolved_node_server_in_langgraph_dev_names_retry(
         self, monkeypatch, tmp_path
     ):
-        """The server keeps a failed load until it restarts, so EvoSci setup
-        alone does not bring the server's tools back."""
+        """A failed server is retried on a later run, so EvoSci setup can
+        bring the server's tools back without restarting the server."""
         from EvoScientist.mcp import client as mcp_client
 
         monkeypatch.setattr(paths, "SERVER_PROCESS", True)
@@ -2608,7 +2608,8 @@ class TestLoadToolsProgressCallback:
         )
 
         (failure,) = [e for e in events if e[0] == "error"]
-        assert "EvoSci server stop" in failure[2]
+        assert "EvoSci setup" in failure[2]
+        assert "retries this server on a later run" in failure[2]
 
     async def test_unresolved_node_server_alone_returns_its_failure(
         self, monkeypatch, tmp_path

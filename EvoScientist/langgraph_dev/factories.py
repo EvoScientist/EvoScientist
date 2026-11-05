@@ -147,6 +147,44 @@ def _mcp_tools_generation() -> int:
     return _mcp_tools_cache_generation()
 
 
+# Graphs whose builds load MCP tools (directly, or through the subagent
+# factory). Only these are invalidated when the MCP tool-cache
+# generation moves: the memory workers, the observation linker,
+# autoskills and the expert container never read MCP tools, so
+# rebuilding them on every recovery would be wasted work.
+MCP_GRAPH_IDS = frozenset(
+    {"EvoScientist", "writing-agent", "data-analysis-agent", "scheduler", "proactive"}
+)
+
+
+def _maybe_retry_failed_mcp_servers(graph_id: str, access: str) -> None:
+    """Retry failed MCP servers before a run is served, if one is due.
+
+    ``GraphCache.get`` only rebuilds a graph when the MCP generation has
+    moved, and the generation only moves when a retry actually runs — but
+    the retry itself only ran inside ``_load_mcp_tools_cached``, which a
+    cache hit never reaches. So a graph built while a server was down
+    would stay tool-less until some *other* graph was built for the
+    first time. A run start is the one access that may wait on the
+    network: check cheaply (a set lookup plus a clock read) whether any
+    failed server's retry delay has passed, and if so reload just those
+    servers under the build lock before the graph is served. State and
+    history reads never trigger a retry.
+    """
+    if access != "threads.create_run" or graph_id not in MCP_GRAPH_IDS:
+        return
+    from EvoScientist.EvoScientist import (
+        _load_mcp_tools_cached,
+        _mcp_retry_due_servers,
+    )
+
+    if not _mcp_retry_due_servers():
+        return
+    with GRAPHS._build_lock:
+        if _mcp_retry_due_servers():
+            _load_mcp_tools_cached()
+
+
 class GraphCache:
     """Built graphs by (graph, project, run folder).
 
@@ -174,10 +212,12 @@ class GraphCache:
             graph = self._graphs.get(key)
             if (
                 graph is not None
+                and key[0] in MCP_GRAPH_IDS
                 and self._generations.get(key) != _mcp_tools_generation()
             ):
                 # Built from a tool set the MCP cache has since replaced —
                 # e.g. a server that failed its first load has recovered.
+                # Graphs that never read MCP tools are not invalidated.
                 del self._graphs[key]
                 self._generations.pop(key, None)
                 return None
@@ -222,6 +262,7 @@ def _graph_for(
     dirs, stamp = resolve_folders(
         graph_id, access, configurable, registry.REGISTRY, bound
     )
+    _maybe_retry_failed_mcp_servers(graph_id, access)
     return GRAPHS.get(graph_id, dirs), stamp
 
 
