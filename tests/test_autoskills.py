@@ -1600,6 +1600,711 @@ def test_draft_linking_inside_its_folder_is_approved(tmp_path):
     assert installed.read_text(encoding="utf-8") == "print(1)\n"
 
 
+def test_approve_refuses_a_manifest_whose_names_disagree(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _submit_create(memory_dir, skills_dir, "decoy")
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    skill_md = folder / "SKILL.md"
+    skill_md.write_text(skill_md.read_text(encoding="utf-8") + "TODO\n", "utf-8")
+    _edit_manifest(memory_dir, "focused-validation", skill_name="decoy")
+
+    approved = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    reason = "Proposal folder, id and skill name must match"
+    assert approved["approved"] is False
+    assert approved["error"] == reason
+    assert target.error == reason
+    assert not (skills_dir / "decoy").exists()
+    assert not (skills_dir / "focused-validation").exists()
+
+
+def test_a_manifest_that_cannot_be_written_back_is_unreadable(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _edit_manifest(memory_dir, "focused-validation", description="bad \ud800")
+
+    approved = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+    rejected = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert list_skill_proposals(memory_dir) == []
+    assert approved["approved"] is False
+    assert rejected["rejected"] is False
+    assert not (skills_dir / "focused-validation").exists()
+
+
+def _fail_on_call(real, number, error):
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == number:
+            raise error
+        return real(*args, **kwargs)
+
+    return failing
+
+
+@pytest.mark.parametrize("step", ["second_file", "processed_mark", "manifest"])
+def test_a_failed_approval_of_a_new_skill_leaves_nothing_behind(
+    tmp_path, monkeypatch, step
+):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")
+    full = OSError(28, "No space left on device")
+    if step == "second_file":
+        monkeypatch.setattr(
+            module,
+            "_copy_file_atomic",
+            _fail_on_call(module._copy_file_atomic, 2, full),
+        )
+    elif step == "processed_mark":
+        monkeypatch.setattr(
+            module,
+            "mark_cluster_processed",
+            _fail_on_call(module.mark_cluster_processed, 1, full),
+        )
+    else:
+        real_write = module._write_manifest
+
+        def failing_write(path, payload):
+            if payload.get("status") == "approved":
+                raise full
+            return real_write(path, payload)
+
+        monkeypatch.setattr(module, "_write_manifest", failing_write)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        failed = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert failed["approved"] is False
+    assert failed["error"].startswith("Could not install the skill: ")
+    assert "No space left" in failed["error"]
+    assert not (skills_dir / "focused-validation").exists()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+    monkeypatch.undo()
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    assert (skills_dir / "focused-validation" / "scripts" / "check.py").is_file()
+
+
+def test_a_failed_fork_leaves_no_partial_fork(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _write_installed_skill(
+        global_skills, "paper-review", "Use when reviewing papers.", "# Global\n"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+
+    def partial_copytree(source, destination, *args, **kwargs):
+        Path(destination).mkdir(parents=True, exist_ok=True)
+        (Path(destination) / "SKILL.md").write_text("partial\n", encoding="utf-8")
+        assert (Path(destination) / "SKILL.md").is_file()
+        raise shutil.Error([("a", "b", "No space left on device")])
+
+    monkeypatch.setattr(module.shutil, "copytree", partial_copytree)
+
+    failed = approve_skill_proposal(
+        memory_dir, "paper-review", skills_dir=skills_dir, scope="workspace"
+    )
+
+    assert failed["approved"] is False
+    assert failed["error"].startswith("Could not install the skill: ")
+    assert not (skills_dir / "paper-review").exists()
+    monkeypatch.undo()
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    _approve_quietly(memory_dir, "paper-review", skills_dir, scope="workspace")
+    assert (skills_dir / "paper-review" / "SKILL.md").is_file()
+
+
+def test_a_failed_update_in_place_keeps_the_skill_and_says_so(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "paper-review", "Use when reviewing papers.", "# Old\n"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+    monkeypatch.setattr(
+        module,
+        "_copy_file_atomic",
+        _fail_on_call(module._copy_file_atomic, 1, OSError(5, "I/O error")),
+    )
+
+    failed = approve_skill_proposal(memory_dir, "paper-review", skills_dir=skills_dir)
+
+    assert failed["approved"] is False
+    assert "may already be changed" in failed["error"]
+    assert (installed / "SKILL.md").is_file()
+    assert _manifest(memory_dir, "paper-review")["status"] == "pending"
+
+
+def test_an_unreadable_provenance_refuses_before_any_write(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "paper-review", "Use when reviewing papers.", "# Old\n"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+
+    def bad_provenance(_path):
+        raise ValueError("month must be in 1..12")
+
+    monkeypatch.setattr(module, "_installed_provenance", bad_provenance)
+
+    failed = approve_skill_proposal(memory_dir, "paper-review", skills_dir=skills_dir)
+
+    assert failed["approved"] is False
+    assert "month must be in 1..12" in failed["error"]
+    assert "may already be changed" not in failed["error"]
+    assert "# Old" in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_a_folder_another_writer_created_is_never_removed(tmp_path, monkeypatch):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    destination = skills_dir / "focused-validation"
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self, *args, **kwargs):
+        if self == destination:
+            real_mkdir(self, parents=True)
+            (self / "theirs.txt").write_text("not ours\n", encoding="utf-8")
+            raise FileExistsError(17, "File exists", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert failed["approved"] is False
+    assert (destination / "theirs.txt").is_file()
+
+
+def test_a_blocked_copy_removes_the_folder_it_created(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    destination = skills_dir / "focused-validation"
+
+    def blocked(proposal_dir, target, *args, **kwargs):
+        return target / "outside"
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", blocked)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert "escapes its destination" in failed["error"]
+    assert not destination.exists()
+
+
+def test_an_exact_lookup_never_falls_back_to_a_prefix(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "paper-review-v2")
+
+    approved = approve_skill_proposal(
+        memory_dir, "paper-review", skills_dir=skills_dir, exact=True
+    )
+    rejected = reject_skill_proposal(memory_dir, "paper-review", exact=True)
+
+    assert approved["approved"] is False
+    assert rejected["rejected"] is False
+    assert list_skill_proposals(memory_dir)[0].status == "pending"
+
+
+def test_a_failed_approval_keeps_a_processed_mark_it_did_not_write(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _submit_create(memory_dir, skills_dir, "other-validation", cluster_hash="cluster-1")
+    reject_skill_proposal(memory_dir, "other-validation")
+    real_write = module._write_manifest
+
+    def failing_write(path, payload):
+        if payload.get("status") == "approved":
+            raise OSError(5, "I/O error")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", failing_write)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        failed = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert failed["approved"] is False
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+
+@pytest.mark.parametrize("appears", ["folder", "link"])
+def test_a_new_install_never_writes_into_a_path_that_appeared(
+    tmp_path, monkeypatch, appears
+):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    if appears == "link" and sys.platform == "win32":
+        pytest.skip("symlinks need privileges")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    destination = skills_dir / "focused-validation"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real_resolve = module._resolve_install
+
+    def resolve_then_another_writer(*args, **kwargs):
+        resolved = real_resolve(*args, **kwargs)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if appears == "folder":
+            destination.mkdir()
+            (destination / "theirs.txt").write_text("not ours\n", encoding="utf-8")
+        else:
+            destination.symlink_to(elsewhere, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(module, "_resolve_install", resolve_then_another_writer)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert failed["approved"] is False
+    assert list(elsewhere.iterdir()) == []
+    if appears == "folder":
+        assert sorted(p.name for p in destination.iterdir()) == ["theirs.txt"]
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+
+
+def test_an_update_whose_skill_vanished_is_refused_not_recreated(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "paper-review", "Use when reviewing papers.", "# Old\n"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+    real_resolve = module._resolve_install
+
+    def resolve_then_uninstall(*args, **kwargs):
+        resolved = real_resolve(*args, **kwargs)
+        shutil.rmtree(installed)
+        return resolved
+
+    monkeypatch.setattr(module, "_resolve_install", resolve_then_uninstall)
+
+    failed = approve_skill_proposal(memory_dir, "paper-review", skills_dir=skills_dir)
+
+    assert failed["approved"] is False
+    assert not installed.exists()
+
+
+def test_a_fork_into_a_folder_another_writer_created_leaves_it(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _write_installed_skill(
+        global_skills, "paper-review", "Use when reviewing papers.", "# Global\n"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+    destination = skills_dir / "paper-review"
+    real_mkdir = Path.mkdir
+
+    def racing_mkdir(self, *args, **kwargs):
+        if self == destination:
+            real_mkdir(self, parents=True)
+            (self / "theirs.txt").write_text("not ours\n", encoding="utf-8")
+            raise FileExistsError(17, "File exists", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    failed = approve_skill_proposal(
+        memory_dir, "paper-review", skills_dir=skills_dir, scope="workspace"
+    )
+
+    assert failed["approved"] is False
+    assert sorted(p.name for p in destination.iterdir()) == ["theirs.txt"]
+
+
+def test_approve_refuses_a_folder_named_unlike_its_draft(tmp_path):
+    """The CLI's prefix lookup can pick a folder whose manifest names another draft."""
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    other = tmp_path / "other"
+    other.mkdir()
+    _submit_create(memory_dir, other / "skills", "paper-review")
+    root = autoskill_proposals_dir(memory_dir)
+    shutil.copytree(root / "paper-review", root / "paper-review-copy")
+    copy_md = root / "paper-review-copy" / "SKILL.md"
+    copy_md.write_text(copy_md.read_text(encoding="utf-8") + "TODO\n", "utf-8")
+    manifest_path = root / "paper-review-copy" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["workspace_dir"] = str(tmp_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    approved = approve_skill_proposal(
+        memory_dir, "paper-review", skills_dir=skills_dir, workspace_dir=tmp_path
+    )
+
+    assert approved["approved"] is False
+    assert approved["error"] == "Proposal folder, id and skill name must match"
+    assert not (skills_dir / "paper-review").exists()
+
+
+def test_a_value_error_after_the_copy_leaves_nothing_behind(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_create(memory_dir, skills_dir, "focused-validation")
+    real_write = module._write_manifest
+
+    def unencodable(path, payload):
+        if payload.get("status") == "approved":
+            "\ud800".encode("utf-8")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", unencodable)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        failed = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert failed["approved"] is False
+    assert failed["error"].startswith("Could not install the skill: ")
+    assert not (skills_dir / "focused-validation").exists()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    base = _write_installed_skill(
+        global_skills, "fork-me", "Use when forking.", "# Global\n"
+    )
+    (base / "scripts").mkdir()
+    (base / "scripts" / "a.py").write_text("print(1)\n", encoding="utf-8")
+    (base / "scripts").chmod(0o555)
+    _write_skill_folder(memory_dir, "fork-me", "Use when forking.", "# Fork\n")
+    folder = autoskill_proposals_dir(memory_dir) / "fork-me"
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "new.py").write_text("print(2)\n", encoding="utf-8")
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="fork-me",
+        cluster_hash="cluster-fork",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Fork it.",
+        operation="update",
+        target_skill_name="fork-me",
+        skills_dir=skills_dir,
+        workspace_dir=tmp_path,
+    )
+    assert result["submitted"] is True
+    try:
+        failed = approve_skill_proposal(
+            memory_dir, "fork-me", skills_dir=skills_dir, scope="workspace"
+        )
+    finally:
+        (base / "scripts").chmod(0o755)
+
+    assert failed["approved"] is False
+    assert not (skills_dir / "fork-me").exists()
+
+
+def test_a_folder_that_cannot_be_removed_is_named_in_the_error(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    monkeypatch.setattr(
+        module,
+        "_copy_file_atomic",
+        _fail_on_call(module._copy_file_atomic, 1, OSError(28, "No space left")),
+    )
+    monkeypatch.setattr(module.shutil, "rmtree", lambda *args, **kwargs: None)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    destination = skills_dir / "focused-validation"
+    assert failed["approved"] is False
+    assert (
+        f"the partly installed folder {destination} could not be removed"
+        in (failed["error"])
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_approve_refuses_when_the_skill_folders_cannot_be_read(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    skills_dir.mkdir()
+    skills_dir.chmod(0o600)
+    try:
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+        target = proposal_install_target(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+    finally:
+        skills_dir.chmod(0o755)
+
+    assert approved["approved"] is False
+    if sys.version_info >= (3, 14):
+        # Path.exists answers False on a permission error; the mkdir then refuses.
+        assert approved["error"].startswith("Could not install the skill: ")
+    else:
+        assert approved["error"].startswith("Could not read the skill folders: ")
+        assert target.error.startswith("Could not read the skill folders: ")
+
+
+def test_a_corrupt_install_record_does_not_block_an_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "paper-review", "Use when reviewing papers.", "# Old\n"
+    )
+    (skills_dir / ".installed.yaml").write_text(
+        "paper-review: " + "[" * 5000 + "]" * 5000 + "\n", encoding="utf-8"
+    )
+    _submit_update(memory_dir, skills_dir, "paper-review")
+
+    _approve_quietly(memory_dir, "paper-review", skills_dir)
+
+    assert "Updated steps." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _mode(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, not root"
+)
+def test_a_cleanup_never_changes_files_behind_a_link(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    outside.chmod(0o644)
+
+    def link_then_fail(proposal_dir, destination):
+        # Inside a read-only folder the link outlives the first removal.
+        (destination / "ro").mkdir()
+        (destination / "ro" / "link.txt").symlink_to(outside)
+        (destination / "ro").chmod(0o555)
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", link_then_fail)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert failed["approved"] is False
+    assert _mode(outside) == 0o644
+    assert not (skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_a_cleanup_never_walks_a_folder_swapped_for_a_link(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+    (outside / "keep.txt").chmod(0o644)
+
+    def swap_then_fail(proposal_dir, destination):
+        destination.rmdir()
+        destination.symlink_to(outside, target_is_directory=True)
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", swap_then_fail)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert "could not be removed" in failed["error"]
+    assert _mode(outside / "keep.txt") == 0o644
+
+
+def test_a_manifest_holding_nan_is_unreadable(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace('"skill_name": "focused-validation"', '"skill_name": NaN'),
+        encoding="utf-8",
+    )
+
+    rejected = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert list_skill_proposals(memory_dir) == []
+    assert rejected["rejected"] is False
+    assert "NaN" in path.read_text(encoding="utf-8")
+    assert '"status": "pending"' in path.read_text(encoding="utf-8")
+
+
+def test_gone_counts_only_a_missing_path_as_removed(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills.proposals import _gone
+
+    there = tmp_path / "there"
+    there.mkdir()
+    real_lstat = os.lstat
+
+    def failing_lstat(path, *args, **kwargs):
+        if Path(path) == there:
+            raise OSError(5, "I/O error")
+        return real_lstat(path, *args, **kwargs)
+
+    assert _gone(tmp_path / "missing") is True
+    assert _gone(there) is False
+    monkeypatch.setattr(os, "lstat", failing_lstat)
+    assert _gone(there) is False
+
+
+def test_a_cleanup_that_cannot_check_reports_the_leftover(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    destination = skills_dir / "focused-validation"
+    monkeypatch.setattr(
+        module,
+        "_copy_file_atomic",
+        _fail_on_call(module._copy_file_atomic, 1, OSError(28, "No space left")),
+    )
+    real_lstat, real_stat = os.lstat, os.stat
+
+    def unreadable(real):
+        def call(path, *args, **kwargs):
+            if Path(path) == destination and not destination_check_ok:
+                raise OSError(5, "I/O error")
+            return real(path, *args, **kwargs)
+
+        return call
+
+    destination_check_ok = True
+    real_rmtree = module.shutil.rmtree
+
+    def rmtree_then_break_stat(path, *args, **kwargs):
+        nonlocal destination_check_ok
+        destination_check_ok = False
+        return None
+
+    monkeypatch.setattr(os, "lstat", unreadable(real_lstat))
+    monkeypatch.setattr(os, "stat", unreadable(real_stat))
+    monkeypatch.setattr(module.shutil, "rmtree", rmtree_then_break_stat)
+
+    failed = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert real_rmtree is not None
+    assert failed["approved"] is False
+    assert (
+        f"the partly installed folder {destination} could not be removed"
+        in (failed["error"])
+    )
+
+
+def test_a_failed_mark_rollback_is_reported(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    real_write = module._write_manifest
+
+    def failing_write(path, payload):
+        if payload.get("status") == "approved":
+            raise OSError(5, "I/O error")
+        return real_write(path, payload)
+
+    def failing_unmark(*_args, **_kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(module, "_write_manifest", failing_write)
+    monkeypatch.setattr(module, "unmark_cluster_processed", failing_unmark)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        failed = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert failed["approved"] is False
+    assert "the processed mark could not be removed" in failed["error"]
+
+
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

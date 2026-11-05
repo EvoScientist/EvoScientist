@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -113,6 +114,9 @@ def proposal_virtual_path(skill_name: str) -> str:
 def _read_manifest(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        # A value no decision could write back or send (a lone surrogate, NaN)
+        # makes the manifest corrupt.
+        json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (OSError, ValueError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
@@ -732,24 +736,77 @@ def copied_files(proposal_dir: Path) -> list[Path]:
     return sorted(files)
 
 
-def _copy_proposed_skill(
-    proposal_dir: Path,
-    destination: Path,
-    *,
-    base_dir: Path | None = None,
-) -> Path | None:
+def _create_destination(destination: Path, *, must_create: bool) -> bool:
+    """Make the install folder; True when this call created it.
+
+    A new skill or a fork needs a path no one else holds, so anything already
+    there (a folder or a link) raises FileExistsError and is left alone. An
+    in-place update writes into the skill it resolved, which must still exist.
+    """
+    if not must_create:
+        if not destination.is_dir():
+            raise FileNotFoundError(
+                errno.ENOENT,
+                "The skill to update is no longer installed",
+                str(destination),
+            )
+        return False
+    destination.mkdir(parents=True)
+    return True
+
+
+def _gone(path: Path) -> bool:
+    """Whether nothing is left at ``path``; an error checking it counts as left."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _plain_lstat(path: Path, *, directory: bool) -> bool:
+    try:
+        return _plain(path.lstat(), directory=directory)
+    except OSError:
+        return False
+
+
+def _remove_created(folder: Path) -> bool:
+    """Remove a folder this approval created; False if any of it may be left."""
+    try:
+        shutil.rmtree(folder, ignore_errors=True)
+        if _gone(folder):
+            return True
+        # A copy of a read-only skill keeps its files until its folders are
+        # writable; only real folders and files are touched, never a link.
+        if not _plain_lstat(folder, directory=True):
+            return False
+        for dirpath, dirnames, filenames in os.walk(folder):
+            base = Path(dirpath)
+            with contextlib.suppress(OSError):
+                os.chmod(base, stat.S_IRWXU)
+            dirnames[:] = [
+                name for name in dirnames if _plain_lstat(base / name, directory=True)
+            ]
+            for name in [*dirnames, *filenames]:
+                entry = base / name
+                if _plain_lstat(entry, directory=name in dirnames):
+                    with contextlib.suppress(OSError):
+                        os.chmod(entry, stat.S_IRWXU)
+        shutil.rmtree(folder, ignore_errors=True)
+        return _gone(folder)
+    except OSError:
+        return False
+
+
+def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     """Copy proposal files, returning a blocked path before any unsafe write."""
     copies = [
         (proposal_dir / relative, destination / relative)
         for relative in copied_files(proposal_dir)
     ]
-
-    if not destination.exists():
-        if base_dir is not None:
-            shutil.copytree(base_dir, destination)
-        else:
-            destination.mkdir(parents=True, exist_ok=False)
-
     resolved_destination = destination.resolve()
     safe_copies: list[tuple[Path, Path]] = []
     for source_path, target in copies:
@@ -975,6 +1032,7 @@ def _proposal_dir_by_id(
     proposal_id: str,
     *,
     workspace_dir: str | Path | None = None,
+    exact: bool = False,
 ) -> Path | None:
     requested = proposal_id.strip()
     if not requested:
@@ -985,6 +1043,8 @@ def _proposal_dir_by_id(
     for proposal in proposals:
         if proposal.proposal_id == requested and proposal.path.name == requested:
             return proposal.path
+    if exact:
+        return None
     matches = [
         proposal.path
         for proposal in proposals
@@ -1016,6 +1076,7 @@ class InstallTarget:
 
 def _resolve_install(
     memory_dir: str | Path,
+    proposal_dir: Path,
     manifest: dict[str, Any],
     *,
     skills_dir: str | Path,
@@ -1062,6 +1123,15 @@ def _resolve_install(
     skill_name = str(manifest.get("skill_name", "")).strip()
     if sanitize_skill_name(skill_name) != skill_name:
         return refuse({"approved": False, "error": "Proposal skill name is invalid"})
+    # Validation reads proposals/<skill_name> while the copy reads this folder.
+    if proposal_dir.name != skill_name or manifest.get("proposal_id") != skill_name:
+        return refuse(
+            {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "error": "Proposal folder, id and skill name must match",
+            }
+        )
     operation = _normalize_operation(manifest.get("operation")) or "create"
     target_skill_name = str(manifest.get("target_skill_name") or skill_name).strip()
     valid, errors, _description = _validate_skill_proposal_dir(
@@ -1302,10 +1372,51 @@ def proposal_install_target(
             workspace_shadow=None,
             error=f"No proposal named {proposal_id!r}",
         )
-    target, _failure = _resolve_install(
-        memory_dir, manifest, skills_dir=skills_dir, scope=scope
-    )
+    try:
+        target, _failure = _resolve_install(
+            memory_dir, proposal.path, manifest, skills_dir=skills_dir, scope=scope
+        )
+    except (OSError, ValueError, RecursionError) as exc:
+        return InstallTarget(
+            scope=None,
+            path=None,
+            base_path=None,
+            workspace_shadow=None,
+            error=f"Could not read the skill folders: {exc}",
+        )
     return target
+
+
+def _record_approval(
+    manifest: dict[str, Any],
+    *,
+    approved_by: str,
+    destination: Path,
+    scope: str,
+    workspace_shadow: Path | None,
+    provenance: dict[str, str] | None,
+) -> None:
+    if provenance:
+        manifest["upstream_source"] = provenance["source"]
+        if provenance.get("commit"):
+            manifest["upstream_commit"] = provenance["commit"]
+        else:
+            manifest.pop("upstream_commit", None)
+    else:
+        manifest.pop("upstream_source", None)
+        manifest.pop("upstream_commit", None)
+    manifest["status"] = "approved"
+    manifest["updated_at"] = _now()
+    manifest["approved_by"] = approved_by
+    manifest["approved_at"] = manifest["updated_at"]
+    manifest["approved_skill_path"] = str(destination)
+    # The tier the skill was actually installed into, which an approval may
+    # override.
+    manifest["scope"] = scope
+    if workspace_shadow is not None:
+        manifest["workspace_shadow"] = str(workspace_shadow)
+    else:
+        manifest.pop("workspace_shadow", None)
 
 
 def approve_skill_proposal(
@@ -1316,6 +1427,7 @@ def approve_skill_proposal(
     workspace_dir: str | Path | None = None,
     scope: str | None = None,
     approved_by: Literal["user", "auto"] = "user",
+    exact: bool = False,
 ) -> dict[str, Any]:
     """Promote one pending proposal into the tier its manifest records.
 
@@ -1323,12 +1435,14 @@ def approve_skill_proposal(
     here; the approval re-checks that the skill is still installed there and
     never falls back to another tier. ``scope`` overrides the recorded tier
     explicitly, which is how a proposal written before scopes existed is
-    confirmed to install into the global tier.
+    confirmed to install into the global tier. An approval that fails leaves
+    no folder it created behind, and the manifest is written last.
     """
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
         workspace_dir=workspace_dir,
+        exact=exact,
     )
     if proposal_dir is None:
         return {
@@ -1339,9 +1453,16 @@ def approve_skill_proposal(
     manifest = _read_manifest(manifest_path)
     if manifest is None:
         return {"approved": False, "error": "Proposal manifest is missing or invalid"}
-    target, failure = _resolve_install(
-        memory_dir, manifest, skills_dir=skills_dir, scope=scope
-    )
+    try:
+        target, failure = _resolve_install(
+            memory_dir, proposal_dir, manifest, skills_dir=skills_dir, scope=scope
+        )
+    except (OSError, ValueError, RecursionError) as exc:
+        return {
+            "approved": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "error": f"Could not read the skill folders: {exc}",
+        }
     if failure is not None:
         return failure
     assert target.path is not None
@@ -1354,46 +1475,76 @@ def approve_skill_proposal(
     # A fork copies the global skill first; an in-place update starts from itself.
     base_skill_dir = target.base_path if target.base_path != destination else None
 
-    blocked_path = _copy_proposed_skill(
-        proposal_dir, destination, base_dir=base_skill_dir
-    )
-    if blocked_path is not None:
+    def install_failed(
+        error: str, *, changed: bool, leftover: Path | None, mark_left: bool = False
+    ) -> dict[str, Any]:
+        if changed:
+            error += " (the installed skill may already be changed)"
+        if leftover is not None:
+            error += f"; the partly installed folder {leftover} could not be removed"
+        if mark_left:
+            error += "; the processed mark could not be removed"
         return {
             "approved": False,
             "proposal_id": manifest["proposal_id"],
-            "error": f"Skill install path escapes its destination: {blocked_path}",
+            "error": error,
             "scope": target_scope,
         }
 
     provenance_path = (
         destination if operation == "update" and base_skill_dir is None else None
     )
-    upstream_provenance = _installed_provenance(provenance_path)
-    if upstream_provenance:
-        manifest["upstream_source"] = upstream_provenance["source"]
-        if upstream_provenance.get("commit"):
-            manifest["upstream_commit"] = upstream_provenance["commit"]
-        else:
-            manifest.pop("upstream_commit", None)
-    else:
-        manifest.pop("upstream_source", None)
-        manifest.pop("upstream_commit", None)
-
-    manifest["status"] = "approved"
-    manifest["updated_at"] = _now()
-    manifest["approved_by"] = approved_by
-    manifest["approved_at"] = manifest["updated_at"]
-    manifest["approved_skill_path"] = str(destination)
-    # The tier the skill was actually installed into. An approval may
-    # override the tier the proposal recorded, and the manifest has to show
-    # where the skill went.
-    manifest["scope"] = target_scope
-    if workspace_shadow is not None:
-        manifest["workspace_shadow"] = str(workspace_shadow)
-    else:
-        manifest.pop("workspace_shadow", None)
-    _write_manifest(manifest_path, manifest)
-    mark_cluster_processed(memory_dir, str(manifest["cluster_hash"]))
+    cluster_hash = str(manifest["cluster_hash"])
+    mark_left = False
+    try:
+        upstream_provenance = _installed_provenance(provenance_path)
+        created = _create_destination(
+            destination, must_create=target.base_path != destination
+        )
+    except (OSError, ValueError, RecursionError) as exc:
+        return install_failed(
+            f"Could not install the skill: {exc}", changed=False, leftover=None
+        )
+    try:
+        if created and base_skill_dir is not None:
+            shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
+        blocked_path = _copy_proposed_skill(proposal_dir, destination)
+        if blocked_path is None:
+            _record_approval(
+                manifest,
+                approved_by=approved_by,
+                destination=destination,
+                scope=target_scope,
+                workspace_shadow=workspace_shadow,
+                provenance=upstream_provenance,
+            )
+            had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
+            mark_cluster_processed(memory_dir, cluster_hash)
+            try:
+                # The manifest is the commit point, so it is written last.
+                _write_manifest(manifest_path, manifest)
+            except (OSError, ValueError):
+                if not had_mark:
+                    try:
+                        unmark_cluster_processed(memory_dir, cluster_hash)
+                    except OSError:
+                        mark_left = True
+                raise
+    except (OSError, ValueError) as exc:
+        leftover = destination if created and not _remove_created(destination) else None
+        return install_failed(
+            f"Could not install the skill: {exc}",
+            changed=not created,
+            leftover=leftover,
+            mark_left=mark_left,
+        )
+    if blocked_path is not None:
+        leftover = destination if created and not _remove_created(destination) else None
+        return install_failed(
+            f"Skill install path escapes its destination: {blocked_path}",
+            changed=False,
+            leftover=leftover,
+        )
     _notify_approved_skill()
     return {
         "approved": True,
@@ -1583,12 +1734,14 @@ def reject_skill_proposal(
     proposal_id: str,
     *,
     workspace_dir: str | Path | None = None,
+    exact: bool = False,
 ) -> dict[str, Any]:
     """Mark one pending proposal rejected."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
         workspace_dir=workspace_dir,
+        exact=exact,
     )
     if proposal_dir is None:
         return {
