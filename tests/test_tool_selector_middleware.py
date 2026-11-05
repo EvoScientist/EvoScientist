@@ -826,6 +826,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
     else:
         monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-test")
         monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "max")
     captured = {}
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -886,6 +887,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     assert "response_format" not in captured
     assert captured["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured
     assert captured["tool_choice"]["function"]["name"] == "ToolSelectionResponse"
     assert selected == ["tool_1"]
 

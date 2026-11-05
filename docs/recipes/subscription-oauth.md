@@ -112,7 +112,7 @@ Your browser opens OpenAI's sign-in page and returns to a local callback on `loc
 EvoSci config set openai_auth_mode oauth
 EvoSci config set provider         openai
 EvoSci config set model            gpt-6-sol
-EvoSci config set reasoning_effort high     # optional; see note below
+EvoSci config set reasoning_effort xhigh    # optional; see note below
 ```
 
 In this mode every `openai` model uses your plan: the main model, the auxiliary model and any OpenAI entry in the fallback chain. `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `EVOSCIENTIST_USE_RESPONSES_API` are ignored while it is on.
@@ -127,7 +127,7 @@ The '<model>' model is not supported when using Codex with a ChatGPT account.
 
 EvoScientist counts a 272K context window for models on this route, so a conversation whose main model is one of them is summarized before it reaches that size (as a fallback model, it gets the main model's budget). The backend accepts longer input, but every turn resends the whole context against your plan's usage limits; 272K is Codex's own default for most of these models.
 
-> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, plus `default`, which keeps EvoScientist's level for each model); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
+> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, with `high`, the level used when none is set, highlighted); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
 
 ### 4. Machines without a browser
 
