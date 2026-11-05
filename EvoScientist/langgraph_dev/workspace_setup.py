@@ -86,6 +86,7 @@ async def restore_registration(workspace: Workspace, *, was_set_up: bool) -> Non
     await asyncio.to_thread(registry.REGISTRY.set_registered, workspace.key, True)
     if was_set_up:
         SET_UP.add(workspace.key)
+    await _reconcile_autoskills(workspace)
 
 
 async def _import_old_store(workspace: Workspace) -> None:
