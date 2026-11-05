@@ -435,47 +435,29 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
             status_code=409,
         )
     was_set_up = workspace.key in workspace_setup.SET_UP
-    await workspace_setup.unregister_workspace(workspace)
     try:
-        await server_runs.cancel_project_runs(workspace)
         await server_crons.delete_crons(
             [cron["cron_id"] for cron in server_crons.system_crons(crons)]
         )
+        await workspace_setup.unregister_workspace(workspace)
+        await server_runs.cancel_project_runs(workspace)
     except BaseException:
-        await asyncio.to_thread(REGISTRY.set_registered, workspace.key, True)
-        if was_set_up:
-            workspace_setup.SET_UP.add(workspace.key)
+        await workspace_setup.restore_registration(workspace, was_set_up=was_set_up)
         raise
     return JSONResponse({"workspace_dir": workspace.key})
 
 
-_unregister_tasks: set[asyncio.Task[JSONResponse]] = set()
-
-
-async def _unregister_locked(workspace: Workspace) -> JSONResponse:
-    try:
-        async with workspace_setup.registration_lock():
-            return await _unregister(workspace)
-    except Exception as exc:
-        logger.exception("Could not unregister %s.", workspace.key)
-        return JSONResponse(
-            {"error": "unregister_failed", "detail": str(exc)}, status_code=500
-        )
-
-
-def _unregister_finished(task: asyncio.Task[JSONResponse]) -> None:
-    _unregister_tasks.discard(task)
-    if not task.cancelled() and (exc := task.exception()) is not None:
-        logger.error("Unregister task failed: %s", exc, exc_info=exc)
-
-
 async def unregister_workspace(request: Request) -> JSONResponse:
-    """Unregister the project in the ``workspace_dir`` query parameter.
+    """Unregister the project in the workspace_dir query parameter.
 
-    Its folder, threads, assistants and user crons all stay; its AutoSkills
-    and proactive crons are deleted (their reconciles recreate them).
-    Refused (``409``) while it has an enabled user cron, also when its folder
-    is missing: a client disables or deletes those first. Waits for a
+    Pending and running runs on its assistants and bound legacy threads are
+    interrupted. Its folder, threads, assistants and user crons all stay;
+    its AutoSkills and proactive crons are deleted (their reconciles recreate
+    them). A run may already be partly interrupted if deletion or cancellation
+    fails; in that case registration is restored and the request answers 500.
+    A disconnected client does not stop the server from completing this
+    request. Refused (409) while it has an enabled user cron, also when its
+    folder is missing: a client disables or deletes those first. Waits for a
     registration in progress. Needs the local secret.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
@@ -487,10 +469,14 @@ async def unregister_workspace(request: Request) -> JSONResponse:
     )
     if workspace is None:
         return JSONResponse({"error": "invalid_path"}, status_code=400)
-    task = asyncio.create_task(_unregister_locked(workspace))
-    _unregister_tasks.add(task)
-    task.add_done_callback(_unregister_finished)
-    return await asyncio.shield(task)
+    try:
+        async with workspace_setup.registration_lock():
+            return await _unregister(workspace)
+    except Exception as exc:
+        logger.exception("Could not unregister %s.", workspace.key)
+        return JSONResponse(
+            {"error": "unregister_failed", "detail": str(exc)}, status_code=500
+        )
 
 
 async def get_settings(_request: Request) -> JSONResponse:

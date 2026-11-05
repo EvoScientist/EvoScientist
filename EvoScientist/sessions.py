@@ -1771,6 +1771,41 @@ def thread_binding(thread_id: str) -> SessionDirs | None:
     return dirs
 
 
+def workspace_thread_bindings() -> dict[str, SessionDirs]:
+    """Read every persisted thread binding in one SQLite snapshot.
+
+    A malformed stored path is skipped and logged; database read failures are
+    raised because they must not be mistaken for an empty binding set.
+    """
+    try:
+        conn = sqlite3.connect(get_db_path(), timeout=30.0)
+        try:
+            rows = conn.execute(_BINDING_ROWS).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.ProgrammingError:
+        raise
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return {}
+        raise ThreadBindingError(f"Could not read conversation folders: {exc}") from exc
+    except (sqlite3.Error, OSError) as exc:
+        raise ThreadBindingError(f"Could not read conversation folders: {exc}") from exc
+
+    bindings: dict[str, SessionDirs] = {}
+    for thread_id, workspace_dir, run_dir in rows:
+        dirs = SessionDirs.from_stored(workspace_dir, run_dir)
+        if dirs is None:
+            _logger.warning(
+                "Skipping conversation %s with unreadable stored workspace %r.",
+                thread_id,
+                workspace_dir,
+            )
+            continue
+        bindings[thread_id] = dirs
+    return bindings
+
+
 def _without_folders(config: Any) -> Any:
     """*config* with no ``workspace_dir`` / ``run_dir`` in ``configurable`` or
     ``metadata``, the two the saver copies into checkpoint metadata."""
