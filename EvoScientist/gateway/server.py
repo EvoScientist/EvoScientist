@@ -194,30 +194,18 @@ class _PauseStateReadError(RuntimeError):
     """``threads.get_state`` failed after a pause; leave the run paused."""
 
 
-def _is_id_keyed_hitl_resume(response: object) -> bool:
-    """True for a HITL resume payload keyed by interrupt id.
-
-    ``build_hitl_resume`` produces ``{interrupt_id: {"decisions": [...]}}``.
-    ask_user resumes (``{"status": "cancelled"}``,
-    ``{"answers": [...], "status": "answered"}``) are single-key too but key
-    by their own schema, not the interrupt id.
-    """
-    if not isinstance(response, Mapping) or len(response) != 1:
-        return False
-    (value,) = response.values()
-    return isinstance(value, Mapping) and "decisions" in value
-
-
 def _resume_target(
     thread_id: str, response: object, pending: list[str]
 ) -> tuple[str, object]:
     """The pending interrupt *response* answers, and the answer itself.
 
     A single-key payload keyed by a pending id answers that interrupt
-    (``build_hitl_resume`` keys approvals that way). A HITL payload keyed by
-    any other id is a client bug (stale or hand-built id) and raises. Any other
-    payload, ask_user's ``{"status": "cancelled"}`` included, answers the only
-    pending interrupt.
+    (``build_hitl_resume`` keys approvals that way). A single-key payload whose
+    value is a mapping, keyed by any other id, is an answer keyed by a stale or
+    hand-built id and raises: answering the pending interrupt with it would
+    pass the wrapper as the answer. Any other payload answers the only pending
+    interrupt: ask_user's ``{"status": "cancelled"}`` (a string value) and
+    ``{"answers": [...], "status": "answered"}`` (two keys) are not keyed.
     """
     if not pending:
         raise RuntimeError(
@@ -227,7 +215,7 @@ def _resume_target(
         (key,) = response
         if str(key) in pending:
             return str(key), response[key]
-        if _is_id_keyed_hitl_resume(response):
+        if isinstance(response[key], Mapping):
             raise RuntimeError(
                 f"Resume payload key {key} does not match a pending interrupt "
                 f"on thread {thread_id}"

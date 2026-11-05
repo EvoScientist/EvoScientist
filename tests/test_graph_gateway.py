@@ -2365,8 +2365,17 @@ async def test_server_gateway_resume_answers_the_pending_interrupt_not_a_replaye
     assert [start["input"] for start in stream.run.starts] == [{"interrupt-2": answer}]
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"decisions": [{"allowed": True}]}, id="approval"),
+        pytest.param({"answers": ["yes"], "status": "answered"}, id="ask-user"),
+    ],
+)
 @pytest.mark.parametrize("pending", [["interrupt-1"], ["interrupt-a", "interrupt-b"]])
-async def test_langgraph_server_gateway_resume_raises_on_id_mismatch(pending):
+async def test_langgraph_server_gateway_resume_raises_on_id_mismatch(pending, answer):
+    """An answer keyed by an id that is not pending is not unwrapped onto the
+    pending interrupt, whatever the answer's shape."""
     from langgraph.types import Command
 
     gateway, stream = _resume_gateway(*pending)
@@ -2375,13 +2384,27 @@ async def test_langgraph_server_gateway_resume_raises_on_id_mismatch(pending):
         await _resume(
             gateway,
             RunRequest(
-                message=Command(
-                    resume={"stale-interrupt": {"decisions": [{"allowed": True}]}}
-                ),
+                message=Command(resume={"stale-interrupt": answer}),
                 thread_id="abc12345",
             ),
         )
     assert stream.run.starts == []
+
+
+async def test_langgraph_server_gateway_resume_answers_a_single_key_list_payload():
+    """``{"answers": [...]}`` alone is single-key but not keyed by an id."""
+    from langgraph.types import Command
+
+    gateway, stream = _resume_gateway("interrupt-1")
+
+    await _resume(
+        gateway,
+        RunRequest(message=Command(resume={"answers": ["yes"]}), thread_id="abc12345"),
+    )
+
+    assert [start["input"] for start in stream.run.starts] == [
+        {"interrupt-1": {"answers": ["yes"]}}
+    ]
 
 
 async def test_langgraph_server_gateway_resume_keys_a_non_hitl_single_key_payload(
