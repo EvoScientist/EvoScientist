@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -462,6 +463,43 @@ async def get_autoskill_proposal_file(request: Request) -> Response:
     return JSONResponse(body, status_code=status)
 
 
+async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
+    """Approve, reject or revert one AutoSkills draft; needs the local secret.
+
+    See :func:`~EvoScientist.langgraph_dev.autoskills_api.decide`.
+    """
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except (ValueError, RecursionError):
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid_body"}, status_code=400)
+    status, payload = await asyncio.to_thread(
+        autoskills_api.decide,
+        request.path_params["proposal_id"],
+        action,
+        scope=body.get("scope"),
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+async def approve_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "approve")
+
+
+async def reject_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "reject")
+
+
+async def revert_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "revert")
+
+
 async def _unregister(workspace: Workspace) -> JSONResponse:
     from EvoScientist.langgraph_dev import server_crons, server_runs
     from EvoScientist.langgraph_dev.registry import REGISTRY
@@ -666,6 +704,21 @@ def _build_app() -> Starlette:
                 "/api/autoskills/proposals/{proposal_id}/file",
                 get_autoskill_proposal_file,
                 methods=["GET"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/approve",
+                approve_autoskill_proposal,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/reject",
+                reject_autoskill_proposal,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/revert",
+                revert_autoskill_proposal,
+                methods=["POST"],
             ),
             Route("/api/ccproxy/ensure", ensure_ccproxy, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),

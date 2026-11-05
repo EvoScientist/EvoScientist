@@ -1,8 +1,8 @@
 """AutoSkills drafts for the WebUI's review page.
 
 Each function returns ``(status, payload)`` for a thin handler in
-:mod:`~EvoScientist.langgraph_dev.http`. They read files synchronously, so
-the handlers call them in a thread. Only drafts of served projects that
+:mod:`~EvoScientist.langgraph_dev.http`. They read and write files
+synchronously, so the handlers call them in a thread. Only drafts of served projects that
 :func:`~EvoScientist.memory.autoskills.proposals.find_skill_proposal` reaches
 are listed or read, so the page shows exactly what an approval would use.
 """
@@ -13,18 +13,22 @@ import json
 import logging
 import os
 import stat
+import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 
 from EvoScientist import paths
-from EvoScientist.langgraph_dev import registry
+from EvoScientist.langgraph_dev import folder_check, registry
 from EvoScientist.memory.autoskills.proposals import (
     InstallTarget,
     SkillProposal,
+    approve_skill_proposal,
     copied_files,
     find_skill_proposal,
     list_skill_proposals,
     proposal_install_target,
+    reject_skill_proposal,
+    revert_skill_proposal,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,25 @@ MAX_FILE_BYTES = 1_048_576
 _STATUSES = ("pending", "approved", "rejected")
 _SCOPES = (None, "workspace", "global")
 _APPROVERS = frozenset({"user", "auto"})
+_APPROVED_KEYS = (
+    "approved",
+    "proposal_id",
+    "skill_name",
+    "operation",
+    "path",
+    "scope",
+    "workspace_shadow",
+    "upstream_source",
+)
+_REVERT_STATUS = {
+    "not_found": 404,
+    "not_decided": 409,
+    "revert_unavailable": 409,
+    "skill_changed": 409,
+    "revert_failed": 409,
+}
+# One decision at a time, so two tabs approving one draft install it once.
+_DECISIONS = threading.Lock()
 
 
 def _project_key(workspace_dir: object) -> str | None:
@@ -283,3 +306,122 @@ def read_draft_file(
     if not _inside(path, folder):
         return 400, {"error": "invalid_path"}
     return _read_text(path)
+
+
+def _refusal_detail(result: dict[str, Any]) -> str:
+    detail = str(result.get("error") or "")
+    if result.get("errors"):
+        detail += ": " + "; ".join(str(item) for item in result["errors"])
+    return detail
+
+
+def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Map a refusal of approve or reject to the routes' error codes."""
+    error = str(result.get("error") or "")
+    if error.startswith("Only pending proposals"):
+        return 409, {"error": "not_pending", "status": result.get("status")}
+    if error.startswith("scope must be"):
+        return 400, {"error": "invalid_scope"}
+    return 409, {"error": f"{action}_failed", "detail": _refusal_detail(result)}
+
+
+def _apply(
+    proposal: SkillProposal,
+    workspace: paths.Workspace,
+    action: str,
+    scope: str | None,
+) -> tuple[int, dict[str, Any]]:
+    if action == "approve":
+        result = approve_skill_proposal(
+            paths.MEMORIES_DIR,
+            proposal.proposal_id,
+            skills_dir=workspace.skills_dir,
+            workspace_dir=workspace.root,
+            scope=scope,
+            approved_by="user",
+            exact=True,
+        )
+        if result.get("approved"):
+            return 200, {key: result.get(key) for key in _APPROVED_KEYS}
+        return _refused(action, result)
+    if action == "reject":
+        result = reject_skill_proposal(
+            paths.MEMORIES_DIR,
+            proposal.proposal_id,
+            workspace_dir=workspace.root,
+            exact=True,
+        )
+        if result.get("rejected"):
+            return 200, {
+                "rejected": True,
+                "proposal_id": result.get("proposal_id"),
+                "skill_name": result.get("skill_name"),
+            }
+        return _refused(action, result)
+    result = revert_skill_proposal(paths.MEMORIES_DIR, proposal.proposal_id)
+    if result.get("reverted"):
+        return 200, {
+            "reverted": True,
+            "proposal_id": result.get("proposal_id"),
+            "status": "pending",
+        }
+    code = str(result.get("error"))
+    payload: dict[str, Any] = {"error": code}
+    if code == "revert_failed":
+        payload["detail"] = str(result.get("detail") or "")
+    return _REVERT_STATUS.get(code, 409), payload
+
+
+def _decide_locked(
+    proposal_id: str, action: str, scope: str | None
+) -> tuple[int, dict[str, Any]]:
+    proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
+    if proposal is None:
+        return 404, {"error": "not_found"}
+    key = _project_key(proposal.workspace_dir)
+    if key is None:
+        return 409, {"error": "no_project"}
+    workspace = paths.Workspace(key)
+    try:
+        served = folder_check.is_served(workspace, registry.REGISTRY)
+    except OSError:
+        # As the list does: a project folder the server cannot stat is not served.
+        served = False
+    if not served:
+        return 409, {"error": "project_not_served"}
+    return _apply(proposal, workspace, action, scope)
+
+
+def _sendable(payload: dict[str, Any]) -> dict[str, Any]:
+    """A path in a refusal may hold a lone surrogate, which JSON cannot carry."""
+    return {
+        key: value.encode("utf-8", "backslashreplace").decode("utf-8")
+        if isinstance(value, str)
+        else value
+        for key, value in payload.items()
+    }
+
+
+def decide(
+    proposal_id: str,
+    action: Literal["approve", "reject", "revert"],
+    *,
+    scope: object = None,
+) -> tuple[int, dict[str, Any]]:
+    """Approve, reject or revert one draft of a served project."""
+    if action == "approve" and scope is not None and scope not in _SCOPES:
+        return 400, {"error": "invalid_scope"}
+    with _DECISIONS:
+        try:
+            status, payload = _decide_locked(
+                proposal_id, action, scope if isinstance(scope, str) else None
+            )
+        except Exception as exc:
+            # One failed decision answers the client instead of failing the request.
+            logger.warning("Could not %s draft %s.", action, proposal_id, exc_info=True)
+            status = 409
+            payload = {
+                "error": f"{action}_failed",
+                "detail": str(exc) or type(exc).__name__,
+            }
+    return status, _sendable(payload)

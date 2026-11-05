@@ -757,3 +757,526 @@ def test_read_routes_need_no_secret(server, served):
     assert local_secret.HEADER not in server.headers
     assert server.get("/api/autoskills/proposals").status_code == 200
     assert _file(server, "focused-validation", "SKILL.md").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/autoskills/proposals/{id}/approve | reject | revert
+# ---------------------------------------------------------------------------
+
+_APPROVED_KEYS = {
+    "approved",
+    "proposal_id",
+    "skill_name",
+    "operation",
+    "path",
+    "scope",
+    "workspace_shadow",
+    "upstream_source",
+}
+
+
+@pytest.fixture
+def secret(server) -> dict[str, str]:
+    value = (paths.SERVER_HOME / local_secret.FILE_NAME).read_text()
+    return {local_secret.HEADER: value}
+
+
+@pytest.fixture
+def quiet_skill_index(monkeypatch):
+    """Approving and reverting refresh the skill index; no index here."""
+    monkeypatch.setattr(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill",
+        lambda: None,
+    )
+
+
+def _decide(server, name: str, action: str, headers=None, **body):
+    return server.post(
+        f"/api/autoskills/proposals/{name}/{action}",
+        json=body,
+        headers=headers or {},
+    )
+
+
+@pytest.mark.parametrize("action", ["approve", "reject", "revert"])
+def test_decision_routes_need_the_secret(server, served, action):
+    _draft(served, "focused-validation")
+
+    response = _decide(server, "focused-validation", action)
+
+    assert response.status_code == 403
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_installs_into_the_drafts_project(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == _APPROVED_KEYS
+    assert body["approved"] is True
+    assert body["scope"] == "workspace"
+    assert body["path"] == str(served.skills_dir / "focused-validation")
+    assert (served.skills_dir / "focused-validation" / "SKILL.md").is_file()
+    draft = _only_draft(server)
+    assert draft["status"] == "approved"
+    assert draft["approved_by"] == "user"
+
+
+def test_approve_route_global_scope(server, served, secret, quiet_skill_index):
+    _draft(served, "focused-validation")
+
+    response = _decide(server, "focused-validation", "approve", secret, scope="global")
+
+    assert response.status_code == 200
+    assert response.json()["scope"] == "global"
+    assert (paths.GLOBAL_SKILLS_DIR / "focused-validation" / "SKILL.md").is_file()
+    assert not (served.skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.parametrize("scope", ["bogus", "Global", 5, ["workspace"]])
+def test_approve_route_refuses_an_unknown_scope(server, served, secret, scope):
+    _draft(served, "focused-validation")
+
+    response = _decide(server, "focused-validation", "approve", secret, scope=scope)
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_scope"}
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_picks_the_exact_id(server, served, secret, quiet_skill_index):
+    _draft(served, "paper-review")
+    _draft(served, "paper-review-v2")
+
+    response = _decide(server, "paper-review", "approve", secret)
+
+    assert response.status_code == 200
+    assert response.json()["proposal_id"] == "paper-review"
+    statuses = {
+        d["proposal_id"]: d["status"]
+        for d in server.get("/api/autoskills/proposals").json()["proposals"]
+    }
+    assert statuses == {"paper-review": "approved", "paper-review-v2": "pending"}
+
+
+def test_approve_route_not_pending(server, served, secret, quiet_skill_index):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "approve", secret)
+
+    again = _decide(server, "focused-validation", "approve", secret)
+    rejected = _decide(server, "focused-validation", "reject", secret)
+
+    assert again.status_code == 409
+    assert again.json() == {"error": "not_pending", "status": "approved"}
+    assert rejected.status_code == 409
+    assert rejected.json() == {"error": "not_pending", "status": "approved"}
+
+
+@pytest.mark.parametrize("gone", ["unregistered", "folder_missing"])
+def test_decisions_on_a_project_not_served(server, served, secret, projects, gone):
+    _draft(served, "focused-validation")
+    if gone == "unregistered":
+        projects.set_registered(served.key, False)
+    else:
+        shutil.rmtree(served.root)
+
+    for action in ("approve", "reject", "revert"):
+        response = _decide(server, "focused-validation", action, secret)
+        assert response.status_code == 409
+        assert response.json() == {"error": "project_not_served"}
+    assert not (served.skills_dir / "focused-validation").exists()
+
+
+def test_decisions_on_a_draft_without_a_project(server, served, secret):
+    _draft(served, "focused-validation")
+    _edit_manifest("focused-validation", workspace_dir="")
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "no_project"}
+
+
+@pytest.mark.parametrize("action", ["approve", "reject", "revert"])
+@pytest.mark.parametrize("name", ["no-such", "Bad..Id"])
+def test_decisions_on_an_unknown_draft(server, served, secret, action, name):
+    response = _decide(server, name, action, secret)
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found"}
+
+
+@pytest.mark.parametrize("raw", [b"[1]", b"not json", b'"scope"'])
+def test_decision_routes_refuse_a_body_that_is_not_an_object(
+    server, served, secret, raw
+):
+    _draft(served, "focused-validation")
+
+    response = server.post(
+        "/api/autoskills/proposals/focused-validation/approve",
+        content=raw,
+        headers={**secret, "content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_body"}
+
+
+def test_decision_routes_accept_an_empty_body(server, served, secret):
+    _draft(served, "focused-validation")
+
+    response = server.post(
+        "/api/autoskills/proposals/focused-validation/reject", headers=secret
+    )
+
+    assert response.status_code == 200
+
+
+def test_approve_route_reports_the_refusal_in_detail(server, served, secret):
+    _draft(served, "focused-validation")
+    _installed_skill(served.skills_dir, "focused-validation")
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "approve_failed"
+    assert body["detail"].startswith("Skill already exists")
+
+
+def test_approve_route_reports_why_a_draft_folder_is_invalid(server, served, secret):
+    _draft(served, "focused-validation")
+    skill_md = (
+        autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
+    )
+    skill_md.write_text(skill_md.read_text(encoding="utf-8") + "TODO\n", "utf-8")
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail.startswith("Proposal skill folder is invalid: ")
+    assert "TODO" in detail
+
+
+def test_reject_then_revert_routes(server, served, secret):
+    _draft(served, "focused-validation")
+
+    rejected = _decide(server, "focused-validation", "reject", secret)
+    reverted = _decide(server, "focused-validation", "revert", secret)
+    again = _decide(server, "focused-validation", "revert", secret)
+
+    assert rejected.status_code == 200
+    assert rejected.json() == {
+        "rejected": True,
+        "proposal_id": "focused-validation",
+        "skill_name": "focused-validation",
+    }
+    assert reverted.status_code == 200
+    assert reverted.json() == {
+        "reverted": True,
+        "proposal_id": "focused-validation",
+        "status": "pending",
+    }
+    assert again.status_code == 409
+    assert again.json() == {"error": "not_decided"}
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_revert_route_removes_a_new_skill(server, served, secret, quiet_skill_index):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "approve", secret)
+
+    response = _decide(server, "focused-validation", "revert", secret)
+
+    assert response.status_code == 200
+    assert not (served.skills_dir / "focused-validation").exists()
+
+
+def test_revert_route_refusals(server, served, secret, quiet_skill_index):
+    _installed_skill(paths.GLOBAL_SKILLS_DIR, "paper-review")
+    _draft(served, "paper-review", operation="update")
+    _decide(server, "paper-review", "approve", secret)
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "approve", secret)
+    skill_md = served.skills_dir / "focused-validation" / "SKILL.md"
+    skill_md.write_text(skill_md.read_text(encoding="utf-8") + "Mine.\n", "utf-8")
+
+    update = _decide(server, "paper-review", "revert", secret)
+    changed = _decide(server, "focused-validation", "revert", secret)
+
+    assert update.status_code == 409
+    assert update.json() == {"error": "revert_unavailable"}
+    assert changed.status_code == 409
+    assert changed.json() == {"error": "skill_changed"}
+    assert skill_md.is_file()
+
+
+def test_revert_route_reports_a_failed_removal(server, served, secret, monkeypatch):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    monkeypatch.setattr(
+        autoskills_api,
+        "revert_skill_proposal",
+        lambda _memory_dir, proposal_id: {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "revert_failed",
+            "detail": "file in use",
+        },
+    )
+
+    response = _decide(server, "focused-validation", "revert", secret)
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "revert_failed", "detail": "file in use"}
+
+
+@pytest.mark.parametrize("action", ["approve", "reject", "revert"])
+@pytest.mark.parametrize("error", [OSError, ValueError, RuntimeError])
+def test_a_decision_that_raises_is_reported_not_500(
+    server, served, secret, monkeypatch, action, error
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+
+    def raising(*_args, **_kwargs):
+        raise error("disk full")
+
+    monkeypatch.setattr(autoskills_api, f"{action}_skill_proposal", raising)
+
+    response = _decide(server, "focused-validation", action, secret)
+
+    assert response.status_code == 409
+    assert response.json() == {"error": f"{action}_failed", "detail": "disk full"}
+
+
+def test_a_refusal_naming_an_unencodable_path_is_still_sent(
+    server, served, secret, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    monkeypatch.setattr(
+        autoskills_api,
+        "approve_skill_proposal",
+        lambda *args, **kwargs: {
+            "approved": False,
+            "error": "Skill already exists: /skills/caf\udce9",
+        },
+    )
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "approve_failed",
+        "detail": "Skill already exists: /skills/caf\\udce9",
+    }
+
+
+def test_approve_route_installs_into_the_drafts_own_project(
+    server, workspace, secret, projects, tmp_path, quiet_skill_index
+):
+    other = Workspace(tmp_path / "aaa-other")
+    other.root.mkdir()
+    projects.set_registered(other.key, True)
+    projects.set_registered(workspace.key, True)
+    _draft(workspace, "focused-validation")
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 200
+    assert response.json()["path"] == str(workspace.skills_dir / "focused-validation")
+    assert not (other.skills_dir / "focused-validation").exists()
+
+
+def test_approve_route_reports_the_tier_and_the_shadow(
+    server, served, secret, quiet_skill_index
+):
+    _installed_skill(paths.GLOBAL_SKILLS_DIR, "paper-review", body="Global.")
+    _draft(served, "paper-review", operation="update", body="Updated.")
+    _installed_skill(served.skills_dir, "paper-review", body="Local copy.")
+
+    body = _decide(server, "paper-review", "approve", secret).json()
+
+    assert body["scope"] == "global"
+    assert body["workspace_shadow"] == str(served.skills_dir / "paper-review")
+
+
+def test_approve_route_reports_the_upstream_source(
+    server, served, secret, quiet_skill_index
+):
+    from EvoScientist.tools.skills_manager import _save_manifest
+
+    _installed_skill(served.skills_dir, "paper-review", body="Old.")
+    _save_manifest(served.skills_dir, {"paper-review": {"source": "owner/repo"}})
+    _draft(served, "paper-review", operation="update", body="New.")
+
+    body = _decide(server, "paper-review", "approve", secret).json()
+
+    assert body["upstream_source"] == "owner/repo"
+
+
+def test_decision_routes_check_the_secret_before_the_body(server, served):
+    _draft(served, "focused-validation")
+
+    response = server.post(
+        "/api/autoskills/proposals/focused-validation/approve",
+        content=b"not json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_a_deeply_nested_body_is_an_invalid_body(server, served, secret):
+    _draft(served, "focused-validation")
+
+    response = server.post(
+        "/api/autoskills/proposals/focused-validation/approve",
+        content=b"[" * 100_000 + b"]" * 100_000,
+        headers={**secret, "content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_body"}
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_a_project_the_server_cannot_stat_is_not_served(
+    server, served, secret, tmp_path
+):
+    _draft(served, "focused-validation")
+    tmp_path.chmod(0o600)
+    try:
+        response = _decide(server, "focused-validation", "approve", secret)
+    finally:
+        tmp_path.chmod(0o755)
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "project_not_served"}
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_a_decision_never_falls_back_to_a_prefix_match(
+    server, served, secret, monkeypatch, tmp_path, action, quiet_skill_index
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "paper-review")
+    _draft(served, "paper-review-v2")
+    root = autoskill_proposals_dir(paths.MEMORIES_DIR)
+    real_find = autoskills_api.find_skill_proposal
+
+    def find_then_lose_the_folder(memory_dir, proposal_id):
+        found = real_find(memory_dir, proposal_id)
+        shutil.move(root / "paper-review", tmp_path / "moved-away")
+        return found
+
+    monkeypatch.setattr(
+        autoskills_api, "find_skill_proposal", find_then_lose_the_folder
+    )
+
+    response = _decide(server, "paper-review", action, secret)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == f"{action}_failed"
+    manifest = json.loads((root / "paper-review-v2" / "manifest.json").read_text())
+    assert manifest["status"] == "pending"
+
+
+def test_approve_route_leaves_nothing_after_a_failed_copy(
+    server, served, secret, monkeypatch, quiet_skill_index
+):
+    from EvoScientist.memory.autoskills import proposals
+
+    _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    calls = []
+    real_copy = proposals._copy_file_atomic
+
+    def full_disk(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(proposals, "_copy_file_atomic", full_disk)
+
+    response = _decide(server, "focused-validation", "approve", secret)
+
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("Could not install the skill: ")
+    assert not (served.skills_dir / "focused-validation").exists()
+    draft = _only_draft(server)
+    assert draft["status"] == "pending"
+    assert draft["install_error"] is None
+
+
+def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_index):
+    import threading
+    import time
+
+    from EvoScientist.langgraph_dev import autoskills_api
+    from EvoScientist.memory.autoskills import proposals
+
+    _draft(served, "focused-validation")
+    real_copy = proposals._copy_proposed_skill
+    copies = []
+
+    def slow_copy(*args, **kwargs):
+        # Both approvals would pass the pending check before either writes.
+        copies.append(1)
+        time.sleep(0.2)
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(proposals, "_copy_proposed_skill", slow_copy)
+    results = []
+
+    def approve():
+        results.append(autoskills_api.decide("focused-validation", "approve"))
+
+    threads = [threading.Thread(target=approve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(status for status, _ in results) == [200, 409]
+    refused = next(payload for status, payload in results if status == 409)
+    assert refused == {"error": "not_pending", "status": "approved"}
+    assert len(copies) == 1
+
+
+def test_decisions_run_off_the_event_loop(server, served, secret, monkeypatch):
+    import asyncio
+
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    on_loop = []
+    real = autoskills_api.decide
+
+    def recording(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(autoskills_api, "decide", recording)
+    _decide(server, "focused-validation", "reject", secret)
+
+    assert on_loop == [False]
