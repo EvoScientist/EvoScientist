@@ -106,24 +106,35 @@ def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
 
 def _files(folder: Path, base: Path | None) -> list[dict[str, Any]]:
     """Every file an approval copies; metadata never follows a link outside."""
+    try:
+        relatives = copied_files(folder)
+    except OSError:
+        # A pending draft's dry run reports the unreadable folder as install_error.
+        return []
     entries = []
-    for relative in copied_files(folder):
+    for relative in relatives:
         path = folder / relative
         try:
             size = (path.stat() if _inside(path, folder) else path.lstat()).st_size
         except OSError:
             continue
-        candidate = base / relative if base is not None else None
         entries.append(
             {
                 "path": relative.as_posix(),
                 "size": size,
-                "installed": candidate is not None
-                and _inside(candidate, base)
-                and candidate.is_file(),
+                "installed": base is not None and _installed(base, relative),
             }
         )
     return entries
+
+
+def _installed(base: Path, relative: Path) -> bool:
+    """Whether the installed skill has this file, inside its folder."""
+    candidate = base / relative
+    try:
+        return _inside(candidate, base) and candidate.is_file()
+    except OSError:
+        return False
 
 
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
@@ -252,7 +263,11 @@ def read_draft_file(
     if proposal is None or key is None:
         return 404, {"error": "not_found"}
     folder = proposal.path.resolve()
-    if relative not in {path.as_posix() for path in copied_files(folder)}:
+    try:
+        names = {path.as_posix() for path in copied_files(folder)}
+    except OSError:
+        return 404, {"error": "not_found"}
+    if relative not in names:
         return 404, {"error": "not_found"}
     if installed:
         target = _install_target(proposal, key)
@@ -260,7 +275,10 @@ def read_draft_file(
             return 404, {"error": "not_found"}
         folder = target.base_path.resolve()
     path = folder / relative
-    if not path.is_file():
+    try:
+        if not path.is_file():
+            return 404, {"error": "not_found"}
+    except OSError:
         return 404, {"error": "not_found"}
     if not _inside(path, folder):
         return 400, {"error": "invalid_path"}

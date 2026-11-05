@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -466,14 +467,19 @@ def _validate_skill_proposal_dir(
         return False, errors, None
 
     proposal_dir = _proposal_root(memory_dir) / skill_name
-    if not proposal_dir.is_dir():
+    skill_md = proposal_dir / "SKILL.md"
+    try:
+        has_dir = proposal_dir.is_dir()
+        has_skill_md = has_dir and _is_regular_file(skill_md)
+    except OSError as exc:
+        errors.append(f"Cannot read proposal files: {exc}")
+        return False, errors, None
+    if not has_dir:
         errors.append(
             f"Missing proposal directory: {proposal_virtual_path(skill_name)}"
         )
         return False, errors, None
-
-    skill_md = proposal_dir / "SKILL.md"
-    if not skill_md.is_file():
+    if not has_skill_md:
         errors.append(f"Missing {proposal_virtual_path(skill_name)}/SKILL.md")
         return False, errors, None
 
@@ -530,9 +536,18 @@ def _validate_skill_proposal_dir(
     # An approval copies a linked file's target; one outside the draft would be
     # installed without being part of what is reviewed.
     resolved_dir = proposal_dir.resolve()
-    for relative in copied_files(proposal_dir):
-        if not _resolves_within_root(proposal_dir / relative, resolved_dir):
-            errors.append(f"Proposal file links outside its folder: {relative}")
+    try:
+        for relative in copied_files(proposal_dir):
+            if not _resolves_within_root(proposal_dir / relative, resolved_dir):
+                errors.append(
+                    f"Proposal file links outside its folder: {relative.as_posix()}"
+                )
+            else:
+                # A file the copy could not read would leave a half-installed
+                # skill; non-blocking, so a FIFO swapped in cannot hang the check.
+                os.close(os.open(proposal_dir / relative, _OPEN_FLAGS))
+    except OSError as exc:
+        errors.append(f"Cannot read proposal files: {exc}")
 
     return not errors, errors, description_text
 
@@ -677,16 +692,43 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
             pass
 
 
+# Errors Path.is_file reads as "no file" (a broken or looping link), as pathlib does.
+_NO_FILE_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_NO_FILE_WINERRORS = frozenset({21, 123, 1921})
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _is_regular_file(path: Path) -> bool:
+    """``Path.is_file``, but a permission or I/O error raises on every Python."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except OSError as exc:
+        if (
+            exc.errno in _NO_FILE_ERRNOS
+            or getattr(exc, "winerror", None) in _NO_FILE_WINERRORS
+        ):
+            return False
+        raise
+    except ValueError:
+        return False
+
+
 def copied_files(proposal_dir: Path) -> list[Path]:
-    """The draft's files an approval copies, relative to the draft folder."""
+    """The draft's files an approval copies, relative to the draft folder.
+
+    A folder that cannot be read raises, so no draft is approved short of files.
+    """
     files: list[Path] = []
-    for source_path in proposal_dir.rglob("*"):
-        if not source_path.is_file():
-            continue
-        relative = source_path.relative_to(proposal_dir)
-        if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
-            continue
-        files.append(relative)
+    for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
+        base = Path(dirpath)
+        for name in filenames:
+            source_path = base / name
+            if not _is_regular_file(source_path):
+                continue
+            relative = source_path.relative_to(proposal_dir)
+            if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+                continue
+            files.append(relative)
     return sorted(files)
 
 

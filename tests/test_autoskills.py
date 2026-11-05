@@ -1345,15 +1345,20 @@ def test_unreadable_skill_md_is_refused_not_raised(tmp_path, skill_md):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
-def test_draft_linking_outside_its_folder_is_refused(tmp_path):
+@pytest.mark.parametrize("link_to", ["outside", "sibling_draft"])
+def test_draft_linking_outside_its_folder_is_refused(tmp_path, link_to):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
     folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "secret.txt").write_text("not for the skill\n", encoding="utf-8")
-    (folder / "notes.txt").symlink_to(outside / "secret.txt")
+    if link_to == "outside":
+        linked = tmp_path / "outside" / "secret.txt"
+    else:
+        linked = autoskill_proposals_dir(memory_dir) / "other-draft" / "SKILL.md"
+    linked.parent.mkdir(parents=True)
+    linked.write_text("not for the skill\n", encoding="utf-8")
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "notes.txt").symlink_to(linked)
 
     approved = approve_skill_proposal(
         memory_dir, "focused-validation", skills_dir=skills_dir
@@ -1370,11 +1375,186 @@ def test_draft_linking_outside_its_folder_is_refused(tmp_path):
         skills_dir=skills_dir,
     )
 
+    reason = "Proposal file links outside its folder: scripts/notes.txt"
     assert approved["approved"] is False
-    assert any("outside its folder" in error for error in approved["errors"])
-    assert "outside its folder" in target.error
+    assert reason in approved["errors"]
+    assert reason in target.error
     assert resubmitted["submitted"] is False
+    assert reason in resubmitted["errors"]
     assert not (skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+@pytest.mark.parametrize(
+    "mode", [0o600, 0o300, 0o000], ids=["no-search", "no-list", "no-access"]
+)
+def test_draft_folder_it_cannot_read_is_refused_not_raised(tmp_path, mode):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    locked = autoskill_proposals_dir(memory_dir) / "focused-validation" / "scripts"
+    locked.mkdir()
+    (locked / "check.py").write_text("print(1)\n", encoding="utf-8")
+    locked.chmod(mode)
+    try:
+        resubmitted = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="focused-validation",
+            cluster_hash="cluster-1",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Again.",
+            skills_dir=skills_dir,
+        )
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+        target = proposal_install_target(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+    finally:
+        locked.chmod(0o755)
+
+    assert resubmitted["submitted"] is False
+    assert any("Cannot read proposal files" in e for e in resubmitted["errors"])
+    assert approved["approved"] is False
+    assert "Cannot read proposal files" in target.error
+    assert not (skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_draft_file_it_cannot_read_is_refused_before_anything_is_copied(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / "scripts").mkdir()
+    secret = folder / "scripts" / "secret.txt"
+    secret.write_text("x\n", encoding="utf-8")
+    secret.chmod(0o000)
+    try:
+        resubmitted = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="focused-validation",
+            cluster_hash="cluster-1",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Again.",
+            skills_dir=skills_dir,
+        )
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+    finally:
+        secret.chmod(0o644)
+
+    assert resubmitted["submitted"] is False
+    assert any("Cannot read proposal files" in e for e in resubmitted["errors"])
+    assert approved["approved"] is False
+    assert not (skills_dir / "focused-validation").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_draft_folder_itself_unsearchable_is_refused_not_raised(tmp_path, monkeypatch):
+    # Python 3.14's Path.is_file answers False on a permission error.
+    monkeypatch.setattr(Path, "is_file", lambda self: os.path.isfile(self))
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    folder.chmod(0o600)
+    try:
+        resubmitted = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="focused-validation",
+            cluster_hash="cluster-1",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Again.",
+            skills_dir=skills_dir,
+        )
+    finally:
+        folder.chmod(0o755)
+
+    assert resubmitted["submitted"] is False
+    assert any("Cannot read proposal files" in e for e in resubmitted["errors"])
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_unsearchable_folder_is_refused_where_is_file_hides_errors(
+    tmp_path, monkeypatch
+):
+    # Python 3.14's Path.is_file answers False on a permission error.
+    monkeypatch.setattr(Path, "is_file", lambda self: os.path.isfile(self))
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    locked = autoskill_proposals_dir(memory_dir) / "focused-validation" / "scripts"
+    locked.mkdir()
+    (locked / "check.py").write_text("print(1)\n", encoding="utf-8")
+    locked.chmod(0o600)
+    try:
+        target = proposal_install_target(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+    finally:
+        locked.chmod(0o755)
+
+    assert target.path is None
+    assert "Cannot read proposal files" in target.error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks and FIFOs")
+def test_entries_that_are_no_files_are_skipped_not_refused(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / "broken").symlink_to(folder / "missing")
+    (folder / "loop").symlink_to("loop")
+    (folder / "through-a-file").symlink_to("SKILL.md/x")
+    os.mkfifo(folder / "fifo")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        approved = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert approved["approved"] is True
+    installed = skills_dir / "focused-validation"
+    assert sorted(p.name for p in installed.iterdir()) == ["SKILL.md"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="FIFOs")
+@pytest.mark.timeout(10)
+def test_validation_never_blocks_on_a_fifo(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    os.mkfifo(folder / "fifo")
+    real = module._is_regular_file
+    # Stands in for a FIFO swapped in after the walk looked at the entry.
+    monkeypatch.setattr(
+        module, "_is_regular_file", lambda path: path.name == "fifo" or real(path)
+    )
+
+    target = proposal_install_target(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert target.path is not None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
@@ -1399,7 +1579,10 @@ def test_draft_folder_link_is_not_followed(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
 def test_draft_linking_inside_its_folder_is_approved(tmp_path):
-    memory_dir = tmp_path / "memories"
+    # Memories reached through a link, as when the data folder is a symlink.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "data").symlink_to(tmp_path / "real", target_is_directory=True)
+    memory_dir = tmp_path / "data" / "memories"
     skills_dir = tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
     folder = autoskill_proposals_dir(memory_dir) / "focused-validation"

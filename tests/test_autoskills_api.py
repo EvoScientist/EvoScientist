@@ -517,20 +517,85 @@ def test_list_survives_an_unreadable_rationale(server, served):
     assert response.json()["proposals"][0]["rationale_md"] == ""
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
-def test_list_metadata_never_follows_a_link_outside(server, served, tmp_path):
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_list_shows_why_a_draft_folder_cannot_be_read(server, served):
+    _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    locked = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    locked = locked / "scripts"
+    locked.chmod(0o600)
+    try:
+        listed = server.get("/api/autoskills/proposals")
+        read = _file(server, "focused-validation", "SKILL.md")
+    finally:
+        locked.chmod(0o755)
+
+    assert listed.status_code == 200
+    draft = listed.json()["proposals"][0]
+    assert "Cannot read proposal files" in draft["install_error"]
+    assert draft["files"] == []
+    assert read.status_code == 404
+    assert read.json() == {"error": "not_found"}
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_list_survives_an_installed_skill_it_cannot_search(server, served):
+    base = paths.GLOBAL_SKILLS_DIR / "paper-review"
     _installed_skill(paths.GLOBAL_SKILLS_DIR, "paper-review")
-    _draft(served, "paper-review", operation="update", files={"notes.md": "n\n"})
+    (base / "scripts").mkdir()
+    (base / "scripts" / "new.py").write_text("print(1)\n", encoding="utf-8")
+    _draft(
+        served,
+        "paper-review",
+        operation="update",
+        files={"scripts/new.py": "print(2)\n"},
+    )
+    (base / "scripts").chmod(0o600)
+    try:
+        listed = server.get("/api/autoskills/proposals")
+        read = _file(server, "paper-review", "scripts/new.py", installed="1")
+    finally:
+        (base / "scripts").chmod(0o755)
+
+    assert listed.status_code == 200
+    files = {f["path"]: f for f in listed.json()["proposals"][0]["files"]}
+    assert files["scripts/new.py"]["installed"] is False
+    assert read.status_code == 404
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_list_never_reports_the_size_of_a_draft_link_outside(server, served, tmp_path):
+    _draft(served, "focused-validation")
     outside = tmp_path / "outside.md"
     outside.write_text("x" * 12345, encoding="utf-8")
-    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "paper-review"
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
     (folder / "big.md").symlink_to(outside)
-    (paths.GLOBAL_SKILLS_DIR / "paper-review" / "notes.md").symlink_to(outside)
 
     draft = _only_draft(server)
 
     files = {f["path"]: f for f in draft["files"]}
     assert files["big.md"]["size"] != 12345
+    assert "outside its folder" in draft["install_error"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_installed_flag_never_follows_a_link_out_of_the_skill(server, served, tmp_path):
+    _installed_skill(paths.GLOBAL_SKILLS_DIR, "paper-review")
+    _draft(served, "paper-review", operation="update", files={"notes.md": "n\n"})
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    (paths.GLOBAL_SKILLS_DIR / "paper-review" / "notes.md").symlink_to(outside)
+
+    draft = _only_draft(server)
+
+    assert draft["install_base"] is not None
+    files = {f["path"]: f for f in draft["files"]}
+    assert files["SKILL.md"]["installed"] is True
     assert files["notes.md"]["installed"] is False
 
 
