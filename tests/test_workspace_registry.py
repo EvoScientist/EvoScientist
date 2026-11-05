@@ -752,7 +752,7 @@ async def test_cancel_project_runs_includes_bound_threads(
             yield item
 
     async def search_runs(_conn, thread_id, *, status, limit, offset):
-        assert thread_id == threads[0]
+        assert thread_id == str(threads[0])
         return rows([{"run_id": r} for r in runs[status][offset : offset + limit]])
 
     async def cancel(_conn, run_ids=None, *, assistant_id=None, thread_id=None):
@@ -774,7 +774,7 @@ async def test_cancel_project_runs_includes_bound_threads(
 
     assert {str(a) for a, _, _ in cancelled if a} == workspace_assistant_ids(workspace)
     assert [(t, ids) for _, t, ids in cancelled if t] == [
-        (threads[0], runs["pending"] + runs["running"])
+        (str(threads[0]), runs["pending"] + runs["running"])
     ]
 
 
@@ -811,7 +811,7 @@ async def test_unregister_route_interrupts_runtime_runs(
             await anext(rows)
         rows = await Runs.put(
             conn,
-            "00000000-0000-0000-0000-000000000000",
+            workspace_assistant_id("EvoScientist", other),
             {"config": {}},
             thread_id=legacy_thread,
             run_id=uuid4(),
@@ -833,9 +833,13 @@ async def test_unregister_route_interrupts_runtime_runs(
 
     from EvoScientist.langgraph_dev import server_runs
 
-    monkeypatch.setattr(server_runs, "workspace_thread_bindings", lambda: {
-        str(legacy_thread): SessionDirs(workspace),
-    })
+    monkeypatch.setattr(
+        server_runs,
+        "workspace_thread_bindings",
+        lambda: {
+            str(legacy_thread): SessionDirs(workspace),
+        },
+    )
     from langgraph_runtime_inmem import ops
 
     monkeypatch.setattr(ops, "get_stream_manager", lambda: StreamManager())
@@ -852,7 +856,9 @@ async def test_unregister_route_interrupts_runtime_runs(
 
     assert response.status_code == 200
     assert [run["status"] for run in runtime_store["runs"]] == [
-        "interrupted", "pending", "interrupted"
+        "interrupted",
+        "pending",
+        "interrupted",
     ]
     assert len(messages) == 2
     assert not projects.is_registered(workspace.key)
