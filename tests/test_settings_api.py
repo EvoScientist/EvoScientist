@@ -38,6 +38,16 @@ def config_file() -> Path:
 
 @pytest.fixture
 def server(monkeypatch, no_workspace_setup):
+    from EvoScientist.langgraph_dev import workspace_setup
+
+    async def no_reconcile():
+        return 0, []
+
+    # A saved AutoSkills setting reconciles every project's cron in the
+    # background, which needs the runtime's store.
+    monkeypatch.setattr(
+        workspace_setup, "reconcile_autoskills_everywhere", no_reconcile
+    )
     monkeypatch.setattr(local_secret, "_value", None)
     # As the server's start does (langgraph_dev.checkpointer).
     settings_api.capture_restart_baseline()
@@ -316,6 +326,37 @@ class TestPatch:
         assert response.status_code == 200
         assert response.json()["restart_required"] is True
         assert field in response.json()["restart_fields"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("memory_skill_synthesis_enabled", False),
+            ("memory_skill_synthesis_mode", "auto"),
+            ("memory_skill_synthesis_cadence", "nightly"),
+            ("memory_skill_synthesis_time", "04:30"),
+        ],
+    )
+    def test_autoskills_fields_apply_without_restart(
+        self, server, secret, field, value
+    ):
+        with _no_checks():
+            response = server.patch(
+                "/api/settings", json={field: value}, headers=secret
+            )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] is False
+        assert field not in server.get("/api/settings").json()["restart_fields"]
+
+    def test_scheduler_timezone_still_needs_a_restart(self, server, secret):
+        """Scheduled tasks read it from the server's cached configuration."""
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                json={"scheduler_default_timezone": "Asia/Tokyo"},
+                headers=secret,
+            )
+        assert response.status_code == 200
+        assert "scheduler_default_timezone" in response.json()["restart_fields"]
 
     def test_default_workdir_needs_no_restart(self, server, secret):
         """The server serves every registered project; only clients read it."""

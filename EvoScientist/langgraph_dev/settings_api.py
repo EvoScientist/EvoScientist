@@ -166,11 +166,24 @@ def capture_restart_baseline() -> None:
     _baseline = _file_digests(mapping)
 
 
+# Read anew at every AutoSkills submission and run, and the save itself
+# reconciles each project's cron, so the server needs no restart for them.
+LIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "memory_skill_synthesis_enabled",
+        "memory_skill_synthesis_mode",
+        "memory_skill_synthesis_cadence",
+        "memory_skill_synthesis_time",
+    }
+)
+
+
 def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     """Fields whose saved value changed since the server started.
 
     ``shadowed`` fields are left out: the environment overrides them, so a
-    restart would not apply the saved value either. Outside a server (no
+    restart would not apply the saved value either. So are
+    :data:`LIVE_FIELDS`, which apply without one. Outside a server (no
     baseline taken), the first call takes it.
     """
     capture_restart_baseline()
@@ -179,7 +192,9 @@ def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     return sorted(
         name
         for name, digest in now.items()
-        if digest != _baseline.get(name) and name not in shadowed
+        if digest != _baseline.get(name)
+        and name not in shadowed
+        and name not in LIVE_FIELDS
     )
 
 
