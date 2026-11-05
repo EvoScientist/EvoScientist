@@ -694,10 +694,6 @@ class FakeLangGraphThreadStream:
         if self.stay_open:
             await asyncio.Event().wait()
 
-    def subscribe(self, channels: list[str]) -> AsyncIterator[dict[str, Any]]:
-        self.subscribed_channels.append(channels)
-        return self._iter_events()
-
 
 class FakeLangGraphThreadsClient:
     """Fake LangGraph ``client.threads`` surface."""

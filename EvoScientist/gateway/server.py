@@ -48,16 +48,6 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 _THREAD_SEARCH_LIMIT = 1000
-_RUN_SUBSCRIBE_CHANNELS = [
-    "messages",
-    "tools",
-    "updates",
-    "values",
-    "tasks",
-    "lifecycle",
-    "input",
-    "custom",
-]
 _RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
 _RUN_LOOKUP_PAGE_SIZE = 100
 _ACTIVE_RUN_STATUSES = ("pending", "running")
@@ -1503,87 +1493,20 @@ class LangGraphServerGateway:
             mark_run_attempted()
 
         try:
-            if not isinstance(request.message, Command):
-                # A new message reads ``stream.events``: a fresh SSE replays the
-                # thread's history and ``subscribe`` ends at the first root
-                # ``completed``, an earlier run's (#558). Resume turns keep
-                # the ``subscribe`` path below.
-                paused = False
-                async with stream, _ThreadEvents(stream.events) as events:
-                    # A thread without state has no earlier runs to replay.
-                    # Skip also when the state read failed: an empty baseline
-                    # would leave us draining history and risk losing live
-                    # envelopes for the run we are about to start.
-                    if state_values or not process_value_messages:
-                        await events.skip_replay()
-                    run_id = await self._start_or_resume(
-                        stream,
-                        request,
-                        thread_ready=thread_ready,
-                        on_run_attempt=mark_run_attempted,
-                        on_resume_attempt=mark_resume_attempted,
-                        run_metadata=run_metadata,
-                    )
-                    if run_id is None:
-                        # ``events`` stays open after the run; without its id
-                        # no stop condition below can fire.
-                        raise RuntimeError(
-                            f"Could not identify the run for thread {request.thread_id}"
-                        )
-                    accepting_run = True
-                    # See #709
-                    async for event in events:
-                        raw_event = _as_raw_map(event)
-                        if raw_event is None:
-                            continue
-                        event_run_id = _synth_event_run_id(raw_event)
-                        if event_run_id is not None:
-                            accepting_run = event_run_id == run_id
-                        if not accepting_run:
-                            continue
-                        for selection_event in self._deliver_custom_middleware_events(
-                            raw_event
-                        ):
-                            yield selection_event
-                        event_map: dict[str, Any] = dict(raw_event)
-                        for subagent_event in tracker.process(event_map):
-                            yield subagent_event
-                        for normalized in await processor.process(event_map):
-                            emitted_interrupt = (
-                                emitted_interrupt or _is_interrupt_event(normalized)
-                            )
-                            yield normalized
-                        # Stop at this run's root completed/failed, or at a
-                        # pause (a root input.requested or interrupted), which
-                        # is read from thread state below.
-                        phase = _root_lifecycle_phase(event_map)
-                        if emitted_interrupt or phase in {"completed", "failed"}:
-                            break
-                        if phase == "interrupted" or _is_root_input_requested(
-                            event_map
-                        ):
-                            paused = True
-                            break
-                    else:
-                        raise RuntimeError(
-                            "Thread event stream ended before the run finished"
-                        )
-                    run_completed = True
-                    if not emitted_interrupt:
-                        for event in await self._paused_interrupt_events(
-                            stream,
-                            request.thread_id,
-                            processor,
-                            paused=paused,
-                        ):
-                            yield event
-                for event in tracker.finish():
-                    yield event
-                # run_completed is set, so the ``finally`` below has nothing
-                # to cancel; ``done`` goes out here as it does after it.
-                yield emitter.done(processor.full_response).data
-                return
-            async with stream:
+            # Every turn reads ``stream.events`` and stops at its own run's end
+            # or pause. A fresh SSE replays the thread's history, so
+            # ``subscribe`` would end at an earlier run's root ``completed``
+            # (#558); and on a resume the replayed pause has already set the
+            # SDK's ``interrupted`` flag, so ``subscribe`` would never end at
+            # the resumed run's next pause (#738).
+            paused = False
+            async with stream, _ThreadEvents(stream.events) as events:
+                # A thread without state has no earlier runs to replay.
+                # Skip also when the state read failed: an empty baseline
+                # would leave us draining history and risk losing live
+                # envelopes for the run we are about to start.
+                if state_values or not process_value_messages:
+                    await events.skip_replay()
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1592,9 +1515,22 @@ class LangGraphServerGateway:
                     on_resume_attempt=mark_resume_attempted,
                     run_metadata=run_metadata,
                 )
-                async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
+                if run_id is None:
+                    # ``events`` stays open after the run; without its id
+                    # no stop condition below can fire.
+                    raise RuntimeError(
+                        f"Could not identify the run for thread {request.thread_id}"
+                    )
+                accepting_run = True
+                # See #709
+                async for event in events:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
+                        continue
+                    event_run_id = _synth_event_run_id(raw_event)
+                    if event_run_id is not None:
+                        accepting_run = event_run_id == run_id
+                    if not accepting_run:
                         continue
                     for selection_event in self._deliver_custom_middleware_events(
                         raw_event
@@ -1608,12 +1544,26 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
+                    # Stop at this run's root completed/failed, or at a
+                    # pause (a root input.requested or interrupted), which
+                    # is read from thread state below.
+                    phase = _root_lifecycle_phase(event_map)
+                    if emitted_interrupt or phase in {"completed", "failed"}:
+                        break
+                    if phase == "interrupted" or _is_root_input_requested(event_map):
+                        paused = True
+                        break
+                else:
+                    raise RuntimeError(
+                        "Thread event stream ended before the run finished"
+                    )
                 run_completed = True
                 if not emitted_interrupt:
-                    for event in await self._pending_interrupt_events(
+                    for event in await self._paused_interrupt_events(
                         stream,
                         request.thread_id,
                         processor,
+                        paused=paused,
                     ):
                         yield event
             for event in tracker.finish():
@@ -1645,7 +1595,7 @@ class LangGraphServerGateway:
                 )
             )
             if cancelled_run_id is None and run_attempted:
-                # A synchronous start/respond rejection creates no run to
+                # A synchronous start rejection creates no run to
                 # cancel. Preserve the existing repair in that safe case, but
                 # never clear state while any unidentified active run remains.
                 can_repair = await self._list_active_runs(request.thread_id) == []

@@ -1,8 +1,8 @@
-"""Turns that send a new message on the LangGraph server gateway (#558).
+"""Turns on the LangGraph server gateway (#558, #738).
 
-A new message reads ``stream.events``: it skips the thread's history replay,
-starts the run, keeps only that run's envelopes and stops at its root
-completed/failed or at a pause. Resume turns use ``subscribe``.
+Every turn, a new message or a resume, reads ``stream.events``: it skips the
+thread's history replay, starts the run, keeps only that run's envelopes and
+stops at its root completed/failed or at a pause.
 """
 
 from __future__ import annotations
@@ -411,10 +411,10 @@ async def test_events_stream_ending_early_raises():
         await _turn(gateway, "hi")
 
 
-# --- state: resume and retry use subscribe ---------------------------------
+# --- state: resume and retry read events like a new message ----------------
 
 
-async def test_resume_keeps_the_subscribe_path():
+async def test_resume_reads_its_run_from_the_thread_events():
     stream = FakeLangGraphThreadStream(
         THREAD_ID, events=[_text("resumed: ok"), _finish()]
     )
@@ -424,11 +424,55 @@ async def test_resume_keeps_the_subscribe_path():
         gateway, Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
     )
 
-    assert stream.event_streams_opened == 0
+    assert stream.event_streams_opened == 1
     assert [start["input"] for start in stream.run.starts] == [
         {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
     assert _texts(events) == ["resumed: ok"]
+
+
+async def test_resume_whose_run_pauses_again_ends_at_the_new_pause():
+    """#738: the replayed pause already set ``stream.interrupted``, so the turn
+    must end at the resumed run's own pause, not wait for a rising edge."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("first call done"),
+            _finish(),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        interrupts=[{"interrupt_id": "interrupt-0"}],
+        interrupted=True,
+        replay=[_lifecycle("run-0", "running"), _lifecycle("run-0", "interrupted")],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-0"}]
+    )
+    start = stream.run.start
+
+    async def start_and_pause_again(**kwargs):
+        result = await start(**kwargs)
+        threads.states[THREAD_ID]["interrupts"] = [_STATE_INTERRUPT]
+        return result
+
+    stream.run.start = start_and_pause_again
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert [start["input"] for start in stream.run.starts] == [
+        {"interrupt-0": {"decisions": [{"type": "approve"}]}}
+    ]
+    assert _texts(events) == ["first call done"]
+    assert [event for event in events if event["type"] == "interrupt"] == [
+        _INTERRUPT_EVENT
+    ]
+    assert events[-1]["type"] == "done"
+    assert not stream.lost_live_events
 
 
 async def test_retrying_the_same_resume_payload_resumes_again():
@@ -443,7 +487,7 @@ async def test_retrying_the_same_resume_payload_resumes_again():
 
     assert _texts(first) == _texts(second) == ["resumed: ok"]
     assert [start["input"] for start in stream.run.starts] == [payload, payload]
-    assert stream.event_streams_opened == 0
+    assert stream.event_streams_opened == 2
 
 
 # --- _ThreadEvents.skip_replay: controllable clock, no real waiting ---------
