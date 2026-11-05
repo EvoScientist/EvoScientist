@@ -31,7 +31,7 @@ from .summarization import (
 )
 from .tool_results import _extract_command_tool_content, _extract_tool_content
 from .tool_selection import _ToolSelectionSuppressor
-from .utils import DisplayLimits, tool_result_succeeded
+from .utils import DisplayLimits, cut_middle, tool_result_succeeded
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
@@ -1166,7 +1166,11 @@ class _V3EventProcessor:
             if event_type == "tool-error" and _is_interrupt_error_message(message):
                 return events
             if event_type == "tool-error":
-                content = str(message or "")
+                content = cut_middle(
+                    str(message or ""),
+                    DisplayLimits.TOOL_RESULT_MAX,
+                    DisplayLimits.TOOL_RESULT_TAIL,
+                )
                 success = False
             else:
                 output = data_map.get("output")
@@ -1193,9 +1197,11 @@ class _V3EventProcessor:
                     )
                 else:
                     raw_content = "" if output is None else str(output)
-                content = raw_content[: DisplayLimits.TOOL_RESULT_MAX]
-                if len(raw_content) > DisplayLimits.TOOL_RESULT_MAX:
-                    content += "\n... (truncated)"
+                content = cut_middle(
+                    raw_content,
+                    DisplayLimits.TOOL_RESULT_MAX,
+                    DisplayLimits.TOOL_RESULT_TAIL,
+                )
                 success = tool_result_succeeded(
                     name, raw_content, status=status, artifact=artifact
                 )

@@ -432,18 +432,26 @@ def format_tool_result_compact(
 
     lines = content.strip().split("\n")
     total_lines = len(lines)
+    remaining = total_lines - max_lines
+    style = "dim" if ok else "red dim"
 
-    display_lines = lines[:max_lines]
-    for i, line in enumerate(display_lines):
+    # A long failure shows its end too: a command reports there how it ended.
+    tail = max_lines - max_lines // 2 if not ok and remaining > 0 else 0
+    rows: list[str | None] = [*lines[: max_lines - tail]]
+    if remaining > 0:
+        # Blank lines in the end would crowd out the reason above the exit status.
+        end = [line for line in lines[max_lines - tail :] if line.strip()]
+        end = end[-tail:] if tail else []
+        remaining = total_lines - len(rows) - len(end)
+        rows += [None, *end]
+    for i, line in enumerate(rows):
+        if line is None:
+            elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
+            continue
         prefix = "\u2514" if i == 0 else " "
         if len(line) > 80:
             line = line[:77] + "\u2026"
-        style = "dim" if ok else "red dim"
         elements.append(Text(f"  {prefix} {line}", style=style))
-
-    remaining = total_lines - max_lines
-    if remaining > 0:
-        elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
 
     return elements
 

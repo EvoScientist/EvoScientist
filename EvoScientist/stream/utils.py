@@ -57,6 +57,8 @@ class DisplayLimits:
     TOOL_RESULT_STREAM = 500
     TOOL_RESULT_FINAL = 800
     TOOL_RESULT_MAX = 2000
+    # What a shortened result keeps of its end, where a command reports how it ended.
+    TOOL_RESULT_TAIL = 500
 
 
 def has_args(args) -> bool:
@@ -102,6 +104,18 @@ def tool_result_succeeded(
     if name == "code_interpreter":
         return not content.rstrip().endswith("</error>")
     return is_success(content)
+
+
+def cut_middle(text: str, limit: int, tail: int) -> str:
+    """Shorten ``text`` past ``limit`` chars by cutting its middle, keeping about ``tail`` of its end."""
+    if len(text) <= limit:
+        return text
+    start = len(text) - tail
+    # Begin the kept end on a whole line when one starts soon; a long last line is kept in part.
+    newline = text.find("\n", start - 1, start + tail // 4)
+    if newline != -1 and text[newline + 1 :].strip():
+        start = newline + 1
+    return f"{text[: limit - tail]}\n... (truncated) ...\n{text[start:]}"
 
 
 def truncate(content: str, max_length: int, suffix: str = "\n... (truncated)") -> str:

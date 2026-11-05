@@ -3,6 +3,7 @@
 from EvoScientist.stream.utils import (
     _shorten_path,
     count_lines,
+    cut_middle,
     format_tool_compact,
     format_tool_compact_with_result,
     has_args,
@@ -283,6 +284,38 @@ class TestTruncate:
         result = truncate("hello world", 5)
         assert result.startswith("hello")
         assert "truncated" in result
+
+
+class TestCutMiddle:
+    def test_within_limit(self):
+        assert cut_middle("short", 10, 4) == "short"
+
+    def test_keeps_the_start_and_whole_last_lines(self):
+        text = "\n".join(f"line {i}" for i in range(100))
+        result = cut_middle(text, 200, 40)
+        head, marker, end = result.partition("\n... (truncated) ...\n")
+        assert marker
+        assert head == text[:160]
+        assert end.endswith("line 99")
+        assert end.split("\n")[0].startswith("line ")
+
+    def test_an_end_that_starts_on_a_line_keeps_that_line(self):
+        reason = "Error: disk full\n"
+        for filler in ("z", "\n"):
+            text = "x" * 300 + "\n" + reason + filler * (500 - len(reason))
+            assert "Error: disk full" in cut_middle(text, 800, 500)
+
+    def test_a_long_last_line_is_kept_in_part(self):
+        reason = "[stderr] ValueError: " + "detail " * 95 + "END"
+        text = "\n".join(f"line {i}" for i in range(200)) + "\n" + reason
+        text += "\nExit code: 1\n[Command failed with exit code 1]"
+        end = cut_middle(text, 2000, 500).partition("\n... (truncated) ...\n")[2]
+        assert not end.startswith("Exit code")
+        assert "detail END\nExit code: 1" in end
+
+    def test_an_end_cut_mid_line_is_kept_when_nothing_follows(self):
+        text = "x" * 300 + "\n" + "y" * 600 + "\n\n"
+        assert cut_middle(text, 800, 500).endswith("y" * 497 + "\n\n")
 
 
 # === _shorten_path ===

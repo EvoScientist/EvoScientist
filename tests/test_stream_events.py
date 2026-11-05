@@ -733,6 +733,48 @@ class TestV3ProtocolStreaming:
         results = [e for e in events if e.get("type") == "tool_result"]
         assert [r["success"] for r in results] == [False, True]
 
+    async def test_a_long_result_keeps_its_end(self):
+        """A long command output is cut in the middle, so its exit status stays."""
+        content = (
+            "\n".join(f"collected line {i}" for i in range(400))
+            + "\n[Command failed with exit code 1]"
+        )
+        output = ToolMessage(
+            name="execute",
+            content=content,
+            tool_call_id="tc1",
+            artifact={"exit_code": 1, "truncated": False},
+        )
+        agent = FakeV3Agent(
+            [tool_started("execute", {"command": "pytest"}), tool_finished(output)]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["content"].startswith("collected line 0\n")
+        assert "... (truncated) ..." in result["content"]
+        assert result["content"].endswith("[Command failed with exit code 1]")
+
+    async def test_a_long_tool_error_keeps_its_end(self):
+        message = "boom " * 1000 + "the last words"
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup", {}),
+                protocol_event(
+                    "tools",
+                    {
+                        "event": "tool-error",
+                        "message": message,
+                        "tool_call_id": "tc1",
+                    },
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["success"] is False
+        assert len(result["content"]) < 2100
+        assert result["content"].endswith("the last words")
+
     async def test_an_interpreter_result_is_judged_by_its_closing_tag(self):
         """The interpreter's error or result follows any stdout it printed."""
         failed = ToolMessage(

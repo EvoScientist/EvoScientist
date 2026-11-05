@@ -179,6 +179,40 @@ def test_rich_rows_follow_the_result_verdict(is_final):
     assert detail[0].style == "red dim"
 
 
+def test_a_long_failed_result_shows_its_start_and_end():
+    """A failure may say why at its start or, for a command, at its end."""
+    content = "\n".join(f"line {i}" for i in range(30)) + "\n[stderr] Boom"
+    content += "\n\nExit code: 1\n[Command failed with exit code 1]"
+
+    def render(success):
+        rows = format_tool_result_compact("execute", content, success=success)
+        return "".join(_render_text(row) for row in rows)
+
+    failed = render(False)
+    passed = render(True)
+
+    assert failed.split("\n") == [
+        "  └ line 0",
+        "    line 1",
+        "    ... +29 lines",
+        "    [stderr] Boom",
+        "    Exit code: 1",
+        "    [Command failed with exit code 1]",
+        "",
+    ]
+    assert "line 4" in passed
+    assert "+29 lines" in passed
+    # An end with fewer non-blank lines than it has room for keeps them all.
+    sparse = "\n".join(["a", "b", "", "", "", "Exit code: 1", "[Command failed]"])
+    rows = format_tool_result_compact("execute", sparse, success=False)
+    assert "".join(_render_text(r) for r in rows).split("\n")[2:5] == [
+        "    ... +3 lines",
+        "    Exit code: 1",
+        "    [Command failed]",
+    ]
+    assert "Exit code: 1" not in passed
+
+
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():
     """Ordinary tools use the same pending-tool behavior as memory reads."""
     narration = "I will inspect the files first."

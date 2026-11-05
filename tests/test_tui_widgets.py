@@ -263,6 +263,41 @@ class TestToolCallWidget(unittest.TestCase):
         summary = w._result_summary()
         assert len(summary) <= 61  # 57 + "…"
 
+    def _fake_output(self, w):
+        class _Output:
+            def __init__(self) -> None:
+                self.updated = None
+
+            def update(self, value) -> None:
+                self.updated = value
+
+            def add_class(self, _name) -> None:
+                pass
+
+        output = _Output()
+        w.query_one = lambda selector, cls=None: output  # type: ignore[assignment]
+        return output
+
+    def test_a_long_result_is_shown_as_the_stream_cut_it(self):
+        """The stream keeps a long result's start and end; the widget cuts nothing more."""
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+        from EvoScientist.stream.utils import cut_middle
+
+        raw = (
+            "\n".join(f"collected line {i}" for i in range(300))
+            + "\n[Command failed with exit code 1]"
+        )
+        content = cut_middle(raw, 2000, 500)
+        for status in ("error", "success"):
+            w = ToolCallWidget("execute", {})
+            w._result_content = content
+            w._status = status
+            output = self._fake_output(w)
+            w._render_output()
+            if status == "success":
+                w.on_click(None)  # expand the collapsed output
+            assert output.updated.plain == content
+
     def test_result_summary_empty(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 

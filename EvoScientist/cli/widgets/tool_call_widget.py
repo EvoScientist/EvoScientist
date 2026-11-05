@@ -235,9 +235,8 @@ class ToolCallWidget(Vertical):
             # Show full output for errors or short output
             self._collapsed = False
             style = "red dim" if self._status == "error" else "dim"
+            # The stream already keeps a long result's start and end.
             content = self._result_content.strip()
-            if len(content) > 800:
-                content = content[:800] + "\n... (truncated)"
             output_w.update(Text(content, style=style))
             output_w.add_class("--visible")
         else:
@@ -276,8 +275,6 @@ class ToolCallWidget(Vertical):
             # Expand
             self._collapsed = False
             content = self._result_content.strip()
-            if len(content) > 2000:
-                content = content[:2000] + "\n... (truncated)"
             style = "red dim" if self._status == "error" else "dim"
             output_w.update(Text(content, style=style))
         else:
