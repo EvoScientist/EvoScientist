@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 _CCPROXY_AUTH_TIMEOUT_SECONDS = 30
 _CCPROXY_HEALTH_TIMEOUT_SECONDS = 180
+# The longest a ccproxy start may take: the sign-in check and the first answer.
+START_BUDGET_SECONDS = _CCPROXY_AUTH_TIMEOUT_SECONDS + _CCPROXY_HEALTH_TIMEOUT_SECONDS
 
 
 # =============================================================================
@@ -331,6 +333,13 @@ def ensure_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen | N
 # =============================================================================
 # Environment setup
 # =============================================================================
+
+
+def use_server_ccproxy(config: EvoScientistConfig) -> None:
+    """Point this process's Anthropic clients at the server's ccproxy when
+    Anthropic uses OAuth."""
+    if uses_oauth(config):
+        setup_ccproxy_env(config.ccproxy_port)
 
 
 def setup_ccproxy_env(port: int) -> None:

@@ -59,7 +59,7 @@ class Harness:
 
     def __init__(self, monkeypatch, tmp_path) -> None:
         import EvoScientist.config as config_mod
-        from EvoScientist import agent_shell, ccproxy_manager
+        from EvoScientist import agent_shell
         from EvoScientist.deploy import backend_job
         from EvoScientist.langgraph_dev import manager as lgm
 
@@ -122,14 +122,6 @@ class Harness:
         monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: None)
         monkeypatch.setattr(agent_shell, "shell_drift_message", lambda _s: None)
         monkeypatch.setattr(backend_job, "backend_job", lambda: self.job)
-        monkeypatch.setattr(
-            ccproxy_manager,
-            "maybe_start_ccproxy",
-            lambda _c: self.log.append("ccproxy start") or "ccproxy",
-        )
-        monkeypatch.setattr(
-            ccproxy_manager, "stop_ccproxy", lambda _p: self.log.append("ccproxy stop")
-        )
         emit = json_mode._Events.__call__
 
         def _emit_then_close(events, event, **fields):
@@ -436,14 +428,6 @@ def test_dangerous_mode_and_tunnel_warn_in_ready(h, capsys):
     assert set(registration.exposure_messages(tunnel)) <= set(warnings)
 
 
-def test_anthropic_oauth_starts_and_stops_ccproxy(h, capsys):
-    h.config.anthropic_auth_mode = "oauth"
-    h.run(capsys)
-    assert h.log.index("ccproxy start") < h.log.index("backend start")
-    assert h.log.index(("backend stop", h.proc)) < h.log.index("ccproxy stop")
-    assert h.log.index("ccproxy stop") < h.log.index(("event", "stopped"))
-
-
 class _FakeJob:
     def __init__(self, log, warning=None):
         self.log = log
@@ -457,25 +441,6 @@ class _FakeJob:
 
     def close(self):
         self.log.append("job close")
-
-
-def test_a_ccproxy_this_run_started_joins_the_job(h, capsys):
-    h.job = _FakeJob(h.log)
-    h.config.anthropic_auth_mode = "oauth"
-    h.run(capsys)
-    assert h.log.index("ccproxy start") < h.log.index(("job adopt", "ccproxy"))
-    assert h.log.index(("job adopt", "ccproxy")) < h.log.index("backend start")
-
-
-def test_a_reused_ccproxy_is_left_out_of_the_job(h, capsys, monkeypatch):
-    from EvoScientist import ccproxy_manager
-
-    monkeypatch.setattr(ccproxy_manager, "maybe_start_ccproxy", lambda _c: None)
-    h.job = _FakeJob(h.log)
-    h.config.anthropic_auth_mode = "oauth"
-    code, _ = h.run(capsys)
-    assert code == 0
-    assert not any(isinstance(e, tuple) and e[0] == "job adopt" for e in h.log)
 
 
 def test_job_is_closed_only_after_the_backend_stopped(h, capsys):
@@ -494,9 +459,7 @@ def test_job_warning_lands_in_ready(h, capsys):
     )
 
 
-def test_a_failed_backend_stop_still_stops_ccproxy_and_closes_the_job(
-    h, capsys, monkeypatch
-):
+def test_a_failed_backend_stop_still_closes_the_job(h, capsys, monkeypatch):
     """``stop_langgraph_dev()`` lets ``psutil.AccessDenied`` through; the
     later steps still run and the run ends with ``internal_error``."""
     import psutil
@@ -508,13 +471,11 @@ def test_a_failed_backend_stop_still_stops_ccproxy_and_closes_the_job(
         raise psutil.AccessDenied(proc.pid)
 
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _stop)
-    h.config.anthropic_auth_mode = "oauth"
     h.job = _FakeJob(h.log)
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "internal_error"
-    assert h.log.index(("backend stop", h.proc)) < h.log.index("ccproxy stop")
-    assert h.log.index("ccproxy stop") < h.log.index("job close")
+    assert h.log.index(("backend stop", h.proc)) < h.log.index("job close")
 
 
 def test_job_is_closed_after_a_failed_start(h, capsys):
@@ -557,13 +518,6 @@ def test_attached_run_reports_the_running_backend_and_leaves_it(h, capsys):
     assert ready["config_dir"] == "/other/config/evoscientist"
     assert h.started is None
     assert not any(isinstance(e, tuple) and e[0] == "backend stop" for e in h.log)
-
-
-def test_attached_run_starts_no_ccproxy(h, capsys):
-    _attach(h)
-    h.config.anthropic_auth_mode = "oauth"
-    h.run(capsys)
-    assert "ccproxy start" not in h.log
 
 
 def test_attached_run_makes_no_job(h, capsys, monkeypatch):
@@ -768,19 +722,29 @@ def test_missing_chatgpt_sign_in_is_reported_before_starting(
     assert not (h.tmp_path / "ws").exists()
 
 
-def test_ccproxy_failure(h, capsys, monkeypatch):
-    from EvoScientist import ccproxy_manager
+def test_backend_that_cannot_start_ccproxy_is_ccproxy_failed(h, capsys):
+    """The backend exits with its ccproxy code, leaving the reason."""
+    from EvoScientist.langgraph_dev import manager as lgm
+    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
 
-    def _fail(_c):
-        raise RuntimeError("no ccproxy")
+    h.proc.returncode = CCPROXY_FAILED_EXIT
+    start = h._start
 
-    monkeypatch.setattr(ccproxy_manager, "maybe_start_ccproxy", _fail)
-    h.config.anthropic_auth_mode = "oauth"
+    def _exits(**kwargs):
+        proc = start(**kwargs)
+        lgm.RUNTIME.ccproxy_failure.write_text(
+            "ccproxy is not signed in.\nRun: ccproxy auth login claude_api",
+            encoding="utf-8",
+        )
+        h.record = None  # it exited before it answered
+        return proc
+
+    h.mp.setattr(lgm, "_spawn_server", _exits)
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "ccproxy_failed"
-    assert "no ccproxy" in lines[-1]["message"]
-    assert h.started is None
+    assert "ccproxy auth login" in lines[-1]["message"]
+    assert lines[-1]["detail"] == {"log_file": str(lgm.RUNTIME.log_file)}
 
 
 def test_start_failure_before_launch_is_backend_start_failed_without_file(
@@ -982,26 +946,6 @@ def test_a_start_cut_after_the_spawn_stops_the_backend(
     assert _events(lines) == ["starting", terminal]
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
     assert h.clean_stops == [False]
-
-
-def test_stdin_closed_during_the_ccproxy_start_starts_no_backend(
-    h, capsys, monkeypatch
-):
-    from EvoScientist import ccproxy_manager
-
-    def _start_ccproxy(_c):
-        h.log.append("ccproxy start")
-        h.close_stdin()
-        _wait_for_stdin_watcher()
-        return "ccproxy"
-
-    monkeypatch.setattr(ccproxy_manager, "maybe_start_ccproxy", _start_ccproxy)
-    h.config.anthropic_auth_mode = "oauth"
-    code, lines = h.run(capsys)
-    assert code == 0
-    assert _events(lines) == ["starting", "stopped"]
-    assert h.started is None
-    assert h.log.index("ccproxy stop") < h.log.index(("event", "stopped"))
 
 
 def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatch):

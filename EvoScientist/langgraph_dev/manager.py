@@ -103,6 +103,12 @@ class LanggraphRuntimePaths:
         return paths.SERVER_HOME / "ccproxy.log"
 
     @property
+    def ccproxy_failure(self) -> Path:
+        """Why the server could not start its ccproxy, written as it exits
+        for its starter to tell the user."""
+        return paths.SERVER_HOME / "ccproxy_failure.txt"
+
+    @property
     def webui_log(self) -> Path:
         return paths.SERVER_HOME / "webui.log"
 
@@ -137,6 +143,11 @@ def needs_langgraph_dev(
         # On the server backend, execution itself is routed to the dev server,
         # so it must exist even when no async sub-agent / scheduler / memory
         # worker independently asks for it.
+        return True
+    from ..ccproxy_manager import uses_oauth
+
+    if uses_oauth(config):
+        # Anthropic's OAuth goes through the ccproxy the server runs.
         return True
     if config.enable_async_subagents:
         return True
@@ -1554,9 +1565,15 @@ _POLL_INTERVAL = 0.5
 _LOG_TAIL_CHARS = 2000
 
 
-def start_budget() -> float:
+def start_budget(config: EvoScientistConfig) -> float:
     """How long a server's start may take, and so each wait for one: for the
-    start lock, for a started server's record, and for its first answer."""
+    start lock, for a started server's record, and for its first answer.
+    With Anthropic OAuth the server starts its ccproxy first."""
+    from .. import ccproxy_manager
+
+    if ccproxy_manager.uses_oauth(config):
+        # Its port may need a moment to come free first.
+        return _START_BUDGET + _BIND_WAIT + ccproxy_manager.START_BUDGET_SECONDS
     return _START_BUDGET
 
 
@@ -1585,8 +1602,10 @@ class ServerResult:
     holds the lock without a record), ``lock_unreadable`` (the lock cannot
     be opened), ``unresponsive`` (the recorded server did not answer),
     ``start_failed``, ``exited`` (the server this call started exited, with
-    ``exit_code``), ``cancelled`` or ``unregistered`` (the server did not
-    register the project).
+    ``exit_code``), ``ccproxy_failed`` (it exited as it could not start the
+    ccproxy Anthropic's OAuth goes through; ``error`` has its reason),
+    ``cancelled`` or ``unregistered`` (the server did not register the
+    project).
     """
 
     available: bool = False
@@ -1634,6 +1653,9 @@ class ServerResult:
         instead of quoting its end."""
         if not self.error:
             return None
+        if self.problem == "ccproxy_failed":
+            # Its last line says what to do.
+            return " ".join(self.error.split())
         line = self.error.splitlines()[0]
         if self.problem == "exited":
             line = f"{line} See {RUNTIME.log_file}."
@@ -1693,12 +1715,15 @@ def ensure_server(
     (:class:`~EvoScientist.langgraph_dev.registration.RegistrationError`),
     are logged and leave ``served`` False: the user can still chat with sync
     sub-agents; only async sub-agent calls and EvoMemory background workers
-    will fail. The module's notices (:data:`CONFIG_DRIFT_SINCE_LAUNCH`,
+    will fail. Not so when the server could not start the ccproxy Anthropic's
+    OAuth goes through: the session cannot reach Anthropic either, and a
+    *workspace_dir* call raises. The module's notices (:data:`CONFIG_DRIFT_SINCE_LAUNCH`,
     :data:`SERVER_UNAVAILABLE` and the others) follow the result.
 
     Raises a
     :class:`~EvoScientist.langgraph_dev.registration.ServerUnusableError`
-    when the server cannot be used for *workspace_dir* at all. For a known
+    when the server cannot be used for *workspace_dir* at all, or could not
+    start its ccproxy (above). For a known
     project whose folder is missing it leaves this process's server state as
     it was, so a session that stays where it is keeps its server; a server
     from an older EvoScientist serves no project of this session.
@@ -1750,7 +1775,7 @@ def ensure_server(
     configured_port, configured_host = configured_address(config)
     port = configured_port if port is None else port
     host = (host or "").strip() or configured_host
-    waits = _Waits(cancelled, on_wait)
+    waits = _Waits(cancelled, on_wait, start_budget(config))
     try:
         with _LOCK:
             result = _find_or_start(
@@ -1770,6 +1795,13 @@ def ensure_server(
         raise
     finally:
         waits.report(False)
+    if not result.available and result.problem == "ccproxy_failed":
+        # Anthropic is out of reach in this process too: no fallback helps.
+        logger.error("%s", result.error)
+        if workspace_dir is not None:
+            settle(result)
+            raise ServerUnusableError(result.reason)
+        return settle(result)
     if not result.available:
         logger.warning(
             "No background agent server: async sub-agents will fall back to "
@@ -1824,22 +1856,15 @@ def ensure_server(
 def serve_project(
     config: EvoScientistConfig,
     workspace_dir: Path | None,
-    *,
-    with_ccproxy: bool = True,
 ) -> ServerResult:
     """Start the background server, or reuse a running one, and register
     *workspace_dir* with it (``EvoSci service start``, ``EvoSci server
     start``); without one (the restart after an update) nothing is
-    registered. With Anthropic OAuth the server routes through
-    ccproxy: *with_ccproxy* starts it first, lasting like the server
-    (``RuntimeError`` or ``ValueError`` when it cannot start). Returns and
-    raises like :func:`ensure_server`."""
-    from ..ccproxy_manager import maybe_start_ccproxy, setup_ccproxy_env, uses_oauth
+    registered. With Anthropic OAuth this process goes through the server's
+    ccproxy too. Returns and raises like :func:`ensure_server`."""
+    from ..ccproxy_manager import use_server_ccproxy
 
-    if with_ccproxy:
-        maybe_start_ccproxy(config, lasting=True)
-    elif uses_oauth(config):
-        setup_ccproxy_env(config.ccproxy_port)
+    use_server_ccproxy(config)
     return ensure_server(
         config, workspace_dir=workspace_dir, backend="langgraph_server"
     )
@@ -1853,10 +1878,13 @@ class _Waits:
         self,
         cancelled: Callable[[], bool] | None,
         on_wait: Callable[[bool], None] | None,
+        budget: float,
     ) -> None:
         self._cancelled = cancelled
         self._on_wait = on_wait
         self._waiting = False
+        # How long a start may take (:func:`start_budget`).
+        self.budget = budget
 
     def cancelled(self) -> bool:
         return self._cancelled is not None and self._cancelled()
@@ -1871,9 +1899,9 @@ class _Waits:
         time.sleep(_POLL_INTERVAL)
 
     def acquire(self, lock: FileLock) -> bool | None:
-        """Take *lock* within :func:`start_budget`: True once held, False on
-        a cancel, None when another process kept it longer."""
-        deadline = time.monotonic() + start_budget()
+        """Take *lock* within :attr:`budget`: True once held, False on a
+        cancel, None when another process kept it longer."""
+        deadline = time.monotonic() + self.budget
         while True:
             if self.cancelled():
                 return False
@@ -1993,7 +2021,7 @@ def _find(look: _Look, waits: _Waits) -> object:
         if seen.url != _url_to_ask(seen.record, look):
             # The record changed since the probe: ask where it says.
             continue
-        decided = _decide(seen, look, clock)
+        decided = _decide(seen, look, clock, waits.budget)
         if decided != "wait":
             return decided
         waits.pause(for_other=True)
@@ -2017,7 +2045,7 @@ def _observe(look: _Look, last: ServerRecord | None) -> _Seen:
     return _Seen(record=record, lock=lock, url=url, answer=answer)
 
 
-def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
+def _decide(seen: _Seen, look: _Look, clock: _Clock, budget: float) -> object:
     """What one look means: a :class:`ServerResult`, ``"wait"`` to look
     again, or ``"free"`` when no server runs."""
     record, answer = seen.record, seen.answer
@@ -2051,7 +2079,7 @@ def _decide(seen: _Seen, look: _Look, clock: _Clock) -> object:
     if answer in ("own", "other", "older", "foreign"):
         return _answered(answer, record, look.fingerprint)
     if record.phase == server_record.STARTING:
-        if clock.waited_out(("starting", key), start_budget()):
+        if clock.waited_out(("starting", key), budget):
             return _unresponsive(record, _NOT_SERVING)
         return "wait"
     if answer == "silent":
@@ -2442,7 +2470,7 @@ def _spawn(
             problem="busy",
             error=(
                 f"Another EvoScientist process has been starting a server for "
-                f"over {start_budget():.0f} s; it holds {RUNTIME.lock_file}."
+                f"over {waits.budget:.0f} s; it holds {RUNTIME.lock_file}."
             ),
             lock_file=RUNTIME.lock_file,
         )
@@ -2533,7 +2561,7 @@ def _answer_of(
         if answer in ("other", "older", "foreign"):
             stop_langgraph_dev(proc, clean=False)
             return _conflict(answer, record)
-        if time.monotonic() >= spawned_at + start_budget():
+        if time.monotonic() >= spawned_at + waits.budget:
             return _not_ready(proc, spawned_at)
         waits.pause()
 
@@ -2544,7 +2572,7 @@ def _record_of(
     """The started server's record: one whose PID is the process started or
     one of its children (on Windows the server runs below a launcher), never
     a record another server left. A failure stops the process."""
-    deadline = spawned_at + start_budget()
+    deadline = spawned_at + waits.budget
     while True:
         record = read_record()
         if record is not None and record.pid in _spawned_pids(proc):
@@ -2594,8 +2622,24 @@ def _not_ready(proc: subprocess.Popen, spawned_at: float) -> ServerResult:
 
 def _exited(proc: subprocess.Popen) -> ServerResult:
     """The server this call started exited: its exit code and the end of
-    what it logged."""
+    what it logged, or why it could not start its ccproxy."""
+    from .server_ccproxy import CCPROXY_FAILED_EXIT
+
     stop_langgraph_dev(proc)
+    if proc.returncode == CCPROXY_FAILED_EXIT:
+        try:
+            reason = RUNTIME.ccproxy_failure.read_text(encoding="utf-8").strip()
+        except OSError:
+            reason = ""
+        return ServerResult(
+            problem="ccproxy_failed",
+            exit_code=proc.returncode,
+            error=(
+                "The server could not start ccproxy, which Anthropic's OAuth "
+                f"goes through: {reason or f'see {RUNTIME.log_file}.'}"
+            ),
+            log_file=RUNTIME.log_file,
+        )
     return ServerResult(
         problem="exited",
         exit_code=proc.returncode,

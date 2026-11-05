@@ -18,7 +18,6 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..ccproxy_manager import uses_oauth
 from ..commands.base import (
     ChannelRuntime,
     Command,
@@ -808,7 +807,8 @@ def _ensure_async_subagent_server(
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when the server
     cannot be used for *dirs* (``ServerUnusableError``): the server is from
-    an older EvoScientist, or the project's folder is gone.
+    an older EvoScientist, the project's folder is gone, or the server could
+    not start the ccproxy Anthropic's OAuth goes through.
     """
     from ..langgraph_dev.manager import ensure_server
     from ..langgraph_dev.registration import ServerUnusableError
@@ -2262,17 +2262,9 @@ def serve(
 
     _require_chatgpt_sign_in(config, interactive=False)
 
-    # Auto-start ccproxy when Anthropic uses OAuth mode
-    if uses_oauth(config):
-        try:
-            from ..ccproxy_manager import maybe_start_ccproxy
+    from ..ccproxy_manager import use_server_ccproxy
 
-            # It outlives this session, for every session and the background
-            # server to share (EvoSci ccproxy stop / service stop).
-            maybe_start_ccproxy(config, lasting=True)
-        except RuntimeError as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
-            raise typer.Exit(1) from exc
+    use_server_ccproxy(config)
 
     if not config.channel_enabled:
         console.print("[red]No channels configured.[/red]")
@@ -3264,17 +3256,9 @@ def _main_callback(
 
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
 
-    # Auto-start ccproxy when Anthropic uses OAuth mode
-    if uses_oauth(config):
-        try:
-            from ..ccproxy_manager import maybe_start_ccproxy
+    from ..ccproxy_manager import use_server_ccproxy
 
-            # It outlives this session, for every session and the background
-            # server to share (EvoSci ccproxy stop / service stop).
-            maybe_start_ccproxy(config, lasting=True)
-        except RuntimeError as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
-            raise typer.Exit(1) from exc
+    use_server_ccproxy(config)
 
     show_thinking = config.show_thinking if not no_thinking else False
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)

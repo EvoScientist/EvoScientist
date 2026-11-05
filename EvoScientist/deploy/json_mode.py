@@ -31,7 +31,8 @@ Events:
     the port), ``other_data_folder`` (an EvoScientist backend of another data
     folder answers on it) or ``older_server`` (a backend too old to say whose
     it is answers on it).
-  - ``ccproxy_failed``: empty.
+  - ``ccproxy_failed``: ``log_file``: the started backend could not start
+    the ccproxy Anthropic's OAuth goes through, and exited.
   - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
     ``lock_file``: the start lock another EvoScientist process held too
     long or that could not be used, or the data folder's server lock, held
@@ -83,9 +84,9 @@ How a program runs the command:
   quitting. A terminal, ``/dev/null``, ``NUL`` or a file as stdin is ignored;
   the command then stops on Ctrl+C or SIGTERM.
 - When the program exits without closing stdin, the command still stops: on
-  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend,
-  and a ccproxy this command started, run in a job object that ends them
-  together with this command.
+  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend
+  (and the ccproxy it starts) runs in a job object that ends it together with
+  this command.
 """
 
 from __future__ import annotations
@@ -128,6 +129,7 @@ ERROR_CODES = frozenset(
 
 _LAUNCHER_CODES = {
     "port_conflict": "port_conflict",
+    "ccproxy_failed": "ccproxy_failed",
     "backend_start_failed": "backend_start_failed",
     "folder_missing": "folder_missing",
     "server_outdated": "server_outdated",
@@ -286,7 +288,6 @@ class _Run:
         # The log of the backend this command uses (an attached older
         # release's writes its own).
         self.log_file: Any = None
-        self.ccproxy: Any = None
         self.job: Any = None
 
     def start(
@@ -408,7 +409,7 @@ class _Run:
             tunnel=tunnel,
             job=lambda: self.job,
             any_port=True,
-            before_start=lambda: self._before_start(config),
+            before_start=self._before_start,
             cancelled=self.stop.is_set,
         )
         if result.started:
@@ -421,25 +422,11 @@ class _Run:
         self.log_file = lgm.log_file_of(result.record)
         return result
 
-    def _before_start(self, config: Any) -> None:
-        """Right before this command starts a backend: the job it joins and,
-        with Anthropic OAuth, the ccproxy it routes through (another
-        session's running one is reused and left alone)."""
+    def _before_start(self) -> None:
+        """Right before this command starts a backend: the job it joins."""
         from .backend_job import backend_job
 
-        # First, so ccproxy joins it too: Node's job lets children break away,
-        # so a ccproxy outside ours would outlive a killed app.
         self.job = backend_job()
-        if config.anthropic_auth_mode != "oauth":
-            return
-        from ..ccproxy_manager import maybe_start_ccproxy
-
-        try:
-            self.ccproxy = maybe_start_ccproxy(config)
-        except RuntimeError as exc:
-            raise _Failure("ccproxy_failed", f"ccproxy startup failed: {exc}") from exc
-        if self.ccproxy is not None and self.job is not None:
-            self.job.adopt(self.ccproxy)
 
     def _wait_for_tunnel_url(self) -> str | None:
         """The tunnel URL, in short waits that check for a stop between them;
@@ -504,9 +491,9 @@ class _Run:
                 )
 
     def cleanup(self) -> None:
-        """Stop what this command started: the backend, then ccproxy, then
-        close the job (which would end a backend the stop missed). Each step
-        runs even when the one before raised; ``run_json`` reports the error."""
+        """Stop what this command started: the backend, then close the job
+        (which would end a backend the stop missed). Each step runs even when
+        the one before raised; ``run_json`` reports the error."""
         from ..langgraph_dev import manager as lgm
 
         try:
@@ -517,14 +504,8 @@ class _Run:
                 if proc is not None:
                     lgm.stop_langgraph_dev(proc, clean=self.proc is not None)
         finally:
-            try:
-                if self.ccproxy is not None:
-                    from ..ccproxy_manager import stop_ccproxy
-
-                    stop_ccproxy(self.ccproxy)
-            finally:
-                if self.job is not None:
-                    self.job.close()
+            if self.job is not None:
+                self.job.close()
 
 
 def _check_sign_in(config: Any) -> None:

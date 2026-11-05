@@ -304,7 +304,7 @@ def test_node_for_mcp_servers_is_installed_before_start(monkeypatch):
     installed: list = []
     monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", installed.append)
 
-    manager._install_node_for_mcp(manager._Waits(None, None))
+    manager._install_node_for_mcp(manager._Waits(None, None, manager._START_BUDGET))
 
     assert installed == [servers]
 
@@ -318,7 +318,7 @@ def test_failing_node_check_does_not_block_start(monkeypatch, caplog):
     monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {"fs": None})
     monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", _fail)
 
-    manager._install_node_for_mcp(manager._Waits(None, None))
+    manager._install_node_for_mcp(manager._Waits(None, None, manager._START_BUDGET))
 
     assert "Could not check Node.js" in caplog.text
 

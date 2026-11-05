@@ -176,6 +176,18 @@ def test_start_failure_with_anthropic_model_exits(
     monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
 
     assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    # Left for the starter to tell the user.
+    reason = manager.RUNTIME.ccproxy_failure.read_text(encoding="utf-8")
+    assert "ccproxy auth login" in reason
+
+
+def test_start_drops_reason_an_earlier_start_left(server):
+    manager.RUNTIME.ccproxy_failure.write_text("old reason", encoding="utf-8")
+    server.config.anthropic_auth_mode = "api_key"
+
+    server_ccproxy.start(None)
+
+    assert not manager.RUNTIME.ccproxy_failure.exists()
 
 
 def test_start_failure_without_anthropic_model_warns_and_serves(

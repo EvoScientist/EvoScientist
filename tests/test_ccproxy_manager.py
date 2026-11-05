@@ -606,3 +606,31 @@ def test_lasting_start_that_cannot_lock_is_runtime_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Could not start ccproxy"):
         ccproxy_mod.maybe_start_ccproxy(config, lasting=True)
+
+
+@pytest.mark.parametrize(
+    ("anthropic", "openai", "pointed"),
+    [
+        ("oauth", "api_key", True),
+        ("api_key", "api_key", False),
+        ("api_key", "oauth", False),
+    ],
+)
+def test_use_server_ccproxy_only_with_anthropic_oauth(
+    monkeypatch, anthropic, openai, pointed
+):
+    """The server starts ccproxy; a client only points at it. OpenAI's OAuth
+    signs in to ChatGPT directly."""
+    from types import SimpleNamespace
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    ports: list[int] = []
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", ports.append)
+    config = SimpleNamespace(
+        anthropic_auth_mode=anthropic, openai_auth_mode=openai, ccproxy_port=8000
+    )
+
+    ccproxy_mod.use_server_ccproxy(config)
+
+    assert ports == ([8000] if pointed else [])

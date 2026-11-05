@@ -232,10 +232,10 @@ def test_settle_wait_starts_over_once_record_was_seen(monkeypatch):
         answer="refused",
     )
 
-    assert manager._decide(held, look, clock) == "wait"
+    assert manager._decide(held, look, clock, manager._START_BUDGET) == "wait"
     now[0] += 10
-    assert manager._decide(starting, look, clock) == "wait"
-    assert manager._decide(held, look, clock) == "wait"
+    assert manager._decide(starting, look, clock, manager._START_BUDGET) == "wait"
+    assert manager._decide(held, look, clock, manager._START_BUDGET) == "wait"
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +759,9 @@ def test_node_install_stops_waiting_on_cancel(monkeypatch):
     )
     monkeypatch.setattr(manager, "_POLL_INTERVAL", 0.01)
     try:
-        manager._install_node_for_mcp(manager._Waits(lambda: True, None))
+        manager._install_node_for_mcp(
+            manager._Waits(lambda: True, None, manager._START_BUDGET)
+        )
     finally:
         release.set()
 
@@ -1529,3 +1531,50 @@ def test_ensure_server_reports_start_ended_by_other_signal_with_its_code(server)
     result = manager.ensure_server(_config())
 
     assert "exited immediately with code -11" in result.error
+
+
+def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
+    """The server leaves the reason as it exits; a session gets what to do
+    on one line."""
+    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
+
+    server.exit_code = CCPROXY_FAILED_EXIT
+    manager.RUNTIME.ccproxy_failure.parent.mkdir(parents=True, exist_ok=True)
+    manager.RUNTIME.ccproxy_failure.write_text(
+        "ccproxy is not signed in.\nRun: ccproxy auth login claude_api",
+        encoding="utf-8",
+    )
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "ccproxy_failed"
+    assert result.log_file == manager.RUNTIME.log_file
+    assert "\n" not in result.reason
+    assert "ccproxy auth login" in result.reason
+
+
+def test_ensure_for_project_stops_when_server_cannot_start_ccproxy(server, tmp_path):
+    """Anthropic is out of reach in the session too: no fallback helps."""
+    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
+
+    server.exit_code = CCPROXY_FAILED_EXIT
+    manager.RUNTIME.ccproxy_failure.parent.mkdir(parents=True, exist_ok=True)
+    manager.RUNTIME.ccproxy_failure.write_text(
+        "Run: ccproxy auth login claude_api", encoding="utf-8"
+    )
+
+    with pytest.raises(registration.ServerUnusableError, match="ccproxy auth login"):
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+
+def test_start_budget_covers_ccproxy_start_with_anthropic_oauth():
+    from EvoScientist import ccproxy_manager
+
+    config = _config()
+    without = manager.start_budget(config)
+    config.anthropic_auth_mode = "oauth"
+
+    # Its port may need a moment to come free first.
+    assert manager.start_budget(config) == (
+        without + manager._BIND_WAIT + ccproxy_manager.START_BUDGET_SECONDS
+    )

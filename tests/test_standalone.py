@@ -125,6 +125,25 @@ def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
     assert ensure_calls == []
 
 
+def test_ensure_dev_server_spawns_on_local_backend_with_anthropic_oauth(
+    monkeypatch, tmp_path
+):
+    """The runner's own agent goes through the server's ccproxy."""
+    config, ensure_calls = _patch_manager(
+        monkeypatch, gateway_backend="local", default_workdir=str(tmp_path)
+    )
+    config.anthropic_auth_mode = "oauth"
+    config.provider = "anthropic"
+    config.auxiliary_provider = ""
+    config.model_fallbacks = ""
+
+    standalone._ensure_standalone_dev_server(
+        config, workspace_dir=str(tmp_path), backend="local"
+    )
+
+    assert len(ensure_calls) == 1
+
+
 def test_run_standalone_dev_server_falls_back_to_cwd(monkeypatch):
     import EvoScientist.config as config_mod
 
@@ -685,94 +704,7 @@ async def test_stop_during_start_still_cleans_what_start_opened():
     assert (channel.opened, channel.closed) == (1, 1)
 
 
-def _oauth_config(**overrides):
-    base = {"anthropic_auth_mode": "api_key", "openai_auth_mode": "api_key"}
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
-def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    calls: list[object] = []
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
-    )
-
-    standalone._ensure_ccproxy(_oauth_config())
-
-    assert calls == []
-
-
-def test_ensure_ccproxy_outlives_runner(monkeypatch):
-    """It is shared by every session and the background server; EvoSci
-    ccproxy stop stops it."""
-    import atexit as atexit_mod
-
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    calls: list = []
-    monkeypatch.setattr(
-        ccproxy_mod,
-        "maybe_start_ccproxy",
-        lambda config, *, lasting: calls.append((config, lasting)),
-    )
-    registered: list[tuple] = []
-    monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
-
-    cfg = _oauth_config(anthropic_auth_mode="oauth")
-    standalone._ensure_ccproxy(cfg)
-
-    assert calls == [(cfg, True)]
-    assert registered == []
-
-
-def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
-    """An already-running ccproxy (proc is None) needs no atexit shutdown."""
-    import atexit as atexit_mod
-
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: None)
-    registered: list[tuple] = []
-    monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
-
-    standalone._ensure_ccproxy(_oauth_config(anthropic_auth_mode="oauth"))
-
-    assert registered == []
-
-
-def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
-    """OpenAI's OAuth mode signs in to ChatGPT directly: no proxy needed."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    calls: list[object] = []
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config, **_k: calls.append(config)
-    )
-
-    standalone._ensure_ccproxy(_oauth_config(openai_auth_mode="oauth"))
-
-    assert calls == []
-
-
-def test_ensure_ccproxy_exits_when_the_proxy_cannot_start(monkeypatch, caplog):
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    def _boom(config, **_k):
-        raise RuntimeError("ccproxy is required for OAuth mode but not found")
-
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", _boom)
-
-    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exc_info:
-        standalone._ensure_ccproxy(_oauth_config(anthropic_auth_mode="oauth"))
-
-    assert exc_info.value.code == 1
-    assert "ccproxy startup failed: ccproxy is required" in caplog.text
-
-
-def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
-    """``run_standalone`` starts ccproxy (OAuth) iff an agent is configured."""
+def test_run_standalone_uses_server_ccproxy_only_with_agent(monkeypatch):
     import EvoScientist.config as config_mod
 
     monkeypatch.setattr(
@@ -785,10 +717,10 @@ def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
             openai_auth_mode="api_key",
         ),
     )
-    ensured: list[object] = []
-    monkeypatch.setattr(
-        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
-    )
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    used: list[object] = []
+    monkeypatch.setattr(ccproxy_mod, "use_server_ccproxy", used.append)
     monkeypatch.setattr(
         standalone,
         "_ensure_standalone_dev_server",
@@ -797,54 +729,15 @@ def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
     monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
 
     standalone.run_standalone(channel=None, bus=None, use_agent=True)
-    assert len(ensured) == 1
+    assert len(used) == 1
 
-    ensured.clear()
+    used.clear()
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
-    assert ensured == []
+    assert used == []
 
 
-def test_run_standalone_skips_ccproxy_when_chatgpt_sign_in_missing(monkeypatch):
-    """ccproxy starts only after the ChatGPT sign-in check passes."""
-    _, _ = _standalone_ready(
-        monkeypatch,
-        signed_in=False,
-        openai_auth_mode="oauth",
-        anthropic_auth_mode="oauth",
-    )
-    ensured: list[object] = []
-    monkeypatch.setattr(
-        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
-    )
-
-    with pytest.raises(SystemExit):
-        standalone.run_standalone(channel=None, bus=None, use_agent=True)
-
-    assert ensured == []
-
-
-def test_run_standalone_starts_ccproxy_after_chatgpt_sign_in(monkeypatch):
-    """Signed-in ChatGPT OAuth + Anthropic OAuth: the proxy starts."""
-    _, _ = _standalone_ready(
-        monkeypatch,
-        signed_in=True,
-        openai_auth_mode="oauth",
-        anthropic_auth_mode="oauth",
-    )
-    ensured: list[object] = []
-    monkeypatch.setattr(
-        standalone, "_ensure_ccproxy", lambda config, **_k: ensured.append(config)
-    )
-
-    standalone.run_standalone(channel=None, bus=None, use_agent=True)
-
-    assert len(ensured) == 1
-
-
-def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
-    """The dev server copies env from ``os.environ`` at spawn, so the proxy
-    env must be force-set before the dev server starts."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
+def test_run_standalone_points_at_server_ccproxy(monkeypatch):
+    """The runner's own agent goes through the server's ccproxy."""
     import EvoScientist.langgraph_dev.manager as manager_mod
 
     _standalone_ready(
@@ -852,9 +745,6 @@ def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
     )
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
-    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda provider: (True, ""))
-    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port, **_k: None)
     seen: list[str] = []
     monkeypatch.setattr(
         manager_mod,

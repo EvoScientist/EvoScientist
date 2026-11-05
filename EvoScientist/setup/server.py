@@ -122,6 +122,11 @@ def _restart(emit: Emitter) -> tuple[str, bool] | None:
         result = manager.serve_project(config, None)
     except (RuntimeError, ValueError, OSError) as exc:
         return f"Could not start the background agent server again: {exc}", False
+    if result.problem == "ccproxy_failed":
+        return (
+            f"Could not start the background agent server again: {result.reason}",
+            False,
+        )
     if not result.served:
         return (
             "Could not start the background agent server again; it starts with "

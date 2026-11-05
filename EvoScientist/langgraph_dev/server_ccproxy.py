@@ -9,8 +9,8 @@ in that server's record, and the next server ends it first.
 
 When a configured model is Anthropic's, a server that cannot start its
 ccproxy (not installed, not signed in, the port taken, never serving) logs
-why and exits with :data:`CCPROXY_FAILED_EXIT`, for its starter to tell the
-user. Otherwise it warns and serves without ccproxy.
+why and exits with :data:`CCPROXY_FAILED_EXIT`, leaving the reason for its
+starter to tell the user. Otherwise it warns and serves without ccproxy.
 
 A run start starts ccproxy when it is not running (:func:`ensure_serving`),
 until :data:`_FAILED_RESTART_LIMIT` tries in a row failed; when it cannot,
@@ -76,6 +76,13 @@ def start(left: dict | None) -> None:
     The previous one is ended whatever this server uses: its record is
     replaced by now, so no later server would find it."""
     global _port
+    from .manager import RUNTIME
+
+    # Only this start's reason may reach its starter.
+    try:
+        RUNTIME.ccproxy_failure.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove %s", RUNTIME.ccproxy_failure)
     config = get_effective_config()
     ended = _end_left(left, config.ccproxy_port)
     if not ccproxy_manager.uses_oauth(config):
@@ -88,6 +95,7 @@ def start(left: dict | None) -> None:
     except (RuntimeError, OSError) as exc:
         if "anthropic" in providers_in_use(config):
             logger.error("%s", exc)
+            _tell_starter(str(exc))
             sys.exit(CCPROXY_FAILED_EXIT)
         logger.warning(
             "Anthropic OAuth is set, but ccproxy could not start: %s\n"
@@ -95,6 +103,17 @@ def start(left: dict | None) -> None:
             "start tries to start it.",
             exc,
         )
+
+
+def _tell_starter(reason: str) -> None:
+    """Leave *reason* for the process that started the server, which reads it
+    once the server exited with :data:`CCPROXY_FAILED_EXIT`."""
+    from .manager import RUNTIME
+
+    try:
+        RUNTIME.ccproxy_failure.write_text(reason, encoding="utf-8")
+    except OSError:
+        logger.warning("Could not write %s", RUNTIME.ccproxy_failure)
 
 
 def _start(port: int, *, ended: bool, taken_hint: str = "") -> None:

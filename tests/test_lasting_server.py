@@ -394,6 +394,22 @@ def test_stage_restart_failure_is_reported_not_raised(started, monkeypatch):
     assert "Could not start" in result.message
 
 
+def test_stage_restart_ccproxy_failure_says_why(started, monkeypatch):
+    """The next session's start would fail the same way."""
+    failed = manager.ServerResult(
+        problem="ccproxy_failed",
+        error="The server could not start ccproxy: Run: ccproxy auth login",
+    )
+    monkeypatch.setattr(manager, "ensure_server", lambda *_a, **_k: failed)
+    server_stage.remember_for_restart()
+    _updated(monkeypatch)
+
+    result = server_stage.run_stage(_emit()[1], "default")
+
+    assert result.detail["restarted"] is False
+    assert "ccproxy auth login" in result.message
+
+
 def test_stage_ignores_record_when_update_did_not_install(started):
     """The update failed after it stopped the server: same version."""
     server_stage.remember_for_restart()
@@ -821,7 +837,8 @@ def test_server_status_not_running_lists_no_projects(monkeypatch):
     assert urls == []
 
 
-def test_service_start_starts_ccproxy_with_server(started, tmp_path, monkeypatch):
+def test_service_start_starts_no_ccproxy_of_its_own(started, tmp_path, monkeypatch):
+    """The server starts its ccproxy."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     lasting = []
@@ -834,13 +851,12 @@ def test_service_start_starts_ccproxy_with_server(started, tmp_path, monkeypatch
     result = CliRunner().invoke(app, ["service", "start", "--workdir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert lasting == [True]
+    assert lasting == []
     assert started == [(tmp_path, "langgraph_server")]
     assert "EvoSci service stop" in " ".join(result.output.split())
 
 
-def test_server_start_oauth_warns_without_ccproxy(started, tmp_path, monkeypatch):
-    """Only the server: ccproxy is its own command."""
+def test_server_start_oauth_points_at_server_ccproxy(started, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     import EvoScientist.ccproxy_manager as ccproxy_mod
@@ -856,13 +872,13 @@ def test_server_start_oauth_warns_without_ccproxy(started, tmp_path, monkeypatch
             langgraph_dev_host="127.0.0.1",
         ),
     )
-    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", lambda port: None)
-    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_running", lambda port: False)
+    pointed: list[int] = []
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", pointed.append)
 
     result = CliRunner().invoke(app, ["server", "start", "--workdir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert "ccproxy is not running" in " ".join(result.output.split())
+    assert pointed == [8000]
 
 
 def test_ccproxy_start_without_oauth_does_nothing(monkeypatch):

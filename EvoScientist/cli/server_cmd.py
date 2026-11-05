@@ -47,16 +47,15 @@ def server_start(
     ),
 ) -> None:
     """Start the background langgraph dev server and leave it running, for
-    every EvoSci session to share; `EvoSci server stop` stops it. Only the
-    server: `EvoSci service start` also starts ccproxy."""
+    every EvoSci session to share; `EvoSci server stop` stops it. With
+    Anthropic OAuth it starts its ccproxy too."""
     start_background(workdir, with_ccproxy=False)
 
 
 def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
     """``EvoSci server start`` / ``EvoSci service start``: start the server,
-    or reuse a running one, for a project, and with *with_ccproxy* also the
-    ccproxy it uses with Anthropic OAuth."""
-    from ..ccproxy_manager import is_ccproxy_running, uses_oauth
+    or reuse a running one, for a project; *with_ccproxy* names the service
+    in what it prints."""
     from ..config import get_effective_config
     from ..langgraph_dev import manager
     from ..langgraph_dev.registration import ServerUnusableError
@@ -72,12 +71,11 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
     project = _prepare_workdir_or_exit(
         start_workspace_path(workdir, config.default_workdir)
     )
-    oauth = uses_oauth(config)
     try:
         with console.status(
             "[dim]Starting the background agent server...[/dim]", spinner="dots"
         ):
-            result = manager.serve_project(config, project, with_ccproxy=with_ccproxy)
+            result = manager.serve_project(config, project)
     except (ServerUnusableError, RuntimeError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -114,12 +112,6 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
             f"[green]✓[/green] Background agent server running at {url}; it "
             f"serves {escape(str(project))} and every other registered project, "
             f"and keeps running for every EvoSci session until [bold]{stop}[/bold]."
-        )
-    if oauth and not with_ccproxy and not is_ccproxy_running(config.ccproxy_port):
-        console.print(
-            "[yellow]⚠ Anthropic uses OAuth, and ccproxy is not running: start it "
-            "with [bold]EvoSci ccproxy start[/bold] (or use [bold]EvoSci service "
-            "start[/bold]).[/yellow]"
         )
     _print_server_notices()
 

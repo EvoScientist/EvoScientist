@@ -5,7 +5,7 @@ Verifies the orchestration:
 - port resolution (CLI > config > default)
 - host resolution (CLI > config > default) + the public-bind warning
 - the refusal of a running server or an occupied port
-- ccproxy lifecycle (only if Anthropic OAuth configured)
+- no ccproxy of its own (the server starts it)
 - the start ``ensure_server`` makes
 - clean shutdown via signal handler / KeyboardInterrupt
 """
@@ -49,6 +49,9 @@ def _make_config(
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
         langgraph_dev_file_persistence=langgraph_dev_file_persistence,
         dangerous_mode=dangerous_mode,
+        provider="anthropic",
+        auxiliary_provider="",
+        model_fallbacks="",
     )
 
 
@@ -100,7 +103,6 @@ def _run_deploy_once(
 
     captured: dict[str, Any] = {
         "ccproxy_started": False,
-        "ccproxy_stopped": False,
         "langgraph_dev_started": False,
         "langgraph_dev_stopped": False,
         "workspace_passed": None,
@@ -154,21 +156,13 @@ def _run_deploy_once(
 
     monkeypatch.setattr(lgm, "read_tunnel_url", _fake_read_tunnel_url, raising=False)
 
-    # ccproxy mocks
+    # A ccproxy start of its own would show here.
     from EvoScientist import ccproxy_manager as ccp
 
-    def _fake_maybe_start_ccproxy(_cfg):
-        from tests.fakes.langgraph_dev import start_lock_is_held
-
+    def _fake_maybe_start_ccproxy(*_a, **_kw):
         captured["ccproxy_started"] = True
-        captured["ccproxy_under_start_lock"] = start_lock_is_held()
-        return SimpleNamespace(pid=88888)
-
-    def _fake_stop_ccproxy(_proc):
-        captured["ccproxy_stopped"] = True
 
     monkeypatch.setattr(ccp, "maybe_start_ccproxy", _fake_maybe_start_ccproxy)
-    monkeypatch.setattr(ccp, "stop_ccproxy", _fake_stop_ccproxy)
 
     # atexit mock — capture without executing (don't pollute test process)
     import atexit
@@ -522,22 +516,13 @@ def test_deploy_refuses_invalid_port(monkeypatch, tmp_path, bad_port):
     assert exc.value.exit_code == 1
 
 
-def test_deploy_no_ccproxy_when_api_key_auth(monkeypatch, tmp_path):
-    config = _make_config(
-        default_workdir=str(tmp_path),
-        anthropic_auth_mode="api_key",
-        openai_auth_mode="api_key",
-    )
-    captured = _run_deploy_once(monkeypatch, config)
-
-    assert captured["ccproxy_started"] is False
-
-
-def test_deploy_starts_ccproxy_when_anthropic_oauth(monkeypatch, tmp_path):
+def test_deploy_starts_no_ccproxy_with_anthropic_oauth(monkeypatch, tmp_path):
+    """The server it starts runs its own."""
     config = _make_config(default_workdir=str(tmp_path), anthropic_auth_mode="oauth")
     captured = _run_deploy_once(monkeypatch, config)
 
-    assert captured["ccproxy_started"] is True
+    assert captured["ccproxy_started"] is False
+    assert captured["langgraph_dev_started"] is True
 
 
 def test_deploy_needs_no_ccproxy_for_openai_oauth(monkeypatch, tmp_path):
@@ -721,18 +706,6 @@ def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
     assert any("for over" in p for p in _run_deploy_once.printed)
 
 
-def test_deploy_starts_ccproxy_after_banner_under_start_lock(monkeypatch, tmp_path):
-    from tests.fakes.langgraph_dev import start_lock_is_held
-
-    captured = _run_deploy_once(
-        monkeypatch,
-        _make_config(default_workdir=str(tmp_path), anthropic_auth_mode="oauth"),
-    )
-    assert captured["ccproxy_under_start_lock"] is True
-    assert not start_lock_is_held()
-    assert any("Workspace:" in line for line in captured["printed"])
-
-
 @pytest.mark.parametrize("step", ["mkdir", "acquire"])
 def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
     """An OSError from the start lock ends in the startup failed message, not
@@ -758,14 +731,6 @@ def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):
     assert "_fake_stop_langgraph_dev" in names, (
         "deploy must register stop_langgraph_dev via atexit for clean shutdown"
     )
-
-
-def test_deploy_registers_cleanup_for_ccproxy_when_oauth(monkeypatch, tmp_path):
-    config = _make_config(default_workdir=str(tmp_path), anthropic_auth_mode="oauth")
-    captured = _run_deploy_once(monkeypatch, config)
-
-    names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
-    assert "_fake_stop_ccproxy" in names
 
 
 def test_deploy_registers_signal_handlers_for_shutdown(monkeypatch, tmp_path):
