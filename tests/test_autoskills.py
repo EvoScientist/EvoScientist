@@ -818,6 +818,40 @@ def test_revert_approved_create_removes_installed_skill(tmp_path):
     assert manifest["scope"] == "workspace"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_a_draft_under_a_symlinked_folder_is_approved_and_reverted(tmp_path):
+    (tmp_path / "real" / "project").mkdir(parents=True)
+    linked = tmp_path / "linked"
+    linked.symlink_to(tmp_path / "real", target_is_directory=True)
+    memory_dir = linked / "memories"
+    project = linked / "project"
+    skills_dir = project / "skills"
+    folder = _write_skill_folder(
+        memory_dir, "linked-skill", "Use when testing links.", "# Linked\n"
+    )
+    (folder / "scripts").mkdir()
+    (folder / "scripts" / "run.py").write_text("print(1)\n", encoding="utf-8")
+    submitted = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="linked-skill",
+        cluster_hash="cluster-linked",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Linked.",
+        skills_dir=skills_dir,
+        workspace_dir=project,
+    )
+
+    assert submitted["submitted"] is True, submitted
+    assert find_skill_proposal(memory_dir, "linked-skill") is not None
+    target = proposal_install_target(memory_dir, "linked-skill", skills_dir=skills_dir)
+    assert target.error is None, target.error
+    _approve_quietly(memory_dir, "linked-skill", skills_dir, workspace_dir=project)
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        reverted = revert_skill_proposal(memory_dir, "linked-skill")
+    assert reverted["reverted"] is True, reverted
+    assert not (skills_dir / "linked-skill").exists()
+
+
 @pytest.mark.parametrize("change", ["edit", "same_size_edit", "add", "add_folder"])
 def test_revert_refuses_changed_skill(tmp_path, change):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
@@ -1041,6 +1075,12 @@ def test_plain_entries_exclude_windows_reparse_points():
         st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
         st_reparse_tag=0xA0000003,
     )
+    # A WSL symlink reads as a regular file but is a name surrogate too.
+    wsl_link = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o644,
+        st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        st_reparse_tag=0xA000001D,
+    )
     # A OneDrive placeholder is a reparse point but no link.
     cloud_file = SimpleNamespace(
         st_mode=stat.S_IFREG | 0o644,
@@ -1051,6 +1091,7 @@ def test_plain_entries_exclude_windows_reparse_points():
 
     assert _plain(folder, directory=True) is True
     assert _plain(junction, directory=True) is False
+    assert _plain(wsl_link, directory=False) is False
     assert _plain(cloud_file, directory=False) is True
     assert _plain(regular, directory=False) is True
     assert _plain(regular, directory=True) is False
@@ -2023,7 +2064,8 @@ def test_a_value_error_after_the_copy_leaves_nothing_behind(tmp_path, monkeypatc
     sys.platform == "win32" or os.geteuid() == 0,
     reason="POSIX permissions, not root",
 )
-def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch):
+@pytest.mark.parametrize("read_only", ["scripts", "."])
+def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch, read_only):
     global_skills = tmp_path / "global-skills"
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
     memory_dir = tmp_path / "memories"
@@ -2033,7 +2075,7 @@ def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch):
     )
     (base / "scripts").mkdir()
     (base / "scripts" / "a.py").write_text("print(1)\n", encoding="utf-8")
-    (base / "scripts").chmod(0o555)
+    (base / read_only).chmod(0o555)
     _write_skill_folder(memory_dir, "fork-me", "Use when forking.", "# Fork\n")
     folder = autoskill_proposals_dir(memory_dir) / "fork-me"
     (folder / "scripts").mkdir()
@@ -2055,7 +2097,7 @@ def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch):
             memory_dir, "fork-me", skills_dir=skills_dir, scope="workspace"
         )
     finally:
-        (base / "scripts").chmod(0o755)
+        (base / read_only).chmod(0o755)
 
     assert failed["approved"] is False
     assert not (skills_dir / "fork-me").exists()
@@ -2254,7 +2296,6 @@ def test_a_cleanup_that_cannot_check_reports_the_leftover(tmp_path, monkeypatch)
         return call
 
     destination_check_ok = True
-    real_rmtree = module.shutil.rmtree
 
     def rmtree_then_break_stat(path, *args, **kwargs):
         nonlocal destination_check_ok
@@ -2269,7 +2310,6 @@ def test_a_cleanup_that_cannot_check_reports_the_leftover(tmp_path, monkeypatch)
         memory_dir, "focused-validation", skills_dir=skills_dir
     )
 
-    assert real_rmtree is not None
     assert failed["approved"] is False
     assert (
         f"the partly installed folder {destination} could not be removed"
