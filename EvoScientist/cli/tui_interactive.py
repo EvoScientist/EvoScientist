@@ -340,6 +340,7 @@ async def _sync_tui_command_completion(
         update_model = getattr(app, "update_status_after_model_change", None)
         if callable(update_model):
             update_model(cfg.model, cfg.provider)
+        app._schedule_channel_start()
 
     # Rebind the runtime whenever the agent OR thread_id may have moved
     # — ``/new`` and ``/resume`` rotate ``app._conversation_tid``
@@ -727,6 +728,7 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
+            self._channel_start_task: asyncio.Task[None] | None = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
             self._busy = False
@@ -819,6 +821,7 @@ def run_textual_interactive(
             task = asyncio.ensure_future(self._refresh_rubric_badge())
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+            self._schedule_channel_start()
 
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
@@ -1164,8 +1167,9 @@ def run_textual_interactive(
                 self._check_agent_shell, exclusive=True, group="agent-shell"
             )
 
-            # Auto-start channels — needs the agent, so defer to after load
+            # Poll queues once the initial agent load has settled.
             async def _deferred_start_channels():
+                """Start queue polling when the initial load settles."""
                 try:
                     await self._await_agent_ready()
                 except Exception:
@@ -1173,8 +1177,16 @@ def run_textual_interactive(
                         "Skipping channel auto-start because agent load failed",
                         exc_info=True,
                     )
-                    return
-                await self._start_channels()
+                finally:
+                    if (
+                        not self._exiting
+                        and not self._channel_start_stop.is_set()
+                        and self._channel_timer is None
+                    ):
+                        self._channel_timer = self.set_interval(
+                            0.1,
+                            self._poll_channel_queue,
+                        )
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
@@ -1222,9 +1234,25 @@ def run_textual_interactive(
 
         # ── Channel integration ────────────────────────────────
 
+        def _schedule_channel_start(self) -> None:
+            """Start channels in the background for a newly available agent."""
+            if self._exiting or self._channel_start_stop.is_set():
+                return
+            if (
+                self._channel_start_task is not None
+                and not self._channel_start_task.done()
+            ):
+                return
+            task = asyncio.create_task(self._start_channels())
+            self._channel_start_task = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
         async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
             try:
+                if self._exiting or self._agent_loader.agent is None:
+                    return
                 from ..config import load_config
 
                 cfg = await asyncio.to_thread(load_config)
@@ -1253,16 +1281,6 @@ def run_textual_interactive(
                 raise
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
-            finally:
-                if (
-                    not self._exiting
-                    and not self._channel_start_stop.is_set()
-                    and self._channel_timer is None
-                ):
-                    self._channel_timer = self.set_interval(
-                        0.1,
-                        self._poll_channel_queue,
-                    )
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
