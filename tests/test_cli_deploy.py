@@ -52,6 +52,7 @@ def _make_config(
         provider="anthropic",
         auxiliary_provider="",
         model_fallbacks="",
+        ccproxy_port=8000,
     )
 
 
@@ -163,6 +164,8 @@ def _run_deploy_once(
         captured["ccproxy_started"] = True
 
     monkeypatch.setattr(ccp, "spawn_ccproxy", _fake_spawn_ccproxy)
+    # The server's ccproxy answers.
+    monkeypatch.setattr(ccp, "is_ccproxy_running", lambda port: True)
 
     # atexit mock — capture without executing (don't pollute test process)
     import atexit
