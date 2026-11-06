@@ -1100,6 +1100,19 @@ class TestApplyConfigToEnv:
 
         assert os.environ.get("OLLAMA_BASE_URL") == "http://existing:11434"
 
+    def test_anthropic_auth_mode_flag_reaches_fresh_resolve(
+        self, clean_env, temp_config_dir
+    ):
+        """The server re-resolves config from file + env only, and starts
+        ccproxy by what it finds."""
+        save_config(EvoScientistConfig(anthropic_auth_mode="api_key"))
+        resolved = get_effective_config()
+        resolved.anthropic_auth_mode = "oauth"
+
+        apply_config_to_env(resolved)
+
+        assert get_effective_config().anthropic_auth_mode == "oauth"
+
     def test_openai_auth_mode_oauth_is_exported(self, clean_env):
         apply_config_to_env(EvoScientistConfig(openai_auth_mode="oauth"))
 

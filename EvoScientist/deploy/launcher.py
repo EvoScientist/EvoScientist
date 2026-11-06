@@ -635,8 +635,9 @@ _CONFLICTS = {
 
 def server_error(result: ServerResult) -> LauncherError:
     """The :class:`LauncherError` for a ``ensure_server`` result without a
-    server: ``port_conflict`` with its ``reason``, ``cancelled``, or
-    ``backend_start_failed``. That one carries the lock in the way: the
+    server: ``port_conflict`` with its ``reason``, ``cancelled``,
+    ``ccproxy_failed`` with the log, or ``backend_start_failed``. That one
+    carries the lock in the way: the
     start lock another process held too long or this call could not use,
     or this data folder's server lock, held without a record or unreadable;
     otherwise the log, when the result names one: of a server this call
@@ -656,6 +657,11 @@ def server_error(result: ServerResult) -> LauncherError:
         )
     if result.problem == "cancelled":
         return LauncherError("cancelled", "Launch cancelled by shutdown.")
+    if result.problem == "ccproxy_failed":
+        ccproxy_fields: dict[str, Any] = {"log_file": str(result.log_file)}
+        if result.exit_code is not None:
+            ccproxy_fields["exit_code"] = result.exit_code
+        return LauncherError("ccproxy_failed", message, fields=ccproxy_fields)
     if result.lock_file is not None:
         fields: dict[str, Any] = {"lock_file": str(result.lock_file)}
     else:

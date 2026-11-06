@@ -499,7 +499,7 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 所有智能体都从 `config.yaml` 或环境变量中读取密钥。项目目录中的 `.env` 只包含在该目录启动的 `EvoSci` 命令自身的设置，例如 `EVOSCIENTIST_DEFAULT_MODE` 或 `EVOSCIENTIST_UI_BACKEND`；其中凡是 EvoScientist 读取的密钥或其他设置，都会被 `EvoSci` 忽略并给出警告。其中的其他变量（例如 `HF_TOKEN`）同样会被忽略：请在启动 EvoSci 之前在 shell 中 export。
 
-后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci service stop` 再重新启动。
+后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci server start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci server stop` 再重新启动。
 
 </details>
 
@@ -543,7 +543,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；�
 <details>
 <summary>Desktop WebUI</summary>
 
-将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci service stop`；WebUI 会显示在该服务器上注册的所有项目：
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci server stop`；WebUI 会显示在该服务器上注册的所有项目：
 
 ```bash
 EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用

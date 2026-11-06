@@ -232,7 +232,7 @@ def deploy(
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
-        # stop_langgraph_dev + stop_ccproxy run via atexit during interpreter
+        # stop_langgraph_dev runs via atexit during interpreter
         # shutdown, so subprocess teardown happens AFTER this print returns.
         # Don't claim "Stopped." here — that would be a lie until atexit fires.
         console.print(
@@ -247,12 +247,17 @@ def _start_server(
     tunnel: bool,
     ws: str,
 ) -> None:
-    """Start the server this command owns, printing the startup banner and
-    starting ccproxy right before; exits 1 when one already runs for this
-    data folder, or the port or the start fails."""
+    """Start the server this command owns, printing the startup banner right
+    before; exits 1 when one already runs for this data folder, or the port
+    or the start fails."""
+    from ..ccproxy_manager import uses_oauth
     from ..langgraph_dev.manager import ensure_server, is_lasting, stop_langgraph_dev
 
-    starting = "[dim]Starting langgraph dev...[/dim]"
+    starting = (
+        "[dim]Starting langgraph dev and its ccproxy...[/dim]"
+        if uses_oauth(config)
+        else "[dim]Starting langgraph dev...[/dim]"
+    )
     status_box: dict[str, Any] = {}
 
     def _before_start() -> None:
@@ -279,22 +284,8 @@ def _start_server(
                 f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
                 f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
             )
-        # 6. ccproxy lifecycle (Anthropic OAuth only)
-        if config.anthropic_auth_mode == "oauth":
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
-            status_box["status"].update("[dim]Starting ccproxy (OAuth proxy)...[/dim]")
-            try:
-                ccproxy_proc = maybe_start_ccproxy(config)
-            except RuntimeError as exc:
-                console.print(f"[red]ccproxy startup failed:[/red] {escape(str(exc))}")
-                raise typer.Exit(1) from exc
-            if ccproxy_proc:
-                atexit.register(stop_ccproxy, ccproxy_proc)
-                console.print("[green]✓[/green] ccproxy started")
-            status_box["status"].update(starting)
-
-    # 7. Start langgraph dev
+    # 6. Start langgraph dev
     try:
         with console.status(starting, spinner="dots") as status:
             status_box["status"] = status
