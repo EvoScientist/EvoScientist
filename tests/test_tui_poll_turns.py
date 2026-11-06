@@ -35,6 +35,7 @@ from EvoScientist.cli.channel import (
     _register_channel_request,
 )
 from EvoScientist.commands import manager as cmd_manager
+from EvoScientist.commands.base import CommandContext
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.paths import SessionDirs
 from EvoScientist.stream import display as display_mod
@@ -114,7 +115,8 @@ def _fresh_queues(monkeypatch):
 
 async def _app(monkeypatch, workspace):
     app = await capture_app(monkeypatch, workspace)
-    # No channel start, so no poll timer: each test runs the poll itself.
+    # These tests drive queue polling themselves.
+    app._channel_timer = MagicMock()
     app._start_channels = AsyncMock()
     return app
 
@@ -191,11 +193,13 @@ async def _poll_until(app, condition, *, seconds: float = 10.0) -> None:
 async def test_startup_poll_delivers_after_agent_load_recovers(
     monkeypatch, workspace, first_load
 ):
+    """The real timer delivers work after each initial loading outcome."""
     monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
     entered = threading.Event()
     release = threading.Event()
 
     def load_agent(**_kwargs):
+        """Gate the first load and let a user retry succeed."""
         if not entered.is_set():
             entered.set()
             if not release.wait(timeout=10):
@@ -254,9 +258,12 @@ async def test_startup_poll_delivers_after_agent_load_recovers(
                 await _until(lambda: runs.started == ["retry", NOTICE])
                 assert loader.call_count == 2
             else:
+                await _until(lambda: channels.await_count == 1)
                 channels.assert_awaited_once()
                 await _until(lambda: runs.started == [NOTICE])
                 assert loader.call_count == 1
+            await _until(lambda: channels.await_count == 1)
+            assert channels.await_args.args[0] is app._agent_loader.agent
             await _until(lambda: _idle(app, runs))
             _channel_message("from the channel")
             await _until(lambda: runs.started[-1:] == ["from the channel"])
@@ -269,6 +276,76 @@ async def test_startup_poll_delivers_after_agent_load_recovers(
     finally:
         release.set()
         runs.finish_all()
+
+
+async def test_replacing_initial_agent_does_not_wait_for_channel_startup(
+    monkeypatch, workspace
+):
+    """Replacing a pending loader cancels its waiter before channels connect."""
+    entered = threading.Event()
+    release_load = threading.Event()
+    channels_started = asyncio.Event()
+    release_channels = asyncio.Event()
+
+    def load_agent(**_kwargs):
+        """Keep the initial agent pending until the test releases it."""
+        entered.set()
+        if not release_load.wait(timeout=10):
+            raise RuntimeError("test agent load timed out")
+        return object()
+
+    async def start_channels(*_args, **_kwargs):
+        """Hold channel connection independently of the cancelled loader."""
+        channels_started.set()
+        await release_channels.wait()
+        return []
+
+    runs = _Runs()
+    app = await capture_app(monkeypatch, workspace)
+    app._dirs = SessionDirs(workspace)
+    app._runtime_gateways = SimpleNamespace(graph_gateway=runs.gateway)
+    monkeypatch.setattr(app._agent_loader, "_loader_fn", load_agent)
+    monkeypatch.setattr(tui_mod, "_auto_start_channel_in_worker", start_channels)
+    monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: False)
+    monkeypatch.setattr(
+        "EvoScientist.config.load_config",
+        lambda: EvoScientistConfig(channel_enabled="telegram"),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config",
+        lambda: SimpleNamespace(model="test-model", provider="openai"),
+    )
+    try:
+        async with app.run_test(size=(100, 40)):
+            await _until(entered.is_set)
+            startup = next(
+                task
+                for task in app._background_tasks
+                if task.get_coro().__name__ == "_deferred_start_channels"
+            )
+            replacement = object()
+            ctx = CommandContext(
+                dirs=app._dirs,
+                agent=replacement,
+                thread_id=app._conversation_tid,
+                ui=app,
+            )
+            await tui_mod._sync_tui_command_completion(
+                app, ctx, None, SimpleNamespace(name="/model")
+            )
+            await _until(channels_started.is_set)
+            assert startup.cancelled()
+            assert app._agent_loader.agent is replacement
+            assert app._channel_timer is not None
+            channel_task = app._channel_start_task
+            app._schedule_channel_start()
+            assert app._channel_start_task is channel_task
+            app.force_quit()
+    finally:
+        app._channel_start_stop.set()
+        release_load.set()
+        release_channels.set()
+        await asyncio.gather(*app._background_tasks, return_exceptions=True)
 
 
 async def test_a_channel_turn_waits_for_input_typed_before_it_starts(
