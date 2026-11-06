@@ -540,7 +540,21 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
     pending = await asyncio.to_thread(REGISTRY.pending_move)
     if pending is None:
         registered = await asyncio.to_thread(REGISTRY.registered)
-        move = Move(Workspace(match_registered(old, registered)), new)
+        try:
+            old_key = match_registered(old, registered)
+        except MoveRefusedError as exc:
+            if exc.code != "not_registered":
+                raise
+            done = await asyncio.to_thread(REGISTRY.done_moves)
+            if any(
+                same_key(done_old, old.key) and same_key(done_new, new.key)
+                for done_old, done_new in done
+            ):
+                # Done already: as the server started, or after a client
+                # gave up waiting.
+                return MoveReport(new.key, 0, 0, [], 0, [], resumed=True)
+            raise
+        move = Move(Workspace(old_key), new)
         await asyncio.to_thread(_check_folders, move, resuming=False)
     else:
         try:

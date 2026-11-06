@@ -482,6 +482,8 @@ Every agent takes its keys from `config.yaml` or the environment. A project `.en
 
 The background server keeps the environment of the session that started it, for every project, until it is stopped: one project's exports (a conda environment, direnv, a per-project `AWS_PROFILE`) reach the agent's shell and `${VAR}` in `mcp.yaml` in every other project, and exports made later never reach it. Start it with `EvoSci service start --workdir <project>` from a shell that has what every project needs, and after changing that, run `EvoSci service stop` and start it again.
 
+A project's conversations, scheduled tasks, memory and AutoSkills proposals are kept outside its folder, under its path, so a folder you move or rename starts as a new, empty project. Carry the project over with `EvoSci workspace move <old folder> <new folder>`: it moves no files, and refuses when the old folder still exists (a copy is a new project).
+
 </details>
 
 <p align="right"><a href="#top">🔝Back to top</a></p>

@@ -27,7 +27,8 @@ _TABLE = """
 _MOVES_TABLE = """
     CREATE TABLE IF NOT EXISTS workspace_moves (
         old TEXT PRIMARY KEY,
-        new TEXT NOT NULL
+        new TEXT NOT NULL,
+        done INTEGER NOT NULL DEFAULT 0
     )
 """
 
@@ -136,7 +137,9 @@ class Registry:
         try:
             with conn:
                 conn.execute(_MOVES_TABLE)
-            row = conn.execute("SELECT old, new FROM workspace_moves").fetchone()
+            row = conn.execute(
+                "SELECT old, new FROM workspace_moves WHERE NOT done"
+            ).fetchone()
         finally:
             conn.close()
         return (row[0], row[1]) if row else None
@@ -148,19 +151,35 @@ class Registry:
             with conn:
                 conn.execute(_MOVES_TABLE)
                 conn.execute(
-                    "INSERT OR REPLACE INTO workspace_moves (old, new) VALUES (?, ?)",
+                    "INSERT OR REPLACE INTO workspace_moves (old, new, done) "
+                    "VALUES (?, ?, 0)",
                     (old, new),
                 )
         finally:
             conn.close()
 
     def finish_move(self, old: str) -> None:
-        """Record the move of *old* as done."""
+        """Record the move of *old* as done; kept, so the same move asked
+        again (a client that gave up waiting) is answered as done."""
         conn = self._connect()
         try:
             with conn:
                 conn.execute(_MOVES_TABLE)
-                conn.execute("DELETE FROM workspace_moves WHERE old = ?", (old,))
+                conn.execute(
+                    "UPDATE workspace_moves SET done = 1 WHERE old = ?", (old,)
+                )
+        finally:
+            conn.close()
+
+    def done_moves(self) -> list[tuple[str, str]]:
+        """The moves done: (old key, new key)."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(_MOVES_TABLE)
+            return conn.execute(
+                "SELECT old, new FROM workspace_moves WHERE done"
+            ).fetchall()
         finally:
             conn.close()
 

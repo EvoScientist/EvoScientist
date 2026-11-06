@@ -72,6 +72,9 @@ service_app = typer.Typer(
 app.add_typer(service_app, name="service")
 ccproxy_app = typer.Typer(help="Manage ccproxy, which Anthropic OAuth routes through")
 app.add_typer(ccproxy_app, name="ccproxy")
+# Projects the background server serves, by folder.
+workspace_app = typer.Typer(help="Manage projects (the folders EvoSci works in)")
+app.add_typer(workspace_app, name="workspace")
 
 # Configure subcommand group — re-run a single onboarding section.
 configure_app = typer.Typer(

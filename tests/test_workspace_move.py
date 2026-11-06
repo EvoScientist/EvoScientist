@@ -401,8 +401,22 @@ async def test_move_project_moves_threads_tasks_and_registration(moving):
     stored = {str(a["assistant_id"]) for a in db.GLOBAL_STORE["assistants"]}
     assert chat_assistant_id(new) in stored
     assert chat_assistant_id(old) not in stored
+    # Asked again (a client that gave up waiting): done already.
+    again = await workspace_move.move_project(old, new)
+    assert again.resumed is True
+
+
+async def test_move_project_refuses_unregistered_old_into_registered_new(
+    moving, tmp_path
+):
+    """Every client registers the folder it opens: a mistyped old folder
+    must not pass for a finished move."""
+    projects, _old, new, _task = await _arrange(moving)
+    projects.set_registered(new.key, True)
+
     with pytest.raises(workspace_move.MoveRefusedError) as refused:
-        await workspace_move.move_project(old, new)
+        await workspace_move.move_project(Workspace(tmp_path / "typo"), new)
+
     assert refused.value.code == "not_registered"
 
 

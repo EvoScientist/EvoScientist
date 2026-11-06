@@ -43,6 +43,7 @@ from . import (
     async_notifier,
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
     service_cmd,  # noqa: F401 — registers `EvoSci service` / `EvoSci ccproxy`
+    workspace_cmd,  # noqa: F401 — registers `EvoSci workspace`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
