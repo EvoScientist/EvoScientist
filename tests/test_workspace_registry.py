@@ -544,6 +544,8 @@ def test_unregister_workspace_route_refuses_while_user_cron_enabled(
 def test_unregister_workspace_route_keeps_project_and_drops_system_crons(
     server, secret, projects, monkeypatch, workspace
 ):
+    from EvoScientist.langgraph_dev import server_runs
+
     projects.set_registered(workspace.key, True)
     workspace_setup.SET_UP.add(workspace.key)
     rows = [
@@ -568,6 +570,9 @@ def test_unregister_workspace_route_keeps_project_and_drops_system_crons(
 
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_crons, "delete_crons", delete)
+    monkeypatch.setattr(
+        server_runs, "cancel_project_runs", lambda _workspace: asyncio.sleep(0)
+    )
     response = server.delete(
         "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
     )
@@ -669,6 +674,7 @@ def test_unregister_restores_registration_when_cancel_fails(
         raise RuntimeError("cancellation failed")
 
     monkeypatch.setattr(server_crons, "project_crons", crons)
+    monkeypatch.setattr(server_crons, "delete_crons", lambda _ids: asyncio.sleep(0))
     monkeypatch.setattr(server_runs, "cancel_project_runs", fail)
     monkeypatch.setattr(workspace_setup, "_reconcile_autoskills", reconcile_workspace)
     response = server.delete(
