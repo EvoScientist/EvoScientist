@@ -723,20 +723,22 @@ def test_missing_chatgpt_sign_in_is_reported_before_starting(
 
 
 def test_backend_that_cannot_start_ccproxy_is_ccproxy_failed(h, capsys):
-    """The backend exits with its ccproxy code, leaving the reason."""
-    from EvoScientist.langgraph_dev import manager as lgm
-    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
+    """The backend records itself, then its start fails, leaving the reason
+    under its PID."""
+    import json
 
-    h.proc.returncode = CCPROXY_FAILED_EXIT
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    # uvicorn's code for a lifespan that failed.
+    h.proc.returncode = 3
     start = h._start
 
     def _exits(**kwargs):
         proc = start(**kwargs)
+        reason = "ccproxy is not signed in.\nRun: ccproxy auth login claude_api"
         lgm.RUNTIME.ccproxy_failure.write_text(
-            "ccproxy is not signed in.\nRun: ccproxy auth login claude_api",
-            encoding="utf-8",
+            json.dumps({"pid": h.record.pid, "reason": reason}), encoding="utf-8"
         )
-        h.record = None  # it exited before it answered
         return proc
 
     h.mp.setattr(lgm, "_spawn_server", _exits)

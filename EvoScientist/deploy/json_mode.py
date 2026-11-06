@@ -31,8 +31,9 @@ Events:
     the port), ``other_data_folder`` (an EvoScientist backend of another data
     folder answers on it) or ``older_server`` (a backend too old to say whose
     it is answers on it).
-  - ``ccproxy_failed``: ``log_file``: the started backend could not start
-    the ccproxy Anthropic's OAuth goes through, and exited.
+  - ``ccproxy_failed``: ``log_file`` (and ``exit_code`` when it exited):
+    the started backend could not start the ccproxy Anthropic's OAuth goes
+    through, so it did not serve.
   - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
     ``lock_file``: the start lock another EvoScientist process held too
     long or that could not be used, or the data folder's server lock, held

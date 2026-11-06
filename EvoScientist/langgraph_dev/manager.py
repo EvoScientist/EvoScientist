@@ -1616,8 +1616,9 @@ class ServerResult:
     holds the lock without a record), ``lock_unreadable`` (the lock cannot
     be opened), ``unresponsive`` (the recorded server did not answer),
     ``start_failed``, ``exited`` (the server this call started exited, with
-    ``exit_code``), ``ccproxy_failed`` (it exited as it could not start the
-    ccproxy Anthropic's OAuth goes through; ``error`` has its reason),
+    ``exit_code``), ``ccproxy_failed`` (it could not start the ccproxy
+    Anthropic's OAuth goes through, so it did not serve; ``error`` has its
+    reason, ``exit_code`` is set when it exited),
     ``cancelled`` or ``unregistered`` (the server did not register the
     project).
     """
@@ -2606,7 +2607,7 @@ def _answer_of(
     url = record.url
     while True:
         if proc.poll() is not None:
-            return _exited(proc)
+            return _exited(proc, server_pid=record.pid)
         if waits.cancelled():
             return _give_up(proc, problem="cancelled", error="Cancelled.")
         answer = ask(url)
@@ -2627,7 +2628,7 @@ def _answer_of(
             stop_langgraph_dev(proc, clean=False)
             return _conflict(answer, record)
         if time.monotonic() >= spawned_at + waits.budget:
-            return _not_ready(proc, spawned_at)
+            return _not_ready(proc, spawned_at, server_pid=record.pid)
         waits.pause()
 
 
@@ -2673,7 +2674,12 @@ def _give_up(
     return ServerResult(problem=problem, error=error, log_file=RUNTIME.log_file)
 
 
-def _not_ready(proc: subprocess.Popen, spawned_at: float) -> ServerResult:
+def _not_ready(
+    proc: subprocess.Popen, spawned_at: float, *, server_pid: int | None = None
+) -> ServerResult:
+    if (reason := ccproxy_failure_of(server_pid)) is not None:
+        stop_langgraph_dev(proc, clean=False)
+        return _ccproxy_failed(reason, exit_code=None)
     elapsed = time.monotonic() - spawned_at
     return _give_up(
         proc,
@@ -2685,26 +2691,40 @@ def _not_ready(proc: subprocess.Popen, spawned_at: float) -> ServerResult:
     )
 
 
-def _exited(proc: subprocess.Popen) -> ServerResult:
-    """The server this call started exited: its exit code and the end of
-    what it logged, or why it could not start its ccproxy."""
-    from .server_ccproxy import CCPROXY_FAILED_EXIT
+def ccproxy_failure_of(server_pid: int | None) -> str | None:
+    """Why the server *server_pid* could not start its ccproxy, when it left
+    the reason; a reason another server left is not its."""
+    if server_pid is None:
+        return None
+    try:
+        left = json.loads(RUNTIME.ccproxy_failure.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(left, dict) or left.get("pid") != server_pid:
+        return None
+    reason = left.get("reason")
+    return reason.strip() if isinstance(reason, str) and reason.strip() else None
 
+
+def _ccproxy_failed(reason: str, *, exit_code: int | None) -> ServerResult:
+    return ServerResult(
+        problem="ccproxy_failed",
+        exit_code=exit_code,
+        error=(
+            "The server could not start ccproxy, which Anthropic's OAuth goes "
+            f"through: {reason}"
+        ),
+        log_file=RUNTIME.log_file,
+    )
+
+
+def _exited(proc: subprocess.Popen, *, server_pid: int | None = None) -> ServerResult:
+    """The server this call started exited: its exit code and the end of
+    what it logged, or why it could not start its ccproxy (the server
+    *server_pid*, once it recorded itself)."""
     stop_langgraph_dev(proc)
-    if proc.returncode == CCPROXY_FAILED_EXIT:
-        try:
-            reason = RUNTIME.ccproxy_failure.read_text(encoding="utf-8").strip()
-        except OSError:
-            reason = ""
-        return ServerResult(
-            problem="ccproxy_failed",
-            exit_code=proc.returncode,
-            error=(
-                "The server could not start ccproxy, which Anthropic's OAuth "
-                f"goes through: {reason or f'see {RUNTIME.log_file}.'}"
-            ),
-            log_file=RUNTIME.log_file,
-        )
+    if (reason := ccproxy_failure_of(server_pid)) is not None:
+        return _ccproxy_failed(reason, exit_code=proc.returncode)
     return ServerResult(
         problem="exited",
         exit_code=proc.returncode,

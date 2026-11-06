@@ -499,6 +499,9 @@ async def _lifespan(_app: Starlette):
     # graphs and started its cron scheduler and run workers, and before it
     # serves requests; the file I/O goes to a thread because blockbuster
     # refuses it on the event loop.
+    # First: runs that start meanwhile wait for it, and the server marks
+    # itself serving only once ccproxy serves.
+    await asyncio.to_thread(server_ccproxy.start_serving)
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
     await asyncio.to_thread(server_record.mark_serving)
@@ -549,8 +552,9 @@ def _build_app() -> Starlette:
 
 # langgraph-api imports this app before its runtime loads the store, so the
 # server (the process working in the server home) takes its data folder's lock,
-# records itself for its clients, starts its ccproxy and backs the store up
-# first; anything else importing this module does not.
+# records itself for its clients, ends a ccproxy its predecessor left and backs
+# the store up first (quickly: langgraph-api times this import); anything else
+# importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
     server_ccproxy.start(server_record.write_record())

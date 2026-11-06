@@ -8,6 +8,7 @@ asked whose server answers, else a start under the start lock).
 
 from __future__ import annotations
 
+import json
 import threading
 
 import httpx
@@ -1533,16 +1534,20 @@ def test_ensure_server_reports_start_ended_by_other_signal_with_its_code(server)
     assert "exited immediately with code -11" in result.error
 
 
-def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
-    """The server leaves the reason as it exits; a session gets what to do
-    on one line."""
-    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
-
-    server.exit_code = CCPROXY_FAILED_EXIT
+def _ccproxy_reason(pid: int, reason: str) -> None:
+    """What a server whose ccproxy failed leaves for its starter."""
     manager.RUNTIME.ccproxy_failure.parent.mkdir(parents=True, exist_ok=True)
     manager.RUNTIME.ccproxy_failure.write_text(
-        "ccproxy is not signed in.\nRun: ccproxy auth login claude_api",
-        encoding="utf-8",
+        json.dumps({"pid": pid, "reason": reason}), encoding="utf-8"
+    )
+
+
+def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
+    """The server leaves the reason as its start fails; a session gets what
+    to do on one line."""
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(
+        server.pid, "ccproxy is not signed in.\nRun: ccproxy auth login claude_api"
     )
 
     result = manager.ensure_server(_config())
@@ -1553,15 +1558,20 @@ def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
     assert "ccproxy auth login" in result.reason
 
 
+def test_ensure_server_ignores_reason_another_server_left(server):
+    """A later start that fails for another reason is not a ccproxy failure."""
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(server.pid + 1, "Run: ccproxy auth login claude_api")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem != "ccproxy_failed"
+
+
 def test_ensure_for_project_stops_when_server_cannot_start_ccproxy(server, tmp_path):
     """Anthropic is out of reach in the session too: no fallback helps."""
-    from EvoScientist.langgraph_dev.server_ccproxy import CCPROXY_FAILED_EXIT
-
-    server.exit_code = CCPROXY_FAILED_EXIT
-    manager.RUNTIME.ccproxy_failure.parent.mkdir(parents=True, exist_ok=True)
-    manager.RUNTIME.ccproxy_failure.write_text(
-        "Run: ccproxy auth login claude_api", encoding="utf-8"
-    )
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(server.pid, "Run: ccproxy auth login claude_api")
 
     with pytest.raises(registration.ServerUnusableError, match="ccproxy auth login"):
         manager.ensure_server(_config(), workspace_dir=tmp_path)
@@ -1693,3 +1703,16 @@ def test_ccproxy_missing_no_notice_when_not_needed_or_reported(
     notice = manager._ccproxy_missing(config, manager.ServerResult(problem=problem))
 
     assert notice is None
+
+
+def test_start_that_never_served_reports_its_ccproxy_reason(runtime_paths, monkeypatch):
+    """Its ccproxy start ran out the budget; the reason is still its own."""
+    import time
+
+    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *_a, **_k: None)
+    _ccproxy_reason(7, "ccproxy never answered its health check")
+
+    result = manager._not_ready(object(), time.monotonic(), server_pid=7)
+
+    assert result.problem == "ccproxy_failed"
+    assert "health check" in result.error

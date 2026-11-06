@@ -47,6 +47,8 @@ def server(monkeypatch):
     monkeypatch.setattr(server_ccproxy, "_last_error", None)
     monkeypatch.setattr(server_ccproxy, "_failed", 0)
     monkeypatch.setattr(server_ccproxy, "_noted_orphan", False)
+    monkeypatch.setattr(server_ccproxy, "_first", True)
+    monkeypatch.setattr(server_ccproxy, "_ended_left", False)
 
     config = SimpleNamespace(
         anthropic_auth_mode="oauth",
@@ -102,16 +104,23 @@ def _read() -> dict:
     return json.loads(server_record.record_path().read_text(encoding="utf-8"))
 
 
-def _exit_code(left=None) -> int:
-    with pytest.raises(SystemExit) as raised:
-        server_ccproxy.start(left)
-    return raised.value.code
+def _start(left=None) -> None:
+    """The server's start: at import, then first in its lifespan."""
+    server_ccproxy.start(left)
+    server_ccproxy.start_serving()
+
+
+def _refused(left=None) -> str:
+    """Why the start failed, as it leaves the server's lifespan."""
+    with pytest.raises(server_ccproxy.CcproxyStartError) as raised:
+        _start(left)
+    return str(raised.value)
 
 
 def test_start_without_oauth_starts_nothing(server):
     server.config.anthropic_auth_mode = "api_key"
 
-    server_ccproxy.start(None)
+    _start(None)
 
     assert server.steps == [("older",)]
     assert server_record.CCPROXY_PID_KEY not in _read()
@@ -127,7 +136,7 @@ def test_start_without_oauth_ends_ccproxy_previous_server_left(server):
     """Its record is replaced: no later server would find it."""
     server.config.anthropic_auth_mode = "api_key"
 
-    server_ccproxy.start(_LEFT)
+    _start(_LEFT)
 
     assert server.steps == [("end", 77, 123.5), ("older",)]
 
@@ -136,7 +145,7 @@ def test_start_ends_left_ccproxy_without_creation_time(server):
     """Its creation time could not be read when it was recorded."""
     server.config.anthropic_auth_mode = "api_key"
 
-    server_ccproxy.start({**_LEFT, server_record.CCPROXY_CREATE_TIME_KEY: None})
+    _start({**_LEFT, server_record.CCPROXY_CREATE_TIME_KEY: None})
 
     assert server.steps == [("end", 77, None), ("older",)]
 
@@ -147,7 +156,7 @@ def test_start_not_signed_in_ends_ccproxy_previous_server_left(server, monkeypat
 
     monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
 
-    assert _exit_code(_LEFT) == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused(_LEFT)
     assert server.steps == [("end", 77, 123.5), ("older",)]
 
 
@@ -155,7 +164,7 @@ def test_start_with_oauth_starts_ccproxy_without_anthropic_model(server):
     """/model can pick an Anthropic model for a run whatever is configured."""
     server.config.provider = "openrouter"
 
-    server_ccproxy.start(_LEFT)
+    _start(_LEFT)
 
     assert server.steps[:2] == [("end", 77, 123.5), ("older",)]
     assert ("env", server.config.ccproxy_port) in server.steps
@@ -178,7 +187,7 @@ def test_start_failure_with_anthropic_model_exits(
 
     monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
 
-    assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused()
     # Left for the starter to tell the user.
     reason = manager.RUNTIME.ccproxy_failure.read_text(encoding="utf-8")
     assert "ccproxy auth login" in reason
@@ -188,7 +197,7 @@ def test_start_drops_reason_an_earlier_start_left(server):
     manager.RUNTIME.ccproxy_failure.write_text("old reason", encoding="utf-8")
     server.config.anthropic_auth_mode = "api_key"
 
-    server_ccproxy.start(None)
+    _start(None)
 
     assert not manager.RUNTIME.ccproxy_failure.exists()
 
@@ -204,7 +213,7 @@ def test_start_failure_without_anthropic_model_warns_and_serves(
 
     monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
 
-    server_ccproxy.start(None)
+    _start(None)
 
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("ccproxy auth login" in r.getMessage() for r in warnings)
@@ -222,7 +231,7 @@ def test_start_checks_port_before_sign_in(server, monkeypatch, caplog):
     )
     monkeypatch.setattr(manager, "_is_port_occupied", lambda port, host: True)
 
-    assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused()
     assert "EvoSci config set ccproxy_port" in caplog.text
     assert checked == []
 
@@ -230,7 +239,7 @@ def test_start_checks_port_before_sign_in(server, monkeypatch, caplog):
 def test_start_runs_ccproxy_with_its_own_log_and_sets_env(server):
     port = server.config.ccproxy_port
 
-    server_ccproxy.start(None)
+    _start(None)
 
     assert ("spawn", port, manager.RUNTIME.ccproxy_log) in server.steps
     assert manager.RUNTIME.ccproxy_log.parent == paths.SERVER_HOME
@@ -241,7 +250,7 @@ def test_start_rotates_large_ccproxy_log(server, monkeypatch):
     monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 10)
     manager.RUNTIME.ccproxy_log.write_text("x" * 20)
 
-    server_ccproxy.start(None)
+    _start(None)
 
     rotated = manager.RUNTIME.ccproxy_log.with_name("ccproxy.log.1")
     assert rotated.read_text() == "x" * 20
@@ -250,7 +259,7 @@ def test_start_rotates_large_ccproxy_log(server, monkeypatch):
 
 def test_start_records_ccproxy_before_waiting_for_it(server):
     """A server killed while ccproxy starts leaves it recorded."""
-    server_ccproxy.start(None)
+    _start(None)
 
     assert ("wait", server.proc.pid) in server.steps
     record = _read()
@@ -259,7 +268,7 @@ def test_start_records_ccproxy_before_waiting_for_it(server):
 
 
 def test_start_ends_ccproxy_previous_server_left(server):
-    server_ccproxy.start(_LEFT)
+    _start(_LEFT)
 
     assert server.steps.index(("end", 77, 123.5)) < server.steps.index(
         ("spawn", server.config.ccproxy_port, manager.RUNTIME.ccproxy_log)
@@ -272,7 +281,7 @@ def test_start_ends_older_release_lasting_ccproxy(server, monkeypatch):
         ccproxy_manager, "stop_recorded_ccproxy", lambda: ended.append(1) or 99
     )
 
-    server_ccproxy.start({"pid": 20})
+    _start({"pid": 20})
 
     assert ended == [1]
     assert not [step for step in server.steps if step[0] == "end"]
@@ -293,7 +302,7 @@ def test_start_unready_ccproxy_exits_with_its_code(
 
     monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
 
-    assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused()
     assert message in caplog.text
     assert server.steps == [("older",)]
 
@@ -304,8 +313,10 @@ def test_start_on_taken_port_exits_naming_variable(server, caplog):
         taken.listen()
         server.config.ccproxy_port = taken.getsockname()[1]
 
-        assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+        reason = _refused()
 
+    # The server never came up: nothing to restart.
+    assert "EvoSci server stop" not in reason
     assert "EVOSCIENTIST_CCPROXY_PORT" in caplog.text
     assert str(paths.DATA_DIR) in caplog.text
     assert server.steps == [("older",)]
@@ -321,7 +332,7 @@ def test_start_waits_for_port_after_ending_ccproxy_on_it(server, monkeypatch):
 
     monkeypatch.setattr(manager, "_wait_for_port_bindable", _wait)
 
-    server_ccproxy.start(_LEFT)
+    _start(_LEFT)
 
     assert waited == [server.config.ccproxy_port]
 
@@ -332,7 +343,7 @@ def test_start_without_ccproxy_ended_checks_port_once(server, monkeypatch):
 
     monkeypatch.setattr(manager, "_wait_for_port_bindable", _wait)
 
-    server_ccproxy.start(None)
+    _start(None)
 
     assert ("env", server.config.ccproxy_port) in server.steps
 
@@ -365,7 +376,7 @@ def test_start_beside_wildcard_listener_exits(server, monkeypatch):
     wildcard address (macOS, Windows)."""
     monkeypatch.setattr(manager, "_is_port_occupied", lambda port, host: True)
 
-    assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused()
     assert not [step for step in server.steps if step[0] == "spawn"]
 
 
@@ -375,7 +386,7 @@ def test_start_never_serving_ccproxy_exits_naming_its_log(server, monkeypatch, c
 
     monkeypatch.setattr(ccproxy_manager, "wait_for_ccproxy", _never)
 
-    assert _exit_code() == server_ccproxy.CCPROXY_FAILED_EXIT
+    assert _refused()
     assert "did not become healthy" in caplog.text
     assert str(manager.RUNTIME.ccproxy_log) in caplog.text
     # Stopped by the wait: the exit's stop has nothing to do.
@@ -386,13 +397,13 @@ def test_start_never_serving_ccproxy_exits_naming_its_log(server, monkeypatch, c
 def test_start_registers_stop_after_record_removal(server):
     """Exit handlers run in reverse order: ccproxy stops before the record
     goes."""
-    server_ccproxy.start(None)
+    _start(None)
 
     assert server.registered == [server_ccproxy.stop]
 
 
 def test_stop_stops_ccproxy_once(server):
-    server_ccproxy.start(None)
+    _start(None)
 
     server_ccproxy.stop()
     server_ccproxy.stop()
@@ -401,7 +412,7 @@ def test_stop_stops_ccproxy_once(server):
 
 
 def test_request_stop_signals_ccproxy_and_leaves_the_wait_to_stop(server):
-    server_ccproxy.start(None)
+    _start(None)
     signalled = []
     server.proc.terminate = lambda: signalled.append(True)
 
@@ -639,6 +650,7 @@ def serving(server, monkeypatch):
     ``server.proc`` is the one a restart starts."""
     monkeypatch.setattr(server_ccproxy, "_port", server.config.ccproxy_port)
     monkeypatch.setattr(server_ccproxy, "_proc", _Popen(5000))
+    monkeypatch.setattr(server_ccproxy, "_first", False)
     monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
     server.proc.pid = 5001
     return server
@@ -782,7 +794,7 @@ def test_ensure_serving_leaves_ccproxy_answering_without_its_process(
     server_ccproxy.ensure_serving()
 
     assert _spawned(serving) == []
-    assert caplog.text.count("not from the process the server started") == 1
+    assert caplog.text.count("already answers") == 1
     # Runs reach it even when the server started without its own.
     assert ("env", serving.config.ccproxy_port) in serving.steps
 
@@ -962,6 +974,7 @@ def test_server_lifespan_asks_ccproxy_to_stop_as_it_ends(monkeypatch, oauth):
     stopped = []
     monkeypatch.setattr(server_ccproxy, "_port", 8000 if oauth else None)
     monkeypatch.setattr(server_ccproxy, "request_stop", lambda: stopped.append(True))
+    monkeypatch.setattr(server_ccproxy, "start_serving", lambda: None)
     monkeypatch.setattr(server_record, "mark_serving", lambda: None)
     with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)):
         assert stopped == []
@@ -1044,3 +1057,52 @@ def test_launch_while_server_stops_ends_new_ccproxy(server, monkeypatch):
 
     assert server_ccproxy._proc is None
     assert ("stop", server.proc) in server.steps
+
+
+def test_start_at_import_starts_no_ccproxy(server):
+    """langgraph-api times the import: the start waits for the lifespan."""
+    server_ccproxy.start(None)
+
+    assert _spawned(server) == []
+    assert server_ccproxy.needed()
+
+
+def test_start_uses_ccproxy_user_runs_on_port(server, monkeypatch, caplog):
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: True)
+
+    _start()
+
+    assert _spawned(server) == []
+    assert server_record.CCPROXY_PID_KEY not in _read()
+    assert "already answers" in caplog.text
+
+
+def test_refused_start_leaves_reason_under_recorded_pid(server, monkeypatch):
+    """On Windows the record names the launcher, which the starter knows."""
+    monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
+
+    reason = _refused()
+
+    left = json.loads(manager.RUNTIME.ccproxy_failure.read_text(encoding="utf-8"))
+    assert left == {"pid": 20, "reason": reason}
+
+
+def test_server_lifespan_starts_ccproxy_before_serving(monkeypatch):
+    from starlette.testclient import TestClient
+
+    from EvoScientist.langgraph_dev.http import app
+
+    marked = []
+
+    def refuse():
+        raise server_ccproxy.CcproxyStartError("not signed in")
+
+    monkeypatch.setattr(server_ccproxy, "start_serving", refuse)
+    monkeypatch.setattr(server_record, "mark_serving", lambda: marked.append(True))
+    with (
+        pytest.raises(server_ccproxy.CcproxyStartError),
+        TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)),
+    ):
+        pass
+
+    assert marked == []

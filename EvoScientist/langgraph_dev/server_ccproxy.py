@@ -1,16 +1,19 @@
 """The server's ccproxy, the local proxy Anthropic's OAuth routes through.
 
-When Anthropic uses OAuth, the server starts ccproxy as its child when
-:mod:`.http` is imported, right after it recorded itself, and waits until it
-serves, before the runtime starts its scheduled tasks and run workers; it
-stops it as it exits. ccproxy writes to ``ccproxy.log`` in the server home.
-Sessions point at it on ``ccproxy_port``. One a killed server left running is
-in that server's record, and the next server ends it first.
+When Anthropic uses OAuth, the server starts ccproxy as its child first
+thing in its lifespan (:func:`start_serving`), before it marks itself
+serving: not while langgraph-api imports the app, which it times and flags
+when slow. When :mod:`.http` is imported the server only ends the ccproxy a
+killed predecessor left (its record names it) and notes that OAuth is on, so
+a run that starts meanwhile waits for that start. It stops ccproxy as it
+exits. ccproxy writes to ``ccproxy.log`` in the server home. Sessions point at
+it on ``ccproxy_port``. A ccproxy that already answers there (one the user
+runs) is used, not owned: the server neither records nor ends it.
 
 When a configured model is Anthropic's, a server that cannot start its
-ccproxy (not installed, not signed in, the port taken, never serving) logs
-why and exits with :data:`CCPROXY_FAILED_EXIT`, leaving the reason for its
-starter to tell the user. Otherwise it warns and serves without ccproxy.
+ccproxy (not installed, not signed in, the port taken, never serving) leaves
+the reason for its starter, tagged with its PID, and fails its start
+(:class:`CcproxyStartError`). Otherwise it warns and serves without ccproxy.
 
 A run start starts ccproxy when it is not running (:func:`ensure_serving`),
 until :data:`_FAILED_RESTART_LIMIT` tries in a row failed; when it cannot,
@@ -20,6 +23,7 @@ the run fails by the same rule as the server's start.
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import subprocess
 import sys
@@ -32,9 +36,11 @@ from . import server_record
 
 logger = logging.getLogger(__name__)
 
-# The server's exit code when it cannot start the ccproxy a configured
-# Anthropic model needs; the reason is the last thing it logged.
-CCPROXY_FAILED_EXIT = 78
+
+class CcproxyStartError(RuntimeError):
+    """The server could not start the ccproxy a configured Anthropic model
+    needs; raised out of its lifespan, so it does not serve."""
+
 
 # How many failed starts in a row end the tries at run start, until the
 # server restarts.
@@ -49,8 +55,14 @@ _failed = 0
 _attempts = 0
 _last_error: str | None = None
 # Whether a ccproxy that answers without the process this server started
-# (a launcher that exited, its child serving) was logged.
+# (one the user runs, a launcher that exited with its child serving) was
+# logged.
 _noted_orphan = False
+# Whether the server ended a ccproxy its predecessor left, whose port then
+# needs a moment to come free for the first start.
+_ended_left = False
+# Whether no start was tried yet: the one as the server starts.
+_first = True
 
 _proc: subprocess.Popen | None = None
 # Set as the server exits: a ccproxy that ends then is not started again.
@@ -64,18 +76,13 @@ _job = None
 
 
 def start(left: dict | None) -> None:
-    """End the ccproxy the record *left* by the previous server names, then
-    start the server's own when Anthropic uses OAuth.
-
-    When a configured model is Anthropic's and ccproxy cannot start, the
-    server exits with :data:`CCPROXY_FAILED_EXIT`, after logging why.
-    Otherwise it only warns and serves without ccproxy: ``/model`` can still
-    pick an Anthropic model for a run, but a stale OAuth setting must not
-    keep the server from starting.
+    """As :mod:`.http` is imported: end the ccproxy the record *left* by the
+    previous server names, and note whether Anthropic uses OAuth; the start
+    itself is :func:`start_serving`'s.
 
     The previous one is ended whatever this server uses: its record is
     replaced by now, so no later server would find it."""
-    global _port
+    global _port, _ended_left
     from .manager import RUNTIME
 
     # Only this start's reason may reach its starter.
@@ -88,30 +95,46 @@ def start(left: dict | None) -> None:
     if not ccproxy_manager.uses_oauth(config):
         return
     _port = config.ccproxy_port
+    _ended_left = ended
     # Registered after the record's removal, so it runs before it.
     atexit.register(stop)
-    try:
-        _start(config.ccproxy_port, ended=ended)
-    except (RuntimeError, OSError) as exc:
-        if "anthropic" in providers_in_use(config):
-            logger.error("%s", exc)
-            _tell_starter(str(exc))
-            sys.exit(CCPROXY_FAILED_EXIT)
-        logger.warning(
-            "Anthropic OAuth is set, but ccproxy could not start: %s\n"
-            "An Anthropic model (/model) will not work until it can; each run "
-            "start tries to start it.",
-            exc,
-        )
+
+
+def start_serving() -> None:
+    """First thing in the server's lifespan: start ccproxy when Anthropic
+    uses OAuth, as a run start would (runs that start meanwhile share the
+    outcome). Blocking.
+
+    When a configured model is Anthropic's and ccproxy cannot start, leaves
+    the reason for the starter and raises :class:`CcproxyStartError`.
+    Otherwise it only warns and the server serves without ccproxy: ``/model``
+    can still pick an Anthropic model for a run, but a stale OAuth setting
+    must not keep the server from starting."""
+    error = _ensure()
+    if error is None:
+        return
+    if "anthropic" in providers_in_use(get_effective_config()):
+        _tell_starter(error)
+        raise CcproxyStartError(error)
+    logger.warning(
+        "Anthropic OAuth is set, but ccproxy could not start: %s\n"
+        "An Anthropic model (/model) will not work until it can; each run "
+        "start tries to start it.",
+        error,
+    )
 
 
 def _tell_starter(reason: str) -> None:
-    """Leave *reason* for the process that started the server, which reads it
-    once the server exited with :data:`CCPROXY_FAILED_EXIT`."""
+    """Leave *reason* for the process that started the server, tagged with
+    this server's PID, so a failed start of a later server is never read as
+    this one's (see :func:`~.manager.ccproxy_failure_of`)."""
     from .manager import RUNTIME
 
     try:
-        RUNTIME.ccproxy_failure.write_text(reason, encoding="utf-8")
+        RUNTIME.ccproxy_failure.write_text(
+            json.dumps({"pid": server_record.recorded_pid(), "reason": reason}),
+            encoding="utf-8",
+        )
     except OSError:
         logger.warning("Could not write %s", RUNTIME.ccproxy_failure)
 
@@ -144,7 +167,7 @@ def ensure_serving() -> None:
 
     When it cannot start, the run gets the reason as a :class:`RuntimeError`
     if a configured model (main, auxiliary, fallback) is Anthropic's, as the
-    server's start exits then; otherwise the failure is only logged and the
+    server's start fails then; otherwise the failure is only logged and the
     run goes on (an Anthropic model it picks with ``/model`` then cannot be
     reached). Run starts that wait on one start share its outcome. After
     :data:`_FAILED_RESTART_LIMIT` failures in a row nothing is tried until
@@ -215,7 +238,7 @@ def _state() -> str:
 def _restart_once(port: int, seen: int) -> str | None:
     """Start ccproxy, unless a start ran since attempt *seen*; the reason
     ccproxy does not serve, or None."""
-    global _attempts, _failed, _last_error, _noted_orphan
+    global _attempts, _failed, _last_error, _noted_orphan, _ended_left, _first
     with _restart_lock:
         with _lock:
             state = _state()
@@ -225,22 +248,26 @@ def _restart_once(port: int, seen: int) -> str | None:
                 return _last_error
             if state == _GAVE_UP:
                 return _gave_up_message()
-            # One that exited frees its port a moment later.
-            exited = _proc is not None
+            first, _first = _first, False
+            # One that exited, or the predecessor's just ended, frees its
+            # port a moment later.
+            exited = _proc is not None or _ended_left
+            _ended_left = False
         if ccproxy_manager.is_ccproxy_running(port):
-            # On Windows ccproxy.exe is a launcher; its child may serve on.
+            # One the user runs, or on Windows the child of a ccproxy.exe
+            # launcher that exited: used, not owned.
             if not _noted_orphan:
                 _noted_orphan = True
                 logger.warning(
-                    "ccproxy answers on port %d, but not from the process the "
-                    "server started; leaving it.",
+                    "A ccproxy already answers on port %d; using it. The "
+                    "server did not start it and does not stop it.",
                     port,
                 )
             # Not set yet when ccproxy could not start with the server.
             ccproxy_manager.setup_ccproxy_env(port)
             return None
         try:
-            _restart(port, exited=exited)
+            _restart(port, exited=exited, first=first)
         except (RuntimeError, OSError) as exc:
             with _lock:
                 if _stopping:
@@ -272,8 +299,13 @@ def _gave_up_message() -> str:
     )
 
 
-def _restart(port: int, *, exited: bool) -> None:
-    """Start ccproxy again; *exited* when the server's own ccproxy exited."""
+def _restart(port: int, *, exited: bool, first: bool = False) -> None:
+    """Start ccproxy, *first* as the server starts, else again; *exited*
+    when a ccproxy on its port just ended."""
+    if first:
+        logger.info("Starting ccproxy on port %d.", port)
+        _start(port, ended=exited)
+        return
     logger.warning("ccproxy is not running; starting it on port %d.", port)
     _start(
         port,
@@ -321,9 +353,9 @@ def _spawn(port: int) -> subprocess.Popen:
 
 def port_taken_message(port: int) -> str:
     return (
-        f"ccproxy_port {port} is in use by another program (a ccproxy you "
-        "run yourself, another data folder's server, or any other service), "
-        "so the server cannot start its ccproxy (Anthropic OAuth). Pick "
+        f"ccproxy_port {port} is in use by another program that is not a "
+        "ccproxy answering there, so the server cannot start its ccproxy "
+        "(Anthropic OAuth). Pick "
         "another port with `EvoSci config set ccproxy_port <port>`, or stop "
         "that program. An exported EVOSCIENTIST_CCPROXY_PORT overrides the "
         "setting; if you use it, set it for every command of the data folder "

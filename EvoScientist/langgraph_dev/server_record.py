@@ -133,6 +133,13 @@ def address_of(args: list[str]) -> tuple[int, str]:
     return port, option(args, "--host") or DEFAULT_HOST
 
 
+def recorded_pid() -> int:
+    """The PID this server recorded itself under, which its starter knows:
+    on Windows the launcher's, not this process's."""
+    pid = (_written or {}).get("pid")
+    return pid if isinstance(pid, int) else os.getpid()
+
+
 def restart_hint(lasting: bool | None) -> str:
     """How to restart the server a record describes: the background server
     with ``EvoSci server stop``, which leaves one ``EvoSci deploy`` or the
