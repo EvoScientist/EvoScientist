@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..gateway import GraphGateway
-from ..runtime import AsyncRuntimeError
 from ..stream.console import console
 from .tui_backends import RichStreamingBackend, StreamingTUIBackend
 
@@ -132,65 +131,30 @@ def run_streaming(
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
-    try:
-        return backend.run_streaming(
-            agent=agent,
-            message=message,
-            thread_id=thread_id,
-            show_thinking=show_thinking,
-            interactive=interactive,
-            on_thinking=on_thinking,
-            on_todo=on_todo,
-            on_file_write=on_file_write,
-            work_dir=work_dir,
-            on_stream_event=on_stream_event,
-            status_footer_builder=status_footer_builder,
-            metadata=metadata,
-            configurable_extra=configurable_extra,
-            hitl_prompt_fn=hitl_prompt_fn,
-            hitl_outcome_fn=hitl_outcome_fn,
-            ask_user_prompt_fn=ask_user_prompt_fn,
-            cancel_scope=cancel_scope,
-            gateway=gateway,
-            runtime=runtime,
-            rubric=rubric,
-            approve_all_at_start=approve_all_at_start,
-            goal_request=goal_request,
-        )
-    except AsyncRuntimeError:
-        raise
-    except RuntimeError:
-        # Compare the raw name: normalize sends unknown names to "tui", and only an
-        # explicit "tui" retries.
-        if (ui_backend or "").strip().lower() == "tui":
-            console.print(
-                "[yellow]TUI failed at runtime. Falling back to CLI for this request.[/yellow]"
-            )
-            return RichStreamingBackend().run_streaming(
-                agent=agent,
-                message=message,
-                thread_id=thread_id,
-                show_thinking=show_thinking,
-                interactive=interactive,
-                on_thinking=on_thinking,
-                on_todo=on_todo,
-                on_file_write=on_file_write,
-                work_dir=work_dir,
-                on_stream_event=on_stream_event,
-                status_footer_builder=status_footer_builder,
-                metadata=metadata,
-                configurable_extra=configurable_extra,
-                hitl_prompt_fn=hitl_prompt_fn,
-                hitl_outcome_fn=hitl_outcome_fn,
-                ask_user_prompt_fn=ask_user_prompt_fn,
-                cancel_scope=cancel_scope,
-                gateway=gateway,
-                runtime=runtime,
-                rubric=rubric,
-                approve_all_at_start=approve_all_at_start,
-                goal_request=goal_request,
-            )
-        raise
+    return backend.run_streaming(
+        agent=agent,
+        message=message,
+        thread_id=thread_id,
+        show_thinking=show_thinking,
+        interactive=interactive,
+        on_thinking=on_thinking,
+        on_todo=on_todo,
+        on_file_write=on_file_write,
+        work_dir=work_dir,
+        on_stream_event=on_stream_event,
+        status_footer_builder=status_footer_builder,
+        metadata=metadata,
+        configurable_extra=configurable_extra,
+        hitl_prompt_fn=hitl_prompt_fn,
+        hitl_outcome_fn=hitl_outcome_fn,
+        ask_user_prompt_fn=ask_user_prompt_fn,
+        cancel_scope=cancel_scope,
+        gateway=gateway,
+        runtime=runtime,
+        rubric=rubric,
+        approve_all_at_start=approve_all_at_start,
+        goal_request=goal_request,
+    )
 
 
 async def run_streaming_async(

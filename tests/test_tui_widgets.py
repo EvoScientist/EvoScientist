@@ -263,6 +263,64 @@ class TestToolCallWidget(unittest.TestCase):
         summary = w._result_summary()
         assert len(summary) <= 61  # 57 + "…"
 
+    def _fake_output(self, w):
+        class _Output:
+            def __init__(self) -> None:
+                self.updated = None
+
+            def update(self, value) -> None:
+                self.updated = value
+
+            def add_class(self, _name) -> None:
+                pass
+
+        output = _Output()
+        w.query_one = lambda selector, cls=None: output  # type: ignore[assignment]
+        return output
+
+    def test_a_long_result_collapses_and_expands_as_the_stream_cut_it(self):
+        """A long result collapses, failed or not, and expands uncut."""
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+        from EvoScientist.stream.utils import cut_middle
+
+        raw = (
+            "\n".join(f"collected line {i}" for i in range(300))
+            + "\n[Command failed with exit code 1]"
+        )
+        content = cut_middle(raw, 2000, 500)
+        for status in ("error", "success"):
+            w = ToolCallWidget("execute", {})
+            w._result_content = content
+            w._status = status
+            output = self._fake_output(w)
+            w._render_output()
+            assert output.updated.plain == "  [click to expand output]"
+            w.on_click(None)
+            assert output.updated.plain == content
+
+    def test_a_short_failure_is_shown_in_full(self):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        w = ToolCallWidget("execute", {})
+        w._result_content = "Command blocked: contains '..' path traversal."
+        w._status = "error"
+        output = self._fake_output(w)
+        w._render_output()
+        assert output.updated.plain == "Command blocked: contains '..' path traversal."
+
+    def test_a_failure_summary_says_why_without_guessing(self):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        w = ToolCallWidget("execute", {})
+        w._result_content = (
+            "Collecting foo\n[stderr] ERROR: No matching distribution found for foo"
+            "\n\nExit code: 1\n[Command failed with exit code 1]"
+        )
+        w._status = "error"
+        assert w._result_summary() == "[Command failed with exit code 1]"
+        w._status = "success"
+        assert w._result_summary() == "Collecting foo"
+
     def test_result_summary_empty(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 
