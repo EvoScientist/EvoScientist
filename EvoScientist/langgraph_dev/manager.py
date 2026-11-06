@@ -2644,7 +2644,7 @@ def _record_of(
         if record is not None and record.pid in _spawned_pids(proc):
             return record
         if proc.poll() is not None:
-            return _exited(proc)
+            return _exited(proc, server_pid=proc.pid)
         if waits.cancelled():
             return _give_up(proc, problem="cancelled", error="Cancelled.")
         if time.monotonic() >= deadline:

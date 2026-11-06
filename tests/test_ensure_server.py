@@ -1558,6 +1558,18 @@ def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
     assert "ccproxy auth login" in result.reason
 
 
+def test_ensure_server_reports_ccproxy_failure_of_start_gone_before_its_record_was_read(
+    server,
+):
+    server.exit_code = 3
+    _ccproxy_reason(server.pid, "ccproxy is required for OAuth mode but not found.")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "ccproxy_failed"
+    assert "not found" in result.reason
+
+
 def test_ensure_server_ignores_reason_another_server_left(server):
     """A later start that fails for another reason is not a ccproxy failure."""
     server.exit_code, server.records_then_exits = 3, True
