@@ -1869,8 +1869,9 @@ def ensure_server(
 
 def _ccproxy_missing(config: EvoScientistConfig, result: ServerResult) -> str | None:
     """The notice for a session whose Anthropic model goes through the
-    server's ccproxy (OAuth) when nothing answers on ``ccproxy_port``;
-    ``None`` otherwise, also when the server said why it could not start it."""
+    server's ccproxy (OAuth) when nothing answers on ``ccproxy_port`` and the
+    server, asked to, does not start it; ``None`` otherwise, also when the
+    server said why it could not start it."""
     from ..ccproxy_manager import is_ccproxy_running, uses_oauth
     from ..config.settings import providers_in_use
 
@@ -1886,11 +1887,18 @@ def _ccproxy_missing(config: EvoScientistConfig, result: ServerResult) -> str | 
             "Anthropic's OAuth goes through the background agent server's "
             "ccproxy, so Anthropic models fail without the server."
         )
+    reason = registration.ensure_ccproxy(url=result.url)
+    if reason is None and is_ccproxy_running(config.ccproxy_port):
+        return None
     return (
         "The background agent server's ccproxy is not running on port "
         f"{config.ccproxy_port}, so Anthropic models fail (Anthropic's OAuth "
-        "goes through it). Restart the server: EvoSci server stop; it starts "
-        "again with your next session."
+        "goes through it). "
+        + (
+            reason
+            or "Restart the server: EvoSci server stop; it starts again with "
+            "your next session."
+        )
     )
 
 

@@ -331,6 +331,16 @@ async def register_workspace(request: Request) -> JSONResponse:
     return JSONResponse({"workspace_dir": workspace.key} | exposure)
 
 
+async def ensure_ccproxy(request: Request) -> JSONResponse:
+    """Start the server's ccproxy for a session that found nothing answering
+    on ``ccproxy_port``: ``{"serving": <bool>, "detail": <why not, or
+    null>}``. Needs the local secret."""
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    detail = await asyncio.to_thread(server_ccproxy.ensure_for_session)
+    return JSONResponse({"serving": detail is None, "detail": detail})
+
+
 async def reconcile_autoskills(request: Request) -> JSONResponse:
     """Reconcile every served project's AutoSkills cron with the server's
     configuration, after a client changed it: ``{"projects": <count>,
@@ -520,6 +530,7 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
+            Route("/api/ccproxy/ensure", ensure_ccproxy, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
             Route("/api/settings", get_settings, methods=["GET"]),

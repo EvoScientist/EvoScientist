@@ -1616,14 +1616,50 @@ def test_ccproxy_missing_notice_when_nothing_answers(monkeypatch, available):
     from EvoScientist import ccproxy_manager
 
     monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+    monkeypatch.setattr(registration, "ensure_ccproxy", lambda url: None)
 
     notice = manager._ccproxy_missing(
-        _oauth_config(), manager.ServerResult(available=available)
+        _oauth_config(), manager.ServerResult(available=available, url="http://s")
     )
 
     assert notice is not None
     # A server that runs can be restarted; without one, its problem comes first.
     assert ("EvoSci server stop" in notice) is available
+
+
+def test_ccproxy_missing_no_notice_when_server_starts_ccproxy(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        ccproxy_manager, "is_ccproxy_running", lambda port: next(answers)
+    )
+    asked = []
+    monkeypatch.setattr(
+        registration, "ensure_ccproxy", lambda url: asked.append(url) or None
+    )
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True, url="http://s")
+    )
+
+    assert notice is None
+    assert asked == ["http://s"]
+
+
+def test_ccproxy_missing_notice_says_why_server_could_not_start_it(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+    monkeypatch.setattr(
+        registration, "ensure_ccproxy", lambda url: "Run: ccproxy auth login"
+    )
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True, url="http://s")
+    )
+
+    assert "ccproxy auth login" in notice
 
 
 def test_ccproxy_missing_no_notice_when_ccproxy_answers(monkeypatch):

@@ -642,6 +642,42 @@ def test_ensure_serving_leaves_running_ccproxy(serving):
     assert _spawned(serving) == []
 
 
+def test_ensure_serving_waits_for_restart_under_way(serving):
+    """A restart's ccproxy runs before it serves; a run start waits."""
+    outcome: list = []
+    server_ccproxy._restart_lock.acquire()
+    try:
+        run = threading.Thread(target=lambda: outcome.append(server_ccproxy._ensure()))
+        run.start()
+        run.join(0.2)
+        assert run.is_alive()
+    finally:
+        server_ccproxy._restart_lock.release()
+    run.join(5)
+
+    assert outcome == [None]
+    assert _spawned(serving) == []
+
+
+def test_ensure_for_session_restarts_ccproxy_that_is_gone(serving):
+    server_ccproxy._proc.code = 1
+
+    assert server_ccproxy.ensure_for_session() is None
+    assert len(_spawned(serving)) == 1
+
+
+def test_ensure_for_session_says_why_ccproxy_does_not_start(serving, monkeypatch):
+    server_ccproxy._proc.code = 1
+    monkeypatch.setattr(ccproxy_manager, "check_ccproxy_ready", _unready)
+
+    # Also without an Anthropic model configured: the session uses one.
+    assert "ccproxy auth login" in server_ccproxy.ensure_for_session()
+
+
+def test_ensure_for_session_on_server_without_oauth_says_to_restart(server):
+    assert "EvoSci server stop" in server_ccproxy.ensure_for_session()
+
+
 def test_ensure_serving_restarts_ccproxy_that_is_gone(serving):
     server_ccproxy._proc.code = 1
 

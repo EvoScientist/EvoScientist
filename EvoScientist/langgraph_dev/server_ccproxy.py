@@ -150,20 +150,42 @@ def ensure_serving() -> None:
     :data:`_FAILED_RESTART_LIMIT` failures in a row nothing is tried until
     the server restarts.
     """
+    error = _ensure()
+    if error is not None and "anthropic" in providers_in_use(get_effective_config()):
+        raise RuntimeError(error)
+
+
+def ensure_for_session() -> str | None:
+    """Start ccproxy for a session that routes Anthropic through it (OAuth)
+    and found nothing answering, as a run start would; why it does not
+    serve, or None. Blocking."""
+    if _port is None:
+        return (
+            "The server was started without Anthropic OAuth, so it runs no "
+            "ccproxy; restart it: EvoSci server stop; it starts again with "
+            "your next session."
+        )
+    return _ensure()
+
+
+def _ensure() -> str | None:
+    """Start ccproxy when Anthropic uses OAuth and it is not running; why it
+    does not serve, or None."""
     port = _port
     if port is None:
-        return
+        return None
     with _lock:
         state = _state()
         seen = _attempts
+        # A restart under way has a process before it serves: wait for it
+        # and share its outcome.
+        if state == _SKIP and not _stopping and _restart_lock.locked():
+            state = _RESTART
     if state == _SKIP:
-        return
+        return None
     if state == _GAVE_UP:
-        error = _gave_up_message()
-    else:
-        error = _restart_once(port, seen)
-    if error is not None and "anthropic" in providers_in_use(get_effective_config()):
-        raise RuntimeError(error)
+        return _gave_up_message()
+    return _restart_once(port, seen)
 
 
 # What a run start finds (:func:`_state`).
