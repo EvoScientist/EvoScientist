@@ -884,6 +884,62 @@ def test_revert_refuses_changed_skill(tmp_path, change):
     assert "cluster-1" in processed_cluster_hashes(memory_dir)
 
 
+@pytest.mark.parametrize(
+    "cache",
+    [
+        "scripts/__pycache__/check.cpython-313.pyc",
+        "__pycache__/helper.cpython-311.pyc",
+        ".DS_Store",
+        "scripts/Thumbs.db",
+        "desktop.ini",
+        "scripts/thumbs.db",
+        "Desktop.ini",
+    ],
+)
+def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    (installed / cache).parent.mkdir(parents=True, exist_ok=True)
+    (installed / cache).write_bytes(b"\x00cache")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True, result
+    assert not installed.exists()
+
+
+def test_revert_removes_a_copied_cache_the_browser_rewrote(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    installed = skills_dir / "focused-validation"
+    (installed / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1, rewritten")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True, result
+    assert not installed.exists()
+
+
+@pytest.mark.parametrize(
+    "added", ["scripts/check.pyc", "__pycache__/notes.md", "docs/.DS_Store.txt"]
+)
+def test_revert_refuses_a_file_that_only_looks_like_a_cache(tmp_path, added):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    (installed / added).parent.mkdir(parents=True, exist_ok=True)
+    (installed / added).write_text("Mine.\n", encoding="utf-8")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["error"] == "skill_changed"
+    assert (installed / added).is_file()
+
+
 def test_revert_deletes_nothing_when_a_later_file_changed(tmp_path):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
     (installed / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")

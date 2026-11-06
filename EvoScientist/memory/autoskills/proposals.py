@@ -1619,11 +1619,24 @@ def _still_plain(installed: Path, path: Path) -> bool:
         folder = folder.parent
 
 
+# Files a skill gains by being used or browsed, which Undo removes with it;
+# compared without case, as Windows and macOS file names are.
+_CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
+def _is_cache(name: str) -> bool:
+    """Whether a relative path is Python bytecode or a file browser's cache."""
+    parts = name.split("/")
+    if parts[-1].casefold() in _CACHE_NAMES:
+        return True
+    return len(parts) > 1 and parts[-2] == "__pycache__" and name.endswith(".pyc")
+
+
 def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
     """Delete a new skill's files while each is still one the approval copied.
 
     Files already gone count as removed, so a revert cut short can run again;
-    a file added or edited since keeps the whole folder.
+    caches go too, but a file added or edited since keeps the whole folder.
     """
     try:
         top = installed.lstat()
@@ -1636,16 +1649,22 @@ def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
         for relative in copied_files(proposal_dir)
     }
     present = _regular_files(installed)
-    if present is None or not present.keys() <= copied.keys():
-        return False
-    if not all(
-        _still_plain(installed, path) and _same_bytes(path, copied[name])
-        for name, path in present.items()
+    if present is None or not all(
+        name in copied or _is_cache(name) for name in present
     ):
+        return False
+
+    def unchanged(name: str, path: Path) -> bool:
+        if not _still_plain(installed, path):
+            return False
+        # A cache may differ from a copied one: Finder rewrites .DS_Store freely.
+        return name not in copied or _is_cache(name) or _same_bytes(path, copied[name])
+
+    if not all(unchanged(name, path) for name, path in present.items()):
         return False
     for name, path in present.items():
         # Re-checked right before each delete, so a change made meanwhile survives.
-        if not _still_plain(installed, path) or not _same_bytes(path, copied[name]):
+        if not unchanged(name, path):
             return False
         path.unlink()
     for dirpath, _dirnames, _filenames in os.walk(
