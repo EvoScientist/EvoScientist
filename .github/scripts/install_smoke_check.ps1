@@ -18,11 +18,10 @@ param([Parameter(Mandatory = $true)][ValidateSet('online', 'block', 'offline', '
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-# EvoSci's output goes to pipes and files here; with the ANSI code page Python
-# fails on its progress symbols, as in install.ps1.
-$env:PYTHONIOENCODING = 'utf-8'
-# ... and their output (and uv's) is UTF-8: decode it as such, not in the
-# console code page (paths with non-ASCII characters).
+# No PYTHONIOENCODING: EvoSci writes UTF-8 to pipes and files on its own
+# (0.3.8 and later), and these checks are what test that on Windows. Its output
+# (and uv's) is UTF-8: decode it as such, not in the console code page (paths
+# with non-ASCII characters).
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 
 $IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }

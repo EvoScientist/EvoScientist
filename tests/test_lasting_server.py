@@ -1122,6 +1122,39 @@ def test_stop_without_terminal_refuses_busy_server(busy_server, command):
     assert "--yes" in output
 
 
+@pytest.mark.parametrize(
+    ("jobs", "running", "said", "unsaid"),
+    [
+        (
+            ["train.py"],
+            False,
+            "background jobs that a stop ends (train.py)",
+            "runs again",
+        ),
+        ([], True, "a run in progress that a stop cuts and that runs again", "jobs"),
+        (["train.py"], True, "ends (train.py); a run in progress", "work in progress"),
+        ([], False, "work in progress", "runs again"),
+    ],
+    ids=["jobs", "run", "both", "neither found"],
+)
+def test_stop_question_says_what_a_stop_does(
+    busy_server, monkeypatch, jobs, running, said, unsaid
+):
+    """Jobs end and runs run again at the next start; work whose kind the
+    lookups missed promises neither."""
+    from EvoScientist.deploy import busy
+
+    monkeypatch.setattr(busy, "running_bg_process_names", lambda url: jobs)
+    monkeypatch.setattr(busy, "has_busy_thread", lambda url: running)
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.output.split())
+    assert said in output
+    assert unsaid not in output
+
+
 @pytest.mark.parametrize("group", ["server", "service"])
 def test_stop_with_yes_stops_busy_server(busy_server, monkeypatch, group):
     import EvoScientist.ccproxy_manager as ccproxy_mod

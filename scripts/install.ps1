@@ -415,9 +415,9 @@ if own_extras:
         # a network that inspects TLS works; longer timeout for slow mirrors.
         if (-not $env:UV_SYSTEM_CERTS) { $env:UV_SYSTEM_CERTS = '1' }
         if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = '300' }
-        # EvoSci setup writes its progress with symbols such as a check mark: to a pipe (CI,
-        # the desktop app) Python would encode them in the ANSI code page and
-        # fail. Its console output is unaffected.
+        # EvoSci setup writes its progress with symbols such as a check mark.
+        # Releases before 0.3.8 would encode them to a pipe (CI, the desktop
+        # app) in the ANSI code page and fail; later ones write UTF-8 themselves.
         if (-not $env:PYTHONIOENCODING) { $env:PYTHONIOENCODING = 'utf-8' }
         if ($Cn) {
             $env:UV_DEFAULT_INDEX = $CnSimple
