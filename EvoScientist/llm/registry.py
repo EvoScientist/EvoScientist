@@ -27,6 +27,7 @@ _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 _NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
+_RUNCRATE_BASE_URL = "https://api.runcrate.ai/v1"
 _XIAOMI_ANTHROPIC_BASE_URL = "https://api.xiaomimimo.com/anthropic"
 _XIAOMI_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
 _OPPER_BASE_URL = "https://api.opper.ai/v3/compat"
@@ -45,6 +46,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "novita": (_NOVITA_BASE_URL, "NOVITA_API_KEY"),
+    "runcrate": (_RUNCRATE_BASE_URL, "RUNCRATE_API_KEY"),
     "opper": (_OPPER_BASE_URL, "OPPER_API_KEY"),
     "custom-openai": (
         None,
@@ -94,6 +96,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-6-luna", "gpt-6-luna", "custom-openai"),
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
+    # Runcrate (OpenAI-compatible, open-weight models under org/model IDs).
+    # Listed before the native providers and OpenRouter so shared short names
+    # keep resolving to them; Runcrate is selected explicitly.
+    ("deepseek-v4.1-flash", "deepseek-ai/DeepSeek-V4.1-Flash", "runcrate"),
+    ("glm-5.3", "zai-org/GLM-5.3", "runcrate"),
+    ("qwen3.5-397b", "Qwen/Qwen3.5-397B-A17B", "runcrate"),
     # Anthropic (current generation)
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),

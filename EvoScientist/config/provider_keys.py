@@ -437,6 +437,15 @@ def check_novita_key(api_key: str) -> KeyCheck:
         return _classify_validation_error(e)
 
 
+def check_runcrate_key(api_key: str) -> KeyCheck:
+    """Check a Runcrate API key by listing models.
+
+    Runcrate's ``/v1/models`` answers 401 for an invalid key, so listing
+    models is enough to check one.
+    """
+    return _check_openai_compatible_key(api_key, "https://api.runcrate.ai/v1")
+
+
 def check_deepseek_key(api_key: str) -> KeyCheck:
     """Check a DeepSeek API key by listing models."""
     return _check_openai_compatible_key(api_key, "https://api.deepseek.com")
@@ -743,6 +752,9 @@ PROVIDERS: dict[str, KeySpec] = {
     ),
     "opper": _key("Opper", "opper_api_key", "OPPER_API_KEY", "check_opper_key"),
     "novita": _key("Novita", "novita_api_key", "NOVITA_API_KEY", "check_novita_key"),
+    "runcrate": _key(
+        "Runcrate", "runcrate_api_key", "RUNCRATE_API_KEY", "check_runcrate_key"
+    ),
     "deepseek": _key(
         "DeepSeek", "deepseek_api_key", "DEEPSEEK_API_KEY", "check_deepseek_key"
     ),

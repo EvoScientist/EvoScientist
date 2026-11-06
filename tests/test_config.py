@@ -42,6 +42,7 @@ def temp_config_dir(tmp_path, monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "ATLASCLOUD_API_KEY",
+        "RUNCRATE_API_KEY",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -83,6 +84,7 @@ def clean_env(monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "ATLASCLOUD_API_KEY",
+        "RUNCRATE_API_KEY",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -950,6 +952,7 @@ class TestApplyConfigToEnv:
             anthropic_api_key="config-ant-key",
             openai_api_key="config-oai-key",
             atlascloud_api_key="config-atlas-key",
+            runcrate_api_key="config-runcrate-key",
             tavily_api_key="config-tav-key",
         )
 
@@ -958,6 +961,7 @@ class TestApplyConfigToEnv:
         assert os.environ.get("ANTHROPIC_API_KEY") == "config-ant-key"
         assert os.environ.get("OPENAI_API_KEY") == "config-oai-key"
         assert os.environ.get("ATLASCLOUD_API_KEY") == "config-atlas-key"
+        assert os.environ.get("RUNCRATE_API_KEY") == "config-runcrate-key"
         assert os.environ.get("TAVILY_API_KEY") == "config-tav-key"
 
     def test_does_not_override_existing_env(self, monkeypatch):
@@ -977,6 +981,7 @@ class TestApplyConfigToEnv:
         assert os.environ.get("ANTHROPIC_API_KEY") is None
         assert os.environ.get("OPENAI_API_KEY") is None
         assert os.environ.get("ATLASCLOUD_API_KEY") is None
+        assert os.environ.get("RUNCRATE_API_KEY") is None
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") is None
 
     def test_openrouter_anthropic_prompt_cache_opt_out_applied(

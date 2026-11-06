@@ -417,6 +417,26 @@ class TestValidateAtlasCloudKey:
         assert "inconclusive" in msg.lower()
 
 
+class TestValidateRuncrateKey:
+    def test_empty_key_skipped(self):
+        from EvoScientist.config.onboard.validators import validate_runcrate_key
+
+        is_valid, msg = validate_runcrate_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_lists_models_on_runcrate_endpoint(self):
+        from EvoScientist.config.onboard.validators import validate_runcrate_key
+
+        with patch("openai.OpenAI") as client_cls:
+            is_valid, msg = validate_runcrate_key("runcrate-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+        assert client_cls.call_args.kwargs["base_url"] == "https://api.runcrate.ai/v1"
+        client_cls.return_value.models.list.assert_called_once()
+
+
 class TestValidateNovitaKey:
     def test_empty_key_skipped(self):
         from EvoScientist.config.onboard.validators import validate_novita_key

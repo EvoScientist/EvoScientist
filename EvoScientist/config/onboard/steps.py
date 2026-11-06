@@ -336,6 +336,10 @@ def _step_provider(
             value="novita",
         ),
         Choice(
+            title="Runcrate (open-weight models: DeepSeek, GLM, Qwen, etc.)",
+            value="runcrate",
+        ),
+        Choice(
             title="Opper (EU-hosted aggregator — OpenAI, Anthropic, Gemini, Mistral, etc.)",
             value="opper",
         ),
