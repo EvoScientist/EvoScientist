@@ -718,10 +718,8 @@ def _is_regular_file(path: Path) -> bool:
 
 
 def copied_files(proposal_dir: Path) -> list[Path]:
-    """The draft's files an approval copies, relative to the draft folder.
-
-    A folder that cannot be read raises, so no draft is approved short of files.
-    """
+    """The files an approval copies, relative to the draft folder, in POSIX text
+    order; an unreadable folder raises, so no draft is approved short of files."""
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
         base = Path(dirpath)
@@ -733,7 +731,7 @@ def copied_files(proposal_dir: Path) -> list[Path]:
             if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
                 continue
             files.append(relative)
-    return sorted(files)
+    return sorted(files, key=lambda relative: relative.as_posix())
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:

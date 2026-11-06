@@ -188,6 +188,29 @@ def test_list_inlines_texts_and_lists_files(server, served):
     assert draft["approved_skill_present"] is None
 
 
+def test_list_orders_files_by_path_text(server, served):
+    _draft(
+        served,
+        "focused-validation",
+        files={
+            "a/x.txt": "x\n",
+            "a-b/y.txt": "y\n",
+            "docs/manifest.json": "{}\n",
+            "docs/RATIONALE.md": "Why.\n",
+        },
+    )
+
+    draft = _only_draft(server)
+
+    assert [f["path"] for f in draft["files"]] == [
+        "SKILL.md",
+        "a-b/y.txt",
+        "a/x.txt",
+        "docs/RATIONALE.md",
+        "docs/manifest.json",
+    ]
+
+
 def test_list_truncates_large_skill_md(server, served):
     _draft(served, "focused-validation", body="x" * (MAX_INLINE_CHARS + 10))
 
