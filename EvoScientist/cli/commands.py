@@ -879,27 +879,6 @@ def _print_server_notices() -> None:
     print_exposure_warnings(_lg_manager.SERVER_EXPOSURE)
 
 
-def warn_server_backend_hitl_caveats(
-    backend: str | None, *, surface_label: str
-) -> None:
-    """Warn that the server gateway backend is lossy for a HITL surface.
-
-    The interactive CLI and TUI create a per-session workspace, but on the
-    server backend it does not reach the run: execution stays in the server's
-    import-time workspace. That is a gap the server path has not closed yet, so
-    a surface that opts into the server backend surfaces this once at startup
-    rather than silently misrouting.
-    """
-    if backend != "langgraph_server":
-        return
-    console.print(
-        f"[yellow]⚠ Server gateway backend active for the {surface_label}. "
-        "Until the remaining gap closes, the per-session workspace is not "
-        "applied server-side (execute / write_file run in the server's "
-        "workspace).[/yellow]"
-    )
-
-
 def dangerous_flag_note(backend: str | None, *, webui: bool = False) -> str | None:
     """Where this session's ``--dangerous`` applies, for a session whose turns
     run on *backend*, or for the WebUI's: the background server serves later

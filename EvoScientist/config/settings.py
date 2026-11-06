@@ -331,11 +331,9 @@ class EvoScientistConfig:
     # pick its own backend; ``"inherit"`` defers to the global ``gateway_backend``
     # above. The fixed-workspace surfaces (serve, single-shot, standalone) default
     # to ``inherit``, so the global flag moves them. The interactive CLI and TUI
-    # default to ``local`` instead: the server path is still lossy there (the
-    # per-session workspace is not applied server-side, #413, and per-run config
-    # is dropped on resume, #454), so a global ``langgraph_server`` must not move
-    # them - reaching the server backend on those surfaces takes an explicit
-    # ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
+    # default to ``local`` instead, so a global ``langgraph_server`` does not
+    # move them - reaching the server backend on those surfaces takes an
+    # explicit ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
     # never read these fields directly for a routing decision.
     gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
     gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (

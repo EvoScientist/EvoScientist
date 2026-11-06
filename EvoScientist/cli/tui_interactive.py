@@ -566,10 +566,8 @@ def run_textual_interactive(
     # display hook (its widget is mounted from the stream event).
     from ..config import GatewaySurface, resolve_gateway_backend
     from ..stream.sink import SessionEventSink
-    from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
 
     event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways_for_config(
