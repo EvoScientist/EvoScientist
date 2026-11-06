@@ -280,8 +280,10 @@ def test_autoskills_setting_reports_failed_reconcile(monkeypatch):
         (200, {"serving": True, "detail": None}, None),
         (200, {"serving": False, "detail": "Run: ccproxy auth login"}, "auth login"),
         (500, {}, "HTTP 500"),
+        (403, {"error": "local_secret_required"}, "local secret"),
+        (None, {}, "Could not reach"),
     ],
-    ids=["serving", "reason", "error"],
+    ids=["serving", "reason", "error", "other_server", "unreachable"],
 )
 def test_ensure_ccproxy_client_reports_why_server_did_not_start_it(
     monkeypatch, tmp_path, status, body, expected
@@ -300,9 +302,13 @@ def test_ensure_ccproxy_client_reports_why_server_did_not_start_it(
             200, json={"instance": local_secret.instance_of("s3cret")}
         ),
     )
-    monkeypatch.setattr(
-        registration.httpx, "post", lambda url, **_k: httpx.Response(status, json=body)
-    )
+
+    def post(url, **_k):
+        if status is None:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(registration.httpx, "post", post)
 
     reason = registration.ensure_ccproxy(url="http://127.0.0.1:6174")
 

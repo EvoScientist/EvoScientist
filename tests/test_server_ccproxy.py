@@ -966,3 +966,81 @@ def test_server_lifespan_asks_ccproxy_to_stop_as_it_ends(monkeypatch, oauth):
     with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)):
         assert stopped == []
     assert stopped == ([True] if oauth else [])
+
+
+def test_ensure_ccproxy_route_needs_local_secret(monkeypatch, no_workspace_setup):
+    from starlette.testclient import TestClient
+
+    from EvoScientist import local_secret
+    from EvoScientist.langgraph_dev.http import app
+
+    monkeypatch.setattr(local_secret, "_value", None)
+    monkeypatch.setattr(server_record, "mark_serving", lambda: None)
+    with TestClient(
+        app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)
+    ) as client:
+        response = client.post("/api/ccproxy/ensure", json={})
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "local_secret_required"
+
+
+def test_ensure_for_session_says_server_is_stopping(serving, monkeypatch):
+    monkeypatch.setattr(server_ccproxy, "_stopping", True)
+
+    reason = server_ccproxy.ensure_for_session()
+
+    assert "stopping" in reason
+    assert _spawned(serving) == []
+
+
+@pytest.mark.parametrize(("lasting", "names_owner"), [(False, True), (True, False)])
+def test_restart_hint_names_owner_of_server_stop_leaves(lasting, names_owner):
+    hint = server_record.restart_hint(lasting)
+
+    assert ("desktop app" in hint) is names_owner
+    assert ("EvoSci server stop" in hint) is not names_owner
+
+
+class _FakeJob:
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+        self.warning = None
+        self.adopted = []
+
+    def adopt(self, proc) -> None:
+        self.adopted.append(proc)
+        if self.fail:
+            self.warning = "Could not put ccproxy in the job"
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_join_job_reuses_one_job_and_warns_once(monkeypatch, caplog, fail):
+    from EvoScientist.deploy import backend_job
+
+    jobs = []
+
+    def make_job():
+        jobs.append(_FakeJob(fail))
+        return jobs[-1]
+
+    monkeypatch.setattr(backend_job, "backend_job", make_job)
+    monkeypatch.setattr(server_ccproxy, "_job", None)
+
+    server_ccproxy._join_job(_Popen())
+    server_ccproxy._join_job(_Popen())
+
+    assert len(jobs) == 1
+    assert len(jobs[0].adopted) == 2
+    warned = [r for r in caplog.records if "Windows job object" in r.getMessage()]
+    assert len(warned) == (1 if fail else 0)
+
+
+def test_launch_while_server_stops_ends_new_ccproxy(server, monkeypatch):
+    monkeypatch.setattr(server_ccproxy, "_stopping", True)
+
+    with pytest.raises(RuntimeError, match="stopping"):
+        server_ccproxy._launch(8000)
+
+    assert server_ccproxy._proc is None
+    assert ("stop", server.proc) in server.steps

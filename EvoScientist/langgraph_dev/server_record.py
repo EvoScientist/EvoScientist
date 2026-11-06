@@ -133,6 +133,23 @@ def address_of(args: list[str]) -> tuple[int, str]:
     return port, option(args, "--host") or DEFAULT_HOST
 
 
+def restart_hint(lasting: bool | None) -> str:
+    """How to restart the server a record describes: the background server
+    with ``EvoSci server stop``, which leaves one ``EvoSci deploy`` or the
+    desktop app owns (*lasting* False) running."""
+    if lasting is False:
+        return "restart the EvoSci deploy or the desktop app that runs the server"
+    return (
+        "restart the server: EvoSci server stop; it starts again with your next session"
+    )
+
+
+def own_restart_hint() -> str:
+    """:func:`restart_hint` for the server this process is."""
+    lasting = (_written or {}).get("lasting")
+    return restart_hint(lasting if isinstance(lasting, bool) else None)
+
+
 def is_langgraph_dev(args: list[str]) -> bool:
     """Whether a command line is a langgraph dev's."""
     return any("langgraph" in arg for arg in args)

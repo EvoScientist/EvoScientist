@@ -3166,8 +3166,7 @@ def _main_callback(
 
     # Resolve the output format first. In stream-json mode stdout must carry
     # only JSONL, so establish the mode and redirect the console to stderr
-    # BEFORE anything below (ccproxy startup, validation) can print a
-    # human-readable line to stdout.
+    # BEFORE anything below (validation) can print a human-readable line to stdout.
     effective_output_format = (output_format or "text").lower()
     if effective_output_format not in ("text", "stream-json"):
         raise typer.BadParameter("--output-format must be 'text' or 'stream-json'")

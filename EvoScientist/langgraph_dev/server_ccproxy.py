@@ -159,19 +159,19 @@ def ensure_for_session() -> str | None:
     """Start ccproxy for a session that routes Anthropic through it (OAuth)
     and found nothing answering, as a run start would; why it does not
     serve, or None. Blocking."""
+    hint = server_record.own_restart_hint()
     if _port is None:
         return (
             "The server was started without Anthropic OAuth, so it runs no "
-            "ccproxy; restart it: EvoSci server stop; it starts again with "
-            "your next session."
+            f"ccproxy; {hint}."
         )
+    with _lock:
+        stopping = _stopping
+    if stopping:
+        return "The server is stopping; the next session starts it again."
     error = _ensure()
     if error is None and not ccproxy_manager.is_ccproxy_running(_port):
-        return (
-            "ccproxy runs but does not answer on port "
-            f"{_port}; restart the server: EvoSci server stop; it starts "
-            "again with your next session."
-        )
+        return f"ccproxy runs but does not answer on port {_port}; {hint}."
     return error
 
 
@@ -267,8 +267,8 @@ def _gave_up_message() -> str:
     return (
         f"ccproxy could not be started after {_FAILED_RESTART_LIMIT} tries. "
         "Fix the cause (the server log has the reason, and "
-        f"{RUNTIME.ccproxy_log} if it ran), then restart the server: EvoSci "
-        "server stop; the next session starts it."
+        f"{RUNTIME.ccproxy_log} if it ran), then "
+        f"{server_record.own_restart_hint()}."
     )
 
 
@@ -278,9 +278,7 @@ def _restart(port: int, *, exited: bool) -> None:
     _start(
         port,
         ended=exited,
-        taken_hint=(
-            " Then restart the server (EvoSci server stop; the next session starts it)."
-        ),
+        taken_hint=f" Then {server_record.own_restart_hint()}.",
     )
 
 

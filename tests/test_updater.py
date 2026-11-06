@@ -14,6 +14,7 @@ import sys
 import tempfile
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -2284,6 +2285,28 @@ def test_update_stops_older_ccproxy(server, monkeypatch, running):
     updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
 
     assert stopped == [1]
+
+
+def test_update_stops_ccproxy_killed_server_left(server, monkeypatch):
+    """Its record still names it; it would keep the update waiting."""
+    from EvoScientist.langgraph_dev import server_ccproxy, server_record
+
+    server["running"] = False
+    left = {"pid": 9, server_record.CCPROXY_PID_KEY: 77}
+    ended = []
+    monkeypatch.setattr(server_record, "load_json", lambda path: left)
+    monkeypatch.setattr(
+        server_ccproxy, "end_recorded", lambda record, port: ended.append(record) or 77
+    )
+    monkeypatch.setattr(updater, "_stop_older_ccproxy", lambda emit: None)
+    monkeypatch.setattr(
+        "EvoScientist.config.get_effective_config",
+        lambda: SimpleNamespace(ccproxy_port=8000),
+    )
+
+    updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+
+    assert ended == [left]
 
 
 def test_update_stops_nothing_when_another_server_replaced_asked_one(

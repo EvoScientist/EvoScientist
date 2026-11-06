@@ -307,6 +307,7 @@ def check_server(
             )
     if record is None and not is_langgraph_dev_running(port=port, host=host):
         go_on()
+        _stop_left_ccproxy(emit)
         _stop_older_ccproxy(emit)
         return
     if record is not None:
@@ -404,6 +405,22 @@ def _stop_older_ccproxy(emit: Emitter) -> None:
     from .ccproxy_manager import stop_recorded_ccproxy
 
     pid = stop_recorded_ccproxy()
+    if pid is not None:
+        emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
+
+
+def _stop_left_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy a killed server left running (``kill -9``, out of
+    memory): its record still names it, and it would keep the update
+    waiting on a busy environment."""
+    from .config import get_effective_config
+    from .langgraph_dev import server_ccproxy, server_record
+    from .langgraph_dev.manager import RUNTIME
+
+    left = server_record.load_json(RUNTIME.record)
+    if not left:
+        return
+    pid = server_ccproxy.end_recorded(left, get_effective_config().ccproxy_port)
     if pid is not None:
         emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
 

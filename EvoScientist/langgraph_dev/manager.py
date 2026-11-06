@@ -1579,7 +1579,10 @@ _LOG_TAIL_CHARS = 2000
 def start_budget(config: EvoScientistConfig) -> float:
     """How long a server's start may take, and so each wait for one: for the
     start lock, for a started server's record, and for its first answer.
-    With Anthropic OAuth the server starts its ccproxy first."""
+    With Anthropic OAuth the server starts its ccproxy first. Read from this
+    client's configuration: a server another client started with OAuth
+    (``--auth-mode oauth``) while this one's file says ``api_key`` can take
+    longer than this client waits."""
     from .. import ccproxy_manager
 
     if ccproxy_manager.uses_oauth(config):
@@ -1767,12 +1770,19 @@ def ensure_server(
         *,
         needed: bool = True,
         exposure: registration.ServerExposure | None = None,
+        failed: bool = False,
     ) -> ServerResult:
         global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
         global AGENT_SHELL_DRIFT, OLDER_SERVER, SERVER_UNAVAILABLE
         global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE, CCPROXY_MISSING
         _ASYNC_SUBAGENTS_AVAILABLE = result.available
-        CCPROXY_MISSING = _ccproxy_missing(config, result) if needed else None
+        # Not on the way out of an error or a cancel: asking the server to
+        # start ccproxy can take its whole start budget.
+        CCPROXY_MISSING = (
+            _ccproxy_missing(config, result)
+            if needed and not failed and not waits.cancelled()
+            else None
+        )
         if CCPROXY_MISSING is not None:
             logger.warning("%s", CCPROXY_MISSING)
         CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = result.drift, result.shell_drift
@@ -1805,7 +1815,7 @@ def ensure_server(
                 waits=waits,
             )
     except BaseException:
-        settle(ServerResult())
+        settle(ServerResult(), failed=True)
         raise
     finally:
         waits.report(False)
@@ -1838,7 +1848,7 @@ def ensure_server(
         exposure = registration.register_folder(workspace, url=result.url)
     except registration.OlderServerError as exc:
         # Unusable for any project, the session's current one included.
-        settle(ServerResult())
+        settle(ServerResult(), failed=True)
         if result.older:
             # It holds the lock without a record: server stop cannot stop it.
             raise registration.OlderServerError(older_unrecorded_message()) from exc
@@ -1862,7 +1872,7 @@ def ensure_server(
             replace(result, available=False, error=str(exc), problem="unregistered")
         )
     except BaseException:
-        settle(ServerResult())
+        settle(ServerResult(), failed=True)
         raise
     return settle(result, exposure=exposure)
 
@@ -1896,10 +1906,17 @@ def _ccproxy_missing(config: EvoScientistConfig, result: ServerResult) -> str | 
         "goes through it). "
         + (
             reason
-            or "Restart the server: EvoSci server stop; it starts again with "
-            "your next session."
+            or _sentence(
+                server_record.restart_hint(
+                    result.record.lasting if result.record is not None else None
+                )
+            )
         )
     )
+
+
+def _sentence(text: str) -> str:
+    return f"{text[:1].upper()}{text[1:]}."
 
 
 def serve_project(
