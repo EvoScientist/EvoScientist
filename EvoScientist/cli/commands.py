@@ -884,30 +884,6 @@ def _print_server_notices() -> None:
     print_exposure_warnings(_lg_manager.SERVER_EXPOSURE)
 
 
-def warn_server_backend_hitl_caveats(
-    backend: str | None, *, surface_label: str
-) -> None:
-    """Warn that the server gateway backend is lossy for a HITL surface.
-
-    The interactive CLI and TUI create a per-session workspace and switch models
-    mid-session, but on the server backend neither reaches the run: execution
-    stays in the server's import-time workspace, and per-run config (model,
-    active teams, HITL suppression) is dropped when a turn resumes after a tool
-    approval. Both are gaps the server path has not closed yet, so a surface
-    that opts into the server backend surfaces this once at startup rather than
-    silently misrouting.
-    """
-    if backend != "langgraph_server":
-        return
-    console.print(
-        f"[yellow]⚠ Server gateway backend active for the {surface_label}. "
-        "Until the remaining gaps close, the per-session workspace is not "
-        "applied server-side (execute / write_file run in the server's "
-        "workspace), and a model or team switch is dropped for the rest of a "
-        "turn that resumes after a tool approval.[/yellow]"
-    )
-
-
 def dangerous_flag_note(backend: str | None, *, webui: bool = False) -> str | None:
     """Where this session's ``--dangerous`` applies, for a session whose turns
     run on *backend*, or for the WebUI's: the background server serves later
