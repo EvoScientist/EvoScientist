@@ -1173,8 +1173,8 @@ def run_textual_interactive(
                         "Skipping channel auto-start because agent load failed",
                         exc_info=True,
                     )
-                    return
-                await self._start_channels()
+                finally:
+                    await self._start_channels()
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
@@ -1223,8 +1223,10 @@ def run_textual_interactive(
         # ── Channel integration ────────────────────────────────
 
         async def _start_channels(self) -> None:
-            """Auto-start channels if enabled in config."""
+            """Auto-start configured channels and schedule queue polling."""
             try:
+                if self._agent_loader.agent is None:
+                    return
                 from ..config import load_config
 
                 cfg = await asyncio.to_thread(load_config)
