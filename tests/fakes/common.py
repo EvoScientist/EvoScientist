@@ -569,17 +569,32 @@ def paused_thread_state(*interrupt_ids: str) -> dict[str, Any]:
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests.
 
-    Each ``start`` is a new run: ``run-1``, ``run-2``, ...
+    Each ``start`` and each accepted ``input.respond`` is a new run:
+    ``run-1``, ``run-2``, ... ``runs`` holds them as ``runs.list`` rows.
     """
 
     def __init__(self) -> None:
         self.starts: list[dict[str, Any]] = []
+        self.responds: list[dict[str, Any]] = []
+        self.runs: list[dict[str, Any]] = []
+        # Set to an error envelope to refuse the next ``input.respond``.
+        self.respond_reply: dict[str, Any] | None = None
         self.started = asyncio.Event()
 
     @property
     def run_id(self) -> str:
         """The id of the latest run started."""
-        return f"run-{len(self.starts)}"
+        return f"run-{len(self.runs)}"
+
+    def _add_run(self, metadata: dict[str, Any] | None) -> None:
+        self.runs.append(
+            {
+                "run_id": f"run-{len(self.runs) + 1}",
+                "status": "success",
+                "metadata": metadata or {},
+            }
+        )
+        self.started.set()
 
     async def start(
         self,
@@ -595,8 +610,23 @@ class FakeLangGraphRunModule:
                 "metadata": metadata,
             }
         )
-        self.started.set()
+        self._add_run(metadata)
         return {"run_id": self.run_id}
+
+    async def respond_command(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``input.respond`` posted to ``/threads/{id}/commands``."""
+        self.responds.append(
+            {
+                "input": {params["interrupt_id"]: params["response"]},
+                "namespace": params["namespace"],
+                "config": params["config"],
+                "metadata": params["metadata"],
+            }
+        )
+        if self.respond_reply is not None:
+            return self.respond_reply
+        self._add_run(params["metadata"])
+        return {"type": "success", "id": 1, "result": {}}
 
 
 def _is_root_lifecycle_stop(event: Mapping[str, Any]) -> bool:
@@ -840,6 +870,49 @@ class FakeLangGraphClient(LangGraphClient):
 
     def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
         self.threads = threads
+        self.http = _FakeLangGraphHttp(threads)
+        self.runs = _FakeLangGraphRunsClient(threads)
+
+
+class _FakeLangGraphHttp:
+    """``client.http``: routes ``input.respond`` commands to the thread's stream."""
+
+    def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
+        self.threads = threads
+
+    async def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+        _, resource, thread_id, action = path.split("/")
+        assert (resource, action, json["method"]) == (
+            "threads",
+            "commands",
+            "input.respond",
+        )
+        return await self.threads.streams[thread_id].run.respond_command(json["params"])
+
+
+class _FakeLangGraphRunsClient:
+    """``client.runs`` over the runs the fake streams started, newest first."""
+
+    def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
+        self.threads = threads
+        self.cancelled: list[tuple[str, list[str]]] = []
+
+    async def cancel_many(self, *, thread_id: str, run_ids: list[str]) -> None:
+        self.cancelled.append((thread_id, list(run_ids)))
+
+    async def list(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        stream = self.threads.streams.get(thread_id)
+        runs = list(reversed(stream.run.runs)) if stream is not None else []
+        if status is not None:
+            runs = [run for run in runs if run["status"] == status]
+        return runs[offset : offset + limit]
 
 
 def _not_found_response() -> httpx.Response:

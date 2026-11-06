@@ -56,6 +56,14 @@ _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
 
 
+def _run_has_request_id(run: Mapping[str, Any], request_id: str) -> bool:
+    metadata = run.get("metadata")
+    return (
+        isinstance(metadata, Mapping)
+        and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
+    )
+
+
 def _thread_metadata(thread: Thread) -> dict[str, Any]:
     metadata = thread.get("metadata")
     return dict(metadata) if isinstance(metadata, dict) else {}
@@ -900,6 +908,7 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
         on_run_attempt: Callable[[], None],
+        request_id: str,
         run_metadata: Mapping[str, object] | None = None,
     ) -> str | None:
         config = self._resolve_run_config(
@@ -941,11 +950,11 @@ class LangGraphServerGateway:
         if isinstance(request.message, Command):
             if request.message.resume is not None:
                 return await self._resume_interrupt(
-                    stream,
                     request.thread_id,
                     request.message.resume,
                     config=config,
                     metadata=run_metadata,
+                    request_id=request_id,
                     on_run_attempt=on_run_attempt,
                 )
             raise RuntimeError(
@@ -969,26 +978,28 @@ class LangGraphServerGateway:
 
     async def _resume_interrupt(
         self,
-        stream: AsyncThreadStream,
         thread_id: str,
         response: object,
         *,
         config: dict[str, Any],
         metadata: Mapping[str, object] | None,
+        request_id: str,
         on_run_attempt: Callable[[], None],
     ) -> str | None:
         """Resume the thread's pending interrupt with this run's config.
 
-        ``run.respond`` sends no config, so the resume goes through
-        ``run.start``: on a thread with a pending interrupt the server turns
-        its input into ``Command(resume=input)``. The input is keyed by the
-        interrupt id, the shape ``input.respond`` builds, which also tells the
-        server which of several pending interrupts it answers. A thread with
-        nothing pending would take the same input as a new run, so the pending
-        ids are read from thread state first; ``stream.interrupts`` cannot
-        tell them apart from answered ones, which a new stream replays too.
+        The answer goes out as an ``input.respond`` command, which always
+        resumes, also while another task of the paused run is still working.
+        ``run.start`` would not: it takes its input as a resume only once the
+        thread record lists the interrupt, which happens when the run stops,
+        and otherwise starts the graph over. ``run.respond`` sends no config
+        or metadata, so the command is posted directly. The pending ids are
+        read from thread state, since ``stream.interrupts`` cannot tell them
+        apart from answered ones, which a new stream replays too. The
+        command's result has no run id, so the run is found by its request id.
         """
-        state = await self.thread_store.client.threads.get_state(thread_id)
+        client = self.thread_store.client
+        state = await client.threads.get_state(thread_id)
         pending = [
             str(interrupt_id)
             for interrupt in _state_interrupts(state)
@@ -996,13 +1007,49 @@ class LangGraphServerGateway:
         ]
         interrupt_id, answer = _resume_target(thread_id, response, pending)
         on_run_attempt()
-        result = await stream.run.start(
-            input={interrupt_id: answer},
-            config=config,
-            metadata=dict(metadata) if metadata is not None else None,
+        # The server checks the id; for a subgraph's interrupt it accepts an
+        # empty namespace, the only one thread state could give here.
+        reply = await client.http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "input.respond",
+                "params": {
+                    "interrupt_id": interrupt_id,
+                    "namespace": [],
+                    "response": answer,
+                    "config": config,
+                    "metadata": dict(metadata) if metadata is not None else None,
+                },
+            },
         )
-        run_id = result.get("run_id") if isinstance(result, Mapping) else None
-        return str(run_id) if run_id else None
+        # A refused command comes back with a success status.
+        if isinstance(reply, Mapping) and reply.get("type") == "error":
+            raise RuntimeError(
+                f"Thread {thread_id} refused the answer to interrupt "
+                f"{interrupt_id}: {reply.get('error')}: {reply.get('message')}"
+            )
+        return await self._find_run_for_request(thread_id, request_id)
+
+    async def _find_run_for_request(
+        self, thread_id: str, request_id: str
+    ) -> str | None:
+        """Find this request's run among all of the thread's runs.
+
+        Not only active ones: a short resume can finish before the lookup.
+        """
+        offset = 0
+        while True:
+            page = await self.thread_store.client.runs.list(
+                thread_id, limit=_RUN_LOOKUP_PAGE_SIZE, offset=offset
+            )
+            for run in page:
+                if _run_has_request_id(run, request_id):
+                    run_id = run.get("run_id")
+                    return str(run_id) if run_id else None
+            if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                return None
+            offset += _RUN_LOOKUP_PAGE_SIZE
 
     async def _list_active_runs(self, thread_id: str) -> list[Mapping[str, Any]] | None:
         """Return active runs on the thread, or ``None`` when listing fails."""
@@ -1037,11 +1084,7 @@ class LangGraphServerGateway:
     ) -> str | None:
         """Recover a run accepted before ``run.start`` lost its response."""
         for run in await self._list_active_runs(thread_id) or []:
-            metadata = run.get("metadata")
-            if (
-                isinstance(metadata, Mapping)
-                and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
-            ):
+            if _run_has_request_id(run, request_id):
                 run_id = run.get("run_id")
                 return str(run_id) if run_id else None
         return None
@@ -1392,6 +1435,7 @@ class LangGraphServerGateway:
                     request,
                     thread_ready=thread_ready,
                     on_run_attempt=mark_run_attempted,
+                    request_id=request_id,
                     run_metadata=run_metadata,
                 )
                 if run_id is None:

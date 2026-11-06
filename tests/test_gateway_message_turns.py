@@ -425,7 +425,7 @@ async def test_resume_reads_its_run_from_the_thread_events():
     )
 
     assert stream.event_streams_opened == 1
-    assert [start["input"] for start in stream.run.starts] == [
+    assert [respond["input"] for respond in stream.run.responds] == [
         {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
     assert _texts(events) == ["resumed: ok"]
@@ -470,20 +470,20 @@ async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_valu
     gateway, threads = _gateway(
         stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-0"}]
     )
-    start = stream.run.start
+    respond = stream.run.respond_command
 
-    async def start_and_pause_again(**kwargs):
-        result = await start(**kwargs)
+    async def respond_and_pause_again(params):
+        reply = await respond(params)
         threads.states[THREAD_ID]["interrupts"] = [_STATE_INTERRUPT]
-        return result
+        return reply
 
-    stream.run.start = start_and_pause_again
+    stream.run.respond_command = respond_and_pause_again
 
     events = await _turn(
         gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
     )
 
-    assert [start["input"] for start in stream.run.starts] == [
+    assert [respond["input"] for respond in stream.run.responds] == [
         {"interrupt-0": {"decisions": [{"type": "approve"}]}}
     ]
     assert _texts(events) == ["first call done"]
@@ -516,7 +516,7 @@ async def test_retrying_the_same_resume_payload_resumes_again():
 
     assert _texts(first) == ["first run"]
     assert _texts(second) == ["second run"]
-    assert [start["input"] for start in stream.run.starts] == [payload, payload]
+    assert [respond["input"] for respond in stream.run.responds] == [payload, payload]
     assert stream.event_streams_opened == 2
 
 
@@ -819,17 +819,6 @@ async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[{"id": "interrupt-0"}])
-    client = gateway.thread_store.client
-    cancelled: list[list[str]] = []
-
-    class _Runs:
-        async def list(self, thread_id: str, **kwargs):
-            return [{"run_id": "run-1", "status": "running", "metadata": {}}]
-
-        async def cancel_many(self, *, thread_id: str, run_ids):
-            cancelled.append(list(run_ids))
-
-    client.runs = _Runs()
 
     real_get_state = threads.get_state
     calls = {"n": 0}
@@ -859,8 +848,8 @@ async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
     ):
         await collect()
 
-    assert [start["input"] for start in stream.run.starts] == [answer]
-    assert cancelled == []
+    assert [respond["input"] for respond in stream.run.responds] == [answer]
+    assert gateway.thread_store.client.runs.cancelled == []
     assert threads.state_updates == []
     assert [event["type"] for event in events] == ["error"]
     assert events[-1] == {
