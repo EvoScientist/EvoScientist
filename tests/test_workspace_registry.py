@@ -661,9 +661,8 @@ def test_unregister_restores_registration_when_cancel_fails(
 
     reconciled = []
 
-    async def reconcile():
+    async def reconcile_workspace(_workspace):
         reconciled.append(True)
-        return 0, []
 
     async def fail(_workspace):
         assert not projects.is_registered(workspace.key)
@@ -671,7 +670,7 @@ def test_unregister_restores_registration_when_cancel_fails(
 
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_runs, "cancel_project_runs", fail)
-    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
+    monkeypatch.setattr(workspace_setup, "_reconcile_autoskills", reconcile_workspace)
     response = server.delete(
         "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
     )
@@ -686,6 +685,8 @@ def test_unregister_restores_registration_when_cancel_fails(
 def test_unregister_restores_registration_when_delete_crons_fails(
     server, secret, projects, monkeypatch, workspace
 ):
+    from EvoScientist.langgraph_dev import server_runs
+
     projects.set_registered(workspace.key, True)
 
     async def crons(_workspace):
@@ -696,13 +697,20 @@ def test_unregister_restores_registration_when_delete_crons_fails(
 
     reconciled = []
 
-    async def reconcile():
+    async def cancel(_workspace):
+        return None
+
+    async def reconcile_workspace(_workspace):
         reconciled.append(True)
-        return 0, []
 
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_crons, "delete_crons", fail)
-    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
+    monkeypatch.setattr(server_runs, "cancel_project_runs", cancel)
+    monkeypatch.setattr(
+        workspace_setup,
+        "_reconcile_autoskills",
+        reconcile_workspace,
+    )
     response = server.delete(
         "/api/workspaces", params={"workspace_dir": workspace.key}, headers=secret
     )
@@ -721,7 +729,6 @@ async def test_unregister_restores_registration_when_cancelled(
     projects.set_registered(workspace.key, True)
     workspace_setup.SET_UP.add(workspace.key)
     entered = asyncio.Event()
-    reconciled = []
 
     async def crons(_workspace):
         return []
@@ -730,14 +737,14 @@ async def test_unregister_restores_registration_when_cancelled(
         entered.set()
         await asyncio.Event().wait()
 
-    async def reconcile():
-        reconciled.append(True)
-        return 0, []
-
     monkeypatch.setattr(server_crons, "project_crons", crons)
     monkeypatch.setattr(server_crons, "delete_crons", lambda _ids: asyncio.sleep(0))
     monkeypatch.setattr(server_runs, "cancel_project_runs", cancel)
-    monkeypatch.setattr(workspace_setup, "reconcile_autoskills_everywhere", reconcile)
+    monkeypatch.setattr(
+        workspace_setup,
+        "_reconcile_autoskills",
+        lambda _workspace: asyncio.sleep(0),
+    )
     task = asyncio.create_task(http._unregister(workspace))
     await asyncio.wait_for(entered.wait(), 5)
     task.cancel()
@@ -746,7 +753,6 @@ async def test_unregister_restores_registration_when_cancelled(
 
     assert projects.is_registered(workspace.key)
     assert workspace.key in workspace_setup.SET_UP
-    assert reconciled == [True]
 
 
 async def test_cancel_project_runs_includes_bound_threads(
@@ -895,6 +901,7 @@ async def test_unregister_workspace_route_waits_for_registration_in_progress(
     is done, so the registration cannot record the project behind it."""
     import httpx
 
+    from EvoScientist.langgraph_dev import server_runs
     from EvoScientist.langgraph_dev.http import app
 
     restoring, release = asyncio.Event(), asyncio.Event()
@@ -913,6 +920,9 @@ async def test_unregister_workspace_route_waits_for_registration_in_progress(
     monkeypatch.setattr(workspace_setup, "restore_workspace_threads", restore)
     monkeypatch.setattr(server_crons, "project_crons", no_crons)
     monkeypatch.setattr(server_crons, "delete_crons", delete)
+    monkeypatch.setattr(
+        server_runs, "cancel_project_runs", lambda _workspace: asyncio.sleep(0)
+    )
     monkeypatch.setattr(local_secret, "_value", "secret")
     headers = {local_secret.HEADER: "secret"}
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))

@@ -20,6 +20,8 @@ async def cancel_project_runs(workspace: Workspace) -> None:
     The project must already be unregistered so newly started runs are refused.
     A run can use a graph's default assistant on a previously bound thread, so
     cancelling workspace assistants alone does not cover every project run.
+    A successful cancellation requests a stop; the response may arrive before
+    the worker has finished stopping.
     """
     from langgraph_runtime.database import connect
     from langgraph_runtime.ops import Runs

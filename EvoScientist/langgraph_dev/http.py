@@ -443,13 +443,6 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
         await server_runs.cancel_project_runs(workspace)
     except BaseException:
         await workspace_setup.restore_registration(workspace, was_set_up=was_set_up)
-        try:
-            await workspace_setup.reconcile_autoskills_everywhere()
-        except Exception:
-            logger.exception(
-                "Could not reconcile AutoSkills after unregistering %s failed.",
-                workspace.key,
-            )
         raise
     return JSONResponse({"workspace_dir": workspace.key})
 
@@ -458,7 +451,8 @@ async def unregister_workspace(request: Request) -> JSONResponse:
     """Unregister the project in the workspace_dir query parameter.
 
     Pending and running runs on its assistants and bound legacy threads are
-    interrupted. Its folder, threads, assistants and user crons all stay;
+    interrupted (the stop is requested before the response, but a worker may
+    still be finishing). Its folder, threads, assistants and user crons all stay;
     its AutoSkills and proactive crons are deleted (their reconciles recreate
     them). A run may already be partly interrupted if deletion or cancellation
     fails; in that case registration is restored and the request answers 500.
