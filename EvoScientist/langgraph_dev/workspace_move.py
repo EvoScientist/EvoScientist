@@ -467,6 +467,18 @@ def same_key(first: str, second: str) -> bool:
     return first == second
 
 
+def same_folder(first: str, second: str) -> bool:
+    """Whether two folder keys name the same folder: by the folder itself
+    when both exist (a case-sensitive macOS volume can hold ``Proj`` and
+    ``proj``), else as :func:`same_key`. Blocking."""
+    if first == second:
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return same_key(first, second)
+
+
 def match_registered(old: Workspace, registered: list[str]) -> str:
     """The registered key *old* names: its own, else, on macOS and Windows,
     the one that differs only in case (a folder that is gone keeps the case
@@ -556,7 +568,9 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
                 raise
             done = await asyncio.to_thread(REGISTRY.done_moves)
             for done_old, done_new in done:
-                if same_key(done_old, old.key) and same_key(done_new, new.key):
+                if same_key(done_old, old.key) and await asyncio.to_thread(
+                    same_folder, done_new, new.key
+                ):
                     # Done already: as the server started, or after a client
                     # gave up waiting. A default_workdir the config lock kept
                     # it from rewriting is tried again.
@@ -575,7 +589,9 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
             same_old = match_registered(old, [pending[0]]) == pending[0]
         except MoveRefusedError:
             same_old = False
-        if not same_old or not same_key(new.key, pending[1]):
+        if not same_old or not await asyncio.to_thread(
+            same_folder, new.key, pending[1]
+        ):
             raise MoveRefusedError(
                 "move_pending",
                 f"The move of {pending[0]} to {pending[1]} is not done yet: run "

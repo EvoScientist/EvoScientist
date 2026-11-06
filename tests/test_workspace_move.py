@@ -613,3 +613,17 @@ async def test_repeated_move_retries_default_workdir_it_could_not_update(
 
     assert again.resumed is True
     assert [(m.old.key, m.new.key) for m in retried] == [(old.key, new.key)]
+
+
+def test_same_folder_tells_apart_folders_differing_in_case(tmp_path, monkeypatch):
+    """A case-sensitive macOS volume can hold both."""
+    monkeypatch.setattr(workspace_move.sys, "platform", "darwin")
+    upper, lower = tmp_path / "Proj", tmp_path / "proj"
+    upper.mkdir()
+    lower.mkdir()
+    (tmp_path / "link").symlink_to(upper)
+
+    assert not workspace_move.same_folder(str(upper), str(lower))
+    assert workspace_move.same_folder(str(upper), str(tmp_path / "link"))
+    # A folder that is gone falls back to the keys.
+    assert workspace_move.same_folder(str(tmp_path / "Gone"), str(tmp_path / "gone"))
