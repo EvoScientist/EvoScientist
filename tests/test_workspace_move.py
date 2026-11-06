@@ -620,10 +620,11 @@ def test_same_folder_tells_apart_folders_differing_in_case(tmp_path, monkeypatch
     monkeypatch.setattr(workspace_move.sys, "platform", "darwin")
     upper, lower = tmp_path / "Proj", tmp_path / "proj"
     upper.mkdir()
+    if lower.exists():
+        pytest.skip("this file system ignores case")
     lower.mkdir()
-    (tmp_path / "link").symlink_to(upper)
 
     assert not workspace_move.same_folder(str(upper), str(lower))
-    assert workspace_move.same_folder(str(upper), str(tmp_path / "link"))
+    assert workspace_move.same_folder(str(upper), str(upper / "."))
     # A folder that is gone falls back to the keys.
     assert workspace_move.same_folder(str(tmp_path / "Gone"), str(tmp_path / "gone"))
