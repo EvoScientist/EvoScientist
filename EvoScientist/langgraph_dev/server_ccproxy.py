@@ -165,7 +165,14 @@ def ensure_for_session() -> str | None:
             "ccproxy; restart it: EvoSci server stop; it starts again with "
             "your next session."
         )
-    return _ensure()
+    error = _ensure()
+    if error is None and not ccproxy_manager.is_ccproxy_running(_port):
+        return (
+            "ccproxy runs but does not answer on port "
+            f"{_port}; restart the server: EvoSci server stop; it starts "
+            "again with your next session."
+        )
+    return error
 
 
 def _ensure() -> str | None:

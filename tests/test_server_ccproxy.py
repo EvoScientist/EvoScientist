@@ -659,11 +659,22 @@ def test_ensure_serving_waits_for_restart_under_way(serving):
     assert _spawned(serving) == []
 
 
-def test_ensure_for_session_restarts_ccproxy_that_is_gone(serving):
+def test_ensure_for_session_restarts_ccproxy_that_is_gone(serving, monkeypatch):
     server_ccproxy._proc.code = 1
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        ccproxy_manager, "is_ccproxy_running", lambda port: next(answers)
+    )
 
     assert server_ccproxy.ensure_for_session() is None
     assert len(_spawned(serving)) == 1
+
+
+def test_ensure_for_session_reports_ccproxy_that_runs_but_does_not_answer(serving):
+    reason = server_ccproxy.ensure_for_session()
+
+    assert "does not answer" in reason
+    assert _spawned(serving) == []
 
 
 def test_ensure_for_session_says_why_ccproxy_does_not_start(serving, monkeypatch):

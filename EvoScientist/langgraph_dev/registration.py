@@ -203,7 +203,14 @@ def _require_own_server(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str:
     return secret
 
 
-def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Response:
+def _post_with_secret(
+    url: str,
+    path: str,
+    body: dict,
+    *,
+    what: str,
+    timeout: float = REGISTRATION_TIMEOUT,
+) -> httpx.Response:
     """POST *body* to the server at *url* with the local secret, once it
     answers with the same ``instance``: a different server on the port (another
     user's, another data folder's) does not get it. The instance is public, so
@@ -219,7 +226,7 @@ def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Re
             f"{url}{path}",
             json=body,
             headers={**LANGGRAPH_DEV_AUTH_HEADERS, HEADER: secret},
-            timeout=REGISTRATION_TIMEOUT,
+            timeout=timeout,
             # Loopback: a system proxy must not intercept it.
             trust_env=False,
         )
@@ -262,9 +269,18 @@ def served_projects(url: str) -> list[dict[str, object]]:
 def ensure_ccproxy(*, url: str) -> str | None:
     """Ask the server at *url* to start its ccproxy when it is not running;
     why it does not serve, or None."""
+    from ..ccproxy_manager import START_BUDGET_SECONDS
+
     url = url.rstrip("/")
     try:
-        response = _post_with_secret(url, "/api/ccproxy/ensure", {}, what="reach")
+        # A start can take ccproxy's whole start budget.
+        response = _post_with_secret(
+            url,
+            "/api/ccproxy/ensure",
+            {},
+            what="reach",
+            timeout=START_BUDGET_SECONDS + 30,
+        )
     except RegistrationError as exc:
         return str(exc)
     try:
