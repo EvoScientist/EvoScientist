@@ -39,6 +39,7 @@ from .state import (
     _parse_todo_items,
 )
 from .utils import (
+    EXECUTE_STATUS,
     DisplayLimits,
     ToolStatus,
     failure_summary,
@@ -389,8 +390,8 @@ def format_tool_result_compact(
 ) -> list:
     """Format tool result as tree output.
 
-    Special handling for write_todos: shows formatted checklist with status symbols.
-    Special handling for edit_file: shows color-coded unified diff.
+    ``success`` (the stream's verdict) overrides the text check. A successful write_todos
+    shows its checklist and edit_file its diff; a long failure shows its first and last lines.
     """
     elements = []
     ok = is_success(content) if success is None else success
@@ -440,8 +441,14 @@ def format_tool_result_compact(
     tail = max_lines - max_lines // 2 if not ok and remaining > 0 else 0
     rows: list[str | None] = [*lines[: max_lines - tail]]
     if remaining > 0:
-        # Blank lines in the end would crowd out the reason above the exit status.
+        # Blank lines, and the sandbox's exit code that repeats deepagents' status line,
+        # would crowd out the reason above them.
         end = [line for line in lines[max_lines - tail :] if line.strip()]
+        end = [
+            line
+            for line, after in zip(end, [*end[1:], ""], strict=True)
+            if not (line.startswith("Exit code: ") and after.startswith(EXECUTE_STATUS))
+        ]
         end = end[-tail:] if tail else []
         remaining = total_lines - len(rows) - len(end)
         rows += [None, *end]

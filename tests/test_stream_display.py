@@ -196,8 +196,8 @@ def test_a_long_failed_result_shows_its_start_and_end():
         "  └ line 0",
         "    line 1",
         "    ... +29 lines",
+        "    line 29",
         "    [stderr] Boom",
-        "    Exit code: 1",
         "    [Command failed with exit code 1]",
         "",
     ]
@@ -212,6 +212,25 @@ def test_a_long_failed_result_shows_its_start_and_end():
         "    [Command failed]",
     ]
     assert "Exit code: 1" not in passed
+
+
+def test_a_failed_command_end_skips_the_repeated_exit_code():
+    """The sandbox's exit code repeats deepagents' status line, so the end keeps the reason."""
+    pytest_run = "\n".join(
+        ["collected 12 items", "tests/test_a.py ......F....."]
+        + [f"detail {i}" for i in range(8)]
+        + [
+            "FAILED tests/test_a.py::test_x - AssertionError",
+            "1 failed, 11 passed in 0.12s",
+        ]
+    )
+    pytest_run += "\n\nExit code: 1\n[Command failed with exit code 1]"
+    rows = format_tool_result_compact("execute", pytest_run, success=False)
+    rendered = "".join(_render_text(row) for row in rows)
+
+    assert "FAILED tests/test_a.py::test_x - AssertionError" in rendered
+    assert "[Command failed with exit code 1]" in rendered
+    assert "Exit code: 1" not in rendered
 
 
 def test_a_failed_write_todos_shows_its_error():
