@@ -200,6 +200,57 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
     return rewritten
 
 
+def _proposal_manifests(memory_dir: str | Path, workspace_key: str):
+    """The manifests of *workspace_key*'s proposals, every status: (path,
+    manifest) pairs."""
+    root = _proposal_root(memory_dir)
+    if not root.exists():
+        return
+    for manifest_path in sorted(root.glob("*/manifest.json")):
+        manifest = _read_manifest(manifest_path)
+        stored = manifest.get("workspace_dir") if manifest else None
+        if not isinstance(stored, str) or not stored.strip():
+            continue
+        try:
+            key = paths.Workspace(stored.strip()).key
+        except paths.PATH_ERRORS:
+            continue
+        if key == workspace_key:
+            yield manifest_path, manifest
+
+
+def proposal_project_ids(memory_dir: str | Path, workspace_key: str) -> set[str]:
+    """The memory project ids *workspace_key*'s proposals were made under."""
+    return {
+        project_id
+        for _path, manifest in _proposal_manifests(memory_dir, workspace_key)
+        if isinstance(project_id := manifest.get("project_id"), str) and project_id
+    }
+
+
+def move_proposals(
+    memory_dir: str | Path,
+    old_key: str,
+    new_key: str,
+    project_ids: dict[str, str],
+) -> int:
+    """Give every proposal of the project *old_key* (every status, so
+    ``/autoskills list`` keeps its history) to the project *new_key*, with
+    its memory project id mapped through *project_ids*. Returns the number
+    rewritten; running it again rewrites none."""
+    moved = 0
+    for manifest_path, manifest in list(_proposal_manifests(memory_dir, old_key)):
+        if manifest.get("workspace_dir") == new_key:
+            continue
+        manifest["workspace_dir"] = new_key
+        project_id = manifest.get("project_id")
+        if isinstance(project_id, str) and project_id in project_ids:
+            manifest["project_id"] = project_ids[project_id]
+        _write_manifest(manifest_path, manifest)
+        moved += 1
+    return moved
+
+
 def _proposal_from_manifest(
     path: Path, manifest: dict[str, Any]
 ) -> SkillProposal | None:
