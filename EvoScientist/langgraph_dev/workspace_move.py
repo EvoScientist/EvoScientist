@@ -555,13 +555,18 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
             if exc.code != "not_registered":
                 raise
             done = await asyncio.to_thread(REGISTRY.done_moves)
-            if any(
-                same_key(done_old, old.key) and same_key(done_new, new.key)
-                for done_old, done_new in done
-            ):
-                # Done already: as the server started, or after a client
-                # gave up waiting.
-                return MoveReport(new.key, 0, 0, [], 0, [], resumed=True)
+            for done_old, done_new in done:
+                if same_key(done_old, old.key) and same_key(done_new, new.key):
+                    # Done already: as the server started, or after a client
+                    # gave up waiting. A default_workdir the config lock kept
+                    # it from rewriting is tried again.
+                    warning = await asyncio.to_thread(
+                        _move_default_workdir,
+                        Move(Workspace(done_old), Workspace(done_new)),
+                    )
+                    return MoveReport(
+                        new.key, 0, 0, [], 0, [warning] if warning else [], resumed=True
+                    )
             raise
         move = Move(Workspace(old_key), new)
         await asyncio.to_thread(_check_folders, move, resuming=False)

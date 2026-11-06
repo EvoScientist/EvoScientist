@@ -596,3 +596,20 @@ def test_move_memory_keeps_proposal_only_ids_and_ignores_odd_ones(
     assert remote_id in project_ids
     assert path_id in project_ids
     assert "../../outside" not in project_ids
+
+
+async def test_repeated_move_retries_default_workdir_it_could_not_update(
+    moving, monkeypatch
+):
+    """The config file was locked as the move finished."""
+    _projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    retried = []
+    monkeypatch.setattr(
+        workspace_move, "_move_default_workdir", lambda move: retried.append(move)
+    )
+
+    again = await workspace_move.move_project(old, new)
+
+    assert again.resumed is True
+    assert [(m.old.key, m.new.key) for m in retried] == [(old.key, new.key)]
