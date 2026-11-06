@@ -111,7 +111,7 @@ def poll_status(process_id: str) -> str:
 
     Records the exit first (like :func:`status`), then returns ``"running"`` or the
     terminal status. Returns ``"unknown"`` when the process is not in the registry
-    (e.g. a server restart cleared it) so the reader treats it as not-yet-notifiable.
+    (e.g. a server restart cleared it); the reader then reports it as untracked.
     """
     with _LOCK:
         proc = _PROCESSES.get(process_id)
@@ -351,6 +351,17 @@ def status(
     return (
         f"{head}\nCommand: {command}\n--- output (last {tail_bytes} bytes) ---\n{tail}"
     )
+
+
+def check(
+    process_id: str, *, thread_id: str | None = None
+) -> tuple[str, dict[str, Any] | None]:
+    """Return status text and a state record that agree on whether a process exited."""
+    text = status(process_id, thread_id=thread_id)
+    record = state_record(process_id)
+    if record is not None and record["status"] != "running":
+        text = status(process_id, thread_id=thread_id)
+    return text, record
 
 
 def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:

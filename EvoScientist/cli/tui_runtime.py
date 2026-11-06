@@ -16,13 +16,13 @@ if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
 
 DEFAULT_UI_BACKEND = "cli"
+# An unknown name lands where an unknown config.yaml value does (the field default).
+_UNKNOWN_UI_BACKEND = "tui"
 STREAM_CANCEL_SETTLE_TIMEOUT = 5.0
 # "webui" launches the browser front-end instead of an in-terminal UI; it is
 # intercepted earlier (cli/commands.py:_main_callback) and never reaches the
-# streaming backends, but is listed here so normalize/resolve preserve it
-# rather than falling back to "cli".
+# streaming backends, but is listed here so normalize/resolve preserve it.
 SUPPORTED_UI_BACKENDS = ("cli", "tui", "webui")
-_LEGACY_BACKEND_MAP = {"textual": "tui", "rich": "cli"}
 
 
 class StreamCancellationTimeout(RuntimeError):
@@ -65,10 +65,9 @@ def normalize_ui_backend(value: str | None) -> str:
     if not value:
         return DEFAULT_UI_BACKEND
     normalized = value.strip().lower()
-    normalized = _LEGACY_BACKEND_MAP.get(normalized, normalized)
     if normalized in SUPPORTED_UI_BACKENDS:
         return normalized
-    return DEFAULT_UI_BACKEND
+    return _UNKNOWN_UI_BACKEND
 
 
 def _has_textual_support() -> bool:
@@ -161,8 +160,9 @@ def run_streaming(
     except AsyncRuntimeError:
         raise
     except RuntimeError:
-        requested = normalize_ui_backend(ui_backend)
-        if requested == "tui":
+        # Compare the raw name: normalize sends unknown names to "tui", and only an
+        # explicit "tui" retries.
+        if (ui_backend or "").strip().lower() == "tui":
             console.print(
                 "[yellow]TUI failed at runtime. Falling back to CLI for this request.[/yellow]"
             )

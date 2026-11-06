@@ -178,7 +178,7 @@ def test_server_env_has_no_run_folder(run_dirs, monkeypatch, tmp_path, runtime_p
     monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=run_dirs.workspace.root, port=16190)
+        manager._spawn_server(port=16190)
     assert "EVOSCIENTIST_RUN_DIR" not in captured["env"]
 
 
@@ -354,21 +354,6 @@ def test_failed_upgrade_changes_nothing_and_retries(
     assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
 
 
-def test_upgrade_keeps_bloat_sweep_gate(workspace, sessions_db, monkeypatch):
-    """The legacy-bloat sweep and the folder upgrade are gated independently."""
-    import EvoScientist.sessions as sessions
-    from EvoScientist.sessions import _needs_migration, _upgrade_stored_dirs
-
-    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": workspace.key})])
-    monkeypatch.setattr(sessions, "_MIGRATION_THRESHOLD_BYTES", 0)
-    assert asyncio.run(_needs_migration()) is True
-
-    asyncio.run(_upgrade_stored_dirs())
-
-    assert _upgrade_recorded(sessions_db)
-    assert asyncio.run(_needs_migration()) is True
-
-
 def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
     """Unreadable rows leave the others upgraded and the upgrade done."""
     from EvoScientist.sessions import _upgrade_stored_dirs
@@ -402,6 +387,25 @@ def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
     assert json.loads(rows["unreadable"]) == {"workspace_dir": unresolvable}
     assert rows["broken"] == "{not json"
     assert _upgrade_recorded(sessions_db)
+
+
+def test_upgrade_runs_when_another_user_version_bit_is_set(workspace, sessions_db):
+    """A DB that a retired job marked in another bit is still upgraded."""
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    run = workspace.runs_dir / TS_RUN
+    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": str(run)})])
+    con = sqlite3.connect(sessions_db)
+    con.execute("PRAGMA user_version = 1")
+    con.commit()
+    con.close()
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
+    con = sqlite3.connect(sessions_db)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    con.close()
 
 
 def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
@@ -503,6 +507,36 @@ async def test_cli_and_server_upgrade_before_reading(
     assert str(restored["thread_id"]) == server_tid
     assert restored["metadata"]["workspace_dir"] == run_meta["workspace_dir"]
     assert restored["metadata"]["run_dir"] == run_meta["run_dir"]
+
+
+async def test_server_restores_a_run_mode_thread_with_its_run_dir(
+    workspace, sessions_db, monkeypatch
+):
+    """The server's startup restore lists a run-mode thread with its run folder,
+    so the WebUI shows where it ran."""
+    import EvoScientist.sessions as sessions
+
+    run = workspace.runs_dir / TS_RUN
+    thread_id = str(uuid.uuid4())
+    meta = {
+        "graph_id": "EvoScientist",
+        "updated_at": "2026-09-01T00:00:00+00:00",
+        **SessionDirs(workspace, run).metadata(),
+    }
+    _write_rows(sessions_db, [(thread_id, "c1", meta)])
+    store: dict = {"threads": []}
+    monkeypatch.setitem(
+        sys.modules,
+        "langgraph_runtime_inmem.database",
+        SimpleNamespace(GLOBAL_STORE=store),
+    )
+    monkeypatch.setattr(sessions, "_known_workspace_keys", lambda: {workspace.key})
+    async with sessions.create_checkpointer_for_langgraph_api():
+        pass
+    (restored,) = store["threads"]
+    assert str(restored["thread_id"]) == thread_id
+    assert restored["metadata"]["workspace_dir"] == meta["workspace_dir"]
+    assert restored["metadata"]["run_dir"] == meta["run_dir"]
 
 
 def _stamped(folders: SessionDirs, monkeypatch) -> dict:

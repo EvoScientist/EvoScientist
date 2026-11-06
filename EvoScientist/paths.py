@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -232,8 +231,9 @@ class SessionDirs:
         folder ``<root>/runs/<name>`` whose name has the form ``--mode=run``
         generates is split into the workspace and ``run_dir``. Named runs are
         left as they are, because a project folder can itself live in a
-        folder called ``runs``. Only the one-time upgrade of stored values
-        uses this; new values carry ``run_dir`` themselves.
+        folder called ``runs``. The one-time upgrade of stored values and the
+        import of an older server's store use this; new values carry
+        ``run_dir`` themselves.
         """
         path = normalize_path(workspace_dir)
         project = Workspace(path.parent.parent)
@@ -261,32 +261,9 @@ def process_workspace() -> Workspace:
     ``EVOSCIENTIST_WORKSPACE_DIR`` when set, otherwise the current directory.
     Read once per process, so it does not change with the environment later.
     The langgraph dev server has no workspace of its own:
-    it serves every registered project (see :func:`launcher_workspace`).
+    it serves every registered project.
     """
     return Workspace(_env_path("EVOSCIENTIST_WORKSPACE_DIR") or Path.cwd())
-
-
-# Names the project of the client that started the langgraph dev server.
-LAUNCHER_WORKSPACE_ENV = "EVOSCIENTIST_LAUNCHER_WORKSPACE"
-
-
-@functools.cache
-def launcher_workspace() -> Workspace | None:
-    """In the langgraph dev server: the project of the client that started it
-    (``LAUNCHER_WORKSPACE_ENV``), or ``None`` when it was started without one.
-
-    The server serves every registered project and works in the server home;
-    this is only the project ``GET /api/workspace`` reports once that client
-    registered it. Read once per process.
-    """
-    path = _env_path(LAUNCHER_WORKSPACE_ENV)
-    if path is None:
-        return None
-    try:
-        return Workspace(path)
-    except PATH_ERRORS:
-        logger.warning("Cannot read the launcher's project %s.", path, exc_info=True)
-        return None
 
 
 @functools.cache
@@ -349,7 +326,7 @@ def _config_dir() -> Path:
     ) / "evoscientist"
 
 
-# Whether this process is the langgraph dev server (``start_langgraph_dev``
+# Whether this process is the langgraph dev server (``manager._spawn_server``
 # sets the variable). Read once, at import, and removed from the environment,
 # so the agent's commands and MCP servers do not take themselves for it.
 SERVER_PROCESS: bool = os.environ.pop("EVOSCIENTIST_SERVER_PROCESS", None) == "1"
@@ -418,73 +395,6 @@ def _memories_dir_from_env() -> Path:
 
 
 MEMORIES_DIR: Path = _memories_dir_from_env()
-
-
-# DEPRECATED(0.1.0): remove this migration helper and its call site below.
-def migrate_legacy_sessions_db() -> None:
-    """One-time migration: copy sessions.db (and its WAL/SHM siblings) from
-    ~/.config/evoscientist/ to ~/.evoscientist/.
-
-    Scope is intentionally narrow — only the SQLite trio, because users can't
-    easily move those by hand. User-facing files (skills/, memories/, history)
-    are migrated via an agent prompt documented in the release notes.
-
-    Idempotent via ``.migrated`` marker file. The marker is not written when
-    a copy fails, so transient I/O errors don't permanently block retry.
-    """
-    marker = DATA_DIR / ".migrated"
-    if marker.exists():
-        return
-
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
-        return
-
-    legacy = CONFIG_DIR
-    if not legacy.exists():
-        marker.touch()
-        return
-
-    migrated: list[str] = []
-    failed: list[str] = []
-    for name in ("sessions.db", "sessions.db-wal", "sessions.db-shm"):
-        src = legacy / name
-        dst = DATA_DIR / name
-        if not src.exists():
-            continue
-        if dst.exists():
-            continue  # already migrated
-        try:
-            shutil.copy2(src, dst)
-            migrated.append(name)
-        except OSError as e:
-            logger.warning("Failed to migrate %s: %s", src, e)
-            failed.append(name)
-
-    if migrated:
-        logger.info(
-            "Migrated legacy session DB from %s to %s: %s. "
-            "Legacy files are kept as backup; this auto-migration will be "
-            "removed in EvoScientist 0.1.0.",
-            legacy,
-            DATA_DIR,
-            ", ".join(migrated),
-        )
-
-    # Only write the marker when there were no failures — preserves retry
-    # on transient I/O errors.
-    if not failed:
-        marker.touch()
-
-
-# DEPRECATED(0.1.0): remove this call together with migrate_legacy_sessions_db().
-try:
-    migrate_legacy_sessions_db()
-except Exception:
-    # Never block startup on migration failures
-    logger.exception("Legacy session DB migration failed; continuing without it.")
 
 
 def ensure_dirs() -> None:

@@ -12,7 +12,7 @@ Per-step pruning:
     interrupts attach pending writes to the just-written row. So
     ``get_checkpointer()`` yields a ``PruningCheckpointer`` that prunes
     older rows for the same ``(thread_id, checkpoint_ns)`` after every
-    ``aput()``. The first-run migration sweep cleans up legacy bloat.
+    ``aput()``.
 
 WebUI / langgraph-dev checkpointer:
     ``create_checkpointer_for_langgraph_api()`` backs every ``langgraph dev``
@@ -24,12 +24,10 @@ WebUI / langgraph-dev checkpointer:
 """
 
 import asyncio
-import atexit
 import logging
-import math
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
+from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -293,11 +291,6 @@ class PruningCheckpointer(AsyncSqliteSaver):
         """
         keep = self._keep_per_ns
         async with self.lock:
-            # ``writes`` table is checked inside ``_delete_outside`` so a
-            # legacy DB that only has ``checkpoints`` still gets pruned
-            # (writes DELETE silently skipped; checkpoints DELETE runs).
-            # The migration sweep depends on this — it walks legacy DBs
-            # that often pre-date the ``writes`` table entirely.
             for key, value, walk_to_snapshot, max_keep in _PRUNED_ROWS:
                 rule_keep = keep if max_keep is None else min(keep, max_keep)
                 anchor_ids = await self._fetch_recent_checkpoint_ids(
@@ -436,31 +429,27 @@ class PruningCheckpointer(AsyncSqliteSaver):
         kept_list = list(kept_ids)
         placeholders = ",".join("?" * len(kept_list))
 
-        # Writes DELETE only runs if the ``writes`` table exists. Legacy
-        # DBs from pre-DeltaChannel builds may have only ``checkpoints`` —
-        # we still want to prune those, just skipping the writes step.
-        if await _table_exists(self.conn, "writes"):
-            del_writes = (
-                "DELETE FROM writes "
-                "WHERE thread_id = ? AND checkpoint_ns = ? "
-                "  AND checkpoint_id IN ("
-                "    SELECT checkpoint_id FROM checkpoints "
-                "    WHERE thread_id = ? AND checkpoint_ns = ? "
-                f"      AND json_extract(metadata, '$.{key}') = ? "
-                f"     AND checkpoint_id NOT IN ({placeholders})"
-                "  )"
-            )
-            await self.conn.execute(
-                del_writes,
-                (
-                    thread_id,
-                    checkpoint_ns,
-                    thread_id,
-                    checkpoint_ns,
-                    value,
-                    *kept_list,
-                ),
-            )
+        del_writes = (
+            "DELETE FROM writes "
+            "WHERE thread_id = ? AND checkpoint_ns = ? "
+            "  AND checkpoint_id IN ("
+            "    SELECT checkpoint_id FROM checkpoints "
+            "    WHERE thread_id = ? AND checkpoint_ns = ? "
+            f"      AND json_extract(metadata, '$.{key}') = ? "
+            f"     AND checkpoint_id NOT IN ({placeholders})"
+            "  )"
+        )
+        await self.conn.execute(
+            del_writes,
+            (
+                thread_id,
+                checkpoint_ns,
+                thread_id,
+                checkpoint_ns,
+                value,
+                *kept_list,
+            ),
+        )
 
         del_checkpoints = (
             "DELETE FROM checkpoints "
@@ -497,67 +486,11 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     super-step trims the per-(thread, ns) history to ``keep_per_ns``. The
     retention count is read from ``EvoScientistConfig`` at context entry;
     setting it to 0 disables pruning entirely.
-
-    Also runs the legacy-bloat migration sweep synchronously *before*
-    yielding the saver when needed. Sequencing sweep ahead of any agent
-    ``aput()`` eliminates the SQLite file-lock contention that produced
-    "database is locked" when channel inbound raced the sweep mid-DELETE.
-    The sweep is gated by its bit of ``PRAGMA user_version`` so it runs at
-    most once across all future launches; subsequent invocations cost
-    nothing. On failure the bit is NOT set, so the next launch retries.
     """
     keep = _resolve_keep_per_ns()
     async with PruningCheckpointer.from_conn_string_with_keep(
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
-        # The whole gate is wrapped in a broad try/except: any unexpected
-        # failure (incl. preview / status print) must degrade to "yield
-        # the saver, log a warning" — never to "hang startup".
-        if keep > 0:
-            try:
-                if await _needs_migration():
-                    import time
-
-                    from rich.console import Console
-
-                    # stderr-bound so non-interactive callers redirecting
-                    # stdout don't capture migration progress noise.
-                    console = Console(stderr=True)
-                    size_str, pair_count, size_bytes = await _migration_preview()
-                    eta_str = _format_duration(_estimate_sweep_seconds(size_bytes))
-                    console.print(
-                        f"[dim]·[/dim] Compacting sessions DB "
-                        f"([cyan]{size_str}[/cyan], "
-                        f"[yellow]{pair_count} thread-namespace pairs[/yellow]"
-                        f"[dim], est. ~{eta_str}[/dim])"
-                    )
-
-                    t0 = time.time()
-
-                    with console.status(
-                        "[dim]Compacting...[/dim]", spinner="dots"
-                    ) as status:
-
-                        async def _on_progress(done: int, total: int) -> None:
-                            elapsed = time.time() - t0
-                            pct = (done * 100 // total) if total else 0
-                            eta = (elapsed / done) * (total - done) if done > 0 else 0
-                            status.update(
-                                f"[dim]Compacting[/dim] "
-                                f"[yellow]{pct}%[/yellow] "
-                                f"[dim]({done}/{total} pairs · "
-                                f"{_format_duration(elapsed)} elapsed · "
-                                f"~{_format_duration(eta)} remaining)[/dim]"
-                            )
-
-                        await _run_migration_sweep(keep, progress_cb=_on_progress)
-
-                    console.print(
-                        f"[dim]·[/dim] [green]✓[/green] Compaction done in "
-                        f"[green]{_format_duration(time.time() - t0)}[/green]"
-                    )
-            except Exception as exc:
-                _logger.warning("migration sweep failed: %s", exc, exc_info=True)
         await _upgrade_stored_dirs_safely()
         yield saver
 
@@ -814,45 +747,9 @@ async def _load_checkpoint_messages(
     event = target_cv.get("_summarization_event")
     summarization_event = event if isinstance(event, dict) else None
 
-    if not accumulated:
-        await _log_orphan_warning_if_pruned(saver.conn, thread_id)
-
     if not isinstance(accumulated, list):
         return []
     return _apply_summarization_event(accumulated, summarization_event)
-
-
-async def _log_orphan_warning_if_pruned(
-    conn: aiosqlite.Connection, thread_id: str
-) -> None:
-    """Emit a WARNING if *thread_id* has orphan ``parent_checkpoint_id`` refs.
-
-    Empty reconstructed history + a broken parent chain is the signature
-    of a pre-fix DB where the old ``keep_per_ns=10`` default pruned early
-    writes before the snapshot frequency materialized a ``_DeltaSnapshot``
-    seed. The DB has no path to recover those messages — log so /resume
-    showing a stub history isn't silent.
-    """
-    query = """
-        SELECT 1 FROM checkpoints c1
-        WHERE c1.thread_id = ? AND c1.checkpoint_ns = ''
-          AND c1.parent_checkpoint_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM checkpoints c2
-              WHERE c2.thread_id = c1.thread_id
-                AND c2.checkpoint_ns = ''
-                AND c2.checkpoint_id = c1.parent_checkpoint_id
-          )
-        LIMIT 1
-    """
-    async with conn.execute(query, (thread_id,)) as cur:
-        if await cur.fetchone():
-            _logger.warning(
-                "Thread %s has orphan checkpoints (pre-fix pruning) "
-                "and no surviving DeltaChannel snapshot; reconstructed "
-                "history is empty. Early messages cannot be recovered.",
-                thread_id,
-            )
 
 
 def _unwrap_messages_seed(value: object) -> list | None:
@@ -1234,24 +1131,11 @@ async def get_thread_messages(thread_id: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Migration sweep & VACUUM (one-time legacy cleanup)
+# PRAGMA user_version
 # ---------------------------------------------------------------------------
 
-# PRAGMA user_version is a 32-bit int slot in the SQLite file header. Each
-# one-time job owns one bit of it and is gated on its own bit, so one job
-# can never mark another as done: the legacy-bloat sweep sets bit 1 once it
-# has run successfully, the stored-folders upgrade below sets bit 2.
-_MIGRATION_VERSION = 1
-
-# Threshold below which the sweep is skipped (DB is already small enough
-# that legacy bloat is not the user's problem). 100 MB is chosen so a
-# normally-pruned DB after a few months of use never triggers the sweep,
-# while the 2.6 GB pathology is comfortably above the line.
-_MIGRATION_THRESHOLD_BYTES = 100 * 1024 * 1024
-
-# Inter-pair sleep so the sweep yields to the agent loop and never spikes
-# CPU on a large DB. Tunable for tests via monkeypatch.
-_SWEEP_YIELD_SECONDS = 0.0
+# One bit of PRAGMA user_version per one-time job; bit 1 is still set on older
+# DBs by a retired sweep, so do not reuse it.
 
 
 async def _get_user_version(conn: aiosqlite.Connection) -> int:
@@ -1265,172 +1149,6 @@ async def _set_user_version(conn: aiosqlite.Connection, version: int) -> None:
     # because we control the value (constant int).
     await conn.execute(f"PRAGMA user_version = {int(version)}")
     await conn.commit()
-
-
-def _format_duration(seconds: float) -> str:
-    """Render a number of seconds as ``45s`` / ``2m 18s`` / ``1h 5m``.
-
-    Guards against ``inf`` / ``nan`` so a stray non-finite value (e.g. an
-    ETA computed before any pair completes) cannot raise ``OverflowError``
-    via ``int(float('inf'))``.
-    """
-    if not math.isfinite(seconds):
-        return "?"
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        m, s = divmod(seconds, 60)
-        return f"{m}m {s}s" if s else f"{m}m"
-    h, rem = divmod(seconds, 3600)
-    m = rem // 60
-    return f"{h}h {m}m" if m else f"{h}h"
-
-
-def _estimate_sweep_seconds(size_bytes: int) -> int:
-    """Rough ETA for a full migration sweep on the given DB size.
-
-    Empirical baseline: 14.53 GB ≈ 138s on a typical SSD, i.e. ~10 s/GB.
-    Used only for a user-facing pre-sweep hint — real time is reported
-    after completion so the estimate doesn't need to be precise.
-    """
-    return max(2, round(size_bytes / (1024 * 1024 * 1024) * 9.5))
-
-
-async def _migration_preview() -> tuple[str, int, int]:
-    """Return ``(size_str, pair_count, size_bytes)`` for the pre-sweep status line.
-
-    ``size_str`` is a human-readable file size (``"2.62 GB"`` / ``"364.3 MB"``).
-    ``pair_count`` is the number of distinct ``(thread_id, checkpoint_ns)``
-    pairs the sweep will iterate. ``size_bytes`` is the raw byte count
-    (used by ``_estimate_sweep_seconds`` for the ETA). Best-effort:
-    returns zeros on any error.
-    """
-    db_path = get_db_path()
-    try:
-        size_bytes = db_path.stat().st_size
-    except OSError:
-        size_bytes = 0
-    if size_bytes < 1024 * 1024:
-        size_str = f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        size_str = f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-
-    pair_count = 0
-    try:
-        async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
-            if await _table_exists(conn, "checkpoints"):
-                async with conn.execute(
-                    "SELECT COUNT(*) FROM ("
-                    "  SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
-                    "  WHERE json_extract(metadata, '$.agent_name') = ?"
-                    ")",
-                    (AGENT_NAME,),
-                ) as cur:
-                    row = await cur.fetchone()
-                    pair_count = int(row[0]) if row else 0
-    except aiosqlite.Error:
-        pass
-    return size_str, pair_count, size_bytes
-
-
-async def _needs_migration() -> bool:
-    """Return True if the legacy-bloat sweep should run now.
-
-    True iff the DB exists, is larger than ``_MIGRATION_THRESHOLD_BYTES``,
-    and the sweep's ``_MIGRATION_VERSION`` bit of ``PRAGMA user_version``
-    is not set.
-    """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return False
-    try:
-        size = db_path.stat().st_size
-    except OSError:
-        return False
-    if size < _MIGRATION_THRESHOLD_BYTES:
-        return False
-    try:
-        async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
-            if not await _table_exists(conn, "checkpoints"):
-                return False
-            return not await _get_user_version(conn) & _MIGRATION_VERSION
-    except aiosqlite.Error:
-        return False
-
-
-async def _run_migration_sweep(
-    keep: int,
-    progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
-) -> int:
-    """Prune all ``(thread_id, checkpoint_ns)`` pairs to ``keep`` rows each.
-
-    Iterates pairs in deterministic order, applies the same DELETE pattern
-    the per-step pruner uses, and yields to the event loop between pairs
-    so the agent stays responsive. On success sets the sweep's bit of
-    ``PRAGMA user_version`` so the sweep never reruns.
-
-    ``progress_cb``: optional ``async (done: int, total: int) -> None``
-    fired after each pair is committed; used by callers to drive a live
-    progress indicator.
-
-    Returns the number of pairs pruned.
-    """
-    if keep <= 0:
-        return 0
-    db_path = str(get_db_path())
-    pairs_pruned = 0
-    async with aiosqlite.connect(db_path, timeout=60.0) as conn:
-        if not await _table_exists(conn, "checkpoints"):
-            return 0
-        if await _get_user_version(conn) & _MIGRATION_VERSION:
-            return 0
-
-        async with conn.execute(
-            "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints "
-            "WHERE json_extract(metadata, '$.agent_name') = ?",
-            (AGENT_NAME,),
-        ) as cur:
-            pairs = list(await cur.fetchall())
-
-        # Reuse the DeltaChannel-aware prune logic from PruningCheckpointer
-        # instead of running naive keep_latest SQL: legacy DBs almost always
-        # have threads where the latest N checkpoints sit ABOVE a
-        # ``_DeltaSnapshot`` ancestor, and the naive form would sever the
-        # snapshot chain — exactly the failure mode the steady-state Fix
-        # already prevents. Sharing one saver across all pairs means
-        # ``setup()`` and the in-class lock are constructed once.
-        #
-        # We invoke ``_prune_after_put`` directly (not ``aput``) — the
-        # sweep is a bulk cleanup, not a checkpoint write. As a result
-        # ``saver._aput_lock`` (the outer put+prune pair lock) is
-        # intentionally unused here; only the inner ``self.lock`` that
-        # ``_prune_after_put`` itself acquires runs.
-        saver = PruningCheckpointer(conn, keep_per_ns=keep)
-        for thread_id, checkpoint_ns in pairs:
-            ns = checkpoint_ns or ""
-            await saver._prune_after_put(str(thread_id), ns)
-            pairs_pruned += 1
-            if progress_cb is not None:
-                try:
-                    await progress_cb(pairs_pruned, len(pairs))
-                except Exception:  # pragma: no cover - never let UI break sweep
-                    pass
-            if _SWEEP_YIELD_SECONDS >= 0:
-                await asyncio.sleep(_SWEEP_YIELD_SECONDS)
-
-        await _set_user_version(
-            conn, await _get_user_version(conn) | _MIGRATION_VERSION
-        )
-
-    # Schedule VACUUM at process exit (must run after the long-lived saver
-    # connection closes to acquire the exclusive lock VACUUM requires).
-    # Pass ``db_path`` explicitly so test-time monkeypatches of
-    # ``get_db_path`` don't leak into atexit and hit the real DB.
-    _schedule_vacuum_atexit(db_path)
-    return pairs_pruned
 
 
 # ---------------------------------------------------------------------------
@@ -1556,55 +1274,6 @@ async def _upgrade_stored_dirs() -> None:
         except BaseException:
             await conn.rollback()
             raise
-
-
-_vacuum_scheduled = False
-
-
-def _schedule_vacuum_atexit(db_path: str) -> None:
-    """Register the atexit VACUUM hook exactly once per process.
-
-    Captures ``db_path`` at registration time so the hook always operates
-    on the path that was current when the sweep ran. This matters in
-    tests, where ``get_db_path`` is monkey-patched to a temp file but the
-    patch has unwound by the time atexit fires — re-resolving at exit
-    would point at the user's real ``sessions.db`` and trigger an
-    unwanted VACUUM on production data.
-    """
-    global _vacuum_scheduled
-    if _vacuum_scheduled:
-        return
-    _vacuum_scheduled = True
-    atexit.register(_atexit_vacuum, db_path)
-
-
-def _atexit_vacuum(db_path: str) -> None:
-    """Run ``VACUUM`` synchronously at process exit on the captured path.
-
-    Uses stdlib ``sqlite3`` (atexit can't await aiosqlite). Best-effort:
-    swallow any error since this runs during shutdown when stderr may be
-    closed.
-    """
-    import os
-    import sqlite3
-
-    if not os.path.exists(db_path):
-        return
-    try:
-        with sqlite3.connect(db_path, timeout=60.0) as conn:
-            # VACUUM cannot run inside a transaction; sqlite3 starts one
-            # implicitly on the first execute, so isolation_level=None ensures
-            # we are in autocommit mode for the VACUUM statement.
-            conn.isolation_level = None
-            conn.execute("VACUUM")
-    except sqlite3.Error as exc:
-        # Best-effort during shutdown: stderr may already be closed, but
-        # try to log so a persistent VACUUM failure is at least diagnosable
-        # from the next session. Swallow any logging error in turn.
-        try:
-            _logger.warning("VACUUM at exit failed: %s", exc)
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1769,6 +1438,41 @@ def thread_binding(thread_id: str) -> SessionDirs | None:
             f"read: {row[0]!r}"
         )
     return dirs
+
+
+def workspace_thread_bindings() -> dict[str, SessionDirs]:
+    """Read every persisted thread binding in one SQLite snapshot.
+
+    A malformed stored path is skipped and logged; database read failures are
+    raised because they must not be mistaken for an empty binding set.
+    """
+    try:
+        conn = sqlite3.connect(get_db_path(), timeout=30.0)
+        try:
+            rows = conn.execute(_BINDING_ROWS).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.ProgrammingError:
+        raise
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return {}
+        raise ThreadBindingError(f"Could not read conversation folders: {exc}") from exc
+    except (sqlite3.Error, OSError) as exc:
+        raise ThreadBindingError(f"Could not read conversation folders: {exc}") from exc
+
+    bindings: dict[str, SessionDirs] = {}
+    for thread_id, workspace_dir, run_dir in rows:
+        dirs = SessionDirs.from_stored(workspace_dir, run_dir)
+        if dirs is None:
+            _logger.warning(
+                "Skipping conversation %s with unreadable stored workspace %r.",
+                thread_id,
+                workspace_dir,
+            )
+            continue
+        bindings[thread_id] = dirs
+    return bindings
 
 
 def _without_folders(config: Any) -> Any:

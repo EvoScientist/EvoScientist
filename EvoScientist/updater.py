@@ -256,42 +256,77 @@ def check_server(
     confirm: Confirm,
     before_stop: Callable[[], None] | None = None,
 ) -> None:
-    """Stop the langgraph dev server this EvoSci started, after asking; a
-    server it has no ownership record for is never touched. Raises
-    ``server_running`` when the update must not go on. *before_stop* runs
-    once the update goes on, before anything is stopped."""
+    """Stop this data folder's recorded langgraph dev server, on whatever
+    port it runs, after asking; a server without a record is never touched.
+    Raises ``server_running`` when the update must not go on. *before_stop*
+    runs once the update goes on, before anything is stopped."""
     from .cli.server_cmd import manual_stop_command
     from .config import get_effective_config
     from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
-        _base_url,
-        _pid_serves_port,
-        _read_workspace_sidecar,
+        ServerStopFailedError,
+        _is_port_occupied,
         configured_address,
         is_langgraph_dev_running,
         is_lasting,
-        stop_recorded_server,
+        lock_unreadable_message,
+        read_record_and_lock,
+        reread_record,
+        starting_without_record,
+        stop_server,
+        unrecorded_lock_message,
     )
+    from .langgraph_dev.server_home import HELD, UNKNOWN
 
     config = get_effective_config()
     port, host = configured_address(config)
-    # A stale record whose server does not answer is ignored.
     go_on = before_stop or (lambda: None)
-    if not is_langgraph_dev_running(port=port, host=host):
+
+    record, lock = read_record_and_lock()
+    # Without a record: a start in progress, a lock held, or one that cannot
+    # be opened (but with --yes) leaves the update undone.
+    if record is None and starting_without_record():
+        raise UpdateError(
+            "server_running",
+            "Another EvoScientist process is starting the server; nothing was "
+            "changed. Run EvoSci update again once it is up.",
+        )
+    if record is None:
+        if lock == HELD:
+            raise UpdateError(
+                "server_running",
+                f"{unrecorded_lock_message(then='run EvoSci update again')} "
+                "Nothing was changed.",
+            )
+        if lock == UNKNOWN and not opts.yes:
+            # Whether a server runs cannot be told: --yes updates anyway.
+            raise UpdateError(
+                "server_running",
+                f"{lock_unreadable_message()} Nothing was changed. Pass --yes to "
+                "update anyway.",
+            )
+    if record is None and not is_langgraph_dev_running(port=port, host=host):
         go_on()
         _stop_service_ccproxy(emit)
         return
-    sidecar = _read_workspace_sidecar()
-    if sidecar is not None and _pid_serves_port(sidecar.get("pid"), port):
-        url = _base_url(port, host)
+    if record is not None:
+        port, url = record.port, record.url
         busy = []
-        jobs = running_bg_process_names(url)
-        if jobs:
-            busy.append(f"background jobs still running: {', '.join(jobs)}")
-        if has_busy_thread(url):
-            busy.append("a task is running")
+        # Asked while it listens, also when /ok missed its second: a busy
+        # server answers late.
+        if _is_port_occupied(record.port, record.host):
+            jobs = running_bg_process_names(url)
+            if jobs:
+                busy.append(f"background jobs still running: {', '.join(jobs)}")
+            if has_busy_thread(url):
+                busy.append("a task is running")
+        version = (
+            "was started by an older EvoScientist release"
+            if record.older
+            else "runs the old version"
+        )
         question = (
-            f"The EvoScientist server on port {port} runs the old version"
+            f"The EvoScientist server on port {port} {version}"
             + (f" ({'; '.join(busy)})" if busy else "")
             + ". Stop it and update?"
         )
@@ -306,28 +341,45 @@ def check_server(
                 raise UpdateError(
                     "server_running", "Update cancelled; the server keeps running."
                 )
+            # The answer may have taken a while: stop only the server asked
+            # about.
+            current, _, same = reread_record(record)
+            if not same:
+                raise UpdateError(
+                    "server_running",
+                    f"Another server (pid {current.pid}) took the place of the "
+                    "one you were asked about; nothing was changed. Run EvoSci "
+                    "update again.",
+                )
+            if current is None:
+                # The server asked about is gone: look again from the start.
+                return check_server(opts, emit, confirm, before_stop)
         go_on()
         # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
-        # is started again by the setup after the update, from the project it
-        # was started from.
-        recorded = sidecar.get("workspace")
-        restart = is_lasting(sidecar) and isinstance(recorded, str)
+        # is started again by the setup after the update, and serves every
+        # registered project again.
+        restart = is_lasting(record)
         if restart:
             from .setup.server import remember_for_restart
 
-            remember_for_restart(recorded)
-        pid = stop_recorded_server()
+            remember_for_restart()
+        try:
+            pid = stop_server(record=record)
+        except ServerStopFailedError as exc:
+            # Its message says what keeps the server running.
+            pid, failed = None, f"{exc} Nothing was changed."
+        else:
+            failed = (
+                f"Could not stop the EvoScientist server on port {port}; nothing "
+                f"was changed. Stop it with EvoSci server stop, then run EvoSci "
+                f"update again."
+            )
         if pid is None:
             if restart:
                 from .setup.server import forget_restart
 
                 forget_restart()
-            raise UpdateError(
-                "server_running",
-                f"Could not stop the EvoScientist server on port {port}; nothing "
-                f"was changed. Stop it with EvoSci server stop, then run EvoSci "
-                f"update again.",
-            )
+            raise UpdateError("server_running", failed)
         emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
         _stop_service_ccproxy(emit)
         return
@@ -833,9 +885,10 @@ def _server_tree() -> set[int]:
     import psutil
 
     from .ccproxy_manager import recorded_ccproxy_running
-    from .langgraph_dev.manager import _read_workspace_sidecar
+    from .langgraph_dev.manager import read_record
 
-    pids = [(_read_workspace_sidecar() or {}).get("pid"), recorded_ccproxy_running()]
+    record = read_record(older=True)
+    pids = [record.pid if record else None, recorded_ccproxy_running()]
     tree: set[int] = set()
     for pid in pids:
         try:

@@ -14,6 +14,7 @@ from EvoScientist.cli.tui_runtime import (
     run_streaming,
     run_streaming_async,
 )
+from EvoScientist.config import EvoScientistConfig
 from EvoScientist.runtime import AsyncRuntimeError
 from tests.fakes.common import FakeGraphGateway
 
@@ -29,15 +30,11 @@ def test_normalize_ui_backend_accepts_known_values():
     assert normalize_ui_backend("TUI") == "tui"
 
 
-def test_normalize_ui_backend_maps_legacy_values():
-    assert normalize_ui_backend("textual") == "tui"
-    assert normalize_ui_backend("Textual") == "tui"
-    assert normalize_ui_backend("rich") == "cli"
-    assert normalize_ui_backend("Rich") == "cli"
-
-
-def test_normalize_ui_backend_unknown_falls_back_to_cli():
-    assert normalize_ui_backend("unknown-ui") == "cli"
+def test_normalize_ui_backend_unknown_lands_where_the_config_file_does():
+    assert (
+        normalize_ui_backend("unknown-ui")
+        == EvoScientistConfig(ui_backend="unknown-ui").ui_backend
+    )
 
 
 def test_resolve_ui_backend_falls_back_when_textual_unavailable(monkeypatch):
@@ -85,6 +82,35 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
         gateway=FakeGraphGateway(),
     )
     assert result == "fallback-ok"
+
+
+def test_run_streaming_runs_an_unknown_backend_once(monkeypatch):
+    """A RuntimeError is not retried for a name that never asked for the TUI."""
+    rich_runs = []
+
+    class _RichStub:
+        def run_streaming(self, **kwargs):
+            rich_runs.append(kwargs)
+            return "fallback-ok"
+
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.get_backend", lambda *a, **k: _BrokenBackend()
+    )
+    monkeypatch.setattr(
+        "EvoScientist.cli.tui_runtime.RichStreamingBackend", lambda: _RichStub()
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_streaming(
+            ui_backend="unknown-ui",
+            agent=object(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=FakeGraphGateway(),
+        )
+    assert rich_runs == []
 
 
 @pytest.mark.parametrize("broken_first", [False, True], ids=["direct", "fallback"])

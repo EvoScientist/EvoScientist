@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, workspace_setup
+from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -107,22 +107,11 @@ async def get_teams(request: Request) -> JSONResponse:
     """Return installed expert skills as ``{teams: [...]}`` for the WebUI gallery.
 
     A "team" in the WebUI vocabulary is an installed expert skill — a skill
-    directory carrying a sibling ``EXPERT.md`` (or, on the deprecated path,
-    ``type: expert`` SKILL.md frontmatter). The response is a curated,
-    gallery-safe projection: name + description, plus optional ``byline`` /
-    ``capability_tags`` / ``avatar_hint`` when the skill populates them.
+    directory carrying a sibling ``EXPERT.md``. The response is a curated,
+    gallery-safe projection.
 
-    Cards for experts on the current contract carry name + description only:
-    the decoration fields were actor metadata in SKILL.md frontmatter, which
-    that contract removes rather than relocates (``EXPERT.md`` has no
-    frontmatter to hold them). The omit-when-unpopulated projection below is
-    what makes those cards degrade rather than break; restoring richer cards
-    means sourcing decoration from index metadata, not re-adding frontmatter
-    fields.
-
-    Backend implementation details (SKILL.md body / system prompt, role
-    line, tool list, source tier, filesystem path,
-    tags) are intentionally NOT projected. The gallery only needs
+    Backend implementation details (system prompt, tool list, source tier,
+    filesystem path, tags) are intentionally NOT projected. The gallery only needs
     identity + descriptor fields to render the card; anything richer
     belongs in a dedicated info endpoint.
 
@@ -134,47 +123,27 @@ async def get_teams(request: Request) -> JSONResponse:
     filesystem walking + yaml parsing, which langgraph-dev's
     ``blockbuster`` middleware refuses on the async event loop.
 
-    Response shape (each entry): ``{name, description, byline?,
-    capability_tags?, avatar_hint?}`` — the WebUI gallery consumes these.
+    Response shape (each entry): ``{name, description}`` — the WebUI gallery
+    consumes these.
 
     The ``workspace_dir`` query parameter names the project whose installs
-    count (``400`` when it is not a readable absolute path, ``404`` when that
-    project is not served); without it, the project ``GET /api/workspace``
-    reports, with the same ``503`` when there is none.
+    count: ``400`` without it or when it is not a readable absolute path,
+    ``404`` when that project is not served.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
     from EvoScientist.tools.skills_manager import list_expert_skills
 
     requested = request.query_params.get("workspace_dir")
     if requested is None:
-        workspace = await asyncio.to_thread(_launcher_project)
-        if workspace is None:
-            return _no_project()
-    else:
-        workspace = await asyncio.to_thread(read_workspace_or_none, requested)
-        if workspace is None:
-            return JSONResponse({"error": "invalid_path"}, status_code=400)
-        if not await asyncio.to_thread(_served, workspace):
-            return JSONResponse({"error": "not_served"}, status_code=404)
+        return JSONResponse({"error": "workspace_dir_required"}, status_code=400)
+    workspace = await asyncio.to_thread(read_workspace_or_none, requested)
+    if workspace is None:
+        return JSONResponse({"error": "invalid_path"}, status_code=400)
+    if not await asyncio.to_thread(_served, workspace):
+        return JSONResponse({"error": "not_served"}, status_code=404)
 
     experts = await asyncio.to_thread(list_expert_skills, True, workspace=workspace)
-    teams = []
-    for info in experts:
-        entry = {
-            "name": info.name,
-            "description": info.description,
-        }
-        # Optional gallery fields — omit when unpopulated so the WebUI
-        # card degrades gracefully (SkillInfo defaults `byline` /
-        # `avatar_hint` to "" and `capability_tags` to [], which we
-        # treat as "not declared").
-        if info.byline:
-            entry["byline"] = info.byline
-        if info.capability_tags:
-            entry["capability_tags"] = list(info.capability_tags)
-        if info.avatar_hint:
-            entry["avatar_hint"] = info.avatar_hint
-        teams.append(entry)
+    teams = [{"name": info.name, "description": info.description} for info in experts]
     return JSONResponse({"teams": teams})
 
 
@@ -215,6 +184,28 @@ async def get_bg_processes_running(_request: Request) -> JSONResponse:
     records = await asyncio.to_thread(background.running_records)
     running = [{"process_id": r["process_id"], "name": r["name"]} for r in records]
     return JSONResponse({"running": running})
+
+
+async def get_bg_process_check(request: Request) -> JSONResponse:
+    """Return the status text and state mirror for a process owned by this server.
+
+    The local graph's check_process tool uses the mirror to persist terminal
+    state, so resuming the thread does not repeatedly announce the same exit.
+    The local secret is required because the response includes commands and logs.
+    Registry access and log-tail reads run outside the async event loop.
+    """
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+
+    from EvoScientist import background
+
+    process_id = request.query_params.get("process_id", "")
+    thread_id = request.query_params.get("thread_id") or None
+
+    text, record = await asyncio.to_thread(
+        background.check, process_id, thread_id=thread_id
+    )
+    return JSONResponse({"text": text, "record": record})
 
 
 async def post_policy(request: Request) -> JSONResponse:
@@ -263,51 +254,6 @@ def _served(workspace: Workspace) -> bool:
     from EvoScientist.langgraph_dev.registry import REGISTRY
 
     return is_served(workspace, REGISTRY)
-
-
-def _launcher_project() -> Workspace | None:
-    """The project of the client that started this server, when it is served.
-    Blocking."""
-    from EvoScientist.paths import launcher_workspace
-
-    launcher = launcher_workspace()
-    return launcher if launcher is not None and _served(launcher) else None
-
-
-def _no_project() -> JSONResponse:
-    return JSONResponse(
-        {
-            "error": "no_workspace",
-            "detail": "No folder is selected: this server was started without "
-            "a project, or that project is not registered or its folder is "
-            "missing.",
-        },
-        status_code=503,
-    )
-
-
-async def get_workspace(_request: Request) -> JSONResponse:
-    """Return the project of the client that started this server as
-    ``{workspace_dir, run_dir}``, while it is served.
-
-    ``workspace_dir`` is the project root in the form thread and checkpoint
-    metadata use (:attr:`~EvoScientist.paths.Workspace.key`), so a client
-    can compare it with them and derive the folder's assistant IDs without
-    resolving paths itself; ``run_dir`` is always ``null``. ``503`` (not
-    ``404``, which a client takes for a server without this route) when
-    there is no such project, or it is not registered or its folder is
-    missing.
-
-    Offloaded to a thread because resolving the folders touches the
-    filesystem, which blockbuster refuses on the event loop.
-    """
-    from EvoScientist.paths import SessionDirs
-
-    workspace = await asyncio.to_thread(_launcher_project)
-    if workspace is None:
-        return _no_project()
-    # The same serialisation as thread and checkpoint stamps.
-    return JSONResponse({"run_dir": None} | SessionDirs(workspace).metadata())
 
 
 def _registered_projects() -> list[dict[str, object]]:
@@ -398,7 +344,7 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
 
 
 async def _unregister(workspace: Workspace) -> JSONResponse:
-    from EvoScientist.langgraph_dev import server_crons
+    from EvoScientist.langgraph_dev import server_crons, server_runs
     from EvoScientist.langgraph_dev.registry import REGISTRY
 
     if not await asyncio.to_thread(REGISTRY.is_registered, workspace.key):
@@ -412,20 +358,31 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
             },
             status_code=409,
         )
-    await server_crons.delete_crons(
-        [cron["cron_id"] for cron in server_crons.system_crons(crons)]
-    )
-    await workspace_setup.unregister_workspace(workspace)
+    was_set_up = workspace.key in workspace_setup.SET_UP
+    try:
+        await server_crons.delete_crons(
+            [cron["cron_id"] for cron in server_crons.system_crons(crons)]
+        )
+        await workspace_setup.unregister_workspace(workspace)
+        await server_runs.cancel_project_runs(workspace)
+    except BaseException:
+        await workspace_setup.restore_registration(workspace, was_set_up=was_set_up)
+        raise
     return JSONResponse({"workspace_dir": workspace.key})
 
 
 async def unregister_workspace(request: Request) -> JSONResponse:
-    """Unregister the project in the ``workspace_dir`` query parameter.
+    """Unregister the project in the workspace_dir query parameter.
 
-    Its folder, threads, assistants and user crons all stay; its AutoSkills
-    and proactive crons are deleted (their reconciles recreate them).
-    Refused (``409``) while it has an enabled user cron, also when its folder
-    is missing: a client disables or deletes those first. Waits for a
+    Pending and running runs on its assistants and bound legacy threads are
+    interrupted (the stop is requested before the response, but a worker may
+    still be finishing). Its folder, threads, assistants and user crons all stay;
+    its AutoSkills and proactive crons are deleted (their reconciles recreate
+    them). A run may already be partly interrupted if deletion or cancellation
+    fails; in that case registration is restored and the request answers 500.
+    A disconnected client does not stop the server from completing this
+    request. Refused (409) while it has an enabled user cron, also when its
+    folder is missing: a client disables or deletes those first. Waits for a
     registration in progress. Needs the local secret.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
@@ -540,6 +497,7 @@ async def _lifespan(_app: Starlette):
     # refuses it on the event loop.
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
+    await asyncio.to_thread(server_record.mark_serving)
     yield
 
 
@@ -559,11 +517,11 @@ def _build_app() -> Starlette:
             Route("/api/models", get_models, methods=["GET"]),
             Route("/api/teams", get_teams, methods=["GET"]),
             Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+            Route("/api/bg_process_check", get_bg_process_check, methods=["GET"]),
             Route(
                 "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
             ),
             Route("/api/policy", post_policy, methods=["POST"]),
-            Route("/api/workspace", get_workspace, methods=["GET"]),
             Route("/api/workspaces", list_workspaces, methods=["GET"]),
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
@@ -581,9 +539,11 @@ def _build_app() -> Starlette:
 
 
 # langgraph-api imports this app before its runtime loads the store, so the
-# server (the process working in the server home) takes its data folder's lock
-# and backs the store up first; anything else importing this module does not.
+# server (the process working in the server home) takes its data folder's lock,
+# records itself for its clients and backs the store up first; anything else
+# importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
+    server_record.write_record()
     server_home.back_up_store()
 app = _build_app()

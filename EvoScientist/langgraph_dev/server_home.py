@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 LOCK_FILE = "server.lock"
 # A server stopped just before may still be exiting, and hold the lock.
 LOCK_WAIT = 5.0
+# How long a check waits for the lock: other clients checking hold it for an
+# instant, a server for its life.
+PROBE_WAIT = 0.2
 
 _held: FileLock | None = None
 
@@ -59,18 +62,33 @@ def serves_from_home() -> bool:
         return False
 
 
-def server_running(wait: float = 0) -> bool:
-    """Whether a server uses this data folder, after waiting up to *wait*
-    seconds for one that is exiting. Blocking."""
+def lock_path() -> Path:
+    """This data folder's server lock."""
+    return paths.SERVER_HOME / LOCK_FILE
+
+
+# What :func:`lock_state` finds.
+HELD = "held"
+FREE = "free"
+UNKNOWN = "unknown"
+
+
+def lock_state(wait: float = PROBE_WAIT) -> str:
+    """Whether a server uses this data folder: :data:`HELD` when the lock
+    stays held for *wait* seconds, longer than another client's check holds
+    it; :data:`FREE`; :data:`UNKNOWN` when the lock file cannot be opened
+    (another user's, after a ``sudo EvoSci``). Blocking."""
     if not paths.SERVER_HOME.is_dir():
-        return False
-    lock = FileLock(str(paths.SERVER_HOME / LOCK_FILE))
+        return FREE
+    lock = FileLock(str(lock_path()))
     try:
         lock.acquire(timeout=wait)
     except FileLockTimeout:
-        return True
+        return HELD
+    except OSError:
+        return UNKNOWN
     lock.release()
-    return False
+    return FREE
 
 
 def hold_server_lock() -> None:
@@ -83,7 +101,8 @@ def hold_server_lock() -> None:
     global _held
     if _held is not None:
         return
-    lock = FileLock(str(ensure_server_home() / LOCK_FILE))
+    ensure_server_home()
+    lock = FileLock(str(lock_path()))
     try:
         lock.acquire(timeout=LOCK_WAIT)
     except FileLockTimeout:

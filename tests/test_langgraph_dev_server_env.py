@@ -1,4 +1,4 @@
-"""Tests for the environment ``start_langgraph_dev`` gives the server.
+"""Tests for the environment ``_spawn_server`` gives the server.
 
 The server always runs with ``EVOSCIENTIST_SERVER_PROCESS`` set; the parent
 process and a plain ``import EvoScientist`` leave it unset.
@@ -6,17 +6,15 @@ process and a plain ``import EvoScientist`` leave it unset.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from EvoScientist.langgraph_dev import boundary, manager
-from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs
+from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs, reloaded
 
 
 @pytest.mark.parametrize("inherited", [None, "", "0"])
@@ -29,42 +27,28 @@ def test_start_sets_server_process_env(monkeypatch, tmp_path, runtime_paths, inh
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16174)
+        manager._spawn_server(port=16174)
 
     assert captured["env"]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
 
 
-def test_start_runs_server_in_server_home_for_launcher_project(
-    monkeypatch, tmp_path, runtime_paths
-):
+def test_start_runs_server_in_server_home(monkeypatch, tmp_path, runtime_paths):
     """The server serves every registered project, so it gets no workspace of
-    its own, only the project of the client starting it, as an absolute path.
-    The user's ``EVOSCIENTIST_WORKSPACE_DIR`` (Docker sets it) passes as is."""
+    its own. The user's ``EVOSCIENTIST_WORKSPACE_DIR`` (Docker sets it) passes
+    as is."""
     from EvoScientist import paths
 
     monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", "/inherited")
     monkeypatch.chdir(tmp_path)
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=Path("proj"), port=16178)
+        manager._spawn_server(port=16178)
 
     env = captured["env"]
     assert env["EVOSCIENTIST_WORKSPACE_DIR"] == "/inherited"
-    assert env[paths.LAUNCHER_WORKSPACE_ENV] == str(tmp_path / "proj")
     assert captured["cwd"] == str(paths.SERVER_HOME)
     if os.name == "posix":
         assert paths.SERVER_HOME.stat().st_mode & 0o777 == 0o700
-
-
-def test_start_refuses_when_another_server_holds_data_folder(
-    monkeypatch, tmp_path, runtime_paths
-):
-    from EvoScientist.langgraph_dev import server_home
-
-    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
-    monkeypatch.setattr(server_home, "server_running", lambda wait=0: True)
-    with pytest.raises(RuntimeError, match="EvoSci server stop"):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
 
 
 def test_start_gives_server_no_dotenv_keys(monkeypatch, tmp_path, runtime_paths):
@@ -80,7 +64,7 @@ def test_start_gives_server_no_dotenv_keys(monkeypatch, tmp_path, runtime_paths)
     settings.get_effective_config()
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+        manager._spawn_server(port=16178)
 
     env = captured["env"]
     assert env["TAVILY_API_KEY"] == "tvly-shell"
@@ -101,7 +85,7 @@ def test_session_flag_reaches_only_server_it_owns(
     settings.record_env_origin("EVOSCIENTIST_DANGEROUS_MODE", "cli")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16192, lasting=lasting)
+        manager._spawn_server(port=16192, lasting=lasting)
 
     env = captured["env"]
     origins = json.loads(env[settings.ENV_ORIGINS_VAR])
@@ -118,7 +102,7 @@ def test_auth_mode_flag_reaches_lasting_server(monkeypatch, tmp_path, runtime_pa
     settings.record_env_origin("EVOSCIENTIST_OPENAI_AUTH_MODE", "cli")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16194)
+        manager._spawn_server(port=16194)
 
     assert captured["env"]["EVOSCIENTIST_OPENAI_AUTH_MODE"] == "oauth"
 
@@ -144,7 +128,7 @@ def test_dangerous_mode_reaching_lasting_server(
     settings.apply_config_to_env(config)
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16193)
+        manager._spawn_server(port=16193)
 
     assert ("EVOSCIENTIST_DANGEROUS_MODE" in captured["env"]) is reaches
 
@@ -157,8 +141,7 @@ def test_start_sets_the_browser_boundary(monkeypatch, tmp_path, runtime_paths):
     monkeypatch.setenv("TUNNEL_HTTP_HOST_HEADER", "localhost")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path,
+        manager._spawn_server(
             port=16178,
             allowed_origins="https://smith.langchain.com",
         )
@@ -179,34 +162,28 @@ def test_start_passes_this_process_data_folder(monkeypatch, tmp_path, runtime_pa
     monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+        manager._spawn_server(port=16178)
     assert captured["env"]["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
 
 
 def test_start_trusts_the_bind_host(monkeypatch, tmp_path, runtime_paths):
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path, port=16178, host="myhost.local"
-        )
+        manager._spawn_server(port=16178, host="myhost.local")
     names = json.loads(captured["env"][boundary.BOUNDARY_ENV])["names"]
     assert "myhost.local" in names
 
 
 def test_ensure_passes_backend_allowed_origins(monkeypatch, tmp_path, runtime_paths):
     from EvoScientist.config import EvoScientistConfig
+    from tests.fakes.langgraph_dev import Server
 
-    started: dict = {}
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
-    monkeypatch.setattr(
-        manager, "start_langgraph_dev", lambda *_a, **kw: started.update(kw)
-    )
+    server = Server(monkeypatch)
     config = EvoScientistConfig(
         langgraph_dev_port=16178, backend_allowed_origins="https://smith.langchain.com"
     )
-    manager.ensure_langgraph_dev(config, workspace_dir=tmp_path)
-    assert started["allowed_origins"] == "https://smith.langchain.com"
+    manager.ensure_server(config, backend="langgraph_server")
+    assert server.spawns[0]["allowed_origins"] == "https://smith.langchain.com"
 
 
 # =============================================================================
@@ -220,7 +197,7 @@ def test_host_defaults_to_loopback_in_argv(monkeypatch, tmp_path, runtime_paths)
     default moves."""
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+        manager._spawn_server(port=16178)
 
     args = captured["args"]
     assert args[args.index("--host") + 1] == "127.0.0.1"
@@ -230,7 +207,7 @@ def test_explicit_wildcard_host_reaches_argv(monkeypatch, tmp_path, runtime_path
     """The opt-in to a public bind has to survive all the way into argv."""
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
+        manager._spawn_server(port=16178, host="0.0.0.0")
 
     args = captured["args"]
     assert args[args.index("--host") + 1] == "0.0.0.0"
@@ -241,9 +218,7 @@ def test_env_carries_explicit_bind_host(monkeypatch, tmp_path, runtime_paths):
     caller-resolved host must be injected — mirrors the port propagation."""
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path, port=16178, host="192.168.1.5"
-        )
+        manager._spawn_server(port=16178, host="192.168.1.5")
 
     assert captured["env"].get("EVOSCIENTIST_LANGGRAPH_DEV_HOST") == "192.168.1.5"
 
@@ -254,7 +229,7 @@ def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
     monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "10.0.0.9")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
+        manager._spawn_server(port=16178, host="0.0.0.0")
 
     assert captured["env"].get("EVOSCIENTIST_LANGGRAPH_DEV_HOST") == "0.0.0.0"
 
@@ -269,39 +244,25 @@ def test_async_subagents_available_init_true_in_server(monkeypatch):
     ``EVOSCIENTIST_SERVER_PROCESS`` at import), ``_ASYNC_SUBAGENTS_AVAILABLE``
     initializes to True so the
     deployed main agent's ``_maybe_swap_async_subagents`` swaps eagerly
-    without waiting for ``start_langgraph_dev`` to flip the flag (which it
+    without waiting for ``ensure_server`` to flip the flag (which it
     can't — the server never calls that function on itself)."""
-    # Re-import the module to re-run the module-level initialization.
-    import importlib
-
-    import EvoScientist.langgraph_dev.manager as mgr
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", True)
-    reloaded = importlib.reload(mgr)
-    try:
-        assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is True
-        assert reloaded.is_async_subagents_available() is True
-    finally:
-        # Restore: reload again as a CLI process so subsequent tests see
-        # the normal initialization.
-        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
-        importlib.reload(mgr)
+    with reloaded(manager) as module:
+        assert module._ASYNC_SUBAGENTS_AVAILABLE is True
+        assert module.is_async_subagents_available() is True
 
 
 def test_async_subagents_available_init_false_without_env(monkeypatch):
     """In a CLI process, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to False —
     the pre-existing safety behavior (fall back to sync if langgraph dev
     isn't reachable)."""
-    import importlib
-
-    import EvoScientist.langgraph_dev.manager as mgr
     from EvoScientist import paths
 
     monkeypatch.setattr(paths, "SERVER_PROCESS", False)
-
-    reloaded = importlib.reload(mgr)
-    assert reloaded._ASYNC_SUBAGENTS_AVAILABLE is False
+    with reloaded(manager) as module:
+        assert module._ASYNC_SUBAGENTS_AVAILABLE is False
 
 
 def test_tunnel_true_appends_flag(monkeypatch, tmp_path, runtime_paths):
@@ -309,8 +270,7 @@ def test_tunnel_true_appends_flag(monkeypatch, tmp_path, runtime_paths):
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path,
+        manager._spawn_server(
             port=16190,
             tunnel=True,
         )
@@ -323,80 +283,130 @@ def test_tunnel_false_default_omits_flag(monkeypatch, tmp_path, runtime_paths):
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path,
+        manager._spawn_server(
             port=16191,
         )
 
     assert "--tunnel" not in captured["args"]
 
 
-def test_node_for_mcp_servers_is_installed_before_the_spawn(
-    monkeypatch, tmp_path, runtime_paths
-):
+def test_node_for_mcp_servers_is_installed_before_start(monkeypatch):
     from EvoScientist.mcp import client as mcp_client
 
-    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     servers = {"fs": {"transport": "stdio", "command": "npx"}}
     monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: servers)
+    installed: list = []
+    monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", installed.append)
 
-    def install(config):
-        assert config == servers
-        monkeypatch.setenv("PATH", "private-node-bin")
+    manager._install_node_for_mcp(manager._Waits(None, None))
 
-    monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", install)
-    with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16176)
-    assert captured["env"]["PATH"] == "private-node-bin"
+    assert installed == [servers]
 
 
-def test_a_failing_node_check_does_not_block_the_spawn(
-    monkeypatch, tmp_path, runtime_paths
-):
+def test_failing_node_check_does_not_block_start(monkeypatch, caplog):
     from EvoScientist.mcp import client as mcp_client
 
-    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    def _fail(_config):
+        raise RuntimeError("no network")
+
     monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {"fs": None})
-    with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16177)
-    assert "env" in captured
+    monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", _fail)
+
+    manager._install_node_for_mcp(manager._Waits(None, None))
+
+    assert "Could not check Node.js" in caplog.text
 
 
-def test_start_records_the_agent_python_in_the_sidecar(
-    monkeypatch, tmp_path, runtime_paths
-):
-    """Reuse compares this record; without it the python warning never fires."""
-    import json
-    from types import SimpleNamespace
+def test_ensure_installs_node_once_before_start(monkeypatch, runtime_paths):
+    """Node is installed before the server is spawned, whose PATH has to carry
+    it, and not again for a server that is reused."""
+    from tests.fakes.langgraph_dev import Server
 
-    from EvoScientist.setup import research_env
-
-    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    server = Server(monkeypatch)
+    spawned_at_install: list = []
     monkeypatch.setattr(
         manager,
-        "RUNTIME",
-        dataclasses.replace(
-            manager.RUNTIME, workspace_sidecar=tmp_path / "workspace.json"
-        ),
+        "_install_node_for_mcp",
+        lambda waits: spawned_at_install.append(len(server.spawns)),
     )
-    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    config = manager.EvoScientistConfig(enable_async_subagents=True)
 
-    def _poll():
-        # Called by the health loop, after the sidecar is written.
-        raise PopenAbort("sidecar written")
+    manager.ensure_server(config)
+    manager.ensure_server(config)
 
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242, poll=_poll)
-    )
+    assert spawned_at_install == [0]
+    assert len(server.spawns) == 1
+
+
+@pytest.mark.parametrize(("lasting", "flag"), [(True, "1"), (False, "0")])
+def test_start_passes_server_what_it_records(
+    monkeypatch, tmp_path, runtime_paths, lasting, flag
+):
+    """The server records its starter's PID, whether it outlives it, and the
+    configuration it was started for, which it cannot know itself."""
+    from EvoScientist.langgraph_dev import server_record
+
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
-    sidecar = json.loads((tmp_path / "workspace.json").read_text())
-    assert sidecar["agent_python"] == "/env/bin/python"
+        manager._spawn_server(port=16179, lasting=lasting, config_fingerprint="fp1")
+
+    env = captured["env"]
+    assert env[server_record.SPAWNER_PID_VAR] == str(os.getpid())
+    assert env[server_record.LASTING_VAR] == flag
+    assert env[server_record.FINGERPRINT_VAR] == "fp1"
+
+
+def test_start_passes_no_inherited_fingerprint(monkeypatch, tmp_path, runtime_paths):
+    from EvoScientist.langgraph_dev import server_record
+
+    monkeypatch.setenv(server_record.FINGERPRINT_VAR, "stale")
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(PopenAbort):
+        manager._spawn_server(port=16179)
+
+    assert server_record.FINGERPRINT_VAR not in captured["env"]
+
+
+@pytest.mark.parametrize("os_name", ["nt", "posix"])
+def test_start_knows_server_leads_its_process_group_only_on_windows(
+    monkeypatch, tmp_path, runtime_paths, os_name
+):
+    """Only a server spawned as a group leader is sent Ctrl+Break on stop:
+    for any other PID Windows sends it to the whole console."""
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", set())
+    monkeypatch.setattr(manager.os, "name", os_name)
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242)
+    )
+
+    manager._spawn_server(port=16179)
+
+    assert (4242 in manager._BREAK_GROUP_PIDS) is (os_name == "nt")
+
+
+def test_ensure_stops_unhealthy_server_without_clean_stop(monkeypatch, runtime_paths):
+    """A server that never answered has no run to put back in the queue."""
+    from tests.fakes.langgraph_dev import Server
+
+    server = Server(monkeypatch)
+    server.records = False
+    stops: list = []
+    monkeypatch.setattr(
+        manager, "stop_langgraph_dev", lambda *a, **kw: stops.append((a, kw))
+    )
+
+    result = manager.ensure_server(
+        manager.EvoScientistConfig(enable_async_subagents=True)
+    )
+
+    assert result.problem == "start_failed"
+    assert stops == [((server.procs[0],), {"clean": False})]
 
 
 def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime_paths):
-    """The server is spawned with the job's flags and joins the job before the
-    PID file is written (``started`` stops the run here)."""
+    """The server is spawned with the job's flags and joins the job right
+    after the spawn (``started`` stops the run here)."""
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     monkeypatch.setattr(manager, "_PROCESS", None)
     proc = SimpleNamespace(pid=4242)
@@ -417,11 +427,10 @@ def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime
             raise PopenAbort("joined")
 
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179, job=_Job())
+        manager._spawn_server(port=16179, job=_Job())
     assert captured["kwargs"]["creationflags"] & 0x4
     assert captured["started"] is proc
     assert captured["recorded"] is proc
-    assert not manager.RUNTIME.pid_file.exists()
 
 
 def test_start_without_a_job_keeps_the_spawn_flags(
@@ -435,7 +444,7 @@ def test_start_without_a_job_keeps_the_spawn_flags(
 
     monkeypatch.setattr(subprocess, "Popen", _popen)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+        manager._spawn_server(port=16179)
     if manager.os.name == "nt":
         assert captured["kwargs"]["creationflags"] == (
             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -443,42 +452,6 @@ def test_start_without_a_job_keeps_the_spawn_flags(
     else:
         assert captured["kwargs"]["start_new_session"] is True
         assert "creationflags" not in captured["kwargs"]
-
-
-def test_start_records_the_bind_host(monkeypatch, tmp_path, runtime_paths):
-    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242)
-    )
-    recorded: dict = {}
-
-    def _write(**kwargs):
-        recorded.update(kwargs)
-        raise PopenAbort("recorded")
-
-    monkeypatch.setattr(manager, "_write_workspace_sidecar", _write)
-    with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16180, host="0.0.0.0")
-    assert recorded["host"] == "0.0.0.0"
-
-
-def test_start_records_the_listening_port(monkeypatch, tmp_path, runtime_paths):
-    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
-    monkeypatch.setattr(manager, "_PROCESS", None)
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242)
-    )
-    recorded: dict = {}
-
-    def _write(**kwargs):
-        recorded.update(kwargs)
-        raise PopenAbort("recorded")
-
-    monkeypatch.setattr(manager, "_write_workspace_sidecar", _write)
-    with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16181)
-    assert recorded["port"] == 16181
 
 
 def test_start_passes_env_origins_to_the_server_only(
@@ -494,7 +467,7 @@ def test_start_passes_env_origins_to_the_server_only(
     monkeypatch.delenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", raising=False)
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16190)
+        manager._spawn_server(port=16190)
 
     origins = json.loads(captured["env"][settings.ENV_ORIGINS_VAR])
     assert origins["OPENAI_API_KEY"] == {"source": "file"}
@@ -512,7 +485,7 @@ def test_env_origins_leave_the_users_own_export_alone(
     monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "16191")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
-        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16191)
+        manager._spawn_server(port=16191)
 
     origins = json.loads(captured["env"][settings.ENV_ORIGINS_VAR])
     assert "EVOSCIENTIST_LANGGRAPH_DEV_PORT" not in origins

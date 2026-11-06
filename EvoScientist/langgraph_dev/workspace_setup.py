@@ -81,6 +81,14 @@ async def unregister_workspace(workspace: Workspace) -> None:
     SET_UP.discard(workspace.key)
 
 
+async def restore_registration(workspace: Workspace, *, was_set_up: bool) -> None:
+    """Restore the served state after an unregister operation fails."""
+    await asyncio.to_thread(registry.REGISTRY.set_registered, workspace.key, True)
+    if was_set_up:
+        SET_UP.add(workspace.key)
+    await _reconcile_autoskills(workspace)
+
+
 async def _import_old_store(workspace: Workspace) -> None:
     """Import what *workspace*'s old runtime store has left to import (see
     :mod:`~EvoScientist.langgraph_dev.legacy_import`). Logged on failure: the

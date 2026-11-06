@@ -17,10 +17,10 @@ from ...cron.schedule import (
 )
 from ...langgraph_dev.assistants import launch_assistant_id
 from ...langgraph_dev.sdk import (
+    configured_langgraph_dev_url,
     default_scheduler_timezone,
     get_langgraph_async_client,
     get_langgraph_sync_client,
-    langgraph_dev_url,
     messages_input,
 )
 from ...paths import SessionDirs, Workspace
@@ -88,7 +88,7 @@ async def alist_autoskill_schedules(
 ) -> list[dict[str, Any]]:
     """The workspace's internal AutoSkills cron records."""
     rows = await asearch_all(
-        get_langgraph_async_client(url=langgraph_dev_url(config)),
+        get_langgraph_async_client(url=configured_langgraph_dev_url(config)),
         metadata={"run_kind": AUTOSKILL_RUN_KIND},
     )
     return await asyncio.to_thread(_owned_by, rows, workspace_dir)
@@ -182,7 +182,7 @@ def run_autoskill_now(
     workspace_dir: str | Path,
 ) -> dict[str, Any]:
     """Launch a one-off AutoSkills run immediately."""
-    client = get_langgraph_sync_client(url=langgraph_dev_url(config))
+    client = get_langgraph_sync_client(url=configured_langgraph_dev_url(config))
     workspace = Workspace(workspace_dir)
     folders = SessionDirs(workspace).metadata()
     thread = client.threads.create(
@@ -208,7 +208,7 @@ async def arun_autoskill_now(
     workspace_dir: str | Path,
 ) -> dict[str, Any]:
     """Async variant of :func:`run_autoskill_now`."""
-    client = get_langgraph_async_client(url=langgraph_dev_url(config))
+    client = get_langgraph_async_client(url=configured_langgraph_dev_url(config))
     workspace = Workspace(workspace_dir)
     folders = SessionDirs(workspace).metadata()
     thread = await client.threads.create(

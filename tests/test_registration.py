@@ -272,20 +272,120 @@ def test_register_folder_without_secret_names_data_folder(monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
+# The projects a server serves (``EvoSci server status``)
+# ---------------------------------------------------------------------------
+
+
+def _listing(monkeypatch, response, *, instance: str = "s3cret") -> list[dict]:
+    """Fake a server holding the secret *instance* that answers the listing
+    with *response* (or raises it); return every GET sent."""
+    sent: list[dict] = []
+
+    def get(url, **kwargs):
+        sent.append({"url": url, **kwargs})
+        if url.endswith("/api/instance"):
+            return httpx.Response(
+                200, json={"instance": local_secret.instance_of(instance)}
+            )
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(registration.httpx, "get", get)
+    return sent
+
+
+def test_served_projects_lists_own_server_without_sending_secret(monkeypatch, secret):
+    projects = [{"workspace_dir": "/p/a", "name": "a", "missing": True}]
+    sent = _listing(monkeypatch, httpx.Response(200, json={"workspaces": projects}))
+
+    assert registration.served_projects(URL) == projects
+    assert [request["url"] for request in sent] == [
+        f"{URL}/api/instance",
+        f"{URL}/api/workspaces",
+    ]
+    for request in sent:
+        assert local_secret.HEADER not in request["headers"]
+        assert request["trust_env"] is False
+        assert request["timeout"] == registration.STATUS_TIMEOUT
+
+
+def test_served_projects_drops_malformed_entries(monkeypatch, secret):
+    good = {"workspace_dir": "/p/a", "name": "a", "missing": False}
+    body = {"workspaces": [good, "x", {"name": "no-dir"}, {"workspace_dir": 1}]}
+    _listing(monkeypatch, httpx.Response(200, json=body))
+
+    assert registration.served_projects(URL) == [good]
+
+
+def test_served_projects_refuses_other_data_folder_server(monkeypatch, secret):
+    sent = _listing(
+        monkeypatch, httpx.Response(200, json={"workspaces": []}), instance="theirs"
+    )
+
+    with pytest.raises(registration.OtherServerError):
+        registration.served_projects(URL)
+    assert [request["url"] for request in sent] == [f"{URL}/api/instance"]
+
+
+def test_served_projects_unreadable_secret_is_not_another_server(monkeypatch, tmp_path):
+    """This data folder's own secret cannot be read: the server is not
+    blamed on another data folder."""
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "server")
+    sent = _listing(monkeypatch, httpx.Response(200, json={"workspaces": []}))
+
+    with pytest.raises(RegistrationError, match="EVOSCIENTIST_DATA_DIR") as raised:
+        registration.served_projects(URL)
+    assert not isinstance(raised.value, registration.OtherServerError)
+    assert [request["url"] for request in sent] == [f"{URL}/api/instance"]
+
+
+def test_served_projects_server_without_instance_is_older(monkeypatch, secret):
+    monkeypatch.setattr(
+        registration.httpx, "get", lambda _url, **_k: httpx.Response(404)
+    )
+
+    with pytest.raises(OlderServerError):
+        registration.served_projects(URL)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, json={"unexpected": True}),
+    ],
+    ids=["timeout", "server_error", "unexpected_body"],
+)
+def test_served_projects_failed_read_is_registration_error(
+    monkeypatch, secret, response
+):
+    """A failed read is not reported as an empty list."""
+    _listing(monkeypatch, response)
+
+    with pytest.raises(RegistrationError) as raised:
+        registration.served_projects(URL)
+    assert not isinstance(raised.value, registration.OtherServerError)
+
+
+# ---------------------------------------------------------------------------
 # Where clients register
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def reused_server(monkeypatch, runtime_paths):
-    """``ensure_langgraph_dev`` finds a server already running."""
+    """``ensure_server`` finds a server already running."""
     from EvoScientist.langgraph_dev import manager
 
     monkeypatch.setattr(manager, "_PROCESS", None)
     monkeypatch.setattr(
         manager,
-        "_ensure_langgraph_dev_locked",
-        lambda *_a, **_k: manager._Found(available=True),
+        "_find_or_start",
+        lambda *_a, **_k: manager.ServerResult(
+            available=True, url="http://127.0.0.1:6174", port=6174, host="127.0.0.1"
+        ),
     )
     monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
     monkeypatch.setattr(manager, "needs_langgraph_dev", lambda *_a, **_k: True)
@@ -304,7 +404,7 @@ def test_ensure_registers_project_after_reuse(monkeypatch, reused_server, tmp_pa
         lambda workspace, *, url: registered.append((workspace, url)),
     )
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
 
     assert registered == [(Workspace(tmp_path), "http://127.0.0.1:6174")]
     assert manager.is_async_subagents_available()
@@ -322,7 +422,7 @@ def test_ensure_failed_registration_counts_as_server_unavailable(
 
     monkeypatch.setattr(registration, "register_folder", fail)
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
 
     assert not manager.is_async_subagents_available()
     assert "setup failed" in caplog.text
@@ -341,23 +441,20 @@ def test_ensure_missing_folder_keeps_current_session_server(
     monkeypatch.setattr(registration, "register_folder", missing)
 
     with pytest.raises(ProjectFolderMissingError):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.is_async_subagents_available()
 
 
-def test_ensure_unusable_lock_is_failed_start(monkeypatch, reused_server, tmp_path):
+def test_ensure_unusable_lock_is_failed_start(monkeypatch, runtime_paths, tmp_path):
     from EvoScientist.langgraph_dev import manager
+    from tests.fakes.langgraph_dev import Server, break_start_lock
 
-    class _Lock:
-        def __init__(self, *_a, **_k):
-            pass
+    Server(monkeypatch)
+    break_start_lock(monkeypatch, tmp_path, "acquire")
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
 
-        def acquire(self):
-            raise PermissionError("read-only")
-
-    monkeypatch.setattr(manager, "FileLock", _Lock)
-
-    assert manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path) is False
+    assert manager.ensure_server(cfg, workspace_dir=tmp_path).served is False
     assert manager.SERVER_UNAVAILABLE
 
 
@@ -371,10 +468,10 @@ def test_ensure_start_error_leaves_no_server(
     def broken(*_a, **_k):
         raise error
 
-    monkeypatch.setattr(manager, "_ensure_langgraph_dev_locked", broken)
+    monkeypatch.setattr(manager, "_find_or_start", broken)
 
     with pytest.raises(type(error)):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()
 
 
@@ -389,7 +486,7 @@ def test_ensure_older_server_serves_no_project(monkeypatch, reused_server, tmp_p
     monkeypatch.setattr(registration, "register_folder", older)
 
     with pytest.raises(OlderServerError):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()
 
 
@@ -510,14 +607,14 @@ def test_ensure_settles_registered_server_exposure(
         registration, "register_folder", lambda _workspace, *, url: exposure
     )
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.SERVER_EXPOSURE == exposure
 
     def fail(_workspace, *, url):
         raise RegistrationError("setup failed")
 
     monkeypatch.setattr(registration, "register_folder", fail)
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.SERVER_EXPOSURE is None
 
 
@@ -593,6 +690,25 @@ def test_tui_notices_name_unavailable_server(monkeypatch):
     assert manager.SERVER_UNAVAILABLE_MESSAGE not in _agent_shell_notices()
 
 
+def test_tui_notices_say_why_server_is_unavailable(monkeypatch):
+    from EvoScientist.cli.tui_interactive import _agent_shell_notices
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "SERVER_UNAVAILABLE", True)
+    monkeypatch.setattr(manager, "SERVER_UNAVAILABLE_REASON", "runs on port 16400")
+    assert any("runs on port 16400" in n for n in _agent_shell_notices())
+
+
+def test_tui_notices_name_older_releases_server(monkeypatch):
+    from EvoScientist.cli.tui_interactive import _agent_shell_notices
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "OLDER_SERVER", manager.OLDER_SERVER_MESSAGE)
+    assert manager.OLDER_SERVER_MESSAGE in _agent_shell_notices()
+    monkeypatch.setattr(manager, "OLDER_SERVER", None)
+    assert manager.OLDER_SERVER_MESSAGE not in _agent_shell_notices()
+
+
 def test_ensure_unexpected_registration_error_leaves_no_server(
     monkeypatch, reused_server, tmp_path
 ):
@@ -604,5 +720,5 @@ def test_ensure_unexpected_registration_error_leaves_no_server(
     monkeypatch.setattr(registration, "register_folder", broken)
 
     with pytest.raises(ValueError, match="bug"):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()
