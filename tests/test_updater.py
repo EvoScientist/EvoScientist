@@ -705,7 +705,7 @@ def test_missing_uv(uv_install, monkeypatch, no_subprocess):
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def server(monkeypatch):
-    """A server answering on 6174; *owned* when its sidecar pid serves it."""
+    """A server answering on 6174; *owned* when its record names it."""
     import EvoScientist.langgraph_dev.manager as manager
 
     state = {
@@ -715,26 +715,41 @@ def server(monkeypatch):
         "stop_fails": False,
         "jobs": ["train.py"],
         "busy": True,
+        "record": manager.ServerRecord(pid=42, port=6174, host="127.0.0.1"),
+        "probed": [],
+        # Whether the recorded server listens, so its work can be asked.
+        "listening": True,
     }
-    monkeypatch.setattr(
-        manager, "is_langgraph_dev_running", lambda **kw: state["running"]
-    )
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": 42})
-    monkeypatch.setattr(manager, "_pid_serves_port", lambda pid, port: state["owned"])
 
-    def stop():
+    def running(*, port=6174, host="127.0.0.1", **_kw):
+        state["probed"].append(port)
+        return state["running"]
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", running)
+    monkeypatch.setattr(
+        manager, "_is_port_occupied", lambda port, host="": state["listening"]
+    )
+
+    def recorded():
+        return state["record"] if state["owned"] and state["running"] else None
+
+    monkeypatch.setattr(manager, "read_record", lambda **_k: recorded())
+
+    def stop(**_k):
         if state["stop_fails"] == "unopened":
             raise manager.ServerStopFailedError(
                 "Could not stop langgraph dev (pid 42): out of resources. It "
-                "keeps running and its records are kept; try again."
+                "keeps running; try again."
             )
+        if state["stop_fails"] == "refused":
+            raise manager._stop_failed(42, manager._refused_cause())
         if state["stop_fails"] or not state["owned"]:
             return None
         state["stopped"] += 1
         state["running"] = False
         return 42
 
-    monkeypatch.setattr(manager, "stop_recorded_server", stop)
+    monkeypatch.setattr(manager, "stop_server", stop)
     monkeypatch.setattr(
         "EvoScientist.deploy.busy.running_bg_process_names", lambda url: state["jobs"]
     )
@@ -786,11 +801,7 @@ def test_failing_before_stop_leaves_the_server_running(server, monkeypatch):
     import EvoScientist.langgraph_dev.manager as manager
     from EvoScientist.setup import server as server_stage
 
-    monkeypatch.setattr(
-        manager,
-        "_read_workspace_sidecar",
-        lambda: {"pid": 42, "lasting": True},
-    )
+    server["record"] = manager.ServerRecord(42, 6174, "127.0.0.1", lasting=True)
     recorded: list = []
     monkeypatch.setattr(
         server_stage, "remember_for_restart", lambda: recorded.append(True)
@@ -840,6 +851,76 @@ def test_terminal_asks_and_names_busy_work(server):
     assert "a task is running" in asked[0]
 
 
+def test_terminal_asks_about_busy_work_of_server_slow_to_answer(server, monkeypatch):
+    """A busy server may miss /ok's second; its work is asked all the same."""
+    import EvoScientist.langgraph_dev.manager as manager
+
+    monkeypatch.setattr(manager, "read_record", lambda **_k: server["record"])
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
+    asked: list[str] = []
+    updater.check_server(
+        updater.UpdateOptions(), _emits(), lambda q: asked.append(q) or True
+    )
+    assert "train.py" in asked[0]
+
+
+def test_update_skips_busy_questions_for_server_not_listening(server, monkeypatch):
+    """A server that is starting or draining is not asked: nothing answers."""
+    server["listening"] = False
+    asked: list[str] = []
+    updater.check_server(
+        updater.UpdateOptions(), _emits(), lambda q: asked.append(q) or True
+    )
+    assert "train.py" not in asked[0]
+
+
+def test_update_refuses_start_in_progress_after_question(server, monkeypatch):
+    """The asked server is gone and another process starts one: as before
+    the question, nothing is changed."""
+    import EvoScientist.langgraph_dev.manager as manager
+
+    records = iter([manager.ServerRecord(42, 6174, "127.0.0.1"), None, None, None])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
+    starts = iter([True])
+    monkeypatch.setattr(manager, "start_in_progress", lambda: next(starts, False))
+    go_on: list = []
+    with pytest.raises(updater.UpdateError) as raised:
+        updater.check_server(
+            updater.UpdateOptions(),
+            _emits(),
+            lambda q: True,
+            before_stop=lambda: go_on.append(1),
+        )
+    assert raised.value.code == "server_running"
+    assert "starting the server" in str(raised.value)
+    assert go_on == []
+
+
+def test_update_refuses_lock_held_without_record_after_question(server, monkeypatch):
+    """The asked server is gone and the lock is held without a record: as
+    before the question, nothing is changed."""
+    import EvoScientist.langgraph_dev.manager as manager
+    from EvoScientist.langgraph_dev import server_home
+
+    records = iter([manager.ServerRecord(42, 6174, "127.0.0.1"), None])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
+    locks = iter([server_home.HELD, server_home.HELD])
+    monkeypatch.setattr(
+        server_home, "lock_state", lambda wait=0: next(locks, server_home.HELD)
+    )
+    go_on: list = []
+    with pytest.raises(updater.UpdateError) as raised:
+        updater.check_server(
+            updater.UpdateOptions(),
+            _emits(),
+            lambda q: True,
+            before_stop=lambda: go_on.append(1),
+        )
+    assert raised.value.code == "server_running"
+    assert go_on == []
+    assert server["stopped"] == 0
+
+
 def test_background_job_alone_is_not_called_a_task(server):
     server["busy"] = False
     asked: list[str] = []
@@ -859,9 +940,22 @@ def test_owned_server_that_does_not_stop(server):
     assert "ownership record" not in exc.value.message
 
 
+def test_owned_server_the_stop_may_not_end(server):
+    """Another user's or an elevated server: the update says why it is left
+    running and changes nothing."""
+    from EvoScientist.langgraph_dev import manager
+
+    server["stop_fails"] = "refused"
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+    assert exc.value.code == "server_running"
+    assert manager._refused_cause().split(";")[0] in exc.value.message
+    assert "Nothing was changed" in exc.value.message
+
+
 def test_owned_server_the_stop_could_not_open(server):
-    """Its records are kept, so running the update again retries: the error
-    says that, not to stop the server by hand first."""
+    """Running the update again retries: the error says that, not to stop
+    the server by hand first."""
     server["stop_fails"] = "unopened"
     with pytest.raises(updater.UpdateError) as exc:
         updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
@@ -873,20 +967,16 @@ def test_owned_server_the_stop_could_not_open(server):
 
 
 @pytest.mark.parametrize("stop_fails", [False, True, "unopened"])
-@pytest.mark.parametrize(
-    "sidecar",
-    [{"pid": 42, "lasting": True}, {"pid": 42, "workspace": "/proj", "lasting": True}],
-    ids=["current", "older_record_with_project"],
-)
-def test_lasting_server_is_recorded_for_restart(
-    server, monkeypatch, stop_fails, sidecar
-):
+@pytest.mark.parametrize("older", [False, True], ids=["current", "older_release"])
+def test_lasting_server_is_recorded_for_restart(server, monkeypatch, stop_fails, older):
     """The setup after the update starts it again; a server that did not
     stop leaves no record."""
     import EvoScientist.langgraph_dev.manager as manager
     from EvoScientist.setup import server as server_stage
 
-    monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: sidecar)
+    server["record"] = manager.ServerRecord(
+        42, 6174, "127.0.0.1", lasting=True, older=older
+    )
     server["stop_fails"] = stop_fails
     recorded: list = []
     monkeypatch.setattr(
@@ -960,6 +1050,41 @@ def test_unowned_server_terminal_may_continue(server):
     emit = _emits()
     updater.check_server(updater.UpdateOptions(), emit, lambda q: True)
     assert server["stopped"] == 0
+
+
+def test_update_waits_for_server_another_process_starts(server, monkeypatch):
+    import EvoScientist.langgraph_dev.manager as manager
+
+    server["owned"] = False
+    monkeypatch.setattr(manager, "start_in_progress", lambda: True)
+    go_on: list = []
+    with pytest.raises(updater.UpdateError) as raised:
+        updater.check_server(
+            updater.UpdateOptions(yes=True),
+            _emits(),
+            None,
+            before_stop=lambda: go_on.append(1),
+        )
+    assert raised.value.code == "server_running"
+    assert go_on == []
+
+
+def test_update_waits_for_server_whose_start_just_finished(server, monkeypatch):
+    """The start released its lock between the update's two reads."""
+    import EvoScientist.langgraph_dev.manager as manager
+
+    records = iter([None, manager.ServerRecord(42, 6174, "127.0.0.1")])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
+    go_on: list = []
+    with pytest.raises(updater.UpdateError) as raised:
+        updater.check_server(
+            updater.UpdateOptions(yes=True),
+            _emits(),
+            None,
+            before_stop=lambda: go_on.append(1),
+        )
+    assert raised.value.code == "server_running"
+    assert go_on == []
 
 
 def test_stale_record_without_server_is_ignored(server):
@@ -1986,17 +2111,10 @@ def test_server_tree_reads_the_recorded_server(monkeypatch):
 
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
-        monkeypatch.setattr(
-            manager, "_read_workspace_sidecar", lambda: {"pid": os.getpid()}
-        )
+        record = manager.ServerRecord(os.getpid(), 6174, "127.0.0.1")
+        monkeypatch.setattr(manager, "read_record", lambda **_k: record)
         assert {os.getpid(), child.pid} <= updater._server_tree()
-        monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: None)
-        assert updater._server_tree() == set()
-        monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": "x"})
-        assert updater._server_tree() == set()
-        monkeypatch.setattr(
-            manager, "_read_workspace_sidecar", lambda: {"pid": float("inf")}
-        )
+        monkeypatch.setattr(manager, "read_record", lambda **_k: None)
         assert updater._server_tree() == set()
     finally:
         child.kill()
@@ -2044,11 +2162,7 @@ def test_deploy_owned_server_is_not_restarted(server, monkeypatch):
     import EvoScientist.langgraph_dev.manager as manager
     from EvoScientist.setup import server as server_stage
 
-    monkeypatch.setattr(
-        manager,
-        "_read_workspace_sidecar",
-        lambda: {"pid": 42, "lasting": False},
-    )
+    server["record"] = manager.ServerRecord(42, 6174, "127.0.0.1", lasting=False)
     recorded: list = []
     monkeypatch.setattr(
         server_stage, "remember_for_restart", lambda: recorded.append(True)
@@ -2057,6 +2171,103 @@ def test_deploy_owned_server_is_not_restarted(server, monkeypatch):
     updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
 
     assert recorded == []
+
+
+def test_update_stops_recorded_server_on_another_port(server, monkeypatch):
+    """langgraph_dev_port changed while the server ran: the record names it,
+    so the update asks about it and stops it."""
+    import EvoScientist.langgraph_dev.manager as manager
+
+    server["record"] = manager.ServerRecord(42, 7000, "127.0.0.1")
+    queried: list[str] = []
+    monkeypatch.setattr(
+        "EvoScientist.deploy.busy.running_bg_process_names",
+        lambda url: queried.append(url) or [],
+    )
+    asked: list[str] = []
+
+    updater.check_server(
+        updater.UpdateOptions(), _emits(), lambda q: asked.append(q) or True
+    )
+
+    assert server["stopped"] == 1
+    assert "port 7000" in asked[0]
+    assert queried == ["http://127.0.0.1:7000"]
+
+
+def test_update_names_server_older_release_started(server):
+    import EvoScientist.langgraph_dev.manager as manager
+
+    server["record"] = manager.ServerRecord(42, 6174, "127.0.0.1", older=True)
+    asked: list[str] = []
+
+    updater.check_server(
+        updater.UpdateOptions(), _emits(), lambda q: asked.append(q) or True
+    )
+
+    assert "older EvoScientist release" in asked[0]
+    assert server["stopped"] == 1
+
+
+@pytest.fixture
+def lock(monkeypatch):
+    """The server lock's state, as a test sets it."""
+    from EvoScientist.langgraph_dev import server_home
+
+    state = {"lock": server_home.FREE}
+    monkeypatch.setattr(server_home, "lock_state", lambda wait=0: state["lock"])
+    return state
+
+
+def test_update_refuses_lock_held_without_record(server, lock):
+    from EvoScientist.langgraph_dev import server_home
+
+    server["owned"] = False
+    server["running"] = False
+    lock["lock"] = server_home.HELD
+    went_on: list = []
+
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(
+            updater.UpdateOptions(yes=True),
+            _emits(),
+            lambda q: True,
+            before_stop=lambda: went_on.append(1),
+        )
+
+    assert exc.value.code == "server_running"
+    assert "EvoSci update again" in exc.value.message
+    assert went_on == []
+    assert server["stopped"] == 0
+
+
+@pytest.mark.parametrize("yes", [True, False])
+def test_update_unreadable_lock_goes_on_only_with_yes(server, lock, yes):
+    from EvoScientist.langgraph_dev import server_home
+
+    server["owned"] = False
+    server["running"] = False
+    lock["lock"] = server_home.UNKNOWN
+    asked: list = []
+    went_on: list = []
+
+    def check():
+        updater.check_server(
+            updater.UpdateOptions(yes=yes),
+            _emits(),
+            lambda q: asked.append(q) or True,
+            before_stop=lambda: went_on.append(1),
+        )
+
+    if yes:
+        check()
+    else:
+        with pytest.raises(updater.UpdateError) as exc:
+            check()
+        assert exc.value.code == "server_running"
+
+    assert bool(went_on) is yes
+    assert asked == []
 
 
 @pytest.mark.parametrize("running", [True, False])
@@ -2073,3 +2284,36 @@ def test_update_stops_service_ccproxy(server, monkeypatch, running):
     updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
 
     assert stopped == [1]
+
+
+def test_update_stops_nothing_when_another_server_replaced_asked_one(
+    server, monkeypatch
+):
+    import EvoScientist.langgraph_dev.manager as manager
+
+    records = iter(
+        [
+            manager.ServerRecord(42, 6174, "127.0.0.1", created=1.0),
+            manager.ServerRecord(43, 6174, "127.0.0.1", created=2.0),
+        ]
+    )
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
+
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(updater.UpdateOptions(), _emits(), lambda q: True)
+
+    assert exc.value.code == "server_running"
+    assert "43" in exc.value.message
+    assert server["stopped"] == 0
+
+
+def test_update_goes_on_when_asked_server_stopped_meanwhile(server, monkeypatch):
+    import EvoScientist.langgraph_dev.manager as manager
+
+    records = iter([manager.ServerRecord(42, 6174, "127.0.0.1"), None])
+    monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
+    monkeypatch.setattr(updater, "_stop_service_ccproxy", lambda emit: None)
+
+    updater.check_server(updater.UpdateOptions(), _emits(), lambda q: True)
+
+    assert server["stopped"] == 0

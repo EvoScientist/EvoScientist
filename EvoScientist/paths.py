@@ -326,7 +326,7 @@ def _config_dir() -> Path:
     ) / "evoscientist"
 
 
-# Whether this process is the langgraph dev server (``start_langgraph_dev``
+# Whether this process is the langgraph dev server (``manager._spawn_server``
 # sets the variable). Read once, at import, and removed from the environment,
 # so the agent's commands and MCP servers do not take themselves for it.
 SERVER_PROCESS: bool = os.environ.pop("EVOSCIENTIST_SERVER_PROCESS", None) == "1"

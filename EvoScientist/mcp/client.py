@@ -955,7 +955,7 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     the server then fails to start as it would without Node. Never installs
     inside ``langgraph dev`` (``paths.SERVER_PROCESS``): a download there would
     race the server's health deadline with its progress hidden in the server
-    log, so ``start_langgraph_dev`` runs this before spawning instead. The
+    log, so ``ensure_server`` runs this before spawning instead. The
     server, which outlives sessions, only puts on its PATH a private Node that
     a session or ``EvoSci setup`` installed since it started, at its first MCP
     load: the tool cache keeps that load while ``mcp.yaml`` is unchanged.

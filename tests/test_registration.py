@@ -376,14 +376,16 @@ def test_served_projects_failed_read_is_registration_error(
 
 @pytest.fixture
 def reused_server(monkeypatch, runtime_paths):
-    """``ensure_langgraph_dev`` finds a server already running."""
+    """``ensure_server`` finds a server already running."""
     from EvoScientist.langgraph_dev import manager
 
     monkeypatch.setattr(manager, "_PROCESS", None)
     monkeypatch.setattr(
         manager,
-        "_ensure_langgraph_dev_locked",
-        lambda *_a, **_k: manager._Found(available=True),
+        "_find_or_start",
+        lambda *_a, **_k: manager.ServerResult(
+            available=True, url="http://127.0.0.1:6174", port=6174, host="127.0.0.1"
+        ),
     )
     monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
     monkeypatch.setattr(manager, "needs_langgraph_dev", lambda *_a, **_k: True)
@@ -402,7 +404,7 @@ def test_ensure_registers_project_after_reuse(monkeypatch, reused_server, tmp_pa
         lambda workspace, *, url: registered.append((workspace, url)),
     )
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
 
     assert registered == [(Workspace(tmp_path), "http://127.0.0.1:6174")]
     assert manager.is_async_subagents_available()
@@ -420,7 +422,7 @@ def test_ensure_failed_registration_counts_as_server_unavailable(
 
     monkeypatch.setattr(registration, "register_folder", fail)
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
 
     assert not manager.is_async_subagents_available()
     assert "setup failed" in caplog.text
@@ -439,23 +441,20 @@ def test_ensure_missing_folder_keeps_current_session_server(
     monkeypatch.setattr(registration, "register_folder", missing)
 
     with pytest.raises(ProjectFolderMissingError):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.is_async_subagents_available()
 
 
-def test_ensure_unusable_lock_is_failed_start(monkeypatch, reused_server, tmp_path):
+def test_ensure_unusable_lock_is_failed_start(monkeypatch, runtime_paths, tmp_path):
     from EvoScientist.langgraph_dev import manager
+    from tests.fakes.langgraph_dev import Server, break_start_lock
 
-    class _Lock:
-        def __init__(self, *_a, **_k):
-            pass
+    Server(monkeypatch)
+    break_start_lock(monkeypatch, tmp_path, "acquire")
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
 
-        def acquire(self):
-            raise PermissionError("read-only")
-
-    monkeypatch.setattr(manager, "FileLock", _Lock)
-
-    assert manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path) is False
+    assert manager.ensure_server(cfg, workspace_dir=tmp_path).served is False
     assert manager.SERVER_UNAVAILABLE
 
 
@@ -469,10 +468,10 @@ def test_ensure_start_error_leaves_no_server(
     def broken(*_a, **_k):
         raise error
 
-    monkeypatch.setattr(manager, "_ensure_langgraph_dev_locked", broken)
+    monkeypatch.setattr(manager, "_find_or_start", broken)
 
     with pytest.raises(type(error)):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()
 
 
@@ -487,7 +486,7 @@ def test_ensure_older_server_serves_no_project(monkeypatch, reused_server, tmp_p
     monkeypatch.setattr(registration, "register_folder", older)
 
     with pytest.raises(OlderServerError):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()
 
 
@@ -608,14 +607,14 @@ def test_ensure_settles_registered_server_exposure(
         registration, "register_folder", lambda _workspace, *, url: exposure
     )
 
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.SERVER_EXPOSURE == exposure
 
     def fail(_workspace, *, url):
         raise RegistrationError("setup failed")
 
     monkeypatch.setattr(registration, "register_folder", fail)
-    manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+    manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert manager.SERVER_EXPOSURE is None
 
 
@@ -691,6 +690,25 @@ def test_tui_notices_name_unavailable_server(monkeypatch):
     assert manager.SERVER_UNAVAILABLE_MESSAGE not in _agent_shell_notices()
 
 
+def test_tui_notices_say_why_server_is_unavailable(monkeypatch):
+    from EvoScientist.cli.tui_interactive import _agent_shell_notices
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "SERVER_UNAVAILABLE", True)
+    monkeypatch.setattr(manager, "SERVER_UNAVAILABLE_REASON", "runs on port 16400")
+    assert any("runs on port 16400" in n for n in _agent_shell_notices())
+
+
+def test_tui_notices_name_older_releases_server(monkeypatch):
+    from EvoScientist.cli.tui_interactive import _agent_shell_notices
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "OLDER_SERVER", manager.OLDER_SERVER_MESSAGE)
+    assert manager.OLDER_SERVER_MESSAGE in _agent_shell_notices()
+    monkeypatch.setattr(manager, "OLDER_SERVER", None)
+    assert manager.OLDER_SERVER_MESSAGE not in _agent_shell_notices()
+
+
 def test_ensure_unexpected_registration_error_leaves_no_server(
     monkeypatch, reused_server, tmp_path
 ):
@@ -702,5 +720,5 @@ def test_ensure_unexpected_registration_error_leaves_no_server(
     monkeypatch.setattr(registration, "register_folder", broken)
 
     with pytest.raises(ValueError, match="bug"):
-        manager.ensure_langgraph_dev(reused_server, workspace_dir=tmp_path)
+        manager.ensure_server(reused_server, workspace_dir=tmp_path)
     assert not manager.is_async_subagents_available()

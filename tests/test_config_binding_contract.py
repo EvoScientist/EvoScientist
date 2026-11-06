@@ -33,6 +33,7 @@ from EvoScientist.config.settings import (
 )
 from EvoScientist.langgraph_dev.manager import (
     _FINGERPRINT_FILE_FIELDS,
+    _UNFINGERPRINTED_FIELDS,
     _server_config_fingerprint,
 )
 
@@ -56,6 +57,8 @@ FIELD_CHANNELS: dict[str, str] = {
     "shell_allow_list": "per-call client-side approval policy, read fresh at"
     " each HITL interrupt (channels/interaction.py, stream/display.py)",
     "mirror": "download source, read from the config file at each install",
+    "langgraph_dev_port": "named by the server's record; a session refuses a"
+    " server on another port, deploy --json and the WebUI launcher warn of it",
 }
 
 #: Channel justification for each prefix-based exclusion.
@@ -87,7 +90,9 @@ def _config_field_names() -> set[str]:
 def _excluded_field_names() -> set[str]:
     """Config fields excluded from the fingerprint (explicit + prefix)."""
     names = _config_field_names()
-    excluded = {n for n in names if n in CLIENT_ONLY_FIELDS}
+    excluded = {
+        n for n in names if n in CLIENT_ONLY_FIELDS or n in _UNFINGERPRINTED_FIELDS
+    }
     for name in names - excluded:
         if any(name.startswith(p) for p in CLIENT_ONLY_PREFIXES):
             excluded.add(name)

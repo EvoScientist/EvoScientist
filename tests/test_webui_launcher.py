@@ -181,18 +181,19 @@ def _run_webui_once(
         launcher_mod.WebUILauncher, "wait_ready", lambda self, *a, **k: self._result()
     )
 
-    monkeypatch.setattr(
-        lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied
-    )
-    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: None)
+    from EvoScientist.langgraph_dev import registration
+    from tests.fakes.langgraph_dev import Server
 
-    def _fake_start_langgraph_dev(*, port=None, host=None, **_kw):
-        captured["backend_port"] = port
-        captured["backend_host"] = host
-        return SimpleNamespace(pid=99999)
-
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
+    server = Server(monkeypatch, pid=99999)
+    if backend_port_occupied:
+        server.occupied.add(int(config.langgraph_dev_port))
+    if registration.register_folder.__module__ == registration.__name__:
+        # Unless the test says how the backend answers the registration.
+        monkeypatch.setattr(
+            registration,
+            "register_folder",
+            lambda workspace, *, url: registration.ServerExposure(),
+        )
 
     captured["stop_calls"] = 0
 
@@ -242,6 +243,9 @@ def _run_webui_once(
         # The registered teardown closes it at exit; the tests never run it.
         if captured.get("node_stdout") is not None:
             captured["node_stdout"].close()
+        if server.spawns:
+            captured["backend_port"] = server.spawns[0]["port"]
+            captured["backend_host"] = server.spawns[0]["host"]
     return captured
 
 
@@ -294,7 +298,7 @@ def test_node_output_goes_to_webui_log_next_to_the_backend_log(
     monkeypatch, runtime_paths
 ):
     captured = _run_webui_once(monkeypatch, _make_config())
-    log = runtime_paths.log_file.parent / "webui.log"
+    log = runtime_paths.webui_log
     assert captured["node_stdout"].name == str(log)
     assert any("webui.log" in line for line in captured["printed"])
 
@@ -337,8 +341,8 @@ def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
 
 
 def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
-    """While another process holds the server start lock the spinner says so,
-    as EvoSci deploy does, then goes back to starting langgraph dev."""
+    """While another process starts the server the spinner says so, as
+    EvoSci deploy does, then goes back to starting langgraph dev."""
     from tests.fakes.langgraph_dev import LockHolder
 
     holder = LockHolder()
@@ -361,8 +365,8 @@ def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
         holder.done()
     statuses = [p for p in captured["printed"] if p.startswith("status: ")]
     waiting = (
-        "status: [dim]Waiting for another EvoSci process to start langgraph "
-        "dev...[/dim]"
+        "status: [dim]Waiting for another EvoSci process to start or stop "
+        "langgraph dev...[/dim]"
     )
     assert waiting in statuses
     after = statuses[statuses.index(waiting) + 1 :]
@@ -382,7 +386,7 @@ def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
 # =============================================================================
 
 
-def test_backend_host_reaches_start_langgraph_dev(monkeypatch):
+def test_backend_host_reaches_start(monkeypatch):
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 

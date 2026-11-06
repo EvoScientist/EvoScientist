@@ -34,7 +34,7 @@ def _restore_http_log_levels():
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
     """Stub the dev-server spawn + workspace helpers; return (config, ensure_calls).
 
-    ``ensure_calls`` captures each ``ensure_langgraph_dev`` invocation so a test
+    ``ensure_calls`` captures each ``ensure_server`` invocation so a test
     can assert whether (and with what workspace) the dev server was ensured.
     """
     import EvoScientist.langgraph_dev.manager as manager_mod
@@ -43,7 +43,7 @@ def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
     ensure_calls: list[dict] = []
     monkeypatch.setattr(
         manager_mod,
-        "ensure_langgraph_dev",
+        "ensure_server",
         lambda cfg, *, workspace_dir, backend=None: ensure_calls.append(
             {"config": cfg, "workspace_dir": workspace_dir, "backend": backend}
         ),
@@ -104,7 +104,7 @@ def test_ensure_dev_server_unusable_server_exits(monkeypatch, tmp_path):
     def older(_cfg, *, workspace_dir, backend=None):
         raise OlderServerError()
 
-    monkeypatch.setattr(manager_mod, "ensure_langgraph_dev", older)
+    monkeypatch.setattr(manager_mod, "ensure_server", older)
 
     with pytest.raises(SystemExit) as exited:
         standalone._ensure_standalone_dev_server(
@@ -858,7 +858,7 @@ def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
     seen: list[str] = []
     monkeypatch.setattr(
         manager_mod,
-        "ensure_langgraph_dev",
+        "ensure_server",
         lambda cfg, *, workspace_dir, backend=None: seen.append(
             os.environ["ANTHROPIC_BASE_URL"]
         ),

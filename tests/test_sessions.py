@@ -2004,6 +2004,43 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
                 assert thread_binding("t") == second
                 assert thread_binding("unknown") is None
 
+    def test_workspace_thread_bindings_skips_unreadable_rows(self):
+        import json
+        import sqlite3
+        import tempfile
+        from uuid import uuid4
+
+        from EvoScientist.sessions import workspace_thread_bindings
+
+        valid_id, invalid_id = str(uuid4()), str(uuid4())
+        with tempfile.TemporaryDirectory() as td:
+            valid_workspace = Workspace(os.path.join(td, "valid"))
+            valid_workspace.root.mkdir()
+            db = os.path.join(td, "sessions.db")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE checkpoints (thread_id TEXT, checkpoint_ns TEXT, "
+                "checkpoint_id TEXT, metadata BLOB)"
+            )
+            for thread_id, workspace_dir in (
+                (valid_id, valid_workspace.key),
+                (invalid_id, "/tmp/invalid\x00workspace"),
+            ):
+                conn.execute(
+                    "INSERT INTO checkpoints VALUES (?, '', '1', ?)",
+                    (thread_id, json.dumps({"workspace_dir": workspace_dir})),
+                )
+            conn.commit()
+            conn.close()
+            with self.assertLogs("EvoScientist.sessions", level="WARNING") as logs:
+                with patch(
+                    "EvoScientist.sessions.get_db_path", return_value=_mock_path(db)
+                ):
+                    bindings = workspace_thread_bindings()
+
+        assert bindings == {valid_id: SessionDirs(valid_workspace)}
+        assert invalid_id in "\n".join(logs.output)
+
     def test_thread_binding_refuses_unreadable_folders(self):
         """An unread binding must not pass for an unbound thread."""
         import json

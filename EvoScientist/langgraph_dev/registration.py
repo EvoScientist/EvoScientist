@@ -51,9 +51,10 @@ class OlderServerError(ServerUnusableError):
 
     code = "server_outdated"
 
-    def __init__(self) -> None:
+    def __init__(self, message: str | None = None) -> None:
         super().__init__(
-            "The running server is from an older EvoScientist. Stop it with "
+            message
+            or "The running server is from an older EvoScientist. Stop it with "
             "`EvoSci server stop`, then start again."
         )
 
@@ -166,7 +167,7 @@ def _get(url: str, path: str, *, timeout: float) -> tuple[httpx.Response, object
     return response, body
 
 
-def _server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
+def server_instance(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str | None:
     """The instance the server at *url* names (``GET /api/instance``)."""
     response, body = _get(url, "/api/instance", timeout=timeout)
     if response.status_code == 404:
@@ -189,7 +190,7 @@ def _require_own_server(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str:
     from ..local_secret import instance_of, read_local_secret
 
     # First: a server too old to have created the secret has no instance.
-    instance = _server_instance(url, timeout=timeout)
+    instance = server_instance(url, timeout=timeout)
     secret = read_local_secret()
     if secret is None:
         raise RegistrationError(
@@ -349,9 +350,9 @@ def apply_autoskills_settings(config: object) -> str | None:
     could not. Without a running server each project follows at its next
     setup."""
     from .manager import is_langgraph_dev_running
-    from .sdk import langgraph_dev_url
+    from .sdk import configured_langgraph_dev_url
 
-    url = langgraph_dev_url(config)
+    url = configured_langgraph_dev_url(config)
     if not is_langgraph_dev_running(base_url=url):
         return None
     try:

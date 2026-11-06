@@ -41,7 +41,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, workspace_setup
+from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -344,7 +344,7 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
 
 
 async def _unregister(workspace: Workspace) -> JSONResponse:
-    from EvoScientist.langgraph_dev import server_crons
+    from EvoScientist.langgraph_dev import server_crons, server_runs
     from EvoScientist.langgraph_dev.registry import REGISTRY
 
     if not await asyncio.to_thread(REGISTRY.is_registered, workspace.key):
@@ -358,20 +358,31 @@ async def _unregister(workspace: Workspace) -> JSONResponse:
             },
             status_code=409,
         )
-    await server_crons.delete_crons(
-        [cron["cron_id"] for cron in server_crons.system_crons(crons)]
-    )
-    await workspace_setup.unregister_workspace(workspace)
+    was_set_up = workspace.key in workspace_setup.SET_UP
+    try:
+        await server_crons.delete_crons(
+            [cron["cron_id"] for cron in server_crons.system_crons(crons)]
+        )
+        await workspace_setup.unregister_workspace(workspace)
+        await server_runs.cancel_project_runs(workspace)
+    except BaseException:
+        await workspace_setup.restore_registration(workspace, was_set_up=was_set_up)
+        raise
     return JSONResponse({"workspace_dir": workspace.key})
 
 
 async def unregister_workspace(request: Request) -> JSONResponse:
-    """Unregister the project in the ``workspace_dir`` query parameter.
+    """Unregister the project in the workspace_dir query parameter.
 
-    Its folder, threads, assistants and user crons all stay; its AutoSkills
-    and proactive crons are deleted (their reconciles recreate them).
-    Refused (``409``) while it has an enabled user cron, also when its folder
-    is missing: a client disables or deletes those first. Waits for a
+    Pending and running runs on its assistants and bound legacy threads are
+    interrupted (the stop is requested before the response, but a worker may
+    still be finishing). Its folder, threads, assistants and user crons all stay;
+    its AutoSkills and proactive crons are deleted (their reconciles recreate
+    them). A run may already be partly interrupted if deletion or cancellation
+    fails; in that case registration is restored and the request answers 500.
+    A disconnected client does not stop the server from completing this
+    request. Refused (409) while it has an enabled user cron, also when its
+    folder is missing: a client disables or deletes those first. Waits for a
     registration in progress. Needs the local secret.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
@@ -486,6 +497,7 @@ async def _lifespan(_app: Starlette):
     # refuses it on the event loop.
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
+    await asyncio.to_thread(server_record.mark_serving)
     yield
 
 
@@ -527,9 +539,11 @@ def _build_app() -> Starlette:
 
 
 # langgraph-api imports this app before its runtime loads the store, so the
-# server (the process working in the server home) takes its data folder's lock
-# and backs the store up first; anything else importing this module does not.
+# server (the process working in the server home) takes its data folder's lock,
+# records itself for its clients and backs the store up first; anything else
+# importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
+    server_record.write_record()
     server_home.back_up_store()
 app = _build_app()
