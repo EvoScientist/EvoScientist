@@ -568,6 +568,25 @@ def test_list_survives_an_installed_skill_it_cannot_search(server, served):
     assert read.status_code == 404
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="POSIX permissions, not root",
+)
+def test_list_keeps_an_approval_whose_skill_it_cannot_search(server, served):
+    _draft(served, "focused-validation")
+    _approve(served, "focused-validation")
+    served.skills_dir.chmod(0o600)
+    try:
+        listed = server.get("/api/autoskills/proposals")
+    finally:
+        served.skills_dir.chmod(0o755)
+
+    assert listed.status_code == 200
+    assert listed.json()["counts"]["approved"] == 1
+    (draft,) = listed.json()["proposals"]
+    assert draft["approved_skill_present"] is False
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
 def test_list_never_reports_the_size_of_a_draft_link_outside(server, served, tmp_path):
     _draft(served, "focused-validation")

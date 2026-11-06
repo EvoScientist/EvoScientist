@@ -179,9 +179,9 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     base = target.base_path.resolve() if target and target.base_path else None
     present = None
     if proposal.status == "approved":
-        present = (
-            bool(proposal.approved_skill_path)
-            and Path(str(proposal.approved_skill_path)).is_dir()
+        # os.path.isdir never raises: a folder it cannot stat must not drop the draft.
+        present = bool(proposal.approved_skill_path) and os.path.isdir(
+            str(proposal.approved_skill_path)
         )
     return {
         "proposal_id": proposal.proposal_id,
