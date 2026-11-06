@@ -501,7 +501,7 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci service stop` 再重新启动。
 
-项目的对话、定时任务、记忆和 AutoSkills 提案都按路径保存在项目文件夹之外，所以移动或重命名后的文件夹会成为一个新的空项目。用 `EvoSci workspace move <旧文件夹> <新文件夹>` 把项目迁移过去：它不移动任何文件；如果旧文件夹仍然存在（复制而非移动），它会拒绝执行，复制出的文件夹是一个新项目。
+项目的对话、定时任务、记忆和 AutoSkills 提案都按路径保存在项目文件夹之外，所以移动或重命名后的文件夹会成为一个新的空项目（有远程仓库的 git 项目的记忆仍会跟随它）。用 `EvoSci workspace move <旧文件夹> <新文件夹>` 把项目迁移过去：它不移动任何文件；如果旧文件夹仍然存在（复制而非移动），它会拒绝执行，复制出的文件夹是一个新项目。
 
 </details>
 

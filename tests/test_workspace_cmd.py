@@ -14,6 +14,12 @@ from EvoScientist.langgraph_dev import manager, registration
 from EvoScientist.paths import Workspace
 
 
+def _text(result) -> str:
+    """The command's output as one line: the console wraps it to the
+    terminal's width."""
+    return " ".join(result.output.split())
+
+
 @pytest.fixture
 def folders(tmp_path):
     new = tmp_path / "new"
@@ -54,8 +60,8 @@ def test_workspace_move_prints_what_moved(folders, server):
 
     assert result.exit_code == 0, result.output
     assert asked == [(Workspace(old).key, Workspace(new).key, "http://127.0.0.1:6174")]
-    assert "3 conversation(s)" in result.output
-    assert "1 scheduled task(s)" in result.output
+    assert "3 conversation(s)" in _text(result)
+    assert "1 scheduled task(s)" in _text(result)
 
 
 def test_workspace_move_passes_refusal_on(folders, server):
@@ -66,7 +72,7 @@ def test_workspace_move_passes_refusal_on(folders, server):
     result = CliRunner().invoke(app, ["workspace", "move", str(old), str(new)])
 
     assert result.exit_code == 1
-    assert "copy" in result.output
+    assert "copy" in _text(result)
 
 
 def test_workspace_move_needs_new_folder(tmp_path, server):
@@ -157,5 +163,5 @@ def test_workspace_move_prints_finished_move_and_warnings(folders, server):
     result = CliRunner().invoke(app, ["workspace", "move", str(old), str(new)])
 
     assert result.exit_code == 0, result.output
-    assert "Finished moving" in result.output
-    assert "default_workdir still names" in result.output
+    assert "Finished moving" in _text(result)
+    assert "default_workdir still names" in _text(result)

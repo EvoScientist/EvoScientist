@@ -569,3 +569,30 @@ async def test_move_project_pending_without_new_folder_says_to_put_it_back(movin
 
     assert refused.value.code == "new_missing"
     assert "put the folder back" in str(refused.value)
+
+
+def test_move_memory_keeps_proposal_only_ids_and_ignores_odd_ones(
+    tmp_path, move, monkeypatch
+):
+    from EvoScientist import paths
+    from EvoScientist.langgraph_dev import registry
+
+    memory = tmp_path / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory)
+    monkeypatch.setattr(registry, "REGISTRY", registry.Registry())
+    monkeypatch.setattr(project, "_run_git", lambda args, cwd: None)
+    path_id = min(path_project_ids(move.old.root))
+    remote_id = "P-" + "a" * 16
+    _memory(memory, path_id, observations=[("O-1.md", "path")])
+    _memory(memory, remote_id, observations=[("O-2.md", "remote")])
+    _proposal(memory, "a", move.old, remote_id)
+    _proposal(memory, "b", move.old, "../../outside")
+
+    moved, project_ids = workspace_move._move_memory(move)
+
+    assert moved.moved == [path_id]
+    assert moved.copied == [remote_id]
+    assert (memory / "observations" / "projects" / remote_id).is_dir()
+    assert remote_id in project_ids
+    assert path_id in project_ids
+    assert "../../outside" not in project_ids

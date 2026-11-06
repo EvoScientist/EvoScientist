@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -38,6 +39,8 @@ from .server_crons import is_system_cron, metadata_of
 logger = logging.getLogger(__name__)
 
 _FOLDER_KEYS = ("workspace_dir", "run_dir")
+# What :func:`~EvoScientist.memory.project.resolve_project_id` gives.
+_PROJECT_ID = re.compile(r"P-[0-9a-f]{16}")
 
 
 @dataclass(frozen=True)
@@ -357,7 +360,10 @@ def _merge_folder(source: Path, target: Path, *, keep: bool) -> None:
         if destination.exists():
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        # Published whole: a copy cut short must not pass for a copied file.
+        partial = destination.with_name(f".{destination.name}.moving")
+        shutil.copy2(path, partial)
+        os.replace(partial, destination)
     if not keep:
         shutil.rmtree(source)
 
@@ -381,7 +387,10 @@ def _merge_profile(source: Path, target: Path, old_key: str, template: str) -> N
             f"{text.strip()}\n"
         )
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(merged, encoding="utf-8")
+    # Replaced whole: a write cut short must not lose the new profile.
+    partial = target.with_name(f".{target.name}.moving")
+    partial.write_text(merged, encoding="utf-8")
+    os.replace(partial, target)
 
 
 def move_memory(
@@ -614,19 +623,31 @@ def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
     from .registry import REGISTRY
 
     memory_dir = paths.MEMORIES_DIR
+    path_ids = path_project_ids(move.old.root)
+    # A proposal's id names a folder: only the form ids take is read.
+    proposal_ids = {
+        project_id
+        for project_id in proposal_project_ids(memory_dir, move.old.key)
+        if _PROJECT_ID.fullmatch(project_id)
+    }
+    candidates = path_ids | proposal_ids
+    new_id = resolve_project_id(move.new.root)
+    # Every candidate, its folder moved already or not: a move resumed after
+    # its memory step still maps the proposals.
+    project_ids = {old_id: new_id for old_id in candidates if old_id != new_id}
     old_ids = {
         project_id
-        for project_id in path_project_ids(move.old.root)
-        | proposal_project_ids(memory_dir, move.old.key)
+        for project_id in candidates
         if any(
             (memory_dir / kind / "projects" / project_id).is_dir()
             for kind in ("observations", "profile")
         )
     }
     if not old_ids:
-        return MemoryMove(moved=[], copied=[]), {}
-    new_id = resolve_project_id(move.new.root)
-    shared = {
+        return MemoryMove(moved=[], copied=[]), project_ids
+    # An id only a proposal names may be a repository's remote id, which its
+    # other clones share: it is copied, never removed.
+    shared = (proposal_ids - path_ids) | {
         project_id
         for key in REGISTRY.registered()
         if key not in (move.old.key, move.new.key)
@@ -634,7 +655,7 @@ def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
         and (project_id := resolve_project_id(key)) in old_ids
     }
     moved = move_memory(move, memory_dir, old_ids=old_ids, new_id=new_id, shared=shared)
-    return moved, {old_id: new_id for old_id in old_ids if old_id != new_id}
+    return moved, project_ids
 
 
 async def _delete_assistants(workspace: Workspace) -> None:
