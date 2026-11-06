@@ -556,11 +556,15 @@ class _BusyThreadStream(FakeLangGraphThreadStream):
     ],
 )
 async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
-    message, busy, answered
+    message, busy, answered, monkeypatch
 ):
     """A sibling task's envelopes keep the SSE from going quiet; a resume on a
     busy thread is sent at the cap and queues behind that run. Anything else
     still fails at the cap."""
+    # The sibling's gaps must stay under the quiet window on a ~15 ms timer
+    # (Windows).
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
     stream = _BusyThreadStream(
         THREAD_ID,
         events=[
