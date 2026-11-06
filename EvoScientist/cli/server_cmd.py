@@ -193,7 +193,10 @@ def _print_ccproxy(config, record) -> None:
         if isinstance(pid, int):
             state += f" (pid {pid})"
     else:
-        state = "[red]not running[/red]; the next run starts it again"
+        state = (
+            "[red]not running[/red]; the next run tries to start it (the "
+            "server log says why if it cannot)"
+        )
     console.print(f"  ccproxy:          port {port}, {state}")
 
 
