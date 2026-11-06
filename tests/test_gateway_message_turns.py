@@ -173,12 +173,16 @@ def _texts(events: list[dict]) -> list[str]:
 @pytest.mark.parametrize("namespace", [[], ["child:1"]], ids=["root", "subgraph"])
 async def test_pause_prompt_comes_from_the_envelope_before_state_lists_it(namespace):
     """#706: when ``input.requested`` arrives the thread state may not list
-    the interrupt yet; the prompt comes from the envelope's ``payload``, and a
-    subgraph's pause ends the turn too, with the run still open."""
+    the interrupt yet; the prompt comes from the envelope's ``payload``. A
+    subgraph's pause ends the turn too, at the root ``interrupted`` the server
+    sends right after it."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), _input_requested(namespace)],
-        interrupted=False,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested(namespace),
+            _lifecycle("run-1", "interrupted"),
+        ],
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[])
@@ -190,8 +194,59 @@ async def test_pause_prompt_comes_from_the_envelope_before_state_lists_it(namesp
         _INTERRUPT_EVENT
     ]
     assert events[-1] == {"type": "done", "content": "", "response": ""}
-    # Only the pre-run read.
-    assert threads.state_gets == [THREAD_ID]
+    # The pre-run read and the pause read, which found nothing yet.
+    assert threads.state_gets == [THREAD_ID, THREAD_ID]
+
+
+async def test_pause_of_several_interrupts_prompts_each_once():
+    """The server sends one ``input.requested`` for a step that raised several
+    interrupts; the others come from thread state, without repeating it."""
+    second = {"id": "interrupt-2", "value": _STATE_INTERRUPT["value"]}
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        stay_open=True,
+    )
+    gateway, _ = _gateway(stream, interrupts=[_STATE_INTERRUPT, second])
+
+    events = await _turn(gateway, "hi")
+
+    assert [e["interrupt_id"] for e in events if e["type"] == "interrupt"] == [
+        "interrupt-1",
+        "interrupt-2",
+    ]
+    assert events[-1]["type"] == "done"
+
+
+async def test_failed_pause_read_after_a_prompt_keeps_the_turn():
+    """The envelope already showed the prompt: a failed state read only logs."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[])
+    real_get_state = threads.get_state
+
+    async def fail_after_the_pre_run_read(thread_id: str):
+        if threads.state_gets:
+            raise ConnectionError("state store unavailable")
+        return await real_get_state(thread_id)
+
+    threads.get_state = fail_after_the_pre_run_read  # type: ignore[method-assign]
+
+    events = await _turn(gateway, "hi")
+
+    assert events == [_INTERRUPT_EVENT, {"type": "done", "content": "", "response": ""}]
+    assert gateway.thread_store.client.runs.cancelled == []
 
 
 async def test_pause_without_an_envelope_prompt_reads_it_from_state():
@@ -200,7 +255,6 @@ async def test_pause_without_an_envelope_prompt_reads_it_from_state():
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
-        interrupted=False,
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])

@@ -255,11 +255,6 @@ def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
     return data.get("event") if data is not None else None
 
 
-def _is_root_input_requested(event: Mapping[str, Any]) -> bool:
-    """True for a root-namespace ``input.requested`` (HITL / ask_user pause)."""
-    return event.get("method") == "input.requested" and not _event_namespace(event)
-
-
 class _ThreadEvents:
     """``stream.events`` read ahead into a queue, so the history replay can be skipped.
 
@@ -1274,13 +1269,15 @@ class LangGraphServerGateway:
         processor: _V3EventProcessor,
         *,
         paused: bool,
+        prompted: bool,
     ) -> list[GraphEvent]:
         """The prompts of a turn that saw its own pause, read from thread state.
 
-        Only for a pause whose ``input.requested`` gave no prompt (e.g. one
-        seen as a root ``lifecycle: interrupted`` only): when the envelope
-        arrives, the thread state may not list the interrupt yet.
-        ``stream.interrupts`` is no source either: a new stream replays
+        The ``input.requested`` envelope already gave a prompt when *prompted*;
+        the state adds the rest: the server sends one envelope for a step that
+        raised several interrupts, and none for a pause seen only as a root
+        ``lifecycle: interrupted``. The processor drops a prompt it already
+        emitted. ``stream.interrupts`` is no source: a new stream replays
         interrupts that were already answered, the SDK leaves their value empty
         (the server sends it as ``data.payload``), and ``stream.interrupted``
         comes from a separate SSE that can lag this one.
@@ -1293,13 +1290,16 @@ class LangGraphServerGateway:
         except NotFoundError:
             return events
         except Exception as exc:
-            # The run already paused. Propagate as _PauseStateReadError so the
-            # outer handler can emit error without cancelling the pause.
             logger.warning(
                 "Pause state read failed for thread %s; leaving the pause",
                 thread_id,
                 exc_info=True,
             )
+            if prompted:
+                # The turn already shows its prompt.
+                return events
+            # The run already paused. Propagate as _PauseStateReadError so the
+            # outer handler can emit error without cancelling the pause.
             raise _PauseStateReadError(
                 f"Could not read the pause state for thread {thread_id}"
             ) from exc
@@ -1507,13 +1507,14 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
-                    # Stop at this run's root completed/failed, or at a
-                    # pause: its prompt, or a root input.requested or
-                    # interrupted that gave none, read from thread state below.
+                    # Stop at this run's root completed/failed/interrupted.
+                    # The server sends the root interrupted right after the
+                    # pause's input.requested, also while another task of
+                    # the run still works.
                     phase = _root_lifecycle_phase(event_map)
-                    if emitted_interrupt or phase in {"completed", "failed"}:
+                    if phase in {"completed", "failed"}:
                         break
-                    if phase == "interrupted" or _is_root_input_requested(event_map):
+                    if phase == "interrupted":
                         paused = True
                         break
                 else:
@@ -1521,13 +1522,13 @@ class LangGraphServerGateway:
                         "Thread event stream ended before the run finished"
                     )
                 run_completed = True
-                if not emitted_interrupt:
-                    for event in await self._paused_interrupt_events(
-                        request.thread_id,
-                        processor,
-                        paused=paused,
-                    ):
-                        yield event
+                for event in await self._paused_interrupt_events(
+                    request.thread_id,
+                    processor,
+                    paused=paused,
+                    prompted=emitted_interrupt,
+                ):
+                    yield event
             for event in tracker.finish():
                 yield event
         except _PauseStateReadError as exc:
