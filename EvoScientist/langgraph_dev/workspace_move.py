@@ -61,6 +61,12 @@ class Move:
             for graph_id in served_graph_ids()
         }
 
+    @cached_property
+    def old_as_stored(self) -> str:
+        """The old key as a stored copy of it reads now: the part of the
+        path that still exists is respelled as it is on disk. Blocking."""
+        return Workspace(self.old.root).key
+
     def folders(
         self, workspace_dir: object, run_dir: object = None
     ) -> dict[str, str] | None:
@@ -68,16 +74,16 @@ class Move:
         *run_dir* when they name the old folder (a run folder keeps its
         place under the new one), else None. Resolves paths: call it off the
         event loop on the server."""
-        if not isinstance(workspace_dir, str):
+        if not isinstance(workspace_dir, str) or workspace_dir == self.new.key:
             return None
         dirs = SessionDirs.from_stored(
             workspace_dir, run_dir if isinstance(run_dir, str) else None
         )
-        if dirs is None or dirs.workspace.key != self.old.key:
+        if dirs is None or dirs.workspace.key not in (self.old.key, self.old_as_stored):
             return None
         moved_run = None
         if dirs.run_dir is not None:
-            moved_run = self.new.root / dirs.run_dir.relative_to(self.old.root)
+            moved_run = self.new.root / dirs.run_dir.relative_to(dirs.workspace.root)
         return SessionDirs(self.new, moved_run).metadata()
 
 
@@ -106,35 +112,41 @@ async def move_checkpoints(move: Move) -> int:
     """Re-point every checkpoint row of the old folder's threads in
     ``sessions.db``, every row of a thread and not only its newest (readers
     take the newest stamped row, or the highest ``assistant_id`` over all of
-    them): their folders, and the workspace assistant they name. One
-    transaction; returns the number of threads changed."""
+    them): their folders, and the workspace assistant they name. The
+    threads are found before any lock is taken, then rewritten one
+    transaction each: the write lock holds back every other project's
+    checkpoints. Returns the number of threads changed."""
     db_path = str(await asyncio.to_thread(get_db_path))
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return 0
         async with conn.execute(
-            "SELECT DISTINCT json_extract(metadata, '$.workspace_dir'), "
-            "json_extract(metadata, '$.run_dir') FROM checkpoints "
-            "WHERE json_valid(metadata) "
-            "AND json_extract(metadata, '$.workspace_dir') IS NOT NULL"
+            "SELECT DISTINCT thread_id, json_extract(metadata, '$.workspace_dir'), "
+            "json_extract(metadata, '$.run_dir'), "
+            "json_extract(metadata, '$.assistant_id') FROM checkpoints "
+            "WHERE json_valid(metadata)"
         ) as cur:
-            pairs = {(row[0], row[1]) for row in await cur.fetchall()}
+            rows = await cur.fetchall()
+        pairs = {(row[1], row[2]) for row in rows if row[1] is not None}
         moved = await asyncio.to_thread(_moved_pairs, move, pairs)
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            changed = await _rewrite_checkpoints(conn, move, moved)
-            await conn.commit()
-        except BaseException:
-            await conn.rollback()
-            raise
-    return changed
+        threads = sorted(
+            {
+                row[0]
+                for row in rows
+                if (row[1], row[2]) in moved or row[3] in move.assistants
+            }
+        )
+        if threads:
+            await _rewrite_checkpoints(conn, move, moved, threads)
+    return len(threads)
 
 
 async def _rewrite_checkpoints(
     conn: aiosqlite.Connection,
     move: Move,
     moved: dict[tuple[object, object], dict[str, str]],
-) -> int:
+    threads: list[str],
+) -> None:
     await conn.execute(
         "CREATE TEMP TABLE _move_dirs (old_dir TEXT NOT NULL, old_run TEXT NOT "
         "NULL, new_dir TEXT NOT NULL, new_run TEXT, PRIMARY KEY (old_dir, old_run))"
@@ -154,6 +166,7 @@ async def _rewrite_checkpoints(
             "INSERT INTO _move_assistants VALUES (?, ?)",
             list(move.assistants.items()),
         )
+        await conn.commit()
         # ``metadata`` is stored as a BLOB of JSON text; keep it one. A
         # correlated subquery rather than ``UPDATE ... FROM``, which needs
         # SQLite 3.33.
@@ -167,38 +180,43 @@ async def _rewrite_checkpoints(
             "json_extract(checkpoints.metadata, '$.assistant_id') "
             "IN (SELECT old FROM _move_assistants)"
         )
-        async with conn.execute(
-            "SELECT COUNT(DISTINCT thread_id) FROM checkpoints WHERE json_valid(metadata) "
-            f"AND (EXISTS (SELECT 1 {match}) OR {assistant_match})"
-        ) as cur:
-            (changed,) = await cur.fetchone()
-        await conn.execute(
-            f"""
-            UPDATE checkpoints SET metadata = CAST(
-                (SELECT CASE WHEN m.new_run IS NULL
-                    THEN json_remove(json_set(CAST(checkpoints.metadata AS TEXT),
-                                              '$.workspace_dir', m.new_dir),
-                                     '$.run_dir')
-                    ELSE json_set(CAST(checkpoints.metadata AS TEXT),
-                                  '$.workspace_dir', m.new_dir,
-                                  '$.run_dir', m.new_run)
-                    END {match})
-                AS BLOB)
-            WHERE json_valid(metadata) AND EXISTS (SELECT 1 {match})
-            """
-        )
-        await conn.execute(
-            f"""
-            UPDATE checkpoints SET metadata = CAST(
-                json_set(CAST(metadata AS TEXT), '$.assistant_id',
-                    (SELECT a.new FROM _move_assistants AS a
-                     WHERE a.old = json_extract(checkpoints.metadata,
-                                                '$.assistant_id')))
-                AS BLOB)
-            WHERE json_valid(metadata) AND {assistant_match}
-            """
-        )
-        return changed
+        for thread_id in threads:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await conn.execute(
+                    f"""
+                    UPDATE checkpoints SET metadata = CAST(
+                        (SELECT CASE WHEN m.new_run IS NULL
+                            THEN json_remove(json_set(
+                                CAST(checkpoints.metadata AS TEXT),
+                                '$.workspace_dir', m.new_dir), '$.run_dir')
+                            ELSE json_set(CAST(checkpoints.metadata AS TEXT),
+                                          '$.workspace_dir', m.new_dir,
+                                          '$.run_dir', m.new_run)
+                            END {match})
+                        AS BLOB)
+                    WHERE thread_id = ? AND json_valid(metadata)
+                    AND EXISTS (SELECT 1 {match})
+                    """,
+                    (thread_id,),
+                )
+                await conn.execute(
+                    f"""
+                    UPDATE checkpoints SET metadata = CAST(
+                        json_set(CAST(metadata AS TEXT), '$.assistant_id',
+                            (SELECT a.new FROM _move_assistants AS a
+                             WHERE a.old = json_extract(checkpoints.metadata,
+                                                        '$.assistant_id')))
+                        AS BLOB)
+                    WHERE thread_id = ? AND json_valid(metadata)
+                    AND {assistant_match}
+                    """,
+                    (thread_id,),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
     finally:
         await conn.execute("DROP TABLE _move_dirs")
         await conn.execute("DROP TABLE _move_assistants")
@@ -479,6 +497,22 @@ def same_folder(first: str, second: str) -> bool:
         return same_key(first, second)
 
 
+def renamed_from(new: Workspace, registered: list[str]) -> str | None:
+    """The registered spelling a rename that changed only case left: a key
+    other than *new*'s that a folder ignoring case still finds as *new*'s
+    folder. Blocking."""
+    found = [
+        key
+        for key in registered
+        if key != new.key
+        and same_key(key, new.key)
+        and os.path.exists(key)
+        and new.root.exists()
+        and os.path.samefile(key, new.root)
+    ]
+    return found[0] if len(found) == 1 else None
+
+
 def match_registered(old: Workspace, registered: list[str]) -> str:
     """The registered key *old* names: its own, else, on macOS and Windows,
     the one that differs only in case (a folder that is gone keeps the case
@@ -502,13 +536,14 @@ async def _busy(move: Move) -> bool:
     from langgraph_runtime.database import connect
 
     old_assistants = set(move.assistants)
+    old_keys = {move.old.key, await asyncio.to_thread(lambda: move.old_as_stored)}
     async with connect() as conn:
         threads = {
             thread.get("thread_id")
             for thread in conn.store.get("threads") or []
             if isinstance(thread, dict)
             and (
-                metadata_of(thread).get("workspace_dir") == move.old.key
+                metadata_of(thread).get("workspace_dir") in old_keys
                 or str(metadata_of(thread).get("assistant_id")) in old_assistants
             )
         }
@@ -563,10 +598,15 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
     pending = await asyncio.to_thread(REGISTRY.pending_move)
     if pending is None:
         registered = await asyncio.to_thread(REGISTRY.registered)
+        renamed = None
+        if old.key == new.key:
+            renamed = await asyncio.to_thread(renamed_from, new, registered)
         try:
-            old_key = match_registered(old, registered)
+            if old.key == new.key and renamed is None:
+                raise MoveRefusedError("same_folder", "The two folders are the same.")
+            old_key = renamed or match_registered(old, registered)
         except MoveRefusedError as exc:
-            if exc.code != "not_registered":
+            if exc.code not in ("not_registered", "same_folder"):
                 raise
             done = await asyncio.to_thread(REGISTRY.done_moves)
             for done_old, done_new in done:
@@ -574,16 +614,20 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
                     same_folder, done_new, new.key
                 ):
                     # Done already: as the server started, or after a client
-                    # gave up waiting. A default_workdir the config lock kept
-                    # it from rewriting is tried again.
-                    done_move = Move(Workspace(done_old), Workspace(done_new))
-                    await asyncio.to_thread(_check_folders, done_move, resuming=True)
-                    warning = await asyncio.to_thread(_move_default_workdir, done_move)
-                    return MoveReport(
-                        new.key, 0, 0, [], 0, [warning] if warning else [], resumed=True
+                    # gave up waiting.
+                    done_move = Move(
+                        Workspace.as_stored(done_old), Workspace.as_stored(done_new)
                     )
+                    await asyncio.to_thread(_check_folders, done_move, resuming=True)
+                    if await _busy(done_move):
+                        raise MoveRefusedError(
+                            "busy",
+                            f"A run of {done_move.old.root} is in progress; wait "
+                            "for it to end.",
+                        ) from None
+                    return await _move_again(done_move)
             raise
-        move = Move(Workspace(old_key), new)
+        move = Move(Workspace.as_stored(old_key), new)
         await asyncio.to_thread(_check_folders, move, resuming=False)
     else:
         try:
@@ -598,7 +642,7 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
                 f"The move of {pending[0]} to {pending[1]} is not done yet: run "
                 "it again to finish it.",
             )
-        move = Move(Workspace(pending[0]), Workspace(pending[1]))
+        move = Move(Workspace.as_stored(pending[0]), Workspace(pending[1]))
         await asyncio.to_thread(_check_folders, move, resuming=True)
     if await _busy(move):
         raise MoveRefusedError(
@@ -611,6 +655,41 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
     return report
 
 
+async def _move_again(move: Move) -> MoveReport:
+    """A move done already, asked again: what still names the old folder
+    is re-pointed (more turns of a session still open there, or the
+    runtime's edits a hard stop lost before the runtime saved its store),
+    and a default_workdir the config lock kept it from rewriting is tried
+    again; nothing, once the old folder is not the move's any more
+    (:func:`_still_moved`)."""
+    threads = tasks = 0
+    warning = None
+    if await asyncio.to_thread(_still_moved, move):
+        await drop_import_marks(move)
+        threads = await move_checkpoints(move)
+        await move_threads(move)
+        tasks, _system = await move_crons(move)
+        await _delete_assistants(move.old)
+        warning = await asyncio.to_thread(_move_default_workdir, move)
+    return MoveReport(
+        move.new.key, threads, tasks, [], 0, [warning] if warning else [], resumed=True
+    )
+
+
+def _still_moved(move: Move) -> bool:
+    """Whether what names the old folder of a move done already is still
+    the move's: the new folder is a registered project, and the old one is
+    not a project again, nor a folder other than the new one (re-created
+    there, it gets the same assistant IDs). Blocking."""
+    from .registry import REGISTRY
+
+    if move.old.key in REGISTRY.known() or not REGISTRY.is_registered(move.new.key):
+        return False
+    return not move.old.root.exists() or same_folder(
+        str(move.old.root), str(move.new.root)
+    )
+
+
 async def resume_pending_move() -> None:
     """At the server's start: finish a move that was cut short. Logged on
     failure; the next ``move`` call, or the next start, tries again."""
@@ -619,7 +698,7 @@ async def resume_pending_move() -> None:
     pending = await asyncio.to_thread(REGISTRY.pending_move)
     if pending is None:
         return
-    move = Move(Workspace(pending[0]), Workspace(pending[1]))
+    move = Move(Workspace.as_stored(pending[0]), Workspace(pending[1]))
     try:
         await asyncio.to_thread(_check_folders, move, resuming=True)
         report = await _run(move)
@@ -636,6 +715,45 @@ async def resume_pending_move() -> None:
             logger.warning("%s", warning)
 
 
+async def move_again_where_lost() -> None:
+    """At the server's start, once the projects are set up: move again
+    each move done whose old assistants are back, as a hard stop before
+    the runtime saved its store leaves them (see :func:`_move_again`).
+    Logged on failure."""
+    from .registry import REGISTRY
+
+    try:
+        done = await asyncio.to_thread(REGISTRY.done_moves)
+        if not done:
+            return
+        from langgraph_runtime.database import connect
+
+        async with connect() as conn:
+            present = {
+                str(assistant.get("assistant_id"))
+                for assistant in conn.store.get("assistants") or []
+                if isinstance(assistant, dict)
+            }
+    except Exception:
+        logger.warning("Could not check the moves done before.", exc_info=True)
+        return
+    for done_old, done_new in done:
+        move = Move(Workspace.as_stored(done_old), Workspace.as_stored(done_new))
+        if present.isdisjoint(move.assistants):
+            continue
+        try:
+            # Its assistants were not set up: the next start tries again.
+            await asyncio.to_thread(_check_folders, move, resuming=True)
+            await _move_again(move)
+        except Exception:
+            logger.warning(
+                "Could not move %s to %s again.",
+                move.old.key,
+                move.new.key,
+                exc_info=True,
+            )
+
+
 def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
     """Move the old folder's memory projects; with the map of old ids to
     the new one, for the proposals. Blocking."""
@@ -649,7 +767,7 @@ def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
     # A proposal's id names a folder: only the form ids take is read.
     proposal_ids = {
         project_id
-        for project_id in proposal_project_ids(memory_dir, move.old.key)
+        for project_id in proposal_project_ids(memory_dir, move.old_as_stored)
         if _PROJECT_ID.fullmatch(project_id)
     }
     candidates = path_ids | proposal_ids
@@ -710,7 +828,12 @@ def _move_default_workdir(move: Move) -> str | None:
         value = store.read_config_mapping().get("default_workdir")
         if not isinstance(value, str) or not value.strip():
             return None
-        if Workspace(value.strip()).key != move.old.key:
+        key = Workspace(value.strip()).key
+        if key == move.new.key:
+            return None
+        if key not in (move.old.key, move.old_as_stored) and (
+            os.path.exists(key) or not same_key(key, move.old.key)
+        ):
             return None
         set_config_values({"default_workdir": str(move.new.root)})
     except Exception as exc:
@@ -745,7 +868,9 @@ async def _run(move: Move) -> MoveReport:
     tasks, _system = await move_crons(move)
     memory, project_ids = await asyncio.to_thread(_move_memory, move)
     proposals = await asyncio.to_thread(
-        move_proposals, paths.MEMORIES_DIR, move.old.key, move.new.key, project_ids
+        lambda: move_proposals(
+            paths.MEMORIES_DIR, move.old_as_stored, move.new.key, project_ids
+        )
     )
     await _delete_assistants(move.old)
     await asyncio.to_thread(REGISTRY.forget, move.old.key)

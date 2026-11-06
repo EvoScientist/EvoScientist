@@ -165,3 +165,18 @@ def test_workspace_move_prints_finished_move_and_warnings(folders, server):
     assert result.exit_code == 0, result.output
     assert "Finished moving" in _text(result)
     assert "default_workdir still names" in _text(result)
+
+
+@pytest.mark.parametrize(("pending", "says_again"), [(True, True), (False, False)])
+def test_move_folder_says_to_run_again_only_while_move_is_pending(
+    own_server, folders, pending, says_again
+):
+    own_server(500, {"error": "move_failed", "detail": "disk full", "pending": pending})
+    old, new = folders
+
+    with pytest.raises(registration.RegistrationError) as raised:
+        registration.move_folder(
+            Workspace(old), Workspace(new), url="http://127.0.0.1:6174"
+        )
+
+    assert ("run the same command again" in str(raised.value)) is says_again

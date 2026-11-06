@@ -8,6 +8,8 @@ project over.
 
 from __future__ import annotations
 
+import os
+
 import typer  # type: ignore[import-untyped]
 from rich.markup import escape
 
@@ -32,6 +34,7 @@ def workspace_move(
         old_project, new_project = Workspace(old), Workspace(new)
     except PATH_ERRORS as exc:
         raise typer.BadParameter(str(exc)) from exc
+    shown_old = os.path.abspath(os.path.expanduser(old))
     if not new_project.root.is_dir():
         console.print(f"[red]{escape(str(new_project.root))} does not exist.[/red]")
         raise typer.Exit(1)
@@ -55,13 +58,13 @@ def workspace_move(
         raise typer.Exit(1)
     try:
         with console.status(
-            f"[dim]Moving {escape(str(old_project.root))}...[/dim]", spinner="dots"
+            f"[dim]Moving {escape(shown_old)}...[/dim]", spinner="dots"
         ):
             report = registration.move_folder(old_project, new_project, url=result.url)
     except (registration.RegistrationError, registration.OlderServerError) as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
-    _print_report(old_project.root, new_project.root, report)
+    _print_report(shown_old, new_project.root, report)
     if uses_oauth(config) and not is_ccproxy_running(config.ccproxy_port):
         console.print(
             "[yellow]⚠ Anthropic uses OAuth, and ccproxy is not running: start it "

@@ -378,10 +378,16 @@ async def move_workspace(request: Request) -> JSONResponse:
     except workspace_move.MoveRefusedError as exc:
         return JSONResponse({"error": exc.code, "detail": str(exc)}, status_code=409)
     except Exception as exc:
+        from EvoScientist.langgraph_dev.registry import REGISTRY
+
         logger.exception("Could not move %s to %s.", old.key, new.key)
-        return JSONResponse(
-            {"error": "move_failed", "detail": str(exc)}, status_code=500
-        )
+        failed: dict[str, object] = {"error": "move_failed", "detail": str(exc)}
+        # Whether a move waits to be finished; unknown when the registry
+        # cannot be read either, and the client says it may.
+        with contextlib.suppress(Exception):
+            pending = await asyncio.to_thread(REGISTRY.pending_move)
+            failed["pending"] = pending is not None
+        return JSONResponse(failed, status_code=500)
     return JSONResponse(
         {
             "workspace_dir": report.workspace_dir,
@@ -570,6 +576,8 @@ async def _lifespan(_app: Starlette):
     async with workspace_setup.registration_lock():
         await workspace_move.resume_pending_move()
     await workspace_setup.set_up_at_start()
+    async with workspace_setup.registration_lock():
+        await workspace_move.move_again_where_lost()
     await asyncio.to_thread(server_record.mark_serving)
     yield
 

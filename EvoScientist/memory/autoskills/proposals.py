@@ -240,6 +240,8 @@ def move_proposals(
     rewritten; running it again rewrites none."""
     moved = 0
     for manifest_path, manifest in list(_proposal_manifests(memory_dir, old_key)):
+        if manifest.get("workspace_dir") == new_key:
+            continue
         manifest["workspace_dir"] = new_key
         project_id = manifest.get("project_id")
         if isinstance(project_id, str) and project_id in project_ids:

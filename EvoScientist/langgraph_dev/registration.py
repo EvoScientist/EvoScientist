@@ -421,6 +421,12 @@ def move_folder(old: Workspace, new: Workspace, *, url: str) -> dict[str, Any]:
     detail = body.get("detail")
     if response.status_code == 409 and detail:
         raise RegistrationError(str(detail))
+    if error == "move_failed" and body.get("pending") is not False:
+        raise RegistrationError(
+            f"The EvoScientist server at {url} could not finish moving "
+            f"{old.root}{f' ({detail})' if detail else ''}. Fix the cause and "
+            "run the same command again to finish it."
+        )
     reason = ": ".join(str(part) for part in (error, detail) if part)
     raise RegistrationError(
         f"The EvoScientist server at {url} did not move {old.root} "

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import aiosqlite
 import pytest
@@ -468,6 +469,85 @@ async def test_move_project_refuses_move_it_cannot_make(moving, tmp_path, case):
     assert projects.pending_move() is None
 
 
+async def test_move_cut_short_in_the_middle_is_finished_by_the_next_call(
+    moving, monkeypatch
+):
+    projects, old, new, task = await _arrange(moving)
+    real = workspace_move._move_memory
+
+    def cut(_move):
+        raise OSError("cut")
+
+    monkeypatch.setattr(workspace_move, "_move_memory", cut)
+    with pytest.raises(OSError, match="cut"):
+        await workspace_move.move_project(old, new)
+    assert projects.pending_move() == (old.key, new.key)
+    monkeypatch.setattr(workspace_move, "_move_memory", real)
+
+    finished = await workspace_move.move_project(old, new)
+    again = await workspace_move.move_project(old, new)
+
+    assert finished.resumed is True
+    assert projects.pending_move() is None
+    assert old.key not in projects.known()
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    assert (again.resumed, again.threads, again.tasks) == (True, 0, 0)
+
+
+def test_move_memory_leaves_a_remote_project_alone(tmp_path, move, monkeypatch):
+    from EvoScientist import paths
+    from EvoScientist.langgraph_dev import registry
+
+    memory = tmp_path / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory)
+    monkeypatch.setattr(registry, "REGISTRY", registry.Registry())
+    remote = "https://example.com/lab/project.git"
+    monkeypatch.setattr(
+        project,
+        "_run_git",
+        lambda args, cwd: str(cwd) if args[0] == "rev-parse" else remote,
+    )
+    remote_id = resolve_project_id(move.new.root)
+    _memory(memory, remote_id, observations=[("O-1.md", "remote")])
+    _proposal(memory, "a", move.old, remote_id)
+
+    moved, _ids = workspace_move._move_memory(move)
+
+    assert (moved.moved, moved.copied) == ([], [])
+    assert (memory / "observations" / "projects" / remote_id / "O-1.md").is_file()
+
+
+async def test_move_into_registered_new_keeps_what_it_has(moving, monkeypatch):
+    import langgraph_runtime_inmem.database as db
+
+    from EvoScientist import paths
+
+    projects, old, new, task = await _arrange(moving)
+    memory = new.root.parent / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory)
+    projects.set_registered(new.key, True)
+    await moving[3](new)
+    own_task = _cron(chat_assistant_id(new), new, run_kind="scheduled_task")
+    db.GLOBAL_STORE["crons"].append(own_task)
+    own_thread = str(uuid.uuid4())
+    await _put_rows([(own_thread, "1", {"workspace_dir": new.key})])
+    new_id = resolve_project_id(new.root)
+    old_id = min(path_project_ids(old.root))
+    _memory(memory, new_id, observations=[("O-new.md", "new")])
+    _memory(memory, old_id, observations=[("O-old.md", "old")])
+
+    await workspace_move.move_project(old, new)
+
+    crons = {cron["cron_id"]: cron for cron in db.GLOBAL_STORE["crons"]}
+    assert crons[own_task["cron_id"]]["assistant_id"] == uuid.UUID(
+        chat_assistant_id(new)
+    )
+    assert crons[task["cron_id"]]["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    assert (await _metadata(own_thread))[0]["workspace_dir"] == new.key
+    observations = memory / "observations" / "projects" / new_id
+    assert sorted(p.name for p in observations.iterdir()) == ["O-new.md", "O-old.md"]
+
+
 def test_move_default_workdir_follows_old_folder(monkeypatch, move, other):
     from EvoScientist.config import settings, store
 
@@ -545,7 +625,7 @@ def test_register_route_refuses_folder_being_moved_away(server, move, tmp_path):
 
 @pytest.mark.parametrize(("platform", "same"), [("darwin", True), ("linux", False)])
 def test_same_key_ignores_case_where_folders_do(monkeypatch, platform, same):
-    monkeypatch.setattr(workspace_move.sys, "platform", platform)
+    monkeypatch.setattr(workspace_move, "sys", SimpleNamespace(platform=platform))
 
     assert workspace_move.same_key("/u/Proj", "/u/proj") is same
 
@@ -617,7 +697,7 @@ async def test_repeated_move_retries_default_workdir_it_could_not_update(
 
 def test_same_folder_tells_apart_folders_differing_in_case(tmp_path, monkeypatch):
     """A case-sensitive macOS volume can hold both."""
-    monkeypatch.setattr(workspace_move.sys, "platform", "darwin")
+    monkeypatch.setattr(workspace_move, "sys", SimpleNamespace(platform="darwin"))
     upper, lower = tmp_path / "Proj", tmp_path / "proj"
     upper.mkdir()
     if lower.exists():
@@ -629,9 +709,128 @@ def test_same_folder_tells_apart_folders_differing_in_case(tmp_path, monkeypatch
 
 
 def test_same_folder_without_folders_compares_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(workspace_move.sys, "platform", "darwin")
+    monkeypatch.setattr(workspace_move, "sys", SimpleNamespace(platform="darwin"))
 
     assert workspace_move.same_folder(str(tmp_path / "Gone"), str(tmp_path / "gone"))
+
+
+def test_renamed_from_needs_the_old_spelling_to_find_the_folder(tmp_path, monkeypatch):
+    """A case-sensitive volume can hold a gone Proj and a separate proj."""
+    monkeypatch.setattr(workspace_move, "sys", SimpleNamespace(platform="darwin"))
+    lower = tmp_path / "proj"
+    lower.mkdir()
+    if (tmp_path / "Proj").exists():
+        pytest.skip("this file system ignores case")
+    new = Workspace(lower)
+
+    assert workspace_move.renamed_from(new, [str(tmp_path / "Proj"), new.key]) is None
+
+
+def test_move_default_workdir_ignores_case_only_for_a_folder_gone_too(
+    monkeypatch, move
+):
+    from EvoScientist.config import settings, store
+
+    monkeypatch.setattr(workspace_move, "sys", SimpleNamespace(platform="darwin"))
+    separate = move.old.root.with_name("OLD")
+    separate.mkdir()
+    if move.old.root.exists():
+        pytest.skip("this file system ignores case")
+    written = []
+    monkeypatch.setattr(
+        settings, "set_config_values", lambda changes: written.append(changes)
+    )
+    for value in (str(separate), str(move.old.root.with_name("Old"))):
+        monkeypatch.setattr(
+            store, "read_config_mapping", lambda value=value: {"default_workdir": value}
+        )
+        assert workspace_move._move_default_workdir(move) is None
+
+    assert written == [{"default_workdir": str(move.new.root)}]
+
+
+async def _registered_project(moving, folder) -> tuple[Workspace, dict, str]:
+    """*folder* registered, with its assistants, a scheduled task and a
+    thread; skipped where folders tell case apart."""
+    projects, _old, _new, ensure = moving
+    folder.mkdir(parents=True)
+    if not folder.with_name(folder.name.swapcase()).exists():
+        pytest.skip("this file system tells case apart")
+    workspace = Workspace(folder)
+    projects.set_registered(workspace.key, True)
+    await ensure(workspace)
+    task = _cron(chat_assistant_id(workspace), workspace, run_kind="scheduled_task")
+    import langgraph_runtime_inmem.database as db
+
+    db.GLOBAL_STORE["crons"].append(task)
+    thread = str(uuid.uuid4())
+    await _put_rows(
+        [
+            (
+                thread,
+                "1",
+                {
+                    "workspace_dir": workspace.key,
+                    "assistant_id": chat_assistant_id(workspace),
+                },
+            )
+        ]
+    )
+    return workspace, task, thread
+
+
+async def test_move_project_follows_rename_that_changed_only_case(
+    moving, tmp_path, monkeypatch
+):
+    from EvoScientist import paths
+
+    projects = moving[0]
+    memory = tmp_path / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory)
+    old, task, thread = await _registered_project(moving, tmp_path / "Proj")
+    _proposal(memory, "a", old, "P-" + "0" * 16)
+    (tmp_path / "Proj").rename(tmp_path / "proj")
+    new = Workspace(tmp_path / "proj")
+    projects.set_registered(new.key, True)
+    _proposal(memory, "b", new, "P-" + "1" * 16)
+
+    report = await workspace_move.move_project(Workspace(tmp_path / "Proj"), new)
+
+    assert (report.tasks, report.proposals) == (1, 1)
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    assert old.key not in projects.known()
+    assert projects.is_registered(new.key)
+    assert (await _metadata(thread))[0]["assistant_id"] == chat_assistant_id(new)
+    again = await workspace_move.move_project(Workspace(tmp_path / "Proj"), new)
+    assert again.resumed is True
+
+
+async def test_move_project_finds_project_whose_parent_changed_case(
+    moving, tmp_path, monkeypatch
+):
+    from EvoScientist import paths
+
+    projects = moving[0]
+    memory = tmp_path / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory)
+    old, task, thread = await _registered_project(moving, tmp_path / "Parent" / "proj")
+    run_thread = str(uuid.uuid4())
+    run = f"{old.key}/runs/20260101_120000"
+    await _put_rows([(run_thread, "1", {"workspace_dir": old.key, "run_dir": run})])
+    _proposal(memory, "a", old, "P-" + "0" * 16)
+    (tmp_path / "Parent").rename(tmp_path / "parent")
+    (tmp_path / "parent" / "proj").rename(tmp_path / "parent" / "moved")
+    new = Workspace(tmp_path / "parent" / "moved")
+
+    report = await workspace_move.move_project(Workspace(old.root), new)
+
+    assert (report.threads, report.tasks, report.proposals) == (2, 1, 1)
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    assert old.key not in projects.known()
+    assert (await _metadata(thread))[0]["workspace_dir"] == new.key
+    assert (await _metadata(run_thread))[0]["run_dir"] == (
+        f"{new.key}/runs/20260101_120000"
+    )
 
 
 async def test_repeated_move_into_folder_since_removed_is_refused(moving):
@@ -643,3 +842,136 @@ async def test_repeated_move_into_folder_since_removed_is_refused(moving):
         await workspace_move.move_project(old, new)
 
     assert refused.value.code == "new_missing"
+
+
+async def test_repeated_move_repoints_what_a_session_left_open_wrote(moving):
+    _projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    thread = str(uuid.uuid4())
+    await _put_rows([(thread, "2", {"workspace_dir": old.key})])
+
+    again = await workspace_move.move_project(old, new)
+
+    assert (again.resumed, again.threads) == (True, 1)
+    assert (await _metadata(thread))[-1]["workspace_dir"] == new.key
+
+
+async def test_start_moves_again_what_a_hard_stop_lost(moving):
+    import copy
+
+    import langgraph_runtime_inmem.database as db
+
+    _projects, old, new, task = await _arrange(moving)
+    saved = {
+        key: copy.deepcopy(db.GLOBAL_STORE[key])
+        for key in ("assistants", "crons", "threads")
+    }
+    await workspace_move.move_project(old, new)
+    for key, rows in saved.items():
+        db.GLOBAL_STORE[key] = rows
+
+    await workspace_move.move_again_where_lost()
+
+    (cron,) = [c for c in db.GLOBAL_STORE["crons"] if c["cron_id"] == task["cron_id"]]
+    assert cron["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    stored = {str(a["assistant_id"]) for a in db.GLOBAL_STORE["assistants"]}
+    assert chat_assistant_id(old) not in stored
+
+
+async def test_old_folder_that_was_a_project_again_is_left_alone(moving, monkeypatch):
+    import langgraph_runtime_inmem.database as db
+
+    from EvoScientist.config import settings, store
+
+    projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    old.root.mkdir()
+    projects.set_registered(old.key, True)
+    await moving[3](old)
+    fresh = _cron(chat_assistant_id(old), old, run_kind="scheduled_task")
+    db.GLOBAL_STORE["crons"].append(fresh)
+    projects.set_registered(old.key, False)
+    old.root.rmdir()
+    written = []
+    monkeypatch.setattr(
+        store, "read_config_mapping", lambda: {"default_workdir": old.key}
+    )
+    monkeypatch.setattr(
+        settings, "set_config_values", lambda changes: written.append(changes)
+    )
+
+    await workspace_move.move_again_where_lost()
+    again = await workspace_move.move_project(old, new)
+
+    assert again.tasks == 0
+    assert fresh["assistant_id"] == uuid.UUID(chat_assistant_id(old))
+    assert written == []
+
+
+async def test_old_folder_re_created_in_another_case_is_left_alone(moving):
+    projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    again = old.root.with_name(old.root.name.upper())
+    again.mkdir()
+    if not old.root.exists():
+        pytest.skip("this file system tells case apart")
+    project = Workspace(again)
+    projects.set_registered(project.key, False)
+    thread = str(uuid.uuid4())
+    await _put_rows([(thread, "1", {"workspace_dir": project.key})])
+
+    report = await workspace_move.move_project(old, new)
+
+    assert (report.resumed, report.threads) == (True, 0)
+    assert (await _metadata(thread))[0]["workspace_dir"] == project.key
+
+
+def test_move_default_workdir_leaves_one_naming_new_folder(monkeypatch, move):
+    from EvoScientist.config import settings, store
+
+    written = []
+    monkeypatch.setattr(
+        settings, "set_config_values", lambda changes: written.append(changes)
+    )
+    monkeypatch.setattr(
+        store, "read_config_mapping", lambda: {"default_workdir": move.new.key}
+    )
+
+    assert workspace_move._move_default_workdir(move) is None
+    assert written == []
+
+
+async def test_repeated_move_waits_for_run_on_old_folder(moving):
+    import langgraph_runtime_inmem.database as db
+
+    _projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    db.GLOBAL_STORE["runs"].append(
+        {"assistant_id": chat_assistant_id(old), "status": "running"}
+    )
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+
+    assert refused.value.code == "busy"
+
+
+async def test_start_leaves_move_whose_new_folder_is_missing(moving):
+    import copy
+
+    import langgraph_runtime_inmem.database as db
+
+    _projects, old, new, task = await _arrange(moving)
+    saved = {
+        key: copy.deepcopy(db.GLOBAL_STORE[key])
+        for key in ("assistants", "crons", "threads")
+    }
+    await workspace_move.move_project(old, new)
+    for key, rows in saved.items():
+        db.GLOBAL_STORE[key] = rows
+    new.root.rmdir()
+
+    await workspace_move.move_again_where_lost()
+
+    (cron,) = [c for c in db.GLOBAL_STORE["crons"] if c["cron_id"] == task["cron_id"]]
+    assert cron["assistant_id"] == uuid.UUID(chat_assistant_id(old))
