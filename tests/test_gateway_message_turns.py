@@ -810,19 +810,15 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     }
 
 
-async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
-    """When the interrupted flag is already set, a failing state read must not cancel.
-
-    The flag is set before the run on a resume turn (the replayed pause), and
-    the pause is still read from state.
-    """
+async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
+    """A resume whose run pauses again leaves that run paused when the state
+    read fails."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[_lifecycle("run-1", "running"), _input_requested([])],
-        interrupted=True,
         stay_open=True,
     )
-    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    gateway, threads = _gateway(stream, interrupts=[{"id": "interrupt-0"}])
     client = gateway.thread_store.client
     cancelled: list[list[str]] = []
 
@@ -840,19 +836,20 @@ async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
 
     async def boom(thread_id: str):
         calls["n"] += 1
-        if calls["n"] == 1:
+        # The pre-run read and the resume's pending-id read succeed.
+        if calls["n"] <= 2:
             return await real_get_state(thread_id)
         raise ConnectionError("state store unavailable")
 
-    stream.interrupts = []
     threads.get_state = boom  # type: ignore[method-assign]
+    answer = {"interrupt-0": {"decisions": [{"type": "approve"}]}}
 
     events: list[dict] = []
 
     async def collect() -> None:
         async with asyncio.timeout(GUARD_SECONDS):
             async for event in gateway.stream_events(
-                RunRequest(message="hi", thread_id=THREAD_ID)
+                RunRequest(message=Command(resume=answer), thread_id=THREAD_ID)
             ):
                 events.append(event)
 
@@ -862,7 +859,9 @@ async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
     ):
         await collect()
 
+    assert [start["input"] for start in stream.run.starts] == [answer]
     assert cancelled == []
+    assert threads.state_updates == []
     assert [event["type"] for event in events] == ["error"]
     assert events[-1] == {
         "type": "error",
