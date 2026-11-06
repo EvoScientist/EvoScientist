@@ -144,6 +144,26 @@ def test_ensure_dev_server_spawns_on_local_backend_with_anthropic_oauth(
     assert len(ensure_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("backend", "async_subagents"), [("local", False), ("langgraph_server", True)]
+)
+async def test_standalone_agent_runs_subagents_in_turn_on_local_backend(
+    monkeypatch, workspace, backend, async_subagents
+):
+    import EvoScientist.EvoScientist as agent_module
+
+    config = SimpleNamespace(enable_async_subagents=True)
+    built = {}
+    monkeypatch.setattr(
+        agent_module, "create_cli_agent", lambda **kwargs: built.update(kwargs)
+    )
+
+    await standalone._create_standalone_agent(workspace, config, backend)
+
+    assert built.get("config", config).enable_async_subagents is async_subagents
+    assert config.enable_async_subagents is True
+
+
 def test_run_standalone_dev_server_falls_back_to_cwd(monkeypatch):
     import EvoScientist.config as config_mod
 
@@ -465,7 +485,7 @@ def test_sigint_closes_the_code_interpreter_of_an_unfinished_turn(
     interpreter = create_code_interpreter_middleware()
     interpreter._registry.get("unfinished-turn")
 
-    async def _agent(workspace):
+    async def _agent(workspace, *_args):
         return object()
 
     monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
@@ -521,7 +541,7 @@ def test_forced_exit_settles_turns_before_closing_code_interpreters(
         async def stop(self) -> None:
             await asyncio.Future()
 
-    async def _agent(_workspace):
+    async def _agent(_workspace, *_args):
         return object()
 
     monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
@@ -595,7 +615,7 @@ def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
         async def stop(self) -> None:
             await asyncio.Future()
 
-    async def _agent(_workspace):
+    async def _agent(_workspace, *_args):
         return object()
 
     monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
@@ -647,7 +667,7 @@ def test_sigint_stops_a_shell_command_the_turn_is_running(monkeypatch, tmp_path)
         async def stop(self) -> None:
             pass
 
-    async def _agent(_workspace):
+    async def _agent(_workspace, *_args):
         return object()
 
     monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)

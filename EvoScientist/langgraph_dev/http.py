@@ -502,7 +502,11 @@ async def _lifespan(_app: Starlette):
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
     await asyncio.to_thread(server_record.mark_serving)
-    yield
+    try:
+        yield
+    finally:
+        if server_ccproxy.needed():
+            await asyncio.to_thread(server_ccproxy.request_stop)
 
 
 def _build_app() -> Starlette:

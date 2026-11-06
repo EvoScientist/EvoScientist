@@ -14,6 +14,7 @@ Usage from a channel's ``main()``::
 """
 
 import asyncio
+import copy
 import logging
 import signal
 import threading
@@ -29,11 +30,17 @@ from .debug import emit_debug_event
 logger = logging.getLogger(__name__)
 
 
-async def _create_standalone_agent(workspace: Workspace):
+async def _create_standalone_agent(
+    workspace: Workspace, config: Any = None, backend: str | None = None
+):
     """Construct the synchronous agent without blocking the channel loop."""
     from ..EvoScientist import create_cli_agent
 
-    return await asyncio.to_thread(create_cli_agent, workspace=workspace)
+    if config is None or backend == "langgraph_server":
+        return await asyncio.to_thread(create_cli_agent, workspace=workspace)
+    config = copy.copy(config)
+    config.enable_async_subagents = False
+    return await asyncio.to_thread(create_cli_agent, workspace=workspace, config=config)
 
 
 def _channel_trace_enabled(channel: Channel) -> bool:
@@ -137,7 +144,7 @@ async def _async_main(
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
-        agent = await _create_standalone_agent(workspace)
+        agent = await _create_standalone_agent(workspace, config, backend)
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         logger.info("Agent loaded")
 

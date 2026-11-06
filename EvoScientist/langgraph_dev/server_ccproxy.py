@@ -408,3 +408,18 @@ def stop() -> None:
         _stopping = True
         proc, _proc = _proc, None
     ccproxy_manager.stop_ccproxy_tree(proc)
+
+
+def request_stop() -> None:
+    """Ask ccproxy to stop as the server's lifespan ends, and start it no
+    more: a plain SIGTERM ends the process before :func:`stop` runs at exit
+    (uvicorn raises the signal again after its shutdown). Not waited for:
+    ccproxy finishes the calls it serves, for runs cancelled only after the
+    lifespan. On Windows ``terminate()`` would end only the ``ccproxy.exe``
+    launcher; the job object ends the rest."""
+    global _stopping
+    with _lock:
+        _stopping = True
+        proc = _proc
+    if proc is not None and sys.platform != "win32":
+        proc.terminate()

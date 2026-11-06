@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -397,6 +398,21 @@ def test_stop_stops_ccproxy_once(server):
     server_ccproxy.stop()
 
     assert server.steps[-2:] == [("stop", server.proc), ("stop", None)]
+
+
+def test_request_stop_signals_ccproxy_and_leaves_the_wait_to_stop(server):
+    server_ccproxy.start(None)
+    signalled = []
+    server.proc.terminate = lambda: signalled.append(True)
+
+    server_ccproxy.request_stop()
+    server.proc.code = -15
+    server_ccproxy.ensure_serving()
+    server_ccproxy.stop()
+
+    assert signalled == ([] if sys.platform == "win32" else [True])
+    assert [step[0] for step in server.steps].count("spawn") == 1
+    assert server.steps[-1] == ("stop", server.proc)
 
 
 def test_write_record_returns_record_it_replaced(server, monkeypatch):
@@ -935,3 +951,18 @@ def test_factory_without_oauth_skips_ccproxy_check(monkeypatch):
     )
 
     assert calls == []
+
+
+@pytest.mark.parametrize("oauth", [True, False])
+def test_server_lifespan_asks_ccproxy_to_stop_as_it_ends(monkeypatch, oauth):
+    from starlette.testclient import TestClient
+
+    from EvoScientist.langgraph_dev.http import app
+
+    stopped = []
+    monkeypatch.setattr(server_ccproxy, "_port", 8000 if oauth else None)
+    monkeypatch.setattr(server_ccproxy, "request_stop", lambda: stopped.append(True))
+    monkeypatch.setattr(server_record, "mark_serving", lambda: None)
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)):
+        assert stopped == []
+    assert stopped == ([True] if oauth else [])
