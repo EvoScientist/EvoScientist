@@ -1040,8 +1040,12 @@ class LangGraphServerGateway:
         """
         offset = 0
         while True:
+            # Whole rows carry every run's input (attached images included).
             page = await self.thread_store.client.runs.list(
-                thread_id, limit=_RUN_LOOKUP_PAGE_SIZE, offset=offset
+                thread_id,
+                limit=_RUN_LOOKUP_PAGE_SIZE,
+                offset=offset,
+                select=["run_id", "metadata"],
             )
             for run in page:
                 if _run_has_request_id(run, request_id):

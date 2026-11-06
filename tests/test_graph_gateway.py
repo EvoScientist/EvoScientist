@@ -3146,7 +3146,7 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
     multiple_interrupts,
 ):
     """A successful resume lists runs only to find its own, never the active
-    ones a cleanup reads."""
+    ones a cleanup reads, and only the fields it matches on."""
     from langgraph.types import Command
 
     interrupt_ids = ["interrupt-1"]
@@ -3159,11 +3159,11 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
     )
     client = FakeLangGraphClient(threads)
     list_runs = client.runs.list
-    statuses: list[str | None] = []
+    calls: list[tuple[str | None, list[str] | None]] = []
 
-    async def spy_list(thread_id, *, status=None, **kwargs):
-        statuses.append(status)
-        return await list_runs(thread_id, status=status, **kwargs)
+    async def spy_list(thread_id, *, status=None, select=None, **kwargs):
+        calls.append((status, select))
+        return await list_runs(thread_id, status=status, select=select, **kwargs)
 
     client.runs.list = spy_list
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
@@ -3181,7 +3181,7 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
     assert [respond["input"] for respond in stream.run.responds] == [
         {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
-    assert statuses == [None]
+    assert calls == [(None, ["run_id", "metadata"])]
     assert client.runs.cancelled == []
 
 

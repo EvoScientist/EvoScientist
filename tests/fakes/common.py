@@ -907,11 +907,14 @@ class _FakeLangGraphRunsClient:
         limit: int = 10,
         offset: int = 0,
         status: str | None = None,
+        select: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         stream = self.threads.streams.get(thread_id)
         runs = list(reversed(stream.run.runs)) if stream is not None else []
         if status is not None:
             runs = [run for run in runs if run["status"] == status]
+        if select is not None:
+            runs = [{key: run[key] for key in select if key in run} for run in runs]
         return runs[offset : offset + limit]
 
 
