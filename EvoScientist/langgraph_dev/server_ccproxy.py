@@ -310,13 +310,8 @@ def _end_left(left: dict | None, port: int) -> bool:
     whether it ended one. *port* is ``ccproxy_port``."""
     ended = False
     if left:
-        pid = left.get(server_record.CCPROXY_PID_KEY)
-        created = left.get(server_record.CCPROXY_CREATE_TIME_KEY)
-        if (
-            isinstance(pid, int)
-            and (created is None or isinstance(created, int | float))
-            and ccproxy_manager.end_ccproxy(pid, created, port)
-        ):
+        pid = end_recorded(left, port)
+        if pid is not None:
             logger.info("Ended ccproxy %d, which the previous server left.", pid)
             ended = True
     pid = ccproxy_manager.stop_recorded_ccproxy()
@@ -324,6 +319,20 @@ def _end_left(left: dict | None, port: int) -> bool:
         logger.info("Ended ccproxy %d, which an older release started.", pid)
         ended = True
     return ended
+
+
+def end_recorded(record: dict, port: int) -> int | None:
+    """End the ccproxy a server's *record* names, if it still runs; its pid
+    when it did. *port* is ``ccproxy_port``."""
+    pid = record.get(server_record.CCPROXY_PID_KEY)
+    created = record.get(server_record.CCPROXY_CREATE_TIME_KEY)
+    if (
+        isinstance(pid, int)
+        and (created is None or isinstance(created, int | float))
+        and ccproxy_manager.end_ccproxy(pid, created, port)
+    ):
+        return pid
+    return None
 
 
 def _port_free(port: int, *, ended: bool) -> bool:
@@ -352,8 +361,9 @@ def _join_job(proc: subprocess.Popen) -> None:
     job = _job if _job is not None else backend_job()
     if job is None:
         return
+    warned = job.warning is not None
     job.adopt(proc)
-    if job.warning is not None:
+    if job.warning is not None and not warned:
         logger.warning(
             "Could not put ccproxy in a Windows job object; if the server is "
             "killed, ccproxy runs on until the next server starts."

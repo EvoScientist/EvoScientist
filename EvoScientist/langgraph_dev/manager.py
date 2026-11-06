@@ -183,6 +183,11 @@ AGENT_SHELL_DRIFT: str | None = None
 # release started (:attr:`ServerResult.older_message`).
 OLDER_SERVER: str | None = None
 
+# Set by ``ensure_server`` to the notice when Anthropic's OAuth goes through
+# the server's ccproxy and nothing answers on ``ccproxy_port``
+# (:func:`_ccproxy_missing`).
+CCPROXY_MISSING: str | None = None
+
 # Set by ``ensure_server``: the session needs the server and does not
 # have it (it did not start, or did not register the project). The TUI shows
 # :data:`SERVER_UNAVAILABLE_MESSAGE` in the app, where the terminal is hidden,
@@ -1100,7 +1105,9 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
 def _forget_record(pid: int) -> None:
     """Delete the record that names *pid*, a server a stop ended, while no
     server holds the lock: the stop's signal ends the server before its own
-    removal at exit runs."""
+    removal at exit runs. First end the ccproxy it names: a run that started
+    while the server stopped started it again after the stop ended the
+    server's children."""
     data = server_record.load_json(RUNTIME.record)
     if data is None or data.get("pid") != pid:
         return
@@ -1112,6 +1119,10 @@ def _forget_record(pid: int) -> None:
     try:
         data = server_record.load_json(RUNTIME.record)
         if data is not None and data.get("pid") == pid:
+            from ..config import get_effective_config
+            from . import server_ccproxy
+
+            server_ccproxy.end_recorded(data, get_effective_config().ccproxy_port)
             with contextlib.suppress(OSError):
                 RUNTIME.record.unlink()
     finally:
@@ -1759,8 +1770,11 @@ def ensure_server(
     ) -> ServerResult:
         global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
         global AGENT_SHELL_DRIFT, OLDER_SERVER, SERVER_UNAVAILABLE
-        global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE
+        global SERVER_UNAVAILABLE_REASON, SERVER_EXPOSURE, CCPROXY_MISSING
         _ASYNC_SUBAGENTS_AVAILABLE = result.available
+        CCPROXY_MISSING = _ccproxy_missing(config, result) if needed else None
+        if CCPROXY_MISSING is not None:
+            logger.warning("%s", CCPROXY_MISSING)
         CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT = result.drift, result.shell_drift
         OLDER_SERVER = result.older_message
         SERVER_UNAVAILABLE = needed and not result.available
@@ -1851,6 +1865,33 @@ def ensure_server(
         settle(ServerResult())
         raise
     return settle(result, exposure=exposure)
+
+
+def _ccproxy_missing(config: EvoScientistConfig, result: ServerResult) -> str | None:
+    """The notice for a session whose Anthropic model goes through the
+    server's ccproxy (OAuth) when nothing answers on ``ccproxy_port``;
+    ``None`` otherwise, also when the server said why it could not start it."""
+    from ..ccproxy_manager import is_ccproxy_running, uses_oauth
+    from ..config.settings import providers_in_use
+
+    if (
+        not uses_oauth(config)
+        or "anthropic" not in providers_in_use(config)
+        or result.problem == "ccproxy_failed"
+        or is_ccproxy_running(config.ccproxy_port)
+    ):
+        return None
+    if not result.available:
+        return (
+            "Anthropic's OAuth goes through the background agent server's "
+            "ccproxy, so Anthropic models fail without the server."
+        )
+    return (
+        "The background agent server's ccproxy is not running on port "
+        f"{config.ccproxy_port}, so Anthropic models fail (Anthropic's OAuth "
+        "goes through it). Restart the server: EvoSci server stop; it starts "
+        "again with your next session."
+    )
 
 
 def serve_project(

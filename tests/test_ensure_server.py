@@ -1578,3 +1578,82 @@ def test_start_budget_covers_ccproxy_start_with_anthropic_oauth():
     assert manager.start_budget(config) == (
         without + manager._BIND_WAIT + ccproxy_manager.START_BUDGET_SECONDS
     )
+
+
+def test_forget_record_ends_ccproxy_it_names(runtime_paths, monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    ended = []
+    monkeypatch.setattr(
+        ccproxy_manager,
+        "end_ccproxy",
+        lambda pid, created, port: ended.append((pid, created)) or True,
+    )
+    write_record(
+        9,
+        **{
+            server_record.CCPROXY_PID_KEY: 77,
+            server_record.CCPROXY_CREATE_TIME_KEY: 12.5,
+        },
+    )
+
+    # A run that started while the server stopped started this ccproxy.
+    manager._forget_record(9)
+
+    assert ended == [(77, 12.5)]
+    assert not manager.RUNTIME.record.exists()
+
+
+def _oauth_config(provider: str = "anthropic"):
+    config = _config()
+    config.provider = provider
+    config.anthropic_auth_mode = "oauth"
+    return config
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_ccproxy_missing_notice_when_nothing_answers(monkeypatch, available):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=available)
+    )
+
+    assert notice is not None
+    # A server that runs can be restarted; without one, its problem comes first.
+    assert ("EvoSci server stop" in notice) is available
+
+
+def test_ccproxy_missing_no_notice_when_ccproxy_answers(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: True)
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True)
+    )
+
+    assert notice is None
+
+
+@pytest.mark.parametrize(
+    ("config", "problem"),
+    [
+        (_oauth_config(provider="openai"), None),
+        (_oauth_config(), "ccproxy_failed"),
+        (_config(), None),
+    ],
+    ids=["no_anthropic_model", "server_said_why", "api_key"],
+)
+def test_ccproxy_missing_no_notice_when_not_needed_or_reported(
+    monkeypatch, config, problem
+):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+
+    notice = manager._ccproxy_missing(config, manager.ServerResult(problem=problem))
+
+    assert notice is None

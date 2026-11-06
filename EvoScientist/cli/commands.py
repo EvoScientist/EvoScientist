@@ -855,10 +855,12 @@ def print_exposure_warnings(exposure: Any, *, to: Any = None) -> None:
 
 def _print_server_notices() -> None:
     """What the user should know about the server a start found or started:
-    an older release's server, drift since its launch, and a public bind or
-    tunnel."""
+    its ccproxy missing, an older release's server, drift since its launch,
+    and a public bind or tunnel."""
     from ..langgraph_dev import manager as _lg_manager
 
+    if _lg_manager.CCPROXY_MISSING is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.CCPROXY_MISSING)}[/yellow]")
     if _lg_manager.OLDER_SERVER is not None:
         console.print(f"[yellow]⚠ {escape(_lg_manager.OLDER_SERVER)}[/yellow]")
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
