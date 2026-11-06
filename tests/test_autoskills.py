@@ -2305,6 +2305,81 @@ def test_a_failed_mark_rollback_is_reported(tmp_path, monkeypatch):
     assert "the processed mark could not be removed" in failed["error"]
 
 
+def _fail_rejected_manifest_write(module, monkeypatch, error):
+    real_write = module._write_manifest
+
+    def failing_write(path, payload):
+        if payload.get("status") == "rejected":
+            raise error
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", failing_write)
+
+
+@pytest.mark.parametrize("step", ["processed_mark", "manifest"])
+def test_a_failed_reject_leaves_the_draft_pending(tmp_path, monkeypatch, step):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    full = OSError(28, "No space left on device")
+    if step == "processed_mark":
+        monkeypatch.setattr(
+            module,
+            "mark_cluster_processed",
+            _fail_on_call(module.mark_cluster_processed, 1, full),
+        )
+    else:
+        _fail_rejected_manifest_write(module, monkeypatch, full)
+
+    failed = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert failed["rejected"] is False
+    assert failed["error"].startswith("Could not reject the proposal: ")
+    assert "No space left" in failed["error"]
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+    monkeypatch.undo()
+    assert reject_skill_proposal(memory_dir, "focused-validation")["rejected"]
+
+
+def test_a_failed_reject_keeps_a_mark_it_did_not_write(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    module.mark_cluster_processed(memory_dir, "cluster-1")
+    _fail_rejected_manifest_write(module, monkeypatch, OSError(5, "I/O error"))
+
+    failed = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert failed["rejected"] is False
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+
+def test_a_failed_reject_reports_a_mark_it_could_not_remove(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _fail_rejected_manifest_write(module, monkeypatch, OSError(5, "I/O error"))
+
+    def failing_unmark(*_args, **_kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(module, "unmark_cluster_processed", failing_unmark)
+
+    failed = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert failed["rejected"] is False
+    assert "the processed mark could not be removed" in failed["error"]
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+
+
 def _fake_scoped_client(monkeypatch, *, pages, runs):
     """A stand-in SDK client: busy-thread pages, and each thread's runs."""
     from contextlib import asynccontextmanager

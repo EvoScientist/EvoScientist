@@ -1765,11 +1765,33 @@ def reject_skill_proposal(
             "proposal_id": manifest.get("proposal_id"),
             "error": "Proposal records an invalid cluster hash",
         }
+    cluster_hash = str(manifest["cluster_hash"])
     manifest["status"] = "rejected"
     manifest["updated_at"] = _now()
     manifest["rejected_at"] = manifest["updated_at"]
-    _write_manifest(manifest_path, manifest)
-    mark_cluster_processed(memory_dir, str(manifest["cluster_hash"]))
+    mark_left = False
+    try:
+        had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
+        mark_cluster_processed(memory_dir, cluster_hash)
+        try:
+            # The manifest is the commit point, so it is written last.
+            _write_manifest(manifest_path, manifest)
+        except (OSError, ValueError):
+            if not had_mark:
+                try:
+                    unmark_cluster_processed(memory_dir, cluster_hash)
+                except OSError:
+                    mark_left = True
+            raise
+    except (OSError, ValueError) as exc:
+        error = f"Could not reject the proposal: {exc}"
+        if mark_left:
+            error += "; the processed mark could not be removed"
+        return {
+            "rejected": False,
+            "proposal_id": manifest["proposal_id"],
+            "error": error,
+        }
     return {
         "rejected": True,
         "proposal_id": manifest["proposal_id"],
