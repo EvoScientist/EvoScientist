@@ -1461,13 +1461,13 @@ def test_gateway_assembled_config_is_authoritative_for_is_hitl_suppressed(monkey
     """Composition: the config resolve_per_run_config assembles, read back by
     is_hitl_suppressed, ignores the serving process's auto_approve. A suppressed
     run reads True and an attended run reads False even when the server itself
-    was launched auto-approving — the server-path leak this closes."""
+    was launched auto-approving: a gateway run's own choice wins."""
     import EvoScientist.EvoScientist as evo_mod
     from EvoScientist.backends import is_hitl_suppressed
     from EvoScientist.gateway.types import resolve_per_run_config
 
-    # Serving process is auto-approving; without the always-written key this
-    # would leak into every keyless run via the fallback.
+    # Serving process is auto-approving; a run without the key would follow it
+    # (the fallback for WebUI / SDK runs), so the gateway always writes the key.
     monkeypatch.setattr(
         evo_mod,
         "_ensure_config",

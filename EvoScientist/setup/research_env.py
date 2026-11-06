@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # 1.18 dropped 3.11). Update at release time, like the package's constraints.
 PINS = {
     "numpy": "2.4.6",
-    "pandas": "3.0.6",
+    "pandas": "3.1.1",
     "matplotlib": "3.11.2",
     "scipy": "1.17.1",
 }
