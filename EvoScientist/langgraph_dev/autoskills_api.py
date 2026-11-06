@@ -3,7 +3,8 @@
 Each function returns ``(status, payload)`` for a thin handler in
 :mod:`~EvoScientist.langgraph_dev.http`. They read and write files
 synchronously, so the handlers call them in a thread; ``run_now`` is a
-coroutine that moves its own file work off the loop. Only drafts of served projects that
+coroutine that moves its own file work off the loop. Only drafts of served
+projects that
 :func:`~EvoScientist.memory.autoskills.proposals.find_skill_proposal` reaches
 are listed or read, so the page shows exactly what an approval would use.
 """
@@ -24,8 +25,12 @@ from typing import Any, Literal
 from EvoScientist import paths
 from EvoScientist.langgraph_dev import folder_check, registry
 from EvoScientist.memory.autoskills.proposals import (
+    _OPEN_FLAGS,
+    _SKILL_SCOPES,
     InstallTarget,
     SkillProposal,
+    _failure_text,
+    _resolves_within_root,
     approve_skill_proposal,
     copied_files,
     find_skill_proposal,
@@ -40,7 +45,8 @@ logger = logging.getLogger(__name__)
 MAX_INLINE_CHARS = 200_000
 MAX_FILE_BYTES = 1_048_576
 _STATUSES = ("pending", "approved", "rejected")
-_SCOPES = (None, "workspace", "global")
+# A tuple, so an unhashable scope from a request body is simply not in it.
+_SCOPES = (None, *sorted(_SKILL_SCOPES))
 _APPROVERS = frozenset({"user", "auto"})
 _APPROVED_KEYS = (
     "approved",
@@ -72,14 +78,6 @@ def _project_key(workspace_dir: object) -> str | None:
         return None
 
 
-def _inside(path: Path, root: Path) -> bool:
-    """Whether ``path`` resolves inside the already-resolved ``root``."""
-    try:
-        return path.resolve().is_relative_to(root)
-    except (OSError, RuntimeError):
-        return False
-
-
 def _served_keys(keys: list[str]) -> set[str]:
     served = set()
     for key in keys:
@@ -104,19 +102,27 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
     return key
 
 
+def _read_head(path: Path, size: int) -> bytes | None:
+    """Up to ``size`` bytes of a regular file, or None; a FIFO never blocks it."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            return handle.read(size)
+    except OSError:
+        return None
+
+
 def _inline(path: Path, folder: Path) -> tuple[str, bool]:
     """The start of a draft's text file, and whether it was cut."""
-    try:
-        if not path.is_file() or not _inside(path, folder):
-            return "", False
-        with path.open("rb") as handle:
-            data = handle.read(MAX_INLINE_CHARS * 4 + 1)
-            more = bool(handle.read(1))
-    except OSError:
+    # A character takes at most four bytes, so one byte more shows a longer text.
+    limit = MAX_INLINE_CHARS * 4 + 1
+    data = _read_head(path, limit) if _resolves_within_root(path, folder) else None
+    if data is None:
         return "", False
     text = data.decode("utf-8", errors="replace")
-    truncated = more or len(text) > MAX_INLINE_CHARS
-    return text[:MAX_INLINE_CHARS], truncated
+    return text[:MAX_INLINE_CHARS], len(text) > MAX_INLINE_CHARS
 
 
 def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
@@ -142,7 +148,9 @@ def _files(folder: Path, base: Path | None) -> list[dict[str, Any]]:
     for relative in relatives:
         path = folder / relative
         try:
-            size = (path.stat() if _inside(path, folder) else path.lstat()).st_size
+            size = (
+                path.stat() if _resolves_within_root(path, folder) else path.lstat()
+            ).st_size
         except OSError:
             continue
         entries.append(
@@ -159,7 +167,7 @@ def _installed(base: Path, relative: Path) -> bool:
     """Whether the installed skill has this file, inside its folder."""
     candidate = base / relative
     try:
-        return _inside(candidate, base) and candidate.is_file()
+        return _resolves_within_root(candidate, base) and candidate.is_file()
     except OSError:
         return False
 
@@ -245,6 +253,15 @@ def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
     return 200, {"proposals": drafts, "counts": counts, "by_project": by_project}
 
 
+def list_drafts_body(status: str | None = None) -> tuple[int, bytes]:
+    """:func:`list_drafts` encoded as the response body, off the event loop."""
+    code, payload = list_drafts(status)
+    body = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    )
+    return code, body.encode("utf-8")
+
+
 def _relative_path(value: str) -> str | None:
     """A forward-slash path inside a folder, or None for anything else."""
     if not value or "\\" in value or "\x00" in value:
@@ -257,15 +274,9 @@ def _relative_path(value: str) -> str | None:
 
 def _read_text(path: Path) -> tuple[int, str | dict[str, Any]]:
     """A regular file's text, read once and never past the size limit."""
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError:
+    data = _read_head(path, MAX_FILE_BYTES + 1)
+    if data is None:
         return 404, {"error": "not_found"}
-    with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            return 404, {"error": "not_found"}
-        data = handle.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:
         return 413, {"error": "too_large"}
     if b"\x00" in data:
@@ -307,16 +318,9 @@ def read_draft_file(
             return 404, {"error": "not_found"}
     except OSError:
         return 404, {"error": "not_found"}
-    if not _inside(path, folder):
+    if not _resolves_within_root(path, folder):
         return 400, {"error": "invalid_path"}
     return _read_text(path)
-
-
-def _refusal_detail(result: dict[str, Any]) -> str:
-    detail = str(result.get("error") or "")
-    if result.get("errors"):
-        detail += ": " + "; ".join(str(item) for item in result["errors"])
-    return detail
 
 
 def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -326,7 +330,7 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return 409, {"error": "not_pending", "status": result.get("status")}
     if error.startswith("scope must be"):
         return 400, {"error": "invalid_scope"}
-    return 409, {"error": f"{action}_failed", "detail": _refusal_detail(result)}
+    return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
 
 def _apply(
@@ -376,6 +380,14 @@ def _apply(
     return _REVERT_STATUS.get(code, 409), payload
 
 
+def _served(workspace: paths.Workspace) -> bool:
+    """As the list does: a project folder the server cannot stat is not served."""
+    try:
+        return folder_check.is_served(workspace, registry.REGISTRY)
+    except OSError:
+        return False
+
+
 def _decide_locked(
     proposal_id: str, action: str, scope: str | None
 ) -> tuple[int, dict[str, Any]]:
@@ -386,12 +398,7 @@ def _decide_locked(
     if key is None:
         return 409, {"error": "no_project"}
     workspace = paths.Workspace(key)
-    try:
-        served = folder_check.is_served(workspace, registry.REGISTRY)
-    except OSError:
-        # As the list does: a project folder the server cannot stat is not served.
-        served = False
-    if not served:
+    if not _served(workspace):
         return 409, {"error": "project_not_served"}
     return _apply(proposal, workspace, action, scope)
 
@@ -450,13 +457,6 @@ async def _run_lock(key: str) -> AsyncIterator[None]:
             del _RUN_LOCKS[entry]
         else:
             _RUN_LOCKS[entry] = (lock, users - 1)
-
-
-def _served(workspace: paths.Workspace) -> bool:
-    try:
-        return folder_check.is_served(workspace, registry.REGISTRY)
-    except OSError:
-        return False
 
 
 async def run_now(workspace_dir: object) -> tuple[int, dict[str, Any]]:

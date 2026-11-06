@@ -14,9 +14,10 @@ the routes run them in a thread.
   changes a base URL only together with its stored key.
 - :func:`capture_restart_baseline` records the file when the server starts,
   before it builds any graph; :func:`pending_restart` names the fields that
-  changed since then. Graphs are also built later (another project, a new
-  run folder, one the cache dropped), and those can already use part of a
-  saved change; a restart applies it to every graph.
+  changed since then, except :data:`LIVE_FIELDS`, which apply at once.
+  Graphs are also built later (another project, a new run folder, one the
+  cache dropped), and those can already use part of a saved change; a
+  restart applies it to every graph.
 """
 
 from __future__ import annotations

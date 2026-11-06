@@ -547,8 +547,8 @@ def _validate_skill_proposal_dir(
                     f"Proposal file links outside its folder: {relative.as_posix()}"
                 )
             else:
-                # A file the copy could not read would leave a half-installed
-                # skill; non-blocking, so a FIFO swapped in cannot hang the check.
+                # A file the copy could not read would stop an in-place update
+                # halfway; non-blocking, so a FIFO swapped in cannot hang the check.
                 os.close(os.open(proposal_dir / relative, _OPEN_FLAGS))
     except OSError as exc:
         errors.append(f"Cannot read proposal files: {exc}")
@@ -1057,6 +1057,14 @@ def _notify_approved_skill() -> None:
     _notify_skills_changed()
 
 
+def _failure_text(failure: dict[str, Any]) -> str:
+    """A refusal's message followed by its ``errors`` list, as one line."""
+    text = str(failure.get("error") or "")
+    if failure.get("errors"):
+        text += ": " + "; ".join(str(item) for item in failure["errors"])
+    return text
+
+
 @dataclass(frozen=True)
 class InstallTarget:
     """Where approving a draft would write, resolved without writing.
@@ -1088,9 +1096,7 @@ def _resolve_install(
     target_scope: str | None = None
 
     def refuse(failure: dict[str, Any]) -> tuple[InstallTarget, dict[str, Any]]:
-        error = str(failure.get("error"))
-        if failure.get("errors"):
-            error += ": " + "; ".join(str(item) for item in failure["errors"])
+        error = _failure_text(failure)
         refused = InstallTarget(
             scope=target_scope,
             path=None,
@@ -1672,9 +1678,9 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
 def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any]:
     """Put a rejected draft, or a new skill's approval, back to pending.
 
-    An approved update is refused: its approval overwrote the installed
-    files and kept no copy to restore. Each step can be retried: the manifest
-    keeps its decision until the skill and the processed mark are gone.
+    An approved update, in place or as a project fork, is refused: nothing
+    records the installed skill it started from. Each step can be retried: the
+    manifest keeps its decision until the skill and the processed mark are gone.
     """
     proposal = find_skill_proposal(memory_dir, proposal_id)
     manifest_path = proposal.path / "manifest.json" if proposal else None

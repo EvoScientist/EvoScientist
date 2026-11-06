@@ -203,7 +203,7 @@ def run_autoskill_now(
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
 
 
-_THREAD_PAGE = 20
+_PAGE_SIZE = 20
 
 
 def _project_folders(workspace_dir: str | Path) -> dict[str, str]:
@@ -219,7 +219,7 @@ async def _manual_run_in_flight(client: Any, thread_id: str) -> str | None:
             # One read per page, so a run the queue claims meanwhile is not missed.
             runs = await client.runs.list(
                 thread_id,
-                limit=_THREAD_PAGE,
+                limit=_PAGE_SIZE,
                 offset=offset,
                 select=["run_id", "status", "metadata"],
             )
@@ -230,9 +230,9 @@ async def _manual_run_in_flight(client: Any, thread_id: str) -> str | None:
             manual = (run.get("metadata") or {}).get("schedule") == "manual"
             if manual and run.get("status") in ("pending", "running"):
                 return str(run["run_id"])
-        if len(runs) < _THREAD_PAGE:
+        if len(runs) < _PAGE_SIZE:
             return None
-        offset += _THREAD_PAGE
+        offset += _PAGE_SIZE
 
 
 async def afind_running_autoskill(
@@ -254,7 +254,7 @@ async def afind_running_autoskill(
             threads = await client.threads.search(
                 metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
                 status="busy",
-                limit=_THREAD_PAGE,
+                limit=_PAGE_SIZE,
                 offset=offset,
                 select=["thread_id"],
             )
@@ -263,9 +263,9 @@ async def afind_running_autoskill(
                 run_id = await _manual_run_in_flight(client, thread_id)
                 if run_id is not None:
                     return {"thread_id": thread_id, "run_id": run_id}
-            if len(threads) < _THREAD_PAGE:
+            if len(threads) < _PAGE_SIZE:
                 return None
-            offset += _THREAD_PAGE
+            offset += _PAGE_SIZE
 
 
 async def arun_autoskill_now(

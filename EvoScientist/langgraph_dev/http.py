@@ -436,15 +436,15 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
     return JSONResponse({"projects": count, "failed": failed})
 
 
-async def list_autoskill_proposals(request: Request) -> JSONResponse:
-    """Every registered project's AutoSkills drafts, with their texts and
+async def list_autoskill_proposals(request: Request) -> Response:
+    """Every served project's AutoSkills drafts, with their texts and
     files (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
     from EvoScientist.langgraph_dev import autoskills_api
 
-    status, payload = await asyncio.to_thread(
-        autoskills_api.list_drafts, request.query_params.get("status") or None
+    status, body = await asyncio.to_thread(
+        autoskills_api.list_drafts_body, request.query_params.get("status") or None
     )
-    return JSONResponse(payload, status_code=status)
+    return Response(body, status_code=status, media_type="application/json")
 
 
 async def get_autoskill_proposal_file(request: Request) -> Response:

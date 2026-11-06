@@ -2390,7 +2390,7 @@ def _fake_scoped_client(monkeypatch, *, pages, runs):
     client = MagicMock()
 
     async def search(*, offset=0, **_kwargs):
-        index = offset // schedule._THREAD_PAGE
+        index = offset // schedule._PAGE_SIZE
         return pages[index] if index < len(pages) else []
 
     async def list_runs(thread_id, *, status=None, limit=10, offset=0, **_kwargs):
@@ -2486,7 +2486,7 @@ async def test_find_running_autoskill_reads_every_page_of_runs(workspace, monkey
 
     queued = [
         {"run_id": f"r-{i}", "status": "pending", "metadata": {"schedule": "0 3 * * 0"}}
-        for i in range(schedule._THREAD_PAGE)
+        for i in range(schedule._PAGE_SIZE)
     ]
     _fake_scoped_client(
         monkeypatch,
@@ -2530,7 +2530,7 @@ async def test_find_running_autoskill_sees_a_run_that_starts_while_it_looks(
 async def test_find_running_autoskill_reads_every_page(workspace, monkeypatch):
     import EvoScientist.memory.autoskills.schedule as schedule
 
-    full = [{"thread_id": f"t-{i}"} for i in range(schedule._THREAD_PAGE)]
+    full = [{"thread_id": f"t-{i}"} for i in range(schedule._PAGE_SIZE)]
     client = _fake_scoped_client(
         monkeypatch,
         pages=[full, [{"thread_id": "t-late"}]],
@@ -2543,7 +2543,7 @@ async def test_find_running_autoskill_reads_every_page(workspace, monkeypatch):
 
     assert found == {"thread_id": "t-late", "run_id": "r-late"}
     offsets = [call.kwargs["offset"] for call in client.threads.search.await_args_list]
-    assert offsets == [0, schedule._THREAD_PAGE]
+    assert offsets == [0, schedule._PAGE_SIZE]
 
 
 async def test_run_helpers_resolve_the_project_off_the_event_loop(

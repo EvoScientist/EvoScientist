@@ -662,7 +662,7 @@ def test_handlers_read_off_the_event_loop(server, served, monkeypatch):
         return call
 
     monkeypatch.setattr(
-        autoskills_api, "list_drafts", recording(autoskills_api.list_drafts)
+        autoskills_api, "list_drafts_body", recording(autoskills_api.list_drafts_body)
     )
     monkeypatch.setattr(
         autoskills_api, "read_draft_file", recording(autoskills_api.read_draft_file)
@@ -763,6 +763,47 @@ def test_file_route_binary_and_large(server, served):
     big = _file(server, "focused-validation", "big.txt")
     assert big.status_code == 413
     assert big.json() == {"error": "too_large"}
+
+
+def test_a_file_whose_read_fails_after_its_open_is_not_found(tmp_path, monkeypatch):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    path = tmp_path / "SKILL.md"
+    path.write_text("Steps.\n", encoding="utf-8")
+
+    class FailingFstat:
+        """The module's ``os``, but ``fstat`` fails; pytest's own ``os`` stays."""
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def fstat(_fd):
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(autoskills_api, "os", FailingFstat())
+
+    assert autoskills_api._read_text(path) == (404, {"error": "not_found"})
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"abc", ("abc", False)),
+        (b"abcd", ("abc", True)),
+        (("\U0001f600" * 3 + "a").encode("utf-8"), ("\U0001f600" * 3, True)),
+    ],
+)
+def test_inline_text_is_cut_at_the_character_limit(
+    tmp_path, monkeypatch, data, expected
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 3)
+    path = tmp_path / "SKILL.md"
+    path.write_bytes(data)
+
+    assert autoskills_api._inline(path, tmp_path.resolve()) == expected
 
 
 def test_file_route_installed_copy(server, served):
