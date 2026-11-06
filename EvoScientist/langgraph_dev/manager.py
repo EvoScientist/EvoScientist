@@ -764,7 +764,7 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
 
 
 class ServerKeptError(RuntimeError):
-    """The stop left the recorded server running. ``EvoSci service stop``
+    """The stop left the recorded server running. ``EvoSci server stop``
     keeps a server that ``EvoSci deploy`` or the desktop app owns; any stop
     raises :class:`ServerStopFailedError` when it could not end the server
     for a reason other than it being gone."""
@@ -794,7 +794,7 @@ def _refused_cause() -> str:
 
 def owned_by_its_starter(record: ServerRecord | None) -> bool:
     """Whether the recorded server is one that ``EvoSci deploy`` or the
-    desktop app owns, not the background service: ``EvoSci service stop``
+    desktop app owns, not the background server: ``EvoSci server stop``
     leaves it running. A record that does not say counts as not."""
     return record is not None and record.lasting is False
 
@@ -1046,7 +1046,7 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
     nothing was stopped (no record, or a server that is gone).
 
     *record* is what the caller read (``read_record(older=True)``); read here
-    when not given. With *keep_owned* (``EvoSci service stop``), a server
+    when not given. With *keep_owned* (``EvoSci server stop``), a server
     that ``EvoSci deploy`` or the desktop app owns is left running:
     :class:`ServerKeptError`. One the stop may not end (access refused) or
     could not open is left running too: :class:`ServerStopFailedError`.
@@ -1057,9 +1057,9 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
         return None
     if keep_owned and owned_by_its_starter(record):
         raise ServerKeptError(
-            "The running server is not the background service: an "
+            "The running server is not the background server: an "
             "EvoSci deploy or the desktop app owns it, so it was left "
-            "running (EvoSci server stop stops it anyway)."
+            "running; it stops with its owner."
         )
     with _LOCK:
         own = _PROCESS if _PROCESS is not None and _PROCESS.pid == record.pid else None
@@ -1858,8 +1858,7 @@ def serve_project(
     workspace_dir: Path | None,
 ) -> ServerResult:
     """Start the background server, or reuse a running one, and register
-    *workspace_dir* with it (``EvoSci service start``, ``EvoSci server
-    start``); without one (the restart after an update) nothing is
+    *workspace_dir* with it (``EvoSci server start``); without one (the restart after an update) nothing is
     registered. With Anthropic OAuth this process goes through the server's
     ccproxy too. Returns and raises like :func:`ensure_server`."""
     from ..ccproxy_manager import use_server_ccproxy

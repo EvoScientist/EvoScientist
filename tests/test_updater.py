@@ -785,7 +785,7 @@ def test_before_stop_runs_while_everything_still_runs(
     server["owned"], server["running"] = owned, running
     ccproxy_stops: list[bool] = []
     monkeypatch.setattr(
-        updater, "_stop_service_ccproxy", lambda emit: ccproxy_stops.append(True)
+        updater, "_stop_older_ccproxy", lambda emit: ccproxy_stops.append(True)
     )
     seen: list[tuple[int, int]] = []
     updater.check_server(
@@ -807,7 +807,7 @@ def test_failing_before_stop_leaves_the_server_running(server, monkeypatch):
         server_stage, "remember_for_restart", lambda: recorded.append(True)
     )
     monkeypatch.setattr(
-        updater, "_stop_service_ccproxy", lambda emit: pytest.fail("ccproxy stopped")
+        updater, "_stop_older_ccproxy", lambda emit: pytest.fail("ccproxy stopped")
     )
 
     def failing_check():
@@ -2271,7 +2271,7 @@ def test_update_unreadable_lock_goes_on_only_with_yes(server, lock, yes):
 
 
 @pytest.mark.parametrize("running", [True, False])
-def test_update_stops_service_ccproxy(server, monkeypatch, running):
+def test_update_stops_older_ccproxy(server, monkeypatch, running):
     """It runs from the install the update replaces."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
@@ -2312,7 +2312,7 @@ def test_update_goes_on_when_asked_server_stopped_meanwhile(server, monkeypatch)
 
     records = iter([manager.ServerRecord(42, 6174, "127.0.0.1"), None])
     monkeypatch.setattr(manager, "read_record", lambda **_k: next(records, None))
-    monkeypatch.setattr(updater, "_stop_service_ccproxy", lambda emit: None)
+    monkeypatch.setattr(updater, "_stop_older_ccproxy", lambda emit: None)
 
     updater.check_server(updater.UpdateOptions(), _emits(), lambda q: True)
 

@@ -194,35 +194,10 @@ def is_ccproxy_running(port: int) -> bool:
         return False
 
 
-def start_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen:
-    """Start ccproxy serve as a background process.
-
-    Args:
-        port: Port number for the proxy server.
-        detached: Run it in its own session (process group on Windows), so
-            it outlives this process and the terminal's signals, as the
-            background langgraph dev server does.
-
-    Returns:
-        The Popen handle for the ccproxy process.
-
-    Raises:
-        RuntimeError: If ccproxy fails to become healthy within
-            ``_CCPROXY_HEALTH_TIMEOUT_SECONDS``.
-        FileNotFoundError: If ccproxy binary is not found.
-    """
-    proc = spawn_ccproxy(port, detached=detached)
-    wait_for_ccproxy(proc, port)
-    return proc
-
-
-def spawn_ccproxy(
-    port: int, *, detached: bool = False, output: Any = subprocess.DEVNULL
-) -> subprocess.Popen:
+def spawn_ccproxy(port: int, *, output: Any = subprocess.DEVNULL) -> subprocess.Popen:
     """Start ``ccproxy serve`` without waiting for it to serve
     (:func:`wait_for_ccproxy`). *output* is where its stdout and stderr go, as
-    ``Popen`` takes it: a file, or ``DEVNULL``. See :func:`start_ccproxy`
-    for *detached*."""
+    ``Popen`` takes it: a file, or ``DEVNULL``."""
     exe = _ccproxy_exe() or "ccproxy"
     cmd = [exe, "serve", "--port", str(port)]
     logger.warning(
@@ -230,23 +205,7 @@ def spawn_ccproxy(
         port,
         _CCPROXY_HEALTH_TIMEOUT_SECONDS,
     )
-    spawn: dict = {}
-    if detached:
-        if os.name == "nt":
-            # A console of its own, without a window: closing the terminal
-            # does not end it.
-            spawn["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-            ) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        else:
-            spawn["start_new_session"] = True
-    return subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=output,
-        stderr=output,
-        **spawn,
-    )
+    return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
 
 
 def wait_for_ccproxy(proc: subprocess.Popen, port: int) -> None:
@@ -317,19 +276,6 @@ def stop_ccproxy(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def ensure_ccproxy(port: int, *, detached: bool = False) -> subprocess.Popen | None:
-    """Ensure ccproxy is running — reuse existing or start new
-    (see :func:`start_ccproxy` for *detached*).
-
-    Returns:
-        Popen handle if we started a new process, None if already running.
-    """
-    if is_ccproxy_running(port):
-        logger.debug("ccproxy already running on port %d", port)
-        return None
-    return start_ccproxy(port, detached=detached)
-
-
 # =============================================================================
 # Environment setup
 # =============================================================================
@@ -381,108 +327,12 @@ def check_ccproxy_ready() -> None:
         )
 
 
-def maybe_start_ccproxy(
-    config: EvoScientistConfig, *, lasting: bool = False
-) -> subprocess.Popen | None:
-    """Start ccproxy when Anthropic uses OAuth.
-
-    OpenAI's OAuth mode signs in to ChatGPT directly and needs no proxy.
-
-    Args:
-        config: An ``EvoScientistConfig`` instance.
-        lasting: The ccproxy outlives this session, for every session and
-            the background server to share: start it detached and record it
-            for ``EvoSci ccproxy stop`` (:func:`stop_recorded_ccproxy`), and
-            return None so the caller does not stop it.
-
-    Returns:
-        Popen handle if we started ccproxy for this session to stop, None
-        otherwise.
-    """
-    if not uses_oauth(config):
-        return None
-
-    check_ccproxy_ready()
-
-    port = config.ccproxy_port
-    if not (1 <= port <= 65535):
-        raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
-
-    if lasting:
-        try:
-            with _lasting_start_lock():
-                proc = ensure_ccproxy(port, detached=True)
-                if proc is not None:
-                    # Recorded at once, under the lock: an interrupt during
-                    # the check below leaves a ccproxy that a stop finds.
-                    _record_lasting(proc.pid)
-                    if not _still_running(proc):
-                        _forget_lasting(proc.pid)
-        except OSError as exc:
-            # The lock timing out, too: a filelock Timeout is an OSError.
-            raise RuntimeError(f"Could not start ccproxy: {exc}") from exc
-    else:
-        proc = ensure_ccproxy(port, detached=False)
-    setup_ccproxy_env(port)
-
-    if proc:
-        logger.info("Started ccproxy on port %d", port)
-    else:
-        logger.info("Reusing existing ccproxy on port %d", port)
-    return None if lasting else proc
-
-
-def _still_running(proc: subprocess.Popen) -> bool:
-    """Whether *proc* keeps running: one that lost the port to another
-    ccproxy started at the same time answered the health probe through the
-    winner's, and exits; the winner records itself."""
-    try:
-        proc.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        return True
-    return False
-
-
 def _lasting_record() -> Path:
+    """Where an older release recorded the ccproxy it started for every
+    session (``EvoSci ccproxy start``, ``EvoSci service start``)."""
     from . import paths
 
     return paths.SERVER_HOME / "ccproxy.pid"
-
-
-def _lasting_start_lock():
-    """Held across the check for a running ccproxy and the start of a lasting
-    one: two sessions starting together would each spawn one, and the loser
-    can pass its health probe through the winner's port, then die on its bind
-    after being recorded."""
-    from filelock import FileLock
-
-    from .langgraph_dev.server_home import ensure_server_home
-
-    return FileLock(
-        str(ensure_server_home() / "ccproxy.lock"),
-        timeout=_CCPROXY_HEALTH_TIMEOUT_SECONDS + 10,
-    )
-
-
-def _record_lasting(pid: int) -> None:
-    from .langgraph_dev.server_home import ensure_server_home
-
-    try:
-        # Created as the server creates it: readable by this user only.
-        ensure_server_home()
-        _lasting_record().write_text(str(pid))
-    except OSError:
-        logger.warning("Could not record the ccproxy pid", exc_info=True)
-
-
-def _forget_lasting(pid: int) -> None:
-    """Remove the record of *pid*, when it is still the one recorded."""
-    if recorded_ccproxy_pid() != pid:
-        return
-    try:
-        _lasting_record().unlink(missing_ok=True)
-    except OSError:
-        logger.warning("Could not remove the ccproxy pid record", exc_info=True)
 
 
 def uses_oauth(config: object) -> bool:
@@ -491,8 +341,8 @@ def uses_oauth(config: object) -> bool:
 
 
 def recorded_ccproxy_pid() -> int | None:
-    """The pid of the ccproxy a session started for every session, if one
-    is recorded."""
+    """The pid of the ccproxy an older release started for every session, if
+    one is recorded."""
     try:
         return int(_lasting_record().read_text().strip())
     except (OSError, ValueError):
@@ -533,10 +383,9 @@ def recorded_ccproxy_running() -> int | None:
 
 
 def stop_recorded_ccproxy() -> int | None:
-    """Stop the ccproxy a session started for every session (``EvoSci
-    ccproxy stop``, ``EvoSci service stop``, ``EvoSci update``); its pid, or
-    None when none runs. A pid whose process is not ccproxy (reused) is left
-    alone. Every server start stops it too."""
+    """Stop the ccproxy an older release started for every session (every
+    server start, ``EvoSci update``); its pid, or None when none runs. A pid
+    whose process is not ccproxy (reused) is left alone."""
     record = _lasting_record()
     proc = _recorded_process()
     if proc is ...:

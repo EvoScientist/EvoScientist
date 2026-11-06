@@ -41,7 +41,7 @@ from ..stream.console import console
 from . import (
     async_notifier,
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
-    service_cmd,  # noqa: F401 — registers `EvoSci service` / `EvoSci ccproxy`
+    service_cmd,  # noqa: F401 — registers `EvoSci service`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
@@ -296,7 +296,7 @@ def onboard(
 
 
 def _offer_server_start() -> None:
-    """After onboarding: offer to start the background agent service, which
+    """After onboarding: offer to start the background agent server, which
     registers ``default_workdir``. A running one keeps the settings it started with;
     say how to apply the new ones."""
     import questionary
@@ -311,21 +311,21 @@ def _offer_server_start() -> None:
     record = manager.read_record(older=True)
     if record is not None or manager.is_langgraph_dev_running(port=port, host=host):
         if manager.is_lasting(record):
-            # ``EvoSci service start`` registers ``default_workdir``.
+            # ``EvoSci server start`` registers ``default_workdir``.
             start_again = (
-                "then [bold]EvoSci service start[/bold]"
+                "then [bold]EvoSci server start[/bold]"
                 if config.default_workdir
                 else "and it starts again once an EvoSci session needs it"
             )
             console.print(
-                "[dim]The background agent service runs with your previous "
+                "[dim]The background agent server runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "
-                f"service stop[/bold], {start_again} (this ends its running "
+                f"server stop[/bold], {start_again} (this ends its running "
                 "background work).[/dim]"
             )
         else:
             console.print(
-                "[dim]A server that is not the background service runs on the "
+                "[dim]A server that is not the background server runs on the "
                 "port (an EvoSci deploy, the desktop app or an older release); "
                 "the new settings apply once it restarts.[/dim]"
             )
@@ -334,15 +334,15 @@ def _offer_server_start() -> None:
         # A start here would register this folder (often the home folder) as
         # a project; the first session in a project starts it instead.
         console.print(
-            "[dim]The background agent service starts with your next EvoSci "
+            "[dim]The background agent server starts with your next EvoSci "
             "session in a project, and keeps running for every session until "
-            "[bold]EvoSci service stop[/bold].[/dim]"
+            "[bold]EvoSci server stop[/bold].[/dim]"
         )
         return
     project = start_workspace_path(None, config.default_workdir)
     answer = questionary.confirm(
-        f"Start the background agent service for {project} now? It keeps "
-        "running for every EvoSci session until `EvoSci service stop`.",
+        f"Start the background agent server for {project} now? It keeps "
+        "running for every EvoSci session until `EvoSci server stop`.",
         default=True,
         style=CONFIRM_STYLE,
         qmark=QMARK,
@@ -350,13 +350,13 @@ def _offer_server_start() -> None:
     if not answer:
         return
     try:
-        start_background(None, with_ccproxy=True)
+        start_background(None)
     except typer.Exit:
         console.print("[dim]It starts with your next EvoSci session.[/dim]")
     except Exception as exc:
-        # The configuration is saved; the service starts with the next session.
+        # The configuration is saved; the server starts with the next session.
         console.print(
-            f"[yellow]Could not start the background agent service "
+            f"[yellow]Could not start the background agent server "
             f"({escape(str(exc))}); it starts with your next EvoSci "
             "session.[/yellow]"
         )

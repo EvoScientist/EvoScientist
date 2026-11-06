@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from EvoScientist import paths
 from EvoScientist.cli._app import app
 from EvoScientist.config.settings import get_config_path
-from EvoScientist.langgraph_dev import manager, registration, server_home
+from EvoScientist.langgraph_dev import manager, registration, server_home, server_record
 from EvoScientist.langgraph_dev.registration import OlderServerError
 from EvoScientist.setup import server as server_stage
 
@@ -40,8 +40,6 @@ def _result(*, started: bool, record=None) -> manager.ServerResult:
 def started(monkeypatch) -> list:
     """Fake the server start: this process starts the server unless one
     answers already; return the projects it was started for."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
     calls: list = []
 
     def ensure(config, *, workspace_dir, backend):
@@ -50,9 +48,6 @@ def started(monkeypatch) -> list:
 
     monkeypatch.setattr(manager, "ensure_server", ensure)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
-    )
     return calls
 
 
@@ -90,17 +85,12 @@ def test_server_start_running_server_serves_project_too(started, monkeypatch, tm
 
 def test_server_start_failure_names_log_in_one_line(monkeypatch, tmp_path):
     """The log's end is in the log, not on the terminal."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
     failed = manager.ServerResult(
         problem="exited",
         exit_code=1,
         error="langgraph dev exited immediately with code 1.\nLog tail:\nboom",
     )
     monkeypatch.setattr(manager, "ensure_server", lambda *_a, **_k: failed)
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
-    )
 
     result = CliRunner().invoke(app, ["server", "start", "--workdir", str(tmp_path)])
 
@@ -140,7 +130,7 @@ def _answer(monkeypatch, answer):
 
 
 @pytest.mark.parametrize("answer", [True, False])
-def test_offer_service_start_names_project(monkeypatch, tmp_path, answer):
+def test_offer_server_start_names_project(monkeypatch, tmp_path, answer):
     from EvoScientist.cli import commands, server_cmd
 
     monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
@@ -150,13 +140,13 @@ def test_offer_service_start_names_project(monkeypatch, tmp_path, answer):
     monkeypatch.setattr(
         server_cmd,
         "start_background",
-        lambda workdir, *, with_ccproxy: starts.append(with_ccproxy),
+        lambda workdir: starts.append(workdir),
     )
 
     commands._offer_server_start()
 
     assert str(tmp_path) in asked[0]
-    assert starts == ([True] if answer else [])
+    assert starts == ([None] if answer else [])
 
 
 def test_offer_without_default_workdir_starts_nothing(monkeypatch, tmp_path):
@@ -171,7 +161,7 @@ def test_offer_without_default_workdir_starts_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server_cmd,
         "start_background",
-        lambda workdir, *, with_ccproxy: starts.append(with_ccproxy),
+        lambda workdir: starts.append(workdir),
     )
 
     commands._offer_server_start()
@@ -190,14 +180,12 @@ def _running_service(monkeypatch, record, *, jobs=(), busy=False):
 
 
 def _record_steps(monkeypatch) -> list:
-    from EvoScientist.cli import server_cmd, service_cmd
+    from EvoScientist.cli import server_cmd
 
     steps: list = []
-    monkeypatch.setattr(service_cmd, "service_stop", lambda: steps.append("stop"))
+    monkeypatch.setattr(server_cmd, "server_stop", lambda: steps.append("stop"))
     monkeypatch.setattr(
-        server_cmd,
-        "start_background",
-        lambda workdir, *, with_ccproxy: steps.append("start"),
+        server_cmd, "start_background", lambda workdir: steps.append("start")
     )
     return steps
 
@@ -207,7 +195,7 @@ def _record_steps(monkeypatch) -> list:
     [None, _record(lasting=False), _record(lasting=True)],
     ids=["unrecorded", "owned", "lasting"],
 )
-def test_offer_leaves_running_service_alone(monkeypatch, record):
+def test_offer_leaves_running_server_alone(monkeypatch, record):
     """It says how to apply the new settings; it restarts nothing."""
     from EvoScientist.cli import commands
 
@@ -221,7 +209,7 @@ def test_offer_leaves_running_service_alone(monkeypatch, record):
     assert asked == []
     assert steps == []
     lasting = record is not None and record.lasting
-    hint = "EvoSci service stop" if lasting else "not the background service"
+    hint = "EvoSci server stop" if lasting else "not the background server"
     assert hint in " ".join(captured.get().split())
 
 
@@ -229,7 +217,7 @@ def test_offer_leaves_running_service_alone(monkeypatch, record):
 def test_offer_restart_hint_follows_default_workdir(
     monkeypatch, tmp_path, default_workdir
 ):
-    """With a ``default_workdir`` a plain service start restarts it; without
+    """With a ``default_workdir`` a plain server start restarts it; without
     one a session that needs it does."""
     from EvoScientist.cli import commands
 
@@ -244,13 +232,13 @@ def test_offer_restart_hint_follows_default_workdir(
 
     output = " ".join(captured.get().split())
     assert steps == []
-    assert "EvoSci service stop" in output
-    assert ("EvoSci service start" in output) is default_workdir
+    assert "EvoSci server stop" in output
+    assert ("EvoSci server start" in output) is default_workdir
     assert ("EvoSci session" in output) is not default_workdir
     assert "--workdir" not in output
 
 
-def test_offer_service_start_failure_is_reported(monkeypatch, tmp_path):
+def test_offer_server_start_failure_is_reported(monkeypatch, tmp_path):
     """The configuration is saved; no traceback."""
     from EvoScientist.cli import commands, server_cmd
 
@@ -258,7 +246,7 @@ def test_offer_service_start_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     _answer(monkeypatch, True)
 
-    def unwritable(workdir, *, with_ccproxy):
+    def unwritable(workdir):
         raise PermissionError("read-only")
 
     monkeypatch.setattr(server_cmd, "start_background", unwritable)
@@ -430,37 +418,17 @@ def test_stage_unreadable_restart_record_is_dropped(started):
     assert not (paths.SERVER_HOME / "restart-after-update.json").exists()
 
 
-def test_server_stop_leaves_ccproxy(monkeypatch):
-    """Open sessions on the local backend route through it."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    monkeypatch.setattr(manager, "stop_server", lambda **_k: 42)
-    stopped = []
-    monkeypatch.setattr(ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append(1))
-
-    result = CliRunner().invoke(app, ["server", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == []
-
-
-def test_service_stop_stops_server_and_ccproxy(monkeypatch):
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
+def test_service_stop_is_server_stop_with_notice(monkeypatch):
     stopped = []
     monkeypatch.setattr(
-        manager,
-        "stop_server",
-        lambda **_k: stopped.append("server") or 42,
-    )
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
+        manager, "stop_server", lambda **_k: stopped.append("server") or 42
     )
 
     result = CliRunner().invoke(app, ["service", "stop"])
 
     assert result.exit_code == 0, result.output
-    assert stopped == ["server", "ccproxy"]
+    assert stopped == ["server"]
+    assert "deprecated" in result.output
 
 
 def _recorded_server(monkeypatch, record, stopped: list) -> None:
@@ -474,72 +442,34 @@ def _recorded_server(monkeypatch, record, stopped: list) -> None:
     )
 
 
-@pytest.mark.parametrize("ccproxy_pid", [7, None])
-def test_service_stop_leaves_deploy_owned_server(monkeypatch, ccproxy_pid):
-    """EvoSci deploy or the desktop app stops its own server; the ccproxy that
-    server may route through stays too."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
+def test_server_stop_leaves_deploy_owned_server(monkeypatch):
+    """EvoSci deploy or the desktop app stops its own server."""
+    from EvoScientist.cli import server_cmd
 
     stopped = []
     _recorded_server(monkeypatch, _record(lasting=False), stopped)
-    monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", lambda: ccproxy_pid)
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
-    )
 
-    result = CliRunner().invoke(app, ["service", "stop"])
+    result = CliRunner().invoke(app, ["server", "stop"])
 
     assert result.exit_code == 0, result.output
     assert stopped == []
     output = " ".join(result.output.split())
-    assert "not the background service" in output
-    assert ("EvoSci ccproxy stop" in output) is (ccproxy_pid is not None)
+    assert "not the background server" in output
+    # Its owner may be gone.
+    assert server_cmd.manual_stop_command(6174) in output
 
 
-def test_service_stop_leaves_ccproxy_for_unrecorded_server(monkeypatch):
-    """A server with no ownership record is not touched; it may route through
-    the service's ccproxy."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-    from EvoScientist.deploy import busy
-
-    stopped = []
-    monkeypatch.setattr(manager, "stop_server", lambda **_k: None)
-    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
-    monkeypatch.setattr(busy, "backend_has_active_runs", lambda url: False)
-    monkeypatch.setattr(ccproxy_mod, "recorded_ccproxy_running", lambda: 7)
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
-    )
-
-    result = CliRunner().invoke(app, ["service", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == []
-    assert "EvoSci ccproxy stop" in " ".join(result.output.split())
-
-
-@pytest.mark.parametrize(
-    ("record", "expected"),
-    [(None, ["ccproxy"]), (_record(lasting=None), ["server", "ccproxy"])],
-    ids=["server-gone", "unsaid-owner"],
-)
-def test_service_stop_stops_server_nobody_else_owns(monkeypatch, record, expected):
+def test_server_stop_stops_server_nobody_else_owns(monkeypatch):
     """A record that does not say who owns its server (a server started by
-    hand, an older release) is the service's to stop; without a server, the
-    service stops its ccproxy."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
+    hand, an older release) is the stop's to end."""
     stopped = []
-    _recorded_server(monkeypatch, record, stopped)
+    _recorded_server(monkeypatch, _record(lasting=None), stopped)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy") or 7
-    )
 
-    result = CliRunner().invoke(app, ["service", "stop"])
+    result = CliRunner().invoke(app, ["server", "stop"])
 
     assert result.exit_code == 0, result.output
-    assert stopped == expected
+    assert stopped == ["server"]
 
 
 def test_server_stop_refused_access_exits_without_claiming_stop(monkeypatch):
@@ -586,27 +516,11 @@ def test_server_stop_looks_for_gone_server_at_its_recorded_address(monkeypatch):
     assert asked == [7000]
 
 
-def test_server_stop_stops_deploy_owned_server(monkeypatch):
-    """EvoSci server stop is the explicit way to stop any recorded server."""
-    stopped = []
-    _recorded_server(monkeypatch, _record(lasting=False), stopped)
-
-    result = CliRunner().invoke(app, ["server", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == ["server"]
-
-
 def test_server_start_that_lost_race_says_it_reused(monkeypatch, tmp_path):
     """Another start took the port first: this one only registered its project."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     monkeypatch.setattr(
         manager, "ensure_server", lambda *_a, **_k: _result(started=False)
-    )
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda config, *, lasting: None
     )
 
     result = CliRunner().invoke(app, ["server", "start", "--workdir", str(tmp_path)])
@@ -715,7 +629,6 @@ def test_server_status_names_lock_held_without_record(monkeypatch):
 
 
 def test_server_status_shows_starting_record_as_starting(monkeypatch):
-    from EvoScientist.langgraph_dev import server_record
 
     _status_server(
         monkeypatch, projects=[], record=_record(phase=server_record.STARTING)
@@ -730,16 +643,13 @@ def test_server_status_shows_starting_record_as_starting(monkeypatch):
 
 @pytest.mark.parametrize("group", ["server", "service"])
 def test_stop_names_lock_held_without_record(monkeypatch, group):
-    import EvoScientist.ccproxy_manager as ccproxy_mod
     from EvoScientist.langgraph_dev import server_home
 
     stopped: list = []
     monkeypatch.setattr(manager, "read_record", lambda **_k: None)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
-    monkeypatch.setattr(
-        ccproxy_mod, "stop_recorded_ccproxy", lambda: stopped.append("ccproxy")
-    )
+    monkeypatch.setattr(manager, "stop_server", lambda **_k: stopped.append(1))
 
     result = CliRunner().invoke(app, [group, "stop", "--yes"])
 
@@ -837,23 +747,62 @@ def test_server_status_not_running_lists_no_projects(monkeypatch):
     assert urls == []
 
 
-def test_service_start_starts_no_ccproxy_of_its_own(started, tmp_path, monkeypatch):
-    """The server starts its ccproxy."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
+def _oauth(monkeypatch, oauth: bool) -> None:
+    from types import SimpleNamespace
 
-    lasting = []
     monkeypatch.setattr(
-        ccproxy_mod,
-        "maybe_start_ccproxy",
-        lambda config, **kw: lasting.append(kw.get("lasting")),
+        "EvoScientist.config.get_effective_config",
+        lambda: SimpleNamespace(
+            anthropic_auth_mode="oauth" if oauth else "api_key",
+            ccproxy_port=8000,
+            langgraph_dev_port=6174,
+            langgraph_dev_host="127.0.0.1",
+        ),
     )
 
+
+@pytest.mark.parametrize("running", [True, False])
+def test_server_status_shows_server_ccproxy_with_oauth(monkeypatch, running):
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    _status_server(
+        monkeypatch,
+        projects=[],
+        record=_record(fields={server_record.CCPROXY_PID_KEY: 77}),
+    )
+    _oauth(monkeypatch, True)
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_running", lambda port: running)
+
+    output = _status_output()
+
+    assert "ccproxy: port 8000" in output
+    assert ("pid 77" in output) is running
+    assert ("not running" in output) is not running
+
+
+def test_server_status_shows_no_ccproxy_for_older_releases_server(monkeypatch):
+    """It starts no ccproxy of its own."""
+    _status_server(monkeypatch, projects=[], record=_record(older=True))
+    _oauth(monkeypatch, True)
+
+    assert "ccproxy" not in _status_output()
+
+
+def test_server_status_shows_no_ccproxy_without_oauth(monkeypatch):
+    _status_server(monkeypatch, projects=[])
+    _oauth(monkeypatch, False)
+
+    assert "ccproxy" not in _status_output()
+
+
+def test_service_start_is_server_start_with_notice(started, tmp_path):
     result = CliRunner().invoke(app, ["service", "start", "--workdir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert lasting == []
     assert started == [(tmp_path, "langgraph_server")]
-    assert "EvoSci service stop" in " ".join(result.output.split())
+    output = " ".join(result.output.split())
+    assert "deprecated" in output
+    assert "EvoSci server stop" in output
 
 
 def test_server_start_oauth_points_at_server_ccproxy(started, tmp_path, monkeypatch):
@@ -881,21 +830,6 @@ def test_server_start_oauth_points_at_server_ccproxy(started, tmp_path, monkeypa
     assert pointed == [8000]
 
 
-def test_ccproxy_start_without_oauth_does_nothing(monkeypatch):
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    started = []
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda *a, **k: started.append(1)
-    )
-
-    result = CliRunner().invoke(app, ["ccproxy", "start"])
-
-    assert result.exit_code == 0, result.output
-    assert started == []
-    assert "not needed" in " ".join(result.output.split())
-
-
 def test_stop_recorded_ccproxy_keeps_record_when_denied(monkeypatch, tmp_path):
     """It may still be ours; a later stop can try again."""
     import psutil
@@ -915,7 +849,7 @@ def test_stop_recorded_ccproxy_keeps_record_when_denied(monkeypatch, tmp_path):
     assert (tmp_path / "ccproxy.pid").exists()
 
 
-def test_update_wait_spares_service_ccproxy(monkeypatch, tmp_path):
+def test_update_wait_spares_older_ccproxy(monkeypatch, tmp_path):
     """The update stops it itself, after the wait."""
     import os
 
@@ -926,80 +860,6 @@ def test_update_wait_spares_service_ccproxy(monkeypatch, tmp_path):
     monkeypatch.setattr(manager, "read_record", lambda **_k: None)
 
     assert os.getpid() in updater._server_tree()
-
-
-def test_lost_ccproxy_start_race_is_not_recorded(monkeypatch, tmp_path):
-    """The one that lost the port exits; the winner records itself."""
-    from types import SimpleNamespace
-
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
-
-    class _Lost:
-        pid = 5
-
-        def wait(self, timeout=None):
-            return 1
-
-    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
-    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda _p: (True, ""))
-    monkeypatch.setattr(
-        ccproxy_mod, "ensure_ccproxy", lambda port, *, detached: _Lost()
-    )
-    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", lambda port: None)
-    config = SimpleNamespace(anthropic_auth_mode="oauth", ccproxy_port=8000)
-
-    ccproxy_mod.maybe_start_ccproxy(config, lasting=True)
-
-    assert not (tmp_path / "ccproxy.pid").exists()
-
-
-def test_interrupted_ccproxy_start_leaves_record(monkeypatch, tmp_path):
-    """A Ctrl+C while the start checks the new ccproxy still leaves it
-    recorded, so EvoSci ccproxy stop can stop it."""
-    from types import SimpleNamespace
-
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
-
-    class _Started:
-        pid = 5
-
-        def wait(self, timeout=None):
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
-    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda _p: (True, ""))
-    monkeypatch.setattr(
-        ccproxy_mod, "ensure_ccproxy", lambda port, *, detached: _Started()
-    )
-    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", lambda port: None)
-    config = SimpleNamespace(anthropic_auth_mode="oauth", ccproxy_port=8000)
-
-    with pytest.raises(KeyboardInterrupt):
-        ccproxy_mod.maybe_start_ccproxy(config, lasting=True)
-
-    assert ccproxy_mod.recorded_ccproxy_pid() == 5
-
-
-def test_ccproxy_start_failure_keeps_install_hint(monkeypatch):
-    """The hint's ``[oauth]`` extra is text, not markup."""
-    import EvoScientist.ccproxy_manager as ccproxy_mod
-
-    monkeypatch.setattr(ccproxy_mod, "uses_oauth", lambda _config: True)
-    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_running", lambda _port: False)
-
-    def missing(config, *, lasting):
-        raise RuntimeError("Install it with: pip install 'evoscientist[oauth]'")
-
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", missing)
-
-    result = CliRunner().invoke(app, ["ccproxy", "start"])
-
-    assert result.exit_code == 1
-    assert "evoscientist[oauth]" in result.output
 
 
 @pytest.fixture
@@ -1033,9 +893,9 @@ def test_stop_without_record_asks_nothing(busy_server, monkeypatch):
     assert "--yes" not in result.output
 
 
-def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch):
-    """EvoSci deploy or the desktop app owns it: service stop leaves it
-    running, so its work needs no question, nor --yes in a script."""
+def test_server_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch):
+    """EvoSci deploy or the desktop app owns it: the stop leaves it running,
+    so its work needs no question, nor --yes in a script."""
 
     def stop(*, keep_owned=False, record=None):
         raise manager.ServerKeptError("left running")
@@ -1043,7 +903,7 @@ def test_service_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch
     monkeypatch.setattr(manager, "owned_by_its_starter", lambda _record: True)
     monkeypatch.setattr(manager, "stop_server", stop)
 
-    result = CliRunner().invoke(app, ["service", "stop"])
+    result = CliRunner().invoke(app, ["server", "stop"])
 
     assert result.exit_code == 0, result.output
     assert "--yes" not in result.output
@@ -1079,18 +939,6 @@ def test_manual_stop_command_ends_only_listener(monkeypatch):
     monkeypatch.setattr(server_cmd.sys, "platform", "linux")
 
     assert "-sTCP:LISTEN" in server_cmd.manual_stop_command(6174)
-
-
-def test_server_stop_asks_about_owned_busy_server(busy_server, monkeypatch):
-    """EvoSci server stop ends a server EvoSci deploy or the desktop app owns
-    too, so its work is asked about; without a terminal it is refused."""
-    monkeypatch.setattr(manager, "owned_by_its_starter", lambda _record: True)
-
-    result = CliRunner().invoke(app, ["server", "stop"])
-
-    assert result.exit_code == 1
-    assert busy_server == []
-    assert "--yes" in " ".join(result.output.split())
 
 
 def test_server_stop_asks_about_busy_server_slow_to_answer(busy_server, monkeypatch):

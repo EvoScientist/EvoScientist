@@ -159,10 +159,10 @@ def _run_deploy_once(
     # A ccproxy start of its own would show here.
     from EvoScientist import ccproxy_manager as ccp
 
-    def _fake_maybe_start_ccproxy(*_a, **_kw):
+    def _fake_spawn_ccproxy(*_a, **_kw):
         captured["ccproxy_started"] = True
 
-    monkeypatch.setattr(ccp, "maybe_start_ccproxy", _fake_maybe_start_ccproxy)
+    monkeypatch.setattr(ccp, "spawn_ccproxy", _fake_spawn_ccproxy)
 
     # atexit mock — capture without executing (don't pollute test process)
     import atexit

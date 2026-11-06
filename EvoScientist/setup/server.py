@@ -1,9 +1,9 @@
 """The ``server`` stage of ``EvoSci setup``: the background agent server after
 an upgrade.
 
-The background agent service (the server, and ccproxy with Anthropic OAuth)
-outlives the sessions that use it, shared by every session in any project
-until ``EvoSci service stop``. The first setup after the upgrade says so,
+The background agent server (and its ccproxy with Anthropic OAuth) outlives
+the sessions that use it, shared by every session in any project until
+``EvoSci server stop``. The first setup after the upgrade says so,
 once. The stage also starts again the server ``EvoSci update`` stopped,
 which serves every registered project again.
 """
@@ -21,11 +21,10 @@ from .protocol import Emitter, StageResult, make_event
 logger = logging.getLogger(__name__)
 
 LASTING_MESSAGE = (
-    "The background agent service (the server, and ccproxy with Anthropic "
-    "OAuth) now keeps running after your sessions end, so sessions in every "
-    "project share it. It starts with your next session; `EvoSci service "
-    "stop` stops it. The langgraph_dev_keepalive "
-    "setting is gone."
+    "The background agent server (and its ccproxy with Anthropic OAuth) now "
+    "keeps running after your sessions end, so sessions in every project "
+    "share it. It starts with your next session; `EvoSci server stop` stops "
+    "it. The langgraph_dev_keepalive setting is gone."
 )
 # A record older than this is not from the update this setup follows.
 RESTART_MAX_AGE_SECONDS = 60 * 60
