@@ -84,6 +84,8 @@ def server(monkeypatch):
     )
     monkeypatch.setattr(manager, "_create_time", lambda pid: 555.0)
     monkeypatch.setattr(manager, "_is_port_occupied", lambda port, host: False)
+    # The fake process has no Windows handle to put in a job.
+    monkeypatch.setattr(server_ccproxy, "_join_job", lambda proc: None)
     registered: list = []
     monkeypatch.setattr(server_ccproxy.atexit, "register", registered.append)
     return SimpleNamespace(config=config, steps=steps, proc=proc, registered=registered)
