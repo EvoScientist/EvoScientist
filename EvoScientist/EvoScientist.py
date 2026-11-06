@@ -559,12 +559,13 @@ def _maybe_swap_async_subagents(
 
     from deepagents import AsyncSubAgent
 
-    from .langgraph_dev.sdk import langgraph_dev_url
+    from .langgraph_dev.sdk import configured_langgraph_dev_url
 
-    # Self-dispatch target. Resolved through ``langgraph_dev_url`` so it tracks
-    # both ``langgraph_dev_port`` and ``langgraph_dev_host`` — a wildcard bind
-    # maps back to loopback, a pinned interface is honored verbatim.
-    dev_url = langgraph_dev_url(cfg)
+    # Self-dispatch target: the server this process's session uses, else (in
+    # the server itself) the one ``langgraph_dev_port`` and
+    # ``langgraph_dev_host`` name — a wildcard bind maps back to loopback, a
+    # pinned interface is honored verbatim.
+    dev_url = configured_langgraph_dev_url(cfg)
     out = []
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory

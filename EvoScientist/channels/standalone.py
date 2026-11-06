@@ -283,7 +283,7 @@ def _ensure_standalone_dev_server(
     cold-start poll never blocks the channel event loop. A server this runner
     cannot use (:class:`ServerUnusableError`) is logged as one error line and
     stops startup with exit code 1; a generic start failure does not raise
-    here — ``ensure_langgraph_dev`` leaves the dev server unavailable, and
+    here — ``ensure_server`` leaves the dev server unavailable, and
     ``create_runtime_gateways_for_config`` then falls back to the in-process
     gateway for the run. serve's config-drift hint is not mirrored here (no
     console); the server reconciles the project's AutoSkills schedule as it
@@ -299,9 +299,7 @@ def _ensure_standalone_dev_server(
     ensure_dirs()
     logger.info("Starting background agent server (langgraph dev)...")
     try:
-        manager.ensure_langgraph_dev(
-            config, workspace_dir=workspace_dir, backend=backend
-        )
+        manager.ensure_server(config, workspace_dir=workspace_dir, backend=backend)
     except ServerUnusableError as exc:
         logger.error("Cannot start server-backed standalone channel: %s", exc)
         raise SystemExit(1) from exc

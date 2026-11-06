@@ -39,8 +39,10 @@ from .state import (
     _parse_todo_items,
 )
 from .utils import (
+    EXECUTE_STATUS,
     DisplayLimits,
     ToolStatus,
+    failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
     is_success,
@@ -371,25 +373,35 @@ def _format_single_todo(item: dict) -> Text:
 # ---------------------------------------------------------------------------
 
 
+def _result_succeeded(tr: dict) -> bool:
+    """The decoder's verdict; a result that has none is judged from its text."""
+    success = tr.get("success")
+    if isinstance(success, bool):
+        return success
+    return is_success(tr.get("content", ""))
+
+
 def format_tool_result_compact(
     _name: str,
     content: str,
     max_lines: int = 5,
     tool_args: dict | None = None,
+    success: bool | None = None,
 ) -> list:
     """Format tool result as tree output.
 
-    Special handling for write_todos: shows formatted checklist with status symbols.
-    Special handling for edit_file: shows color-coded unified diff.
+    ``success`` (the stream's verdict) overrides the text check. A successful write_todos
+    shows its checklist and edit_file its diff; a long failure shows its first and last lines.
     """
     elements = []
+    ok = is_success(content) if success is None else success
 
     if not content.strip():
         elements.append(Text("  \u2514 (empty)", style="dim"))
         return elements
 
     # Special handling for edit_file: show diff
-    if _name == "edit_file" and tool_args and is_success(content):
+    if _name == "edit_file" and tool_args and ok:
         old_str = tool_args.get("old_string", "")
         new_str = tool_args.get("new_string", "")
         path = tool_args.get("path", tool_args.get("file_path", ""))
@@ -399,8 +411,8 @@ def format_tool_result_compact(
                 elements.append(Text.from_markup(diff_markup))
                 return elements
 
-    # Special handling for write_todos
-    if _name == "write_todos":
+    # Special handling for write_todos (a failed call shows its error instead)
+    if _name == "write_todos" and ok:
         items = _parse_todo_items(content)
         if items:
             stats = _build_todo_stats(items)
@@ -422,18 +434,32 @@ def format_tool_result_compact(
 
     lines = content.strip().split("\n")
     total_lines = len(lines)
+    remaining = total_lines - max_lines
+    style = "dim" if ok else "red dim"
 
-    display_lines = lines[:max_lines]
-    for i, line in enumerate(display_lines):
+    # A long failure shows its end too: a command reports there how it ended.
+    tail = max_lines - max_lines // 2 if not ok and remaining > 0 else 0
+    rows: list[str | None] = [*lines[: max_lines - tail]]
+    if remaining > 0:
+        # Blank lines, and the sandbox's exit code that repeats deepagents' status line,
+        # would crowd out the reason above them.
+        end = [line for line in lines[max_lines - tail :] if line.strip()]
+        end = [
+            line
+            for line, after in zip(end, [*end[1:], ""], strict=True)
+            if not (line.startswith("Exit code: ") and after.startswith(EXECUTE_STATUS))
+        ]
+        end = end[-tail:] if tail else []
+        remaining = total_lines - len(rows) - len(end)
+        rows += [None, *end]
+    for i, line in enumerate(rows):
+        if line is None:
+            elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
+            continue
         prefix = "\u2514" if i == 0 else " "
         if len(line) > 80:
             line = line[:77] + "\u2026"
-        style = "dim" if is_success(content) else "red dim"
         elements.append(Text(f"  {prefix} {line}", style=style))
-
-    remaining = total_lines - max_lines
-    if remaining > 0:
-        elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
 
     return elements
 
@@ -448,8 +474,7 @@ def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
     is_task = tc.get("name", "").lower() == "task"
 
     if tr is not None:
-        content = tr.get("content", "")
-        if is_success(content):
+        if _result_succeeded(tr):
             style = "bold green"
             indicator = "\u2713" if is_task else ToolStatus.SUCCESS.value
         else:
@@ -573,11 +598,10 @@ def _render_subagent_section(sa: "SubAgentState", compact: bool = False) -> list
             tc_line.append(f"\u2713 {tc_name}", style="green")
         else:
             tc_line.append(f"\u2717 {tc_name}", style="red")
-            content = tr.get("content", "")
-            first_line = content.strip().split("\n")[0][:70]
-            if first_line:
+            reason = failure_summary(tc["name"], tr.get("content", ""))[:70]
+            if reason:
                 err_line = Text("\u2502   ", style=BORDER)
-                err_line.append(f"\u2514 {first_line}", style="red dim")
+                err_line.append(f"\u2514 {reason}", style="red dim")
                 elements.append(tc_line)
                 elements.append(err_line)
                 continue
@@ -1047,12 +1071,13 @@ def create_streaming_display(
                 _append_narration_before_tool(tool_index)
                 elements.append(_render_tool_call_line(tc, tr))
                 content = tr.get("content", "") if tr else ""
-                if tr and (not is_success(content) or tc.get("name") == "edit_file"):
+                if tr and (not _result_succeeded(tr) or tc.get("name") == "edit_file"):
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=10,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1077,7 +1102,7 @@ def create_streaming_display(
             if hidden:
                 for tool_index, _, _ in hidden:
                     _append_narration_before_tool(tool_index)
-                ok = sum(1 for _, _, tr in hidden if is_success(tr.get("content", "")))
+                ok = sum(1 for _, _, tr in hidden if _result_succeeded(tr))
                 fail = len(hidden) - ok
                 summary = Text()
                 summary.append(f"\u2713 {ok} completed", style="dim green")
@@ -1120,12 +1145,13 @@ def create_streaming_display(
                     continue
 
                 content = tr.get("content", "")
-                if not is_success(content) or tc.get("name") == "edit_file":
+                if not _result_succeeded(tr) or tc.get("name") == "edit_file":
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=5,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1312,6 +1338,7 @@ def display_final_results(
                     content,
                     max_lines=10,
                     tool_args=tc.get("args"),
+                    success=_result_succeeded(tr),
                 )
                 for elem in result_elements:
                     console.print(elem)
@@ -2276,8 +2303,10 @@ async def _astream_to_console(
             continue
         tr = _tool_result_for_call(state.tool_results, tc)
         console.print(_render_tool_call_line(tc, tr))
-        if tr and not is_success(tr.get("content", "")):
-            for elem in format_tool_result_compact(tr["name"], tr.get("content", "")):
+        if tr and not _result_succeeded(tr):
+            for elem in format_tool_result_compact(
+                tr["name"], tr.get("content", ""), success=False
+            ):
                 console.print(elem)
 
     # 2) Task List panel — middle

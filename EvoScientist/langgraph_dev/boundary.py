@@ -58,10 +58,17 @@ def is_loopback_host(host: str) -> bool:
     return host in LOOPBACK_NAMES
 
 
+_WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::"})
+
+
+def is_wildcard_host(host: str) -> bool:
+    """Return True if binding ``host`` listens on every interface."""
+    return host.strip().strip("[]") in _WILDCARD_HOSTS
+
+
 BOUNDARY_ENV = "EVOSCIENTIST_BROWSER_BOUNDARY"
 # What the WebUI reads from responses; a ``cors`` block replaces these defaults.
 _EXPOSE_HEADERS = ["x-pagination-total", "x-pagination-next", "content-location"]
-_WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::"})
 # A quick-tunnel name; ``api`` is cloudflared's own API, which langgraph-api
 # takes for the tunnel URL when the tunnel cannot be created.
 _QUICK_TUNNEL = re.compile(r"[a-z0-9-]+\.trycloudflare\.com")
@@ -154,7 +161,7 @@ def _trusted_names(bind_host: str) -> list[str]:
     bind = bind_host.strip().strip("[]").lower()
     if bind in names:
         return names
-    if bind not in _WILDCARD_HOSTS:
+    if not is_wildcard_host(bind_host):
         # The name our own clients use for a server bound to one interface.
         names.append(bind)
     import psutil

@@ -189,7 +189,7 @@ class TestSources:
 
 
 class TestServerRecord:
-    """What start_langgraph_dev records for the server's environment."""
+    """What ``_spawn_server`` records for the server's environment."""
 
     def test_dotenv_setting_not_passed_to_server(
         self, tmp_path, monkeypatch, runtime_paths
@@ -208,7 +208,7 @@ class TestServerRecord:
         from EvoScientist.langgraph_dev import manager
 
         with pytest.raises(PopenAbort):
-            manager.start_langgraph_dev(port=16178)
+            manager._spawn_server(port=16178)
 
         assert "EVOSCIENTIST_UI_BACKEND" not in captured["env"]
         assert "EVOSCIENTIST_UI_BACKEND" not in _server_env_origins(

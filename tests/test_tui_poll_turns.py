@@ -119,6 +119,7 @@ async def _app(monkeypatch, workspace):
 def _wire(app, workspace, runs: _Runs) -> None:
     app._dirs = SessionDirs(workspace)
     app._runtime_gateways = SimpleNamespace(graph_gateway=runs.gateway)
+    app._agent_loader.adopt(object())
     app._await_agent_ready = AsyncMock(return_value=object())
     app._history_suggester = NoHistory()
 
@@ -311,6 +312,219 @@ async def test_a_channel_turn_waits_for_a_notifier_turn_that_took_the_app_first(
             runs.finish_all()
             await _poll_until(app, lambda: _idle(app, runs))
             assert runs.peak == 1
+        finally:
+            runs.finish_all()
+
+
+async def test_ctrl_c_before_notifier_request_requeues_the_batch(
+    monkeypatch, workspace
+):
+    """Post Ctrl+C through the pump during batching, before the notifier sends."""
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0.3)
+    ready = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def load_agent():
+        entered.set()
+        await ready.wait()
+        return object()
+
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            app._await_agent_ready = AsyncMock(side_effect=load_agent)
+            tid = app._conversation_tid
+            _notification(app, "task-1")
+            app._poll_channel_queue()
+            await _until(lambda: not has_pending_notifications(tid))
+            app.call_later(app.action_request_quit)
+            await _until(lambda: entered.is_set())
+            await _until(lambda: not app._busy and app._run_task is None)
+            assert runs.started == []
+            await _until(lambda: has_pending_notifications(tid))
+
+            ready.set()
+            await _poll_until(app, lambda: runs.started == [NOTICE])
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.started == [NOTICE]
+        finally:
+            ready.set()
+            runs.finish_all()
+
+
+async def test_ctrl_c_before_notifier_request_survives_input_typed_since(
+    monkeypatch, workspace
+):
+    """A queued input turn can clear the stop flag before the done-callback."""
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0.3)
+    ready = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def load_agent():
+        entered.set()
+        await ready.wait()
+        return object()
+
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            app._await_agent_ready = AsyncMock(side_effect=load_agent)
+            tid = app._conversation_tid
+            real_drain = app._drain_queue
+            typed = []
+
+            def drain_with_typed_input() -> None:
+                if not typed:
+                    typed.append(True)
+                    app._queued_messages.append("typed")
+                real_drain()
+
+            app._drain_queue = drain_with_typed_input
+            _notification(app, "task-1")
+            app._poll_channel_queue()
+            await _until(lambda: entered.is_set())
+            app.call_later(app.action_request_quit)
+            await _until(lambda: typed)
+            ready.set()
+            await _until(lambda: runs.started == ["typed"])
+            assert has_pending_notifications(tid)
+
+            runs.finish_all()
+            await _poll_until(app, lambda: runs.started == ["typed", NOTICE])
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+        finally:
+            ready.set()
+            runs.finish_all()
+
+
+async def test_second_ctrl_c_before_notifier_request_keeps_the_batch(
+    monkeypatch, workspace
+):
+    """A second Ctrl+C during the stopped turn's cleanup ends its task cancelled."""
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    ready = asyncio.Event()
+    entered = asyncio.Event()
+    closing = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def load_agent():
+        entered.set()
+        await ready.wait()
+        return object()
+
+    async def held_close():
+        closing.set()
+        await closed.wait()
+
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            app._await_agent_ready = AsyncMock(side_effect=load_agent)
+            monkeypatch.setattr(
+                "EvoScientist.middleware.code_interpreter.aclose_code_interpreters",
+                held_close,
+            )
+            tid = app._conversation_tid
+            _notification(app, "task-1")
+            app._poll_channel_queue()
+            await _until(lambda: entered.is_set())
+            app.call_later(app.action_request_quit)
+            await _until(lambda: closing.is_set())
+            app.call_later(app.action_request_quit)
+            await _until(lambda: not app._busy and app._run_task is None)
+            await _until(lambda: has_pending_notifications(tid))
+            assert runs.started == []
+
+            closed.set()
+            ready.set()
+            await _poll_until(app, lambda: runs.started == [NOTICE])
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+        finally:
+            closed.set()
+            ready.set()
+            runs.finish_all()
+
+
+async def test_ctrl_c_after_notifier_request_does_not_replay(monkeypatch, workspace):
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            _notification(app, "task-1")
+            await _poll_until(app, lambda: runs.started == [NOTICE])
+            app.call_later(app.action_request_quit)
+            await _until(lambda: not app._busy and app._run_task is None)
+            for _ in range(10):
+                app._poll_channel_queue()
+                await asyncio.sleep(0.05)
+            assert runs.started == [NOTICE]
+            assert not has_pending_notifications(app._conversation_tid)
+        finally:
+            runs.finish_all()
+
+
+async def test_failed_notifier_agent_load_does_not_retry_each_poll(
+    monkeypatch, workspace
+):
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            app._await_agent_ready = AsyncMock(side_effect=RuntimeError("load failed"))
+            _notification(app, "task-1")
+            await _poll_until(app, lambda: app._await_agent_ready.await_count > 0)
+            await _until(lambda: not app._busy and app._run_task is None)
+            for _ in range(10):
+                app._poll_channel_queue()
+                await asyncio.sleep(0.05)
+            assert app._await_agent_ready.await_count == 1
+            assert runs.started == []
+            assert not has_pending_notifications(app._conversation_tid)
+        finally:
+            runs.finish_all()
+
+
+async def test_a_notice_waits_until_the_agent_is_loaded(monkeypatch, workspace):
+    """Started anyway, a notifier turn would restart a load that Ctrl+C cancelled."""
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    runs = _Runs()
+    runs.free = True
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            app._agent_loader.agent = None
+            _notification(app, "task-1")
+            for _ in range(10):
+                app._poll_channel_queue()
+                await asyncio.sleep(0.05)
+            assert runs.started == []
+            assert not app._busy
+            assert has_pending_notifications(app._conversation_tid)
+
+            app._agent_loader.agent = object()
+            await _poll_until(app, lambda: runs.started == [NOTICE])
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.started == [NOTICE]
         finally:
             runs.finish_all()
 

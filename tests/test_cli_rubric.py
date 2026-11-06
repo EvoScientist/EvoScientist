@@ -377,23 +377,18 @@ def test_rubric_is_refused_on_the_server_gateway(monkeypatch):
     assert "local gateway" in _plain(result.output)
 
 
-def test_runtime_fallback_keeps_the_rubric(monkeypatch):
-    """When the first renderer fails, the retry must still be a graded run."""
+def test_run_streaming_hands_the_rubric_to_the_renderer(monkeypatch):
+    """``-p --rubric`` reaches the renderer, so the run is graded."""
     from EvoScientist.cli import tui_runtime
-
-    class _FailingBackend:
-        def run_streaming(self, **_kwargs):
-            raise RuntimeError("renderer broke")
 
     seen: dict[str, object] = {}
 
-    class _FallbackBackend:
+    class _Backend:
         def run_streaming(self, **kwargs):
             seen.update(kwargs)
             return "ok"
 
-    monkeypatch.setattr(tui_runtime, "get_backend", lambda *_a, **_k: _FailingBackend())
-    monkeypatch.setattr(tui_runtime, "RichStreamingBackend", _FallbackBackend)
+    monkeypatch.setattr(tui_runtime, "get_backend", lambda *_a, **_k: _Backend())
 
     result = tui_runtime.run_streaming(
         ui_backend="tui",
