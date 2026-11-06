@@ -626,5 +626,20 @@ def test_same_folder_tells_apart_folders_differing_in_case(tmp_path, monkeypatch
 
     assert not workspace_move.same_folder(str(upper), str(lower))
     assert workspace_move.same_folder(str(upper), str(upper / "."))
-    # A folder that is gone falls back to the keys.
+
+
+def test_same_folder_without_folders_compares_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace_move.sys, "platform", "darwin")
+
     assert workspace_move.same_folder(str(tmp_path / "Gone"), str(tmp_path / "gone"))
+
+
+async def test_repeated_move_into_folder_since_removed_is_refused(moving):
+    _projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    new.root.rmdir()
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+
+    assert refused.value.code == "new_missing"

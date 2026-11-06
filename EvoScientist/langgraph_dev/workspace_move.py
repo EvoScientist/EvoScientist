@@ -539,7 +539,9 @@ def _check_folders(move: Move, *, resuming: bool) -> None:
     if move.new.key == move.old.key:
         raise MoveRefusedError("same_folder", "The two folders are the same.")
     # A rename that changes only case, on a folder that ignores case.
-    if move.old.root.exists() and not os.path.samefile(move.old.root, move.new.root):
+    if move.old.root.exists() and not same_folder(
+        str(move.old.root), str(move.new.root)
+    ):
         raise MoveRefusedError(
             "old_exists",
             f"{move.old.root} still exists, so this is a copy, not a move: add "
@@ -574,10 +576,9 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
                     # Done already: as the server started, or after a client
                     # gave up waiting. A default_workdir the config lock kept
                     # it from rewriting is tried again.
-                    warning = await asyncio.to_thread(
-                        _move_default_workdir,
-                        Move(Workspace(done_old), Workspace(done_new)),
-                    )
+                    done_move = Move(Workspace(done_old), Workspace(done_new))
+                    await asyncio.to_thread(_check_folders, done_move, resuming=True)
+                    warning = await asyncio.to_thread(_move_default_workdir, done_move)
                     return MoveReport(
                         new.key, 0, 0, [], 0, [warning] if warning else [], resumed=True
                     )
