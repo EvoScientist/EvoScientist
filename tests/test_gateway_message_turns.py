@@ -494,28 +494,35 @@ async def test_resume_reads_its_run_from_the_thread_events():
     assert _texts(events) == ["resumed: ok"]
 
 
-@pytest.mark.parametrize(
-    "replayed_value",
-    [
-        # What the SDK keeps today: it drops the server's ``data.payload``.
-        pytest.param(None, id="replay-without-value"),
-        # Were the SDK to keep it, the answered interrupt must still not be
-        # prompted again.
-        pytest.param(
-            {
+_ANSWERED_PROMPT = {
+    "method": "input.requested",
+    "params": {
+        "namespace": [],
+        "data": {
+            "interrupt_id": "interrupt-0",
+            "payload": {
                 "action_requests": [
                     {"name": "execute", "args": {"command": "echo old"}, "id": "t0"}
                 ],
                 "review_configs": _REVIEW_CONFIGS,
             },
-            id="replay-with-value",
-        ),
-    ],
+        },
+    },
+    "event_id": "0-2",
+}
+
+
+@pytest.mark.parametrize(
+    "replayed_prompt",
+    [False, True],
+    ids=["replay-without-prompt", "replay-with-prompt"],
 )
-async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_value):
+async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_prompt):
     """#738: the replayed pause already set ``stream.interrupted``, so the turn
     must end at the resumed run's own pause, not wait for a rising edge; its
-    prompt is the thread's pending interrupt, not the replayed one."""
+    prompt is the new pause's, and the replayed ``input.requested`` of the
+    interrupt just answered is not prompted again."""
+    replayed_pause = [_ANSWERED_PROMPT] if replayed_prompt else []
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[
@@ -525,9 +532,12 @@ async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_valu
             _input_requested([]),
             _lifecycle("run-1", "interrupted"),
         ],
-        interrupts=[{"interrupt_id": "interrupt-0", "value": replayed_value}],
         interrupted=True,
-        replay=[_lifecycle("run-0", "running"), _lifecycle("run-0", "interrupted")],
+        replay=[
+            _lifecycle("run-0", "running"),
+            *replayed_pause,
+            _lifecycle("run-0", "interrupted"),
+        ],
         stay_open=True,
     )
     gateway, threads = _gateway(
@@ -892,7 +902,6 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
-        interrupted=False,
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])

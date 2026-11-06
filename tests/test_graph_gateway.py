@@ -2009,9 +2009,8 @@ async def test_langgraph_server_gateway_ignores_non_root_value_messages():
 
 
 async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
-    # Pause on the new-message path: the envelope carries payload (ignored by
-    # the processor) and stream.interrupted can still lag, so the interrupt
-    # comes from thread state after paused is set.
+    # Pause on the new-message path seen only as a root ``interrupted``: no
+    # envelope carries the prompt, so it comes from thread state.
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -2021,32 +2020,11 @@ async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
                 "event_id": "synth:run-1:lc::running",
             },
             {
-                "method": "input.requested",
-                "params": {
-                    "namespace": [],
-                    "data": {
-                        "interrupt_id": "interrupt-1",
-                        "payload": {
-                            "action_requests": [
-                                {
-                                    "name": "execute",
-                                    "args": {"command": "echo hello"},
-                                    "id": "tool-1",
-                                }
-                            ],
-                            "review_configs": [
-                                {
-                                    "action_name": "execute",
-                                    "allowed_decisions": ["approve", "reject"],
-                                }
-                            ],
-                        },
-                    },
-                },
-                "event_id": "2-0",
+                "method": "lifecycle",
+                "params": {"namespace": [], "data": {"event": "interrupted"}},
+                "event_id": "synth:run-1:lc::interrupted",
             },
         ],
-        interrupted=False,
         stay_open=True,
     )
     threads = FakeLangGraphThreadsClient(
