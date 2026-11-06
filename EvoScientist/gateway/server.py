@@ -188,6 +188,10 @@ class _PauseStateReadError(RuntimeError):
     """``threads.get_state`` failed after a pause; leave the run paused."""
 
 
+class _ReplayCapError(RuntimeError):
+    """The thread SSE never went quiet within the replay cap."""
+
+
 def _resume_target(
     thread_id: str, response: object, pending: list[str]
 ) -> tuple[str, object]:
@@ -345,7 +349,7 @@ class _ThreadEvents:
                 # A wait shorter than the quiet window means the overall cap
                 # trimmed the timeout, so replay is still unfinished.
                 if skipped > 0 and timeout < quiet_seconds:
-                    raise RuntimeError(
+                    raise _ReplayCapError(
                         f"Thread history replay did not finish within {max_seconds:g}s"
                     ) from None
                 return skipped
@@ -355,7 +359,7 @@ class _ThreadEvents:
             skipped += 1
         # Hitting the cap means replay is still producing envelopes. Starting
         # the run now would miss its live events on this connection.
-        raise RuntimeError(
+        raise _ReplayCapError(
             f"Thread history replay did not finish within {max_seconds:g}s"
         )
 
@@ -1031,6 +1035,17 @@ class LangGraphServerGateway:
             )
         return await self._find_run_for_request(thread_id, request_id)
 
+    async def _thread_is_busy(self, thread_id: str) -> bool:
+        """Whether a run is in flight on the thread; ``False`` when unknown."""
+        try:
+            thread = await self.thread_store.client.threads.get(thread_id)
+        except Exception:
+            logger.warning(
+                "Could not read the status of thread %s", thread_id, exc_info=True
+            )
+            return False
+        return thread.get("status") == "busy"
+
     async def _find_run_for_request(
         self, thread_id: str, request_id: str
     ) -> str | None:
@@ -1427,13 +1442,28 @@ class LangGraphServerGateway:
             # SDK's ``interrupted`` flag, so ``subscribe`` would never end at
             # the resumed run's next pause (#738).
             paused = False
+            # Past the replay cap the queue holds a busy run's live envelopes.
+            behind_busy_run = False
             async with stream, _ThreadEvents(stream.events) as events:
                 # A thread without state has no earlier runs to replay.
                 # Skip also when the state read failed: an empty baseline
                 # would leave us draining history and risk losing live
                 # envelopes for the run we are about to start.
                 if state_values or not process_value_messages:
-                    await events.skip_replay()
+                    try:
+                        await events.skip_replay()
+                    except _ReplayCapError:
+                        # Another task of the paused run can keep the SSE
+                        # from going quiet. The answer queues behind that
+                        # run, whose live envelopes mean this connection is
+                        # normally past the replay when the answer's run
+                        # starts.
+                        if not (
+                            isinstance(request.message, Command)
+                            and await self._thread_is_busy(request.thread_id)
+                        ):
+                            raise
+                        behind_busy_run = True
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1448,7 +1478,10 @@ class LangGraphServerGateway:
                     raise RuntimeError(
                         f"Could not identify the run for thread {request.thread_id}"
                     )
-                accepting_run = True
+                # Envelopes without a run id (model tokens) belong to the run
+                # of the last tagged one: behind a busy run, wait for this
+                # run's own.
+                accepting_run = not behind_busy_run
                 # See #709
                 async for event in events:
                     raw_event = _as_raw_map(event)

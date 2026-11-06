@@ -520,6 +520,71 @@ async def test_retrying_the_same_resume_payload_resumes_again():
     assert stream.event_streams_opened == 2
 
 
+class _BusyThreadStream(FakeLangGraphThreadStream):
+    """Another task of the paused run streams model tokens, which carry no run
+    id, so the SSE never goes quiet; the answer's run starts once that run
+    ends."""
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        while not self.run.started.is_set():
+            yield _text("sibling token", "0-1")
+            await asyncio.sleep(0.005)
+        # The answer is queued: the busy run streams on, then ends.
+        for _ in range(3):
+            yield _text("sibling token", "0-1")
+        yield _lifecycle("run-0", "interrupted")
+        async for event in self._iter_events():
+            yield event
+
+
+@pytest.mark.parametrize(
+    ("message", "busy", "answered"),
+    [
+        pytest.param(
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+            True,
+            True,
+            id="resume-busy",
+        ),
+        pytest.param(
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+            False,
+            False,
+            id="resume-idle",
+        ),
+        pytest.param("hi", True, False, id="new-message-busy"),
+    ],
+)
+async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
+    message, busy, answered
+):
+    """A sibling task's envelopes keep the SSE from going quiet; a resume on a
+    busy thread is sent at the cap and queues behind that run. Anything else
+    still fails at the cap."""
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("resumed"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-1"}]
+    )
+    if busy:
+        threads.threads[0]["status"] = "busy"
+
+    if answered:
+        events = await _turn(gateway, message)
+        assert _texts(events) == ["resumed"]
+        assert len(stream.run.responds) == 1
+    else:
+        with pytest.raises(RuntimeError, match="replay did not finish"):
+            await _turn(gateway, message)
+        assert stream.run.responds == stream.run.starts == []
+
+
 # --- _ThreadEvents.skip_replay: controllable clock, no real waiting ---------
 
 
