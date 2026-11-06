@@ -81,6 +81,16 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _version_stamp(previous: object) -> str:
+    """Now to the millisecond, never ``previous``: each resubmit gets its own
+    ``updated_at``, which is the version a page's approval names."""
+    while True:
+        now = datetime.now(UTC)
+        stamp = f"{now:%Y-%m-%dT%H:%M:%S}.{now.microsecond // 1000:03d}Z"
+        if stamp != previous:
+            return stamp
+
+
 def _proposal_root(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / AUTOSKILL_PROPOSALS_DIR
 
@@ -986,7 +996,7 @@ def submit_autoskill_proposal(
         "status": "pending",
         "operation": normalized_operation,
         "created_at": created_at,
-        "updated_at": _now(),
+        "updated_at": _version_stamp(existing.get("updated_at") if existing else None),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
     }
@@ -1432,6 +1442,7 @@ def approve_skill_proposal(
     scope: str | None = None,
     approved_by: Literal["user", "auto"] = "user",
     exact: bool = False,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     """Promote one pending proposal into the tier its manifest records.
 
@@ -1440,7 +1451,8 @@ def approve_skill_proposal(
     never falls back to another tier. ``scope`` overrides the recorded tier
     explicitly, which is how a proposal written before scopes existed is
     confirmed to install into the global tier. An approval that fails leaves
-    no folder it created behind, and the manifest is written last.
+    no folder it created behind, and the manifest is written last. With
+    ``expected_updated_at``, a pending draft resubmitted since is refused.
     """
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
@@ -1457,6 +1469,17 @@ def approve_skill_proposal(
     manifest = _read_manifest(manifest_path)
     if manifest is None:
         return {"approved": False, "error": "Proposal manifest is missing or invalid"}
+    if (
+        expected_updated_at is not None
+        and manifest.get("status") == "pending"
+        and manifest.get("updated_at") != expected_updated_at
+    ):
+        return {
+            "approved": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "updated_at": manifest.get("updated_at"),
+            "error": "Proposal changed since it was read",
+        }
     try:
         target, failure = _resolve_install(
             memory_dir, proposal_dir, manifest, skills_dir=skills_dir, scope=scope

@@ -375,6 +375,34 @@ def test_auto_mode_approval_records_auto(tmp_path, monkeypatch):
     assert list_skill_proposals(memory_dir)[0].approved_by == "auto"
 
 
+def test_a_resubmit_in_the_same_millisecond_gets_a_new_updated_at(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime, timedelta
+
+    from EvoScientist.memory.autoskills import proposals as module
+
+    start = datetime(2026, 11, 6, 9, 0, 0, tzinfo=UTC)
+    ticks = iter([start, start, start + timedelta(milliseconds=1)])
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(ticks)
+
+    monkeypatch.setattr(module, "_now", lambda: "2026-11-06T09:00:00Z")
+    monkeypatch.setattr(module, "datetime", FrozenClock)
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    first = _manifest(memory_dir, "focused-validation")["updated_at"]
+    _submit_focused_validation(memory_dir, skills_dir)
+    second = _manifest(memory_dir, "focused-validation")["updated_at"]
+
+    assert first == "2026-11-06T09:00:00.000Z"
+    assert second == "2026-11-06T09:00:00.001Z"
+
+
 def test_reject_records_time(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

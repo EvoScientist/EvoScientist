@@ -328,6 +328,8 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     error = str(result.get("error") or "")
     if error.startswith("Only pending proposals"):
         return 409, {"error": "not_pending", "status": result.get("status")}
+    if error.startswith("Proposal changed since it was read"):
+        return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
     if error.startswith("scope must be"):
         return 400, {"error": "invalid_scope"}
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
@@ -338,6 +340,7 @@ def _apply(
     workspace: paths.Workspace,
     action: str,
     scope: str | None,
+    expected_updated_at: str | None,
 ) -> tuple[int, dict[str, Any]]:
     if action == "approve":
         result = approve_skill_proposal(
@@ -348,6 +351,7 @@ def _apply(
             scope=scope,
             approved_by="user",
             exact=True,
+            expected_updated_at=expected_updated_at,
         )
         if result.get("approved"):
             return 200, {key: result.get(key) for key in _APPROVED_KEYS}
@@ -389,7 +393,7 @@ def _served(workspace: paths.Workspace) -> bool:
 
 
 def _decide_locked(
-    proposal_id: str, action: str, scope: str | None
+    proposal_id: str, action: str, scope: str | None, expected_updated_at: str | None
 ) -> tuple[int, dict[str, Any]]:
     proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     if proposal is None:
@@ -400,7 +404,7 @@ def _decide_locked(
     workspace = paths.Workspace(key)
     if not _served(workspace):
         return 409, {"error": "project_not_served"}
-    return _apply(proposal, workspace, action, scope)
+    return _apply(proposal, workspace, action, scope, expected_updated_at)
 
 
 def _sendable(payload: dict[str, Any]) -> dict[str, Any]:
@@ -418,14 +422,21 @@ def decide(
     action: Literal["approve", "reject", "revert"],
     *,
     scope: object = None,
+    expected_updated_at: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Approve, reject or revert one draft of a served project."""
+    """Approve, reject or revert one draft of a served project; an approval
+    with ``expected_updated_at`` refuses a draft resubmitted since the page read it."""
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
+    if action == "approve" and not isinstance(expected_updated_at, str | None):
+        return 400, {"error": "invalid_body"}
     with _DECISIONS:
         try:
             status, payload = _decide_locked(
-                proposal_id, action, scope if isinstance(scope, str) else None
+                proposal_id,
+                action,
+                scope if isinstance(scope, str) else None,
+                expected_updated_at if action == "approve" else None,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.
