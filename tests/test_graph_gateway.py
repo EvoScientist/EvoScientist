@@ -2978,40 +2978,43 @@ _PAUSE_VALUE = {
 _RESUME_DECISIONS = {"decisions": [{"type": "approve"}]}
 
 
-def _root_pause(data_key: str) -> dict[str, Any]:
-    return {
+_ROOT_PAUSES = {
+    "input.requested": {
         "method": "input.requested",
         "params": {
             "namespace": [],
-            "data": {"interrupt_id": "interrupt-2", data_key: _PAUSE_VALUE},
+            "data": {"interrupt_id": "interrupt-2", "payload": _PAUSE_VALUE},
         },
         "event_id": "2-0",
-    }
+    },
+    "interrupted": {
+        "method": "lifecycle",
+        "params": {"namespace": [], "data": {"event": "interrupted"}},
+        "event_id": "2-0",
+    },
+}
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new-message", "resume"])
 @pytest.mark.parametrize(
-    "data_key",
+    "pause",
     [
-        # langgraph-api 0.17 sends ``payload``, which the event processor does
-        # not parse (#706): the interrupt is read after the pause, once the run is
-        # marked completed. When #706 lands, this case moves onto the in-loop path;
-        # pin the run_completed ordering with a pause the processor cannot parse
-        # (e.g. a root ``lifecycle: interrupted`` only).
-        pytest.param("payload", id="server-shape"),
-        # The ``value`` shape is emitted inside the loop, before the run is
+        # The envelope's prompt is emitted inside the loop, before the run is
         # marked completed: only the ``emitted_interrupt`` gate keeps it.
-        pytest.param("value", id="value-shape"),
+        "input.requested",
+        # A pause with no prompt in its envelope is read from state after the
+        # loop, once the run is marked completed: this case pins that ordering.
+        "interrupted",
     ],
 )
 async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
-    resume, data_key
+    resume, pause
 ):
     """A consumer that stops at the interrupt event must leave the paused run alone."""
     from langgraph.types import Command
 
-    stream = FakeLangGraphThreadStream("abc12345", events=[_root_pause(data_key)])
-    # Both server-shape cases read the pause from here.
+    stream = FakeLangGraphThreadStream("abc12345", events=[_ROOT_PAUSES[pause]])
+    # The ``interrupted`` cases read the pause from here.
     paused_at_2 = [{"id": "interrupt-2", "value": _PAUSE_VALUE}]
     state = {"values": {}, "next": ("tools",), "interrupts": paused_at_2}
     if resume:
@@ -3021,9 +3024,6 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
         async def respond_and_pause(params):
             # The resumed run pauses again on a new interrupt.
             reply = await respond(params)
-            value = _PAUSE_VALUE if data_key == "value" else None
-            stream.interrupts = [{"interrupt_id": "interrupt-2", "value": value}]
-            stream.interrupted = True
             state["interrupts"] = paused_at_2
             return reply
 

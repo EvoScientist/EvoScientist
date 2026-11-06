@@ -132,7 +132,7 @@ def _input_requested_event_from_interrupt(
                 "interrupt_id": interrupt.get("interrupt_id")
                 or interrupt.get("id")
                 or "default",
-                "value": interrupt.get("value"),
+                "payload": interrupt.get("value"),
             },
         },
     }
@@ -1277,7 +1277,10 @@ class LangGraphServerGateway:
     ) -> list[GraphEvent]:
         """The prompts of a turn that saw its own pause, read from thread state.
 
-        ``stream.interrupts`` is no source for them: a new stream replays
+        Only for a pause whose ``input.requested`` gave no prompt (e.g. one
+        seen as a root ``lifecycle: interrupted`` only): when the envelope
+        arrives, the thread state may not list the interrupt yet.
+        ``stream.interrupts`` is no source either: a new stream replays
         interrupts that were already answered, the SDK leaves their value empty
         (the server sends it as ``data.payload``), and ``stream.interrupted``
         comes from a separate SSE that can lag this one.
@@ -1505,8 +1508,8 @@ class LangGraphServerGateway:
                         )
                         yield normalized
                     # Stop at this run's root completed/failed, or at a
-                    # pause (a root input.requested or interrupted), which
-                    # is read from thread state below.
+                    # pause: its prompt, or a root input.requested or
+                    # interrupted that gave none, read from thread state below.
                     phase = _root_lifecycle_phase(event_map)
                     if emitted_interrupt or phase in {"completed", "failed"}:
                         break

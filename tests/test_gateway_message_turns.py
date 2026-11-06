@@ -170,27 +170,18 @@ def _texts(events: list[dict]) -> list[str]:
 # --- state: pause on a new thread / in a subgraph ---------------------------
 
 
-@pytest.mark.parametrize(
-    "pause",
-    [
-        pytest.param([_input_requested([])], id="root"),
-        pytest.param(
-            [_input_requested(["child:1"]), _lifecycle("run-1", "interrupted")],
-            id="subgraph",
-        ),
-    ],
-)
-async def test_pause_reads_interrupt_from_state_when_lifecycle_lags(pause):
-    # ``stream.interrupted`` comes from a separate SSE and can still be False
-    # when the pause envelope arrives; the envelope carries ``payload``, which
-    # the event processor does not parse, so the interrupt must come from state.
+@pytest.mark.parametrize("namespace", [[], ["child:1"]], ids=["root", "subgraph"])
+async def test_pause_prompt_comes_from_the_envelope_before_state_lists_it(namespace):
+    """#706: when ``input.requested`` arrives the thread state may not list
+    the interrupt yet; the prompt comes from the envelope's ``payload``, and a
+    subgraph's pause ends the turn too, with the run still open."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), *pause],
+        events=[_lifecycle("run-1", "running"), _input_requested(namespace)],
         interrupted=False,
         stay_open=True,
     )
-    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    gateway, threads = _gateway(stream, interrupts=[])
 
     events = await _turn(gateway, "hi")
 
@@ -199,7 +190,25 @@ async def test_pause_reads_interrupt_from_state_when_lifecycle_lags(pause):
         _INTERRUPT_EVENT
     ]
     assert events[-1] == {"type": "done", "content": "", "response": ""}
-    assert THREAD_ID in threads.state_gets
+    # Only the pre-run read.
+    assert threads.state_gets == [THREAD_ID]
+
+
+async def test_pause_without_an_envelope_prompt_reads_it_from_state():
+    """A pause seen only as a root ``interrupted`` gives no prompt; it is read
+    from thread state, which lists it once the run has stopped."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
+        interrupted=False,
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+
+    events = await _turn(gateway, "hi")
+
+    assert events == [_INTERRUPT_EVENT, {"type": "done", "content": "", "response": ""}]
+    assert threads.state_gets == [THREAD_ID, THREAD_ID]
 
 
 async def test_completed_run_does_not_read_state_interrupts():
@@ -434,9 +443,9 @@ async def test_resume_reads_its_run_from_the_thread_events():
 @pytest.mark.parametrize(
     "replayed_value",
     [
-        # What the SDK keeps today: the server sends ``data.payload``.
+        # What the SDK keeps today: it drops the server's ``data.payload``.
         pytest.param(None, id="replay-without-value"),
-        # Once the value is read (#706), the answered interrupt must not be
+        # Were the SDK to keep it, the answered interrupt must still not be
         # prompted again.
         pytest.param(
             {
@@ -823,11 +832,12 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     """A transient get_state error must not cancel an already paused run.
 
     The turn emits the gateway ``error`` shape (and raises) so callers do not
-    treat an empty ``done`` as a normal finish / "No response".
+    treat an empty ``done`` as a normal finish / "No response". A pause seen
+    only as ``interrupted`` gives no prompt, so it is read from state.
     """
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), _input_requested([])],
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
         interrupted=False,
         stay_open=True,
     )
@@ -884,7 +894,7 @@ async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
     read fails."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), _input_requested([])],
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[{"id": "interrupt-0"}])
