@@ -658,9 +658,10 @@ def server_error(result: ServerResult) -> LauncherError:
     if result.problem == "cancelled":
         return LauncherError("cancelled", "Launch cancelled by shutdown.")
     if result.problem == "ccproxy_failed":
-        return LauncherError(
-            "ccproxy_failed", message, fields={"log_file": str(result.log_file)}
-        )
+        ccproxy_fields: dict[str, Any] = {"log_file": str(result.log_file)}
+        if result.exit_code is not None:
+            ccproxy_fields["exit_code"] = result.exit_code
+        return LauncherError("ccproxy_failed", message, fields=ccproxy_fields)
     if result.lock_file is not None:
         fields: dict[str, Any] = {"lock_file": str(result.lock_file)}
     else:

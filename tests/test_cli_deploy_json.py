@@ -746,7 +746,10 @@ def test_backend_that_cannot_start_ccproxy_is_ccproxy_failed(h, capsys):
     assert code == 1
     assert lines[-1]["code"] == "ccproxy_failed"
     assert "ccproxy auth login" in lines[-1]["message"]
-    assert lines[-1]["detail"] == {"log_file": str(lgm.RUNTIME.log_file)}
+    assert lines[-1]["detail"] == {
+        "log_file": str(lgm.RUNTIME.log_file),
+        "exit_code": 3,
+    }
 
 
 def test_start_failure_before_launch_is_backend_start_failed_without_file(
