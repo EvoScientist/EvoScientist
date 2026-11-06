@@ -998,6 +998,9 @@ class LangGraphServerGateway:
         command's result has no run id, so the run is found by its request id.
         """
         client = self.thread_store.client
+        # The prompt can reach the client before the state lists its
+        # interrupt; an answer sent at once still finds it here because the
+        # turn first waits out the replay's quiet window (``skip_replay``).
         state = await client.threads.get_state(thread_id)
         pending = [
             str(interrupt_id)
