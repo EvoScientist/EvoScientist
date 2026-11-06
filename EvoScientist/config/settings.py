@@ -425,8 +425,8 @@ class EvoScientistConfig:
     # "cn" uses mainland China mirrors; set by `EvoSci setup --cn`.
     mirror: Literal["default", "cn"] = "default"
     log_level: str = "warning"
-    # Empty means use the provider/model default. A non-empty value is an
-    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    # Empty means each route's default (DEFAULT_REASONING_EFFORT on the main
+    # providers). A non-empty value is exported as EVOSCIENTIST_REASONING_EFFORT.
     reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
@@ -452,7 +452,6 @@ class EvoScientistConfig:
     allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
 
     # iMessage Settings
-    imessage_enabled: bool = False  # legacy compat
     imessage_allowed_senders: str = ""
 
     # Telegram Settings
@@ -583,8 +582,7 @@ class EvoScientistConfig:
     # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
     # normal usage produces linear growth, so this default is set well above
     # any realistic conversation length (~180-450 turns of dialogue) while
-    # still capping legacy bloat at upgrade time. 0 disables ongoing pruning
-    # entirely; the one-time legacy migration sweep still runs.
+    # still capping runaway growth. 0 disables pruning entirely.
     checkpoint_keep_per_thread: int = 1000
 
     # DM access control policy
@@ -909,19 +907,10 @@ def display_config_value(key: str, value: Any) -> str:
 # Config value operations
 # =============================================================================
 
-_LITERAL_ALIASES = {"rich": "cli", "textual": "tui"}
-"""Legacy ``ui_backend`` spellings written by earlier onboarding versions.
-
-Kept in step with ``_LEGACY_BACKEND_MAP`` in ``cli/tui_runtime.py``; config is a
-foundational module, so the map is duplicated here rather than importing across
-the config -> cli boundary.
-"""
-
 
 def _match_literal(value: Any, allowed: tuple[Any, ...]) -> str | None:
-    """Case-insensitive Literal match that also accepts legacy aliases."""
+    """Case-insensitive Literal match."""
     text = str(value).strip().lower()
-    text = _LITERAL_ALIASES.get(text, text)
     return text if text in allowed else None
 
 
@@ -1142,6 +1131,12 @@ def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
             raise ValueError("is a file, not a folder")
         if not path.exists():
             warning = "the folder does not exist yet; it is created at start"
+    if key == "reasoning_effort":
+        from ..llm.registry import REASONING_LEVELS
+
+        value = value.strip().lower()
+        if value and value not in REASONING_LEVELS:
+            raise ValueError(f"expected one of {', '.join(REASONING_LEVELS)}, or empty")
     return _plain_config_value(value), warning
 
 
@@ -1412,7 +1407,7 @@ def is_client_only(field: str) -> bool:
 # the workspace are not. Every agent takes its keys and settings from
 # config.yaml and the environment (the credentials are process-wide; one
 # server serves every project), so any other key in a ``.env`` is ignored, and
-# ``start_langgraph_dev`` passes the server none of what a ``.env`` set.
+# ``manager._spawn_server`` passes the server none of what a ``.env`` set.
 DOTENV_FIELDS = frozenset(
     {
         "default_mode",

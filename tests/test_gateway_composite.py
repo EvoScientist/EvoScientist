@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -453,6 +454,15 @@ async def test_delete_server_error_is_non_fatal():
     assert await _composite(read, execute).delete_thread(UUID) is True
 
 
+async def test_delete_server_error_after_a_failed_local_delete(caplog):
+    read = RecordingGateway("r", delete_result=False)
+    execute = RecordingGateway("e", delete_result=True)
+    execute.delete_raises = True
+    with caplog.at_level(logging.WARNING):
+        assert await _composite(read, execute).delete_thread(UUID) is False
+    assert "local delete failed" in caplog.text
+
+
 def test_execute_gateway_exposes_execution_side():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
@@ -531,7 +541,7 @@ def test_gateways_for_config_server_backend_falls_back_when_dev_unavailable(
 ):
     """Server backend + no live dev server -> in-process gateway, not a dead URL.
 
-    ``ensure_langgraph_dev`` soft-fails (leaves the availability flag False) when
+    ``ensure_server`` soft-fails (leaves the availability flag False) when
     the port is held or the subprocess dies; the factory must degrade to local
     rather than build the composite against an unreachable server.
     """

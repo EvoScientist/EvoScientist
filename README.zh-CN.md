@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -147,6 +147,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 ## 🔥 动态
 
+- **[2026 年 11 月 3 日]** 🖥️ **EvoScientist 桌面应用** Windows 版发布！[**下载**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe) 👈
 - **[2026 年 6 月 3 日]** 在 [ResearchClawBench](https://github.com/InternScience/ResearchClawBench)（Agent 模式）中，🥈 总体排名第 2 —— 同时 🥇 在基于 `GPT-5.4` 的智能体中排名第 1！[**排行榜**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[2026 年 4 月 18 日]** 🥇 提交时在 [DeepResearch Bench](https://deepresearch-bench.github.io/) 排名第一！[**排行榜**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
 - **[2026 年 4 月 13 日]** 🥇 再度登顶！提交时在 [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 重回第一！[**排行榜**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
@@ -160,6 +161,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 11 月 3 日]** **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** — WebUI 与桌面应用可在任意项目中共用同一个后台服务器（WebUI 0.5）；Windows 上被服务器停止打断的运行会在下次启动时重新运行；在服务器上取消运行会停止它启动的 shell 命令；工具报错更清晰；修复恢复定时任务、后台进程查询和 `EvoSci deploy --tunnel` 的问题；移除 v0.3.8 之前数据的兼容代码。
 - **[2026 年 10 月 31 日]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — 所有项目共用一个后台服务（用 `EvoSci server stop` 停止）；新增模型：GPT-6.1 Terra（OpenAI 与 OpenRouter）；项目 `.env` 只保存 `EvoSci` 命令自身的设置；安装更稳健、shell 沙箱更严格、`EvoSci update` 更安全；macOS 只支持 Apple 芯片；修复 memory worker、serve 后续轮次和独立渠道等问题。
 - **[2026 年 10 月 24 日]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — 桌面应用铺垫：`EvoSci deploy --json` 与供 WebUI 使用的设置 API；新增模型：Kimi K3.1 Pro（Moonshot 与 OpenRouter）、MiniMax M3.1 Flash（MiniMax 与 OpenRouter），Kimi 与 MiniMax 列表分别精简为 K3.1 Pro / K3 与 M3.1 Flash / M3；路由类提供商只使用各自的 API key；memory worker 写入有上限；工具筛选始终保留内置工具；修复重启后定时任务失效、Windows 输出、退出卡住、独立渠道退出和 MCP 服务器无响应等问题；deepagents 0.7.32。
 - **[2026 年 10 月 17 日]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — macOS、Windows、Linux 一行命令安装，`EvoSci update` 可在版本之间切换；验收标准与目标：`--rubric`、`/rubric`、`/goal` 按你设定的标准检查工作结果；主动性：`EvoSci serve` 会在频道对话里主动跟进（`/proactive`）；可直接用 ChatGPT 账号登录；后端只响应可信页面的浏览器请求；模型调用遇到临时故障会在等待时限内重试；新增模型：Claude Haiku 5.5（Anthropic）、Gemini 4 Argon、Muse Wonder、Muse Spark Open（OpenRouter），Claude 列表精简为当前的四个模型，默认模型改为 Claude Sonnet 5.5；Windows 下频道附件和 `@file` 提及的文件可直接用文件工具打开；deepagents 0.7.28。
@@ -213,12 +215,30 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 - [🔌 MCP 集成](#-mcp-集成)
 - [📱 渠道接入](#-渠道接入)
 - [📚 致谢](#-致谢)
-- [🎯 路线图](#-ᯓ-路线图)
 - [🌍 项目角色](#-项目角色)
 - [🤝 贡献](#-贡献)
 - [📝 引用](#-引用)
 
 ## 📦 安装
+
+### 桌面应用
+
+下载适合你平台的版本：
+
+<p align="center">
+<a href="https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-dark.svg">
+  <img alt="下载 Windows 版" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg" width="220" height="44">
+</picture></a>&nbsp;<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-dark.svg">
+  <img alt="macOS 即将推出" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg" width="220" height="44">
+</picture>
+</p>
+
+> [!NOTE]
+> 安装包暂未签名：Windows SmartScreen 可能会要求确认（点「更多信息」→「仍要运行」）。
 
 ### 快速安装
 
@@ -479,7 +499,7 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 所有智能体都从 `config.yaml` 或环境变量中读取密钥。项目目录中的 `.env` 只包含在该目录启动的 `EvoSci` 命令自身的设置，例如 `EVOSCIENTIST_DEFAULT_MODE` 或 `EVOSCIENTIST_UI_BACKEND`；其中凡是 EvoScientist 读取的密钥或其他设置，都会被 `EvoSci` 忽略并给出警告。其中的其他变量（例如 `HF_TOKEN`）同样会被忽略：请在启动 EvoSci 之前在 shell 中 export。
 
-后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它（WebUI 和桌面应用打开的就是这个项目）；修改环境后，运行 `EvoSci service stop` 再重新启动。
+后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci service stop` 再重新启动。
 
 </details>
 
@@ -523,7 +543,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；�
 <details>
 <summary>Desktop WebUI</summary>
 
-将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci service stop`；`EvoSci --ui webui` 只能打开启动该服务器的项目，要打开其他项目请先停止它：
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci service stop`；WebUI 会显示在该服务器上注册的所有项目：
 
 ```bash
 EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用
@@ -550,6 +570,8 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端�
 > **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上。前端端口 4716 虽然只在 WebUI 模式下存在，但同样不是无害的：它的 API 可以读写、上传工作区文件并安装 skill，因此同样会打印横幅、同样只应在可信网络放开。
 >
 > 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
+>
+> **在多人共用的机器上，回环地址并不私密。** 它只能让服务不暴露到网络上，挡不住本机的其他账户：本机上的任何程序都能访问 6174 和 4716 端口，而后端信任它们。EvoScientist 假定一台机器只有一个用户。在共享服务器上，其他账户可以使用你的后端、以你的身份运行 agent 并读取你的项目，因此请使用你自己独占的机器、虚拟机或容器。
 
 **来自其他来源的页面。** 在所有模式下（包括 `EvoSci deploy`），后端只响应本机页面（任意端口）的浏览器请求；后端监听网络时，也响应本机自身地址上的页面。其他页面会收到 `403`，浏览器里显示为 CORS 或网络错误，后端日志会记下被拒的来源；使用 `--tunnel` 时，调用公网地址的页面也在此列。要让其他页面（例如 LangSmith Studio）使用后端，请加入它的来源并重启后端（`EvoSci server stop`；下一个会话会重新启动它）：
 
@@ -736,26 +758,6 @@ channel_enabled: "telegram,slack,feishu,qq"
 - [**jiuwenswarm**](https://github.com/openJiuwen-ai/jiuwenswarm) — 一个协调智能体峰群处理复杂任务的框架。
 
 感谢以上项目作者对开源社区的宝贵贡献。
-
-<p align="right"><a href="#top">🔝回到顶部</a></p>
-
-## 🎯 ᯓ➤ 路线图
-
-即将推出：
-- [x] 🖥️ 全屏 TUI 和经典 CLI 双界面
-- [x] 📻 EvoMemory v1.0 已上线
-- [x] ⚒️ 200+ 预置技能已内置
-- [x] 🧩 内置研究全流程技能已上线
-- [x] 👋 Human-in-the-loop 操作审批
-- [x] 🦾 智能体主动向人类澄清确认
-- [x] 📑 技术报告已发布
-- [x] 🔐 OAuth 登录（CLI 编程智能体订阅用户）
-- [x] 📺 带工作区的 Web 应用界面（beta）
-- [x] ⏰ 定时任务（cron 风格，通过 /schedule）
-- [ ] 📹 Demo 与教程正在制作中
-- [ ] 📊 基准测试套件即将推出
-
-敬请期待——更多功能正在路上！
 
 <p align="right"><a href="#top">🔝回到顶部</a></p>
 

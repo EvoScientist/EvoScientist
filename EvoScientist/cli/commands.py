@@ -34,7 +34,6 @@ from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_contex
 from ..paths import (
     SessionDirs,
     Workspace,
-    command_arg,
     ensure_dirs,
     start_workspace_path,
 )
@@ -310,8 +309,8 @@ def onboard(
 
 
 def _offer_server_start() -> None:
-    """After onboarding: offer to start the background agent service from
-    ``default_workdir``. A running one keeps the settings it started with;
+    """After onboarding: offer to start the background agent service, which
+    registers ``default_workdir``. A running one keeps the settings it started with;
     say how to apply the new ones."""
     import questionary
 
@@ -322,17 +321,19 @@ def _offer_server_start() -> None:
 
     config = get_effective_config()
     port, host = manager.configured_address(config)
-    if manager.is_langgraph_dev_running(port=port, host=host):
-        sidecar = manager._read_workspace_sidecar()
-        if manager.is_lasting(sidecar):
-            # From the project it was started from, which the WebUI opens.
-            recorded = sidecar.get("workspace")
-            workspace = escape(command_arg(recorded) if recorded else "<project>")
+    record = manager.read_record(older=True)
+    if record is not None or manager.is_langgraph_dev_running(port=port, host=host):
+        if manager.is_lasting(record):
+            # ``EvoSci service start`` registers ``default_workdir``.
+            start_again = (
+                "then [bold]EvoSci service start[/bold]"
+                if config.default_workdir
+                else "and it starts again once an EvoSci session needs it"
+            )
             console.print(
                 "[dim]The background agent service runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "
-                "service stop[/bold], then [bold]EvoSci service start "
-                f"--workdir {workspace}[/bold] (this ends its running "
+                f"service stop[/bold], {start_again} (this ends its running "
                 "background work).[/dim]"
             )
         else:
@@ -343,9 +344,8 @@ def _offer_server_start() -> None:
             )
         return
     if not config.default_workdir:
-        # Started from the folder onboarding ran in (often the home folder),
-        # it would pin the WebUI and the desktop app to that folder's project;
-        # the first session in a project starts it instead.
+        # A start here would register this folder (often the home folder) as
+        # a project; the first session in a project starts it instead.
         console.print(
             "[dim]The background agent service starts with your next EvoSci "
             "session in a project, and keeps running for every session until "
@@ -625,7 +625,7 @@ def configure_provider(
 
 @configure_app.command("model")
 def configure_model():
-    """Re-run model selection (and reasoning effort for OpenRouter and OpenAI)."""
+    """Re-run model selection (and reasoning effort where the provider takes one)."""
     _configure_section("model")
 
 
@@ -814,7 +814,7 @@ def _ensure_async_subagent_server(
     user-visible status message and the refusal handling stay in one place.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded to
-    ``ensure_langgraph_dev`` so whether a server is needed follows the
+    ``ensure_server`` so whether a server is needed follows the
     surface's choice rather than re-reading the global flag. ``None`` keeps the
     global-read behavior.
 
@@ -822,7 +822,7 @@ def _ensure_async_subagent_server(
     cannot be used for *dirs* (``ServerUnusableError``): the server is from
     an older EvoScientist, or the project's folder is gone.
     """
-    from ..langgraph_dev.manager import ensure_langgraph_dev
+    from ..langgraph_dev.manager import ensure_server
     from ..langgraph_dev.registration import ServerUnusableError
 
     try:
@@ -830,11 +830,11 @@ def _ensure_async_subagent_server(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            served = ensure_langgraph_dev(
+            served = ensure_server(
                 config,
                 workspace_dir=dirs.workspace.root,
                 backend=backend,
-            )
+            ).served
     except ServerUnusableError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         _remove_unused_run_dir(dirs.run_dir)
@@ -846,6 +846,8 @@ def _ensure_async_subagent_server(
         console.print(
             f"[yellow]{escape(_lg_manager.SERVER_UNAVAILABLE_MESSAGE)}[/yellow]"
         )
+        if _lg_manager.SERVER_UNAVAILABLE_REASON is not None:
+            console.print(f"[dim]{escape(_lg_manager.SERVER_UNAVAILABLE_REASON)}[/dim]")
     _print_server_notices()
 
 
@@ -865,9 +867,12 @@ def print_exposure_warnings(exposure: Any, *, to: Any = None) -> None:
 
 def _print_server_notices() -> None:
     """What the user should know about the server a start found or started:
-    drift since its launch, and a public bind or tunnel."""
+    an older release's server, drift since its launch, and a public bind or
+    tunnel."""
     from ..langgraph_dev import manager as _lg_manager
 
+    if _lg_manager.OLDER_SERVER is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.OLDER_SERVER)}[/yellow]")
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
         console.print(f"[yellow]⚠ {escape(_lg_manager.CONFIG_DRIFT_MESSAGE)}[/yellow]")
     if _lg_manager.AGENT_SHELL_DRIFT is not None:
@@ -1024,7 +1029,7 @@ async def _register_project(
     background work does not serve the project (it did not start, or the
     registration failed).
 
-    ``ensure_langgraph_dev`` is intentionally always called: EvoMemory
+    ``ensure_server`` is intentionally always called: EvoMemory
     background workers require the server even when async subagents are disabled.
     ServerUnusableError is left for callers to handle according to their UI
     flow.
@@ -1035,16 +1040,16 @@ async def _register_project(
     """
     import asyncio
 
-    from ..langgraph_dev.manager import ensure_langgraph_dev
+    from ..langgraph_dev.manager import ensure_server
 
     with console.status(_RESUME_SYNC_STATUS, spinner="dots"):
-        served = await asyncio.to_thread(
-            ensure_langgraph_dev,
+        result = await asyncio.to_thread(
+            ensure_server,
             config,
             workspace_dir=dirs.workspace.root,
             backend=backend,
         )
-    return served
+    return result.served
 
 
 async def _register_or_keep_session(
@@ -3332,7 +3337,7 @@ def _main_callback(
 
     # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
     # langgraph server (full MCP + async) + the locally installed
-    # @evoscientist/webui front-end in THIS terminal, then block. Reuses start_langgraph_dev
+    # @evoscientist/webui front-end in THIS terminal, then block. Reuses ensure_server
     # but leaves `EvoSci deploy` untouched (it stays a clean server for external
     # UIs / SDK clients).
     #

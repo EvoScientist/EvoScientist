@@ -1,7 +1,7 @@
 """Tests for ``EvoSci deploy --json`` (``EvoScientist.deploy.json_mode``).
 
-``start_langgraph_dev``, the health check and the port probes are faked; the
-backend decision (``_resolve_backend``) runs for real on top of them.
+The server's spawn, its record, the health check and the port probes are
+faked; ``ensure_server`` runs for real on top of them.
 """
 
 from __future__ import annotations
@@ -75,11 +75,14 @@ class Harness:
         # The port once this run's backend started: True, False or a callable.
         self.listening: Any = True
         self.running = True
-        self.sidecar: dict[str, Any] | None = None
-        self.pid_serves = True
+        # This data folder's running server, as its record names it.
+        self.record: Any = None
+        # Whose server answers on the port without a record.
+        self.whose = "own"
         self.tunnel_url: str | None = None
         # What a reused backend answers the registration.
         self.exposure = registration.ServerExposure()
+        self.registered: list[Workspace] = []
         self.job: Any = None
         # "eof": a pipe closed right after ``ready``; "eof-now": already
         # closed; "devnull"; or a file object.
@@ -94,20 +97,26 @@ class Harness:
         monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
         monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "config" / "evoscientist")
 
+        from EvoScientist.langgraph_dev import server_home
+
         monkeypatch.setattr(lgm, "_is_port_occupied", self._occupied)
         monkeypatch.setattr(lgm, "is_langgraph_dev_running", self._running)
-        monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: self.sidecar)
-        monkeypatch.setattr(lgm, "_pid_serves_port", lambda *_a, **_k: self.pid_serves)
+        monkeypatch.setattr(lgm, "read_record", lambda **_k: self.record)
+        monkeypatch.setattr(lgm, "ask", self._ask)
+        monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.FREE)
         monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp-now")
-        monkeypatch.setattr(lgm, "start_langgraph_dev", self._start)
+        monkeypatch.setattr(lgm, "_install_node_for_mcp", lambda waits: None)
+        # Another program on the port keeps it from being bound.
+        monkeypatch.setattr(
+            lgm, "_wait_for_port_bindable", lambda *a, **k: not self.occupied
+        )
+        monkeypatch.setattr(lgm, "_spawn_server", self._start)
         monkeypatch.setattr(lgm, "stop_langgraph_dev", self._stop)
         monkeypatch.setattr(lgm, "read_tunnel_url", lambda *a, **k: self.tunnel_url)
+        monkeypatch.setattr(lgm, "_POLL_INTERVAL", 0.001)
+        monkeypatch.setattr(lgm, "_START_BUDGET", 0.3)
         monkeypatch.setattr(registration, "register_folder", self._register)
         monkeypatch.setattr(lgm, "_PROCESS", None)
-        # The pid file, sidecar, log and start lock under tmp_path.
-        monkeypatch.setattr(
-            lgm, "RUNTIME", lgm.LanggraphRuntimePaths.for_directory(tmp_path / "rt")
-        )
 
         monkeypatch.setattr(agent_shell, "setup_hint", lambda: None)
         monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: None)
@@ -136,7 +145,16 @@ class Harness:
 
     # -- fakes ------------------------------------------------------------ #
     def _running(self, *_a, **_k):
+        if self.started is None and self.record is None and not self.occupied:
+            return False
         return self.running() if callable(self.running) else self.running
+
+    def _ask(self, _url):
+        if self.started is None and self.record is None and not self.occupied:
+            return "refused"
+        if self._running():
+            return self.whose
+        return "foreign" if self.started is None and self.occupied else "silent"
 
     def _occupied(self, *_a, **_k):
         if self.started is None:
@@ -144,16 +162,37 @@ class Harness:
         return self.listening() if callable(self.listening) else self.listening
 
     def _start(self, **kwargs):
+        """The spawn: the server joins the job and records itself."""
+        from EvoScientist.langgraph_dev import manager as lgm
+
         self.started = kwargs
         self.log.append("backend start")
+        lgm._PROCESS = self.proc
+        if kwargs.get("job") is not None:
+            kwargs["job"].started(self.proc)
+        self.record = lgm.ServerRecord(
+            pid=self.proc.pid,
+            port=kwargs["port"],
+            host=kwargs["host"],
+            lasting=kwargs["lasting"],
+            fields={
+                "data_dir": str(paths.DATA_DIR),
+                "config_dir": str(paths.CONFIG_DIR),
+            },
+        )
         return self.proc
 
     def _stop(self, proc=None, *, clean=True):
+        from EvoScientist.langgraph_dev import manager as lgm
+
         self.log.append(("backend stop", proc))
         self.clean_stops.append(clean)
+        if proc is lgm._PROCESS:
+            lgm._PROCESS = None
 
-    def _register(self, _workspace, *, url):
+    def _register(self, workspace, *, url):
         """The backend's answer: one this run started reports its options."""
+        self.registered.append(workspace)
         if self.started is None:
             return self.exposure
         return registration.ServerExposure.of(
@@ -278,7 +317,7 @@ def test_stdout_carries_only_json(h, capsys, monkeypatch):
         console.print("a Rich line")
         return h._start(**kwargs)
 
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _start)
+    monkeypatch.setattr(lgm, "_spawn_server", _start)
     monkeypatch.setattr(
         "EvoScientist.agent_shell.setup_hint", lambda: "Run `EvoSci setup`."
     )
@@ -308,7 +347,7 @@ def test_start_gets_the_resolved_options(h, capsys):
     assert h.started["port"] == 7001
     assert h.started["host"] == "0.0.0.0"
     assert h.started["allowed_origins"] == "https://smith.langchain.com"
-    assert str(h.started["workspace_dir"]) == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started["job"] is None  # no job off Windows
 
 
@@ -357,6 +396,28 @@ def test_tunnel_without_url_reports_null(h, capsys):
     assert _by_event(lines, "ready")["public_url"] is None
 
 
+def test_tunnel_failure_reports_null_and_the_reason(h, capsys, monkeypatch):
+    """cloudflared could not create the tunnel: ``ready`` follows the first
+    read, with no URL and cloudflared's reason among the warnings."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    reads: list[float] = []
+
+    def _read(timeout=35.0, **_k):
+        reads.append(timeout)
+        raise lgm.TunnelFailedError("failed to request quick Tunnel: i/o timeout")
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _read)
+    _, lines = h.run(capsys, tunnel=True)
+    ready = _by_event(lines, "ready")
+    assert ready["public_url"] is None
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in ready["warnings"]
+    )
+    assert reads == [json_mode._TICK]
+
+
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5"])
 def test_public_bind_warns_in_ready(h, capsys, exposed):
     _, lines = h.run(capsys, host=exposed)
@@ -391,6 +452,9 @@ class _FakeJob:
     def adopt(self, process):
         self.log.append(("job adopt", process))
 
+    def started(self, process):
+        self.log.append(("job started", process))
+
     def close(self):
         self.log.append("job close")
 
@@ -418,6 +482,7 @@ def test_job_is_closed_only_after_the_backend_stopped(h, capsys):
     h.job = _FakeJob(h.log)
     h.run(capsys)
     assert h.started["job"] is h.job
+    assert h.log.index("backend start") < h.log.index(("job started", h.proc))
     assert h.log.index(("backend stop", h.proc)) < h.log.index("job close")
 
 
@@ -457,7 +522,7 @@ def test_job_is_closed_after_a_failed_start(h, capsys):
         raise RuntimeError("boom")
 
     h.job = _FakeJob(h.log)
-    h.mp.setattr("EvoScientist.langgraph_dev.manager.start_langgraph_dev", _fail)
+    h.mp.setattr("EvoScientist.langgraph_dev.manager._spawn_server", _fail)
     code, _ = h.run(capsys)
     assert code == 1
     assert "job close" in h.log
@@ -466,9 +531,14 @@ def test_job_is_closed_after_a_failed_start(h, capsys):
 # --------------------------------------------------------------------------- #
 # Attached backend
 # --------------------------------------------------------------------------- #
-def _attach(h, **record):
+def _attach(h, *, port=6174, lasting=True, **fields):
+    """This data folder's server runs, recorded with *fields*."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
     h.occupied = True
-    h.sidecar = {"workspace": h.workspace, "pid": 1, **record}
+    h.record = lgm.ServerRecord(
+        pid=1, port=port, host="127.0.0.1", lasting=lasting, fields=fields
+    )
 
 
 def test_attached_run_reports_the_running_backend_and_leaves_it(h, capsys):
@@ -496,8 +566,18 @@ def test_attached_run_starts_no_ccproxy(h, capsys):
     assert "ccproxy start" not in h.log
 
 
+def test_attached_run_makes_no_job(h, capsys, monkeypatch):
+    from EvoScientist.deploy import backend_job
+
+    made: list = []
+    monkeypatch.setattr(backend_job, "backend_job", lambda: made.append(1))
+    _attach(h)
+    h.run(capsys)
+    assert made == []
+
+
 def test_attached_record_without_folders_falls_back_to_own(h, capsys):
-    """A backend started by an older release recorded no folders."""
+    """A backend an older release started may have recorded no folders."""
     _attach(h)
     _, lines = h.run(capsys)
     ready = _by_event(lines, "ready")
@@ -505,10 +585,8 @@ def test_attached_record_without_folders_falls_back_to_own(h, capsys):
     assert ready["config_dir"] == str(h.tmp_path / "config" / "evoscientist")
 
 
-def test_attached_legacy_stripped_backend_gets_the_drift_warning(h, capsys):
-    """A record from before C15 (``deploy_mode: false``, another version) is
-    attached to, with the version-drift warning."""
-    _attach(h, deploy_mode=False, config_fingerprint="fp-old")
+def test_attached_backend_of_another_version_gets_drift_warning(h, capsys):
+    _attach(h, config_fingerprint="fp-old")
     code, lines = h.run(capsys)
     assert code == 0
     ready = _by_event(lines, "ready")
@@ -603,32 +681,65 @@ def test_foreign_process_is_port_conflict(h, capsys):
     assert h.started is None
 
 
-def test_server_without_a_record_is_port_conflict(h, capsys):
+def test_unrecorded_server_of_this_data_folder_is_attached(h, capsys):
     h.occupied = True
-    h.sidecar = None
-    _, lines = h.run(capsys)
-    assert lines[-1]["code"] == "port_conflict"
-    assert "no ownership record" in lines[-1]["message"]
-    assert lines[-1]["detail"]["reason"] == "no_record"
+    code, lines = h.run(capsys)
+    assert code == 0
+    ready = _by_event(lines, "ready")
+    assert ready["owned"] is False
+    assert ready["data_dir"] == str(h.tmp_path / "data")
+    assert h.started is None
 
 
-def test_record_for_another_port_is_port_conflict(h, capsys):
-    _attach(h)
-    h.pid_serves = False
-    _, lines = h.run(capsys)
-    assert lines[-1]["code"] == "port_conflict"
-    assert lines[-1]["detail"]["reason"] == "record_mismatch"
-
-
-def test_backend_started_from_another_project_is_workspace_conflict(h, capsys):
-    """The app gets the backend's default project from calls that name none."""
+@pytest.mark.parametrize(
+    ("whose", "reason"),
+    [("other", "other_data_folder"), ("older", "older_server")],
+)
+def test_another_servers_backend_is_port_conflict(h, capsys, whose, reason):
     h.occupied = True
-    h.sidecar = {"workspace": str(h.tmp_path / "other"), "pid": 1}
+    h.whose = whose
     code, lines = h.run(capsys)
     assert code == 1
-    assert lines[-1]["code"] == "workspace_conflict"
-    assert lines[-1]["detail"]["workspace"] == str(h.tmp_path / "other")
+    assert lines[-1]["code"] == "port_conflict"
+    assert lines[-1]["detail"]["reason"] == reason
     assert "hint" in lines[-1]["detail"]
+    assert h.started is None
+
+
+def test_this_data_folders_backend_on_another_port_is_attached(h, capsys):
+    """ready has the URL it answers on, and a warning says so."""
+    _attach(h, port=7000)
+    code, lines = h.run(capsys)
+    assert code == 0
+    assert _by_event(lines, "starting")["port"] == 6174
+    ready = _by_event(lines, "ready")
+    assert ready["url"] == "http://127.0.0.1:7000"
+    assert ready["owned"] is False
+    assert any("7000" in w for w in ready["warnings"])
+    assert h.started is None
+
+
+def test_attached_backend_older_release_started_says_to_restart_it(h, capsys):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    _attach(h)
+    h.record = lgm.ServerRecord(pid=1, port=6174, host="127.0.0.1", older=True)
+    _, lines = h.run(capsys)
+    ready = _by_event(lines, "ready")
+    assert lgm.OLDER_SERVER_MESSAGE in ready["warnings"]
+    assert ready["log_file"] == str(lgm.OLDER_RUNTIME_DIR / "langgraph_dev.log")
+
+
+def test_attached_backend_registers_this_project(h, capsys):
+    """The backend serves every registered project: this run registers its
+    own."""
+    _attach(h)
+    code, lines = h.run(capsys)
+    assert code == 0
+    ready = _by_event(lines, "ready")
+    assert ready["owned"] is False
+    assert ready["workspace"] == h.workspace
+    assert h.registered == [Workspace(h.workspace)]
     assert h.started is None
 
 
@@ -672,18 +783,41 @@ def test_ccproxy_failure(h, capsys, monkeypatch):
     assert h.started is None
 
 
-def test_start_failure_is_backend_start_failed_with_the_log(h, capsys, monkeypatch):
+def test_start_failure_before_launch_is_backend_start_failed_without_file(
+    h, capsys, monkeypatch
+):
     from EvoScientist.langgraph_dev import manager as lgm
 
     def _fail(**_kw):
-        raise RuntimeError("langgraph dev exited immediately with code 1.")
+        raise FileNotFoundError("langgraph CLI not found.")
 
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _fail)
+    monkeypatch.setattr(lgm, "_spawn_server", _fail)
     code, lines = h.run(capsys)
     assert code == 1
     assert _events(lines) == ["starting", "error"]
     assert lines[-1]["code"] == "backend_start_failed"
-    assert lines[-1]["detail"] == {"log_file": str(lgm.RUNTIME.log_file)}
+    assert lines[-1]["detail"] == {}
+
+
+def test_backend_that_exits_while_it_starts_reports_its_code_and_log(h, capsys):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    h.proc.returncode = 1
+    start = h._start
+
+    def _exits(**kwargs):
+        proc = start(**kwargs)
+        h.record = None  # it exited before it answered
+        return proc
+
+    h.mp.setattr(lgm, "_spawn_server", _exits)
+    code, lines = h.run(capsys)
+    assert code == 1
+    assert lines[-1]["code"] == "backend_start_failed"
+    assert lines[-1]["detail"] == {
+        "log_file": str(lgm.RUNTIME.log_file),
+        "exit_code": 1,
+    }
 
 
 def test_unexpected_exception_is_internal_error_with_traceback(h, capsys, monkeypatch):
@@ -717,14 +851,20 @@ def test_internal_error_after_start_stops_the_backend_first(h, capsys, monkeypat
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", "error"))
 
 
-def test_owned_backend_dying_is_backend_exited(h, capsys):
+def test_owned_backend_dying_is_backend_exited(h, capsys, monkeypatch):
     h.stdin_kind = "devnull"
-    h.proc.returncode = 3
+    emit = json_mode._Events.__call__
+
+    def _dies_once_ready(events, event, **fields):
+        emit(events, event, **fields)
+        if event == "ready":
+            h.proc.returncode = 3
+
+    monkeypatch.setattr(json_mode._Events, "__call__", _dies_once_ready)
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "backend_exited"
     assert lines[-1]["detail"]["exit_code"] == 3
-    # The dead process's pid file and record are still cleaned up.
     assert ("backend stop", h.proc) in h.log
 
 
@@ -745,7 +885,8 @@ def test_owned_backend_that_stops_answering_keeps_running(h, capsys):
     """A stalled owned backend keeps its port: it is not reported as exited,
     and not stopped while the run waits."""
     h.stdin_kind = "devnull"
-    h.running = False  # /ok never answers
+    answers = iter([True])  # /ok answers the start, then never again
+    h.running = lambda: next(answers, False)
     h.listening = _then_interrupt([True] * 6)
     code, lines = h.run(capsys)
     assert code == 0
@@ -759,6 +900,7 @@ def test_owned_backend_that_stops_listening_is_backend_exited(h, capsys):
     assert code == 1
     assert lines[-1]["code"] == "backend_exited"
     assert "stopped listening" in lines[-1]["message"]
+    assert "log_file" in lines[-1]["detail"]
     assert ("backend stop", h.proc) in h.log
 
 
@@ -771,6 +913,7 @@ def test_attached_backend_that_stops_answering_is_backend_exited(h, capsys):
     assert code == 1
     assert lines[-1]["code"] == "backend_exited"
     assert "stopped answering" in lines[-1]["message"]
+    assert "log_file" in lines[-1]["detail"]
     assert not any(isinstance(e, tuple) and e[0] == "backend stop" for e in h.log)
 
 
@@ -832,10 +975,9 @@ def test_a_start_cut_after_the_spawn_stops_the_backend(
 
     def _spawned_then_cut(**kwargs):
         h._start(**kwargs)
-        monkeypatch.setattr(lgm, "_PROCESS", h.proc)
         raise raised
 
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _spawned_then_cut)
+    monkeypatch.setattr(lgm, "_spawn_server", _spawned_then_cut)
     _, lines = h.run(capsys)
     assert _events(lines) == ["starting", terminal]
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
@@ -874,7 +1016,7 @@ def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatc
         return proc
 
     reads: list[int] = []
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _start)
+    monkeypatch.setattr(lgm, "_spawn_server", _start)
     monkeypatch.setattr(lgm, "read_tunnel_url", lambda *a, **k: reads.append(1))
     code, lines = h.run(capsys, tunnel=True)
     assert code == 0
@@ -883,14 +1025,14 @@ def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatc
     assert reads == []
 
 
-def test_stdin_closed_before_the_decision_starts_nothing(h, capsys, monkeypatch):
+def test_stdin_closed_before_start_starts_nothing(h, capsys, monkeypatch):
     from EvoScientist.langgraph_dev import manager as lgm
 
-    def _occupied(*_a, **_k):
+    def _bindable(*_a, **_k):
         _wait_for_stdin_watcher()
-        return False
+        return True
 
-    monkeypatch.setattr(lgm, "_is_port_occupied", _occupied)
+    monkeypatch.setattr(lgm, "_wait_for_port_bindable", _bindable)
     h.stdin_kind = "eof-now"
     code, lines = h.run(capsys)
     assert code == 0
@@ -921,28 +1063,19 @@ def test_a_pipe_stdin_is_not_handed_on(h, capsys):
     assert stdin_is_pipe() is False
 
 
-def test_a_second_start_waits_for_the_lock(h, capsys, monkeypatch):
-    """Decision and start wait until another start released the lock."""
-    from EvoScientist.langgraph_dev import manager as lgm
-
+def test_second_start_waits_for_lock(h, capsys):
+    """The start waits until another start released the lock."""
     holder = LockHolder()
-    decided: list[bool] = []
-    occupied = lgm._is_port_occupied
-
-    def _occupied(*a, **k):
-        decided.append(holder.release.is_set())
-        return occupied(*a, **k)
-
-    monkeypatch.setattr(lgm, "_is_port_occupied", _occupied)
-    threading.Timer(0.3, holder.done).start()
+    threading.Timer(0.05, holder.done).start()
     code, _ = h.run(capsys)
     assert code == 0
-    assert decided
-    assert all(decided)
     assert h.started is not None
 
 
-def test_a_stop_while_waiting_for_the_lock_starts_nothing(h, capsys):
+def test_stop_while_waiting_for_lock_starts_nothing(h, capsys, monkeypatch):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    monkeypatch.setattr(lgm, "_START_BUDGET", 5.0)
     holder = LockHolder()
     threading.Timer(0.3, h.close_stdin).start()
     try:
@@ -957,7 +1090,6 @@ def test_a_stop_while_waiting_for_the_lock_starts_nothing(h, capsys):
 def test_a_lock_held_too_long_is_backend_start_failed(h, capsys, monkeypatch):
     from EvoScientist.langgraph_dev import manager as lgm
 
-    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
     holder = LockHolder()
     try:
         code, lines = h.run(capsys)
@@ -1101,8 +1233,8 @@ _GRANDCHILD = (
     "    except subprocess.TimeoutExpired:\n"
     "        out = 'hung'\n"
     "    print('grandchild stdin: ' + out, file=sys.stderr, flush=True)\n"
-    "    return P()\n"
-    "m.start_langgraph_dev = start\n"
+    "    return spawn(**k)\n"
+    "m._spawn_server = start\n"
 )
 
 
@@ -1118,7 +1250,8 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "from EvoScientist import agent_shell\n"
         "from EvoScientist.langgraph_dev import manager as m\n"
         "from pathlib import Path\n"
-        "m.RUNTIME = m.LanggraphRuntimePaths.for_directory(Path(sys.argv[1]).parent / 'rt')\n"
+        "from EvoScientist import paths\n"
+        "paths.SERVER_HOME = Path(sys.argv[1]).parent / 'rt'\n"
         "cfg = SimpleNamespace(default_workdir=sys.argv[1], langgraph_dev_port=6174,\n"
         "    langgraph_dev_host='127.0.0.1', anthropic_auth_mode='api_key',\n"
         "    openai_auth_mode='api_key')\n"
@@ -1128,12 +1261,19 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "class P:\n"
         "    pid = 1; returncode = None\n"
         "    def poll(self): return None\n"
-        "probes = []\n"
-        "# Free for the decision, then the started backend's port.\n"
-        "m._is_port_occupied = lambda *a, **k: bool(probes.append(1)) or len(probes) > 1\n"
-        "m.is_langgraph_dev_running = lambda *a, **k: True\n"
+        "# The started backend records itself, then answers on its port.\n"
+        "rec = []\n"
+        "m.read_record = lambda **k: rec[0] if rec else None\n"
+        "m.ask = lambda url: 'own' if rec else 'refused'\n"
+        "m._is_port_occupied = lambda *a, **k: bool(rec)\n"
+        "m.is_langgraph_dev_running = lambda *a, **k: bool(rec)\n"
+        "m._install_node_for_mcp = lambda waits: None\n"
+        "m._wait_for_port_bindable = lambda *a, **k: True\n"
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
-        "m.start_langgraph_dev = lambda **k: P()\n"
+        "def spawn(**k):\n"
+        "    rec.append(m.ServerRecord(pid=1, port=k['port'], host=k['host']))\n"
+        "    return P()\n"
+        "m._spawn_server = spawn\n"
         "m.stop_langgraph_dev = lambda p=None, **_k: print('stopped backend', file=sys.stderr)\n"
         "from EvoScientist.langgraph_dev import registration as r\n"
         "r.register_folder = lambda *a, **k: None\n"

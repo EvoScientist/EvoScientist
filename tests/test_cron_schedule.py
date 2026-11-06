@@ -59,13 +59,27 @@ def test_list_schedules_uses_server_side_filter(monkeypatch, workspace):
     }
 
 
-def test_delete_and_set_enabled(monkeypatch, workspace):
+def test_delete_schedule(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch, workspace)
     (row,) = crons.list_schedules(workspace=workspace)
     crons.delete_schedule(row, workspace=workspace)
     fake.crons.delete.assert_called_once_with("c-1")
+
+
+def test_resume_sends_the_schedule_so_a_missed_run_is_not_fired(monkeypatch, workspace):
+    crons, fake = _patch_client(monkeypatch, workspace)
+    (row,) = crons.list_schedules(workspace=workspace)
+    crons.set_enabled(row, True, workspace=workspace)
+    fake.crons.update.assert_called_once_with(
+        "c-1", enabled=True, schedule="*/10 * * * *"
+    )
+
+
+def test_pause_sends_only_enabled(monkeypatch, workspace):
+    crons, fake = _patch_client(monkeypatch, workspace)
+    (row,) = crons.list_schedules(workspace=workspace)
     crons.set_enabled(row, False, workspace=workspace)
-    assert fake.crons.update.call_args.kwargs["enabled"] is False
+    fake.crons.update.assert_called_once_with("c-1", enabled=False)
 
 
 def test_run_now_dispatches_thread_then_run(monkeypatch, workspace):
@@ -155,7 +169,6 @@ def test_scheduler_graph_id_matches_registration():
 
 def test_production_loaders_accept_utf8_content(tmp_path, monkeypatch):
     """Production config readers must handle localized UTF-8 content."""
-    import os
 
     from EvoScientist import paths
     from EvoScientist.langgraph_dev import manager
@@ -210,34 +223,13 @@ requirements = [
 
     assert uv_tool.read_receipt(venv).with_args() == ["--with", "mcp-écho>=1.0"]
 
-    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
-    monkeypatch.setattr(manager, "RUNTIME", runtime)
-    workspace = tmp_path / "workspace-écho"
-    manager._write_workspace_sidecar(workspace, 12345)
-    assert manager._read_workspace_sidecar() == {
-        "workspace": str(workspace),
-        "pid": 12345,
-        "data_dir": str(paths.DATA_DIR),
-        "config_dir": str(paths.CONFIG_DIR),
-    }
+    from tests.fakes.langgraph_dev import lock_follows_record, write_record
 
-    runtime.pid_file.write_text(str(os.getpid()), encoding="utf-8")
-
-    class _NotLanggraphProcess:
-        def __init__(self, pid):
-            self.pid = pid
-
-        def cmdline(self):
-            return ["python", "localized-test"]
-
-        def kill(self):
-            raise AssertionError("non-langgraph pid must not be killed")
-
-    monkeypatch.setattr(manager, "_list_pids_on_port", lambda port: [os.getpid()])
-    monkeypatch.setattr(manager.psutil, "Process", _NotLanggraphProcess)
-    assert manager._kill_owned_stale_process(6174) is False
-    assert not runtime.pid_file.exists()
-    assert not runtime.workspace_sidecar.exists()
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "données-écho")
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path / "données-écho" / "server")
+    lock_follows_record(monkeypatch)
+    write_record(12345)
+    assert manager.read_record().data_dir == str(tmp_path / "données-écho")
 
 
 # ---------------------------------------------------------------------------

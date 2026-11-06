@@ -6,6 +6,7 @@ import pytest
 
 from EvoScientist.cli.commands import _is_fresh_interactive_session
 from EvoScientist.cli.interactive import cmd_interactive
+from EvoScientist.langgraph_dev.manager import ServerResult
 from EvoScientist.langgraph_dev.registration import ServerExposure
 from EvoScientist.paths import SessionDirs, Workspace
 
@@ -139,9 +140,9 @@ def _run_ensure_backend(monkeypatch, config, *, exposure=None):
 
     def ensure(config, *, workspace_dir, backend=None):
         manager.SERVER_EXPOSURE = exposure
-        return exposure is not None
+        return manager.ServerResult(served=exposure is not None)
 
-    monkeypatch.setattr(manager, "ensure_langgraph_dev", ensure)
+    monkeypatch.setattr(manager, "ensure_server", ensure)
     monkeypatch.setattr(
         cmds.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else "")
     )
@@ -191,7 +192,7 @@ def test_cli_mode_warns_on_tunnel_of_shared_server(monkeypatch):
 
 
 def test_no_warning_when_project_not_registered(monkeypatch):
-    """ensure_langgraph_dev fails soft (async degrades to in-process): a
+    """ensure_server fails soft (async degrades to in-process): a
     server that does not serve the project does not expose it."""
     config = SimpleNamespace(langgraph_dev_host="0.0.0.0")
     printed = _run_ensure_backend(monkeypatch, config, exposure=None)
@@ -219,9 +220,10 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
 
     def fake_ensure(config, *, workspace_dir, backend=None):
         calls.append((config, workspace_dir, backend))
+        return ServerResult(served=True)
 
     monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
+        "EvoScientist.langgraph_dev.manager.ensure_server",
         fake_ensure,
     )
 
@@ -242,9 +244,10 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
 
     def fake_ensure(config, *, workspace_dir, backend=None):
         calls.append((config, workspace_dir, backend))
+        return ServerResult(served=True)
 
     monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
+        "EvoScientist.langgraph_dev.manager.ensure_server",
         fake_ensure,
     )
 

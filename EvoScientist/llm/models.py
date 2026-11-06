@@ -38,7 +38,9 @@ from .registry import (
     _OPENAI_ROUTED_PROVIDERS,
     _THINKING_CAPABLE_PROVIDERS,
     DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
     MODELS,
+    REASONING_LEVELS,
     UnknownModelError,
     _is_mandatory_thinking_kimi,
     _openrouter_needs_json_schema,  # noqa: F401 — re-exported
@@ -58,20 +60,50 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 # Reasoning levels on one scale. One level is stored for every model (main,
 # auxiliary, fallbacks); a route listed here accepts only a slice of the
 # scale, so a level outside it is sent as the nearest one it accepts.
-_REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_REASONING_SCALE = REASONING_LEVELS
 _ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "chatgpt": ("low", "medium", "high", "xhigh", "max"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
+
+
+def _nearest_reasoning_level(effort: str, levels: tuple[str, ...]) -> str:
+    """Return ``effort`` if ``levels`` has it, else the nearest level it has
+    (the lower one on a tie)."""
+    known = [level for level in levels if level in _REASONING_SCALE]
+    if not known or effort in levels or effort not in _REASONING_SCALE:
+        return effort
+    rank = _REASONING_SCALE.index(effort)
+    return min(
+        known,
+        key=lambda level: (
+            abs(_REASONING_SCALE.index(level) - rank),
+            _REASONING_SCALE.index(level),
+        ),
+    )
+
+
+_UNKNOWN_EFFORT_WARNED: set[str] = set()
 
 
 def _resolve_reasoning_effort(default: str, route: str) -> str:
     """Return the configured reasoning effort (or ``default``) as ``route`` takes it."""
-    effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
-    levels = _ROUTE_REASONING_LEVELS.get(route)
-    if not levels or effort in levels or effort not in _REASONING_SCALE:
-        return effort
-    rank = _REASONING_SCALE.index(effort)
-    return min(levels, key=lambda level: abs(_REASONING_SCALE.index(level) - rank))
+    configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "")
+    effort = configured.strip().lower() or default
+    levels = _ROUTE_REASONING_LEVELS.get(route, ())
+    # A value off the scale runs at the default: native Claude would not build,
+    # and other routes would have every request refused.
+    if effort not in _REASONING_SCALE:
+        if effort not in _UNKNOWN_EFFORT_WARNED:
+            _UNKNOWN_EFFORT_WARNED.add(effort)
+            warnings.warn(
+                f"Unknown reasoning_effort {effort!r}; using {default!r}. "
+                f"Set one of: {', '.join(_REASONING_SCALE)}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        effort = default
+    return _nearest_reasoning_level(effort, levels)
 
 
 # Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
@@ -341,6 +373,20 @@ def _fill_claude_structured_output(chat_model: Any, model_id: str) -> None:
         pass
 
 
+def _fit_claude_effort(chat_model: Any) -> None:
+    """Send the effort as a level the model's profile lists (Claude 4.6 has no xhigh)."""
+    profile = getattr(chat_model, "profile", None)
+    levels = (
+        profile.get("reasoning_effort_levels") if isinstance(profile, dict) else None
+    )
+    effort = getattr(chat_model, "reasoning_effort", None)
+    if not isinstance(levels, (list, tuple)) or not isinstance(effort, str):
+        return
+    fitted = _nearest_reasoning_level(effort, tuple(levels))
+    if fitted != effort:
+        chat_model.reasoning_effort = fitted
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -380,7 +426,11 @@ def _apply_auto_config(
                 kwargs.setdefault("max_tokens", 16000)
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            kwargs.setdefault("effort", "max")
+            # A caller's own level (either name) skips the configured one.
+            if "effort" not in kwargs and "reasoning_effort" not in kwargs:
+                kwargs["effort"] = _resolve_reasoning_effort(
+                    DEFAULT_REASONING_EFFORT, "anthropic"
+                )
         elif original_provider == "minimax":
             # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
             kwargs["thinking"] = {"type": "adaptive"}
@@ -389,20 +439,17 @@ def _apply_auto_config(
 
     # OpenAI (native, not third-party routed): reasoning
     if provider == "openai" and not is_third_party and "reasoning" not in kwargs:
-        _default_effort = (
-            "xhigh"
-            if (
-                "5.4" in model_id
-                or "5.5" in model_id
-                or "5.6" in model_id
-                or "codex" in model_id
-            )
-            else "high"
-        )
         _eff = _resolve_reasoning_effort(
-            _default_effort, "chatgpt" if chatgpt_signin else "openai"
+            DEFAULT_REASONING_EFFORT, "chatgpt" if chatgpt_signin else "openai"
         )
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
+
+    # DeepSeek (native): the configured level or the default, sent as is (DeepSeek
+    # maps its aliases).
+    if provider == "deepseek" and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = _resolve_reasoning_effort(
+            DEFAULT_REASONING_EFFORT, "deepseek"
+        )
 
     # Google GenAI: surface thinking traces
     if provider == "google-genai":
@@ -567,7 +614,7 @@ def get_chat_model(
         # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
         # effort "none" with HTTP 400 — that error is surfaced to the user
         # as-is; pick a real effort (low+) for those models.
-        effort = _resolve_reasoning_effort("high", "openrouter")
+        effort = _resolve_reasoning_effort(DEFAULT_REASONING_EFFORT, "openrouter")
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
         # App attribution (issue #339): identify EvoScientist to OpenRouter so
         # usage is credited to the project (app rankings, model app tabs,
@@ -746,6 +793,7 @@ def get_chat_model(
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
         _fill_claude_structured_output(chat_model, model_id)
+        _fit_claude_effort(chat_model)
 
     apply_known_context_window(chat_model)
 

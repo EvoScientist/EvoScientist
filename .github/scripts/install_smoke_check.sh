@@ -42,7 +42,9 @@ answers() {
 show_logs() {
   echo "--- EvoSci output"
   cat "$1" || true
-  for f in "$HOME/.config/evoscientist/langgraph_dev.log" "$HOME/.config/evoscientist/webui.log"; do
+  # Older releases log to ~/.config/evoscientist.
+  for f in "$DATA_DIR/server/langgraph_dev.log" "$DATA_DIR/server/webui.log" \
+    "$HOME/.config/evoscientist/langgraph_dev.log" "$HOME/.config/evoscientist/webui.log"; do
     echo "--- $f"
     tail -n 80 "$f" || true
   done

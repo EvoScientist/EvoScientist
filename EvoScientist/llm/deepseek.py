@@ -65,7 +65,12 @@ class EvoChatDeepSeek(OpenAICompatContentMixin, ChatDeepSeek):
         **kwargs: Any,
     ) -> dict[str, Any]:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        if is_deepseek_thinking_disabled(self.extra_body):
+        # Thinking is off either way, so there is no reasoning to pass back; the
+        # level is read from the payload, where a call-time value has landed.
+        if (
+            is_deepseek_thinking_disabled(self.extra_body)
+            or payload.get("reasoning_effort") == "none"
+        ):
             return payload
 
         try:

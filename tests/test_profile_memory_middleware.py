@@ -45,13 +45,6 @@ def _path_project_id(workspace) -> str:
     return memory_module.resolve_project_id(workspace)
 
 
-def _profile_texts(memories):
-    return [
-        path.read_text(encoding="utf-8")
-        for path in (memories / "profile").rglob("*.md")
-    ]
-
-
 def _sorted_tool_names(middleware) -> list[str]:
     return sorted(tool.name for tool in middleware.tools)
 
@@ -615,6 +608,31 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_profile_without_frontmatter_is_injected_as_stored_when_repair_fails(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+    middleware.modify_request(_request())  # profile files exist now
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "# User profile\n\n## Preferences\n- Likes short reports\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        memory_module.EvoMemoryMiddleware,
+        "_write_text",
+        lambda _self, _path, _content: False,
+    )
+
+    system = _system(middleware.modify_request(_request()))
+
+    assert "- Likes short reports" in system
+    assert "intro: pending" not in system
+
+
 def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -697,72 +715,6 @@ async def test_profile_memory_async_path_inlines_content_under_blockbuster(
     )
 
 
-def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: RL",
-                "",
-                "## Experiment History",
-                "### [2026-01-01] Baseline",
-                "- **Conclusion**: Worked",
-                "",
-                "## Learned Preferences",
-                "- Prefers concise plans.",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    research_taste = (memories / "profile" / "RESEARCH_TASTE.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert user_profile.count("- **Name**: Alice") == 1
-    assert user_profile.count("Prefers concise plans.") == 1
-    assert user_profile.count("### Experiment History") == 1
-    assert user_profile.count("- **Conclusion**: Worked") == 1
-    assert research_taste.count("- **Primary Domain**: RL") == 1
-    assert "Migrated from /memories/MEMORY.md" not in user_profile
-    assert "Migrated from /memories/MEMORY.md" not in research_taste
-    assert not (memories / "MEMORY.md").exists()
-
-
-def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    legacy_path.write_text("  \n\n", encoding="utf-8")
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    assert not legacy_path.exists()
-
-
 def test_profile_memory_uses_explicit_workspace_for_project_profile(tmp_path):
     memories = tmp_path / "memories"
     active_workspace = tmp_path / "active-workspace"
@@ -806,79 +758,6 @@ async def test_profile_memory_resolves_project_id_once_per_middleware(
         path == "/profile/projects/P-cached-project/PROJECT_PROFILE.md"
         for path, _template in middleware._profile_specs
     )
-
-
-def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    custom_note = "Keep this custom deployment note."
-    legacy_path.write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Custom Notes",
-                custom_note,
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    assert custom_note in user_profile
-    assert not legacy_path.exists()
-
-
-def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: (unknown)",
-                "- **Role**: (unknown)",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: (unknown)",
-                "- **Preferred Methods**: (unknown)",
-                "",
-                "## Experiment History",
-                "(No experiments yet)",
-                "",
-                "## Learned Preferences",
-                "- (none yet)",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    migrated_profile_text = "\n".join(_profile_texts(memories))
-    assert "(unknown)" not in migrated_profile_text
-    assert "Imported from legacy MEMORY.md" not in migrated_profile_text
-    assert not (memories / "MEMORY.md").exists()
 
 
 # ---- profile bootstrap: frontmatter helpers ---------------------------------

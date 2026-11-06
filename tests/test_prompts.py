@@ -14,6 +14,13 @@ from EvoScientist.prompts import (
 
 
 class TestGetSystemPrompt:
+    def test_triages_an_untracked_background_process(self):
+        # The notifier reports a process its registry lost as untracked; the
+        # agent must tell the user rather than acknowledge and wait for it.
+        result = get_system_prompt()
+        assert '`status="untracked"`' in result
+        assert "do not wait for it to finish" in result
+
     def test_returns_non_empty(self):
         result = get_system_prompt()
         assert isinstance(result, str)

@@ -259,6 +259,15 @@ class TestValidateSetting:
     def test_auxiliary_provider_may_be_empty(self):
         assert validate_setting("auxiliary_provider", "") == ("", None)
 
+    @pytest.mark.parametrize(("value", "stored"), [("High", "high"), ("", "")])
+    def test_reasoning_effort_is_a_known_level(self, value, stored):
+        assert validate_setting("reasoning_effort", value) == (stored, None)
+
+    @pytest.mark.parametrize("value", ["default", "hgih"])
+    def test_reasoning_effort_lists_the_levels(self, value):
+        with pytest.raises(ValueError, match="expected one of none, minimal, low"):
+            validate_setting("reasoning_effort", value)
+
     def test_literal_lists_the_allowed_values(self):
         with pytest.raises(ValueError, match="expected one of"):
             validate_setting("mirror", "eu")
