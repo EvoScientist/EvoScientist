@@ -113,10 +113,10 @@ def tool_result_succeeded(
 
 # deepagents' status line for a failed ``execute``, and the lines it and the sandbox
 # append after a command's output, last first; each appears at most once.
-_EXECUTE_STATUS = "[Command failed with exit code "
+EXECUTE_STATUS = "[Command failed with exit code "
 _EXECUTE_SUFFIXES = (
     "[Output was truncated",
-    _EXECUTE_STATUS,
+    EXECUTE_STATUS,
     "Exit code: ",
     "... Output truncated at ",
 )
@@ -128,6 +128,12 @@ def failure_summary(name: str, content: str) -> str:
     lines = [line.strip() for line in content.strip().splitlines() if line.strip()]
     if not lines:
         return ""
+    # A raised tool's result opens with a fixed header; its exception is on the next line.
+    first = (
+        lines[1]
+        if lines[0].startswith(TOOL_ERROR_PREFIX) and len(lines) > 1
+        else lines[0]
+    )
     if name == "code_interpreter":
         errors = list(_INTERPRETER_ERROR.finditer(content))
         if errors:
@@ -135,13 +141,13 @@ def failure_summary(name: str, content: str) -> str:
             message = html.unescape(errors[-1].group(2)).strip()
             return f"{kind}: {message.splitlines()[0]}" if message else kind
         # The error's opening tag can fall in the part a long result loses.
-        return "error" if lines[-1].endswith("</error>") else lines[0]
+        return "error" if lines[-1].endswith("</error>") else first
     # deepagents appends the real status line after the command's own output.
     status = next(
-        (line for line in reversed(lines) if line.startswith(_EXECUTE_STATUS)), None
+        (line for line in reversed(lines) if line.startswith(EXECUTE_STATUS)), None
     )
     if name != "execute" or status is None:
-        return lines[0]
+        return first
     body = list(lines)
     for suffix in _EXECUTE_SUFFIXES:
         if body and body[-1].startswith(suffix):

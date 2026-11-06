@@ -393,9 +393,22 @@ class TestFailureSummary:
         assert failure_summary("code_interpreter", cut) == "error"
 
     def test_other_tools_name_their_first_line(self):
-        error = "[TOOL ERROR] Tool 'lookup' failed:\n\nValueError: x\n\nYou may retry."
-        assert failure_summary("lookup", error) == "[TOOL ERROR] Tool 'lookup' failed:"
+        error = "Error executing tool lookup: dataset not found\ndetails"
+        assert failure_summary("lookup", error) == (
+            "Error executing tool lookup: dataset not found"
+        )
         assert failure_summary("lookup", "") == ""
+
+    def test_a_raised_tool_names_its_exception(self):
+        raised = (
+            "[TOOL ERROR] Tool 'lookup' failed with an exception:\n\n"
+            "ValueError: x\n\nYou may retry the tool call."
+        )
+        assert failure_summary("lookup", raised) == "ValueError: x"
+        assert failure_summary("execute", raised) == "ValueError: x"
+        assert failure_summary("code_interpreter", raised) == "ValueError: x"
+        header_only = "[TOOL ERROR] Tool 'lookup' failed with an exception:"
+        assert failure_summary("lookup", header_only) == header_only
 
 
 class TestCutMiddle:
