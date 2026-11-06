@@ -2276,9 +2276,10 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
         ),
     )
 
-    assert [(start["input"], start["metadata"]) for start in stream.run.starts] == [
-        ({"interrupt-1": {"decisions": [{"allowed": True}]}}, None)
+    assert [start["input"] for start in stream.run.starts] == [
+        {"interrupt-1": {"decisions": [{"allowed": True}]}}
     ]
+    assert stream.run.starts[0]["metadata"]["_evoscientist_gateway_request_id"]
     assert events == [{"type": "done", "content": "", "response": ""}]
 
 
@@ -3016,173 +3017,50 @@ async def test_server_gateway_does_not_cancel_a_run_paused_at_an_interrupt(
     assert cancel_calls == []
 
 
-@pytest.mark.parametrize(
-    ("active_after_resume", "expected_run_ids"),
-    [
-        (
-            [
-                {
-                    "run_id": "resumed-run",
-                    "status": "running",
-                    "kwargs": {
-                        "command": {
-                            "resume": {
-                                "interrupt-1": {"decisions": [{"type": "approve"}]}
-                            }
-                        }
-                    },
-                },
-                {
-                    "run_id": "concurrent-fresh-run",
-                    "status": "running",
-                    "kwargs": {"command": None},
-                },
-            ],
-            ["resumed-run"],
-        ),
-        (
-            [
-                {
-                    "run_id": "unrelated-new-run",
-                    "status": "running",
-                    "kwargs": {"command": None},
-                }
-            ],
-            [],
-        ),
-        (
-            [
-                {
-                    "run_id": "pending-resumed-run",
-                    "status": "pending",
-                    "kwargs": {
-                        "command": {
-                            "resume": {
-                                "interrupt-1": {"decisions": [{"type": "approve"}]}
-                            }
-                        }
-                    },
-                }
-            ],
-            ["pending-resumed-run"],
-        ),
-        (
-            [
-                {
-                    "run_id": "different-resume",
-                    "status": "running",
-                    "kwargs": {
-                        "command": {"resume": {"interrupt-2": {"decisions": []}}}
-                    },
-                }
-            ],
-            [],
-        ),
-        (
-            [
-                {
-                    "run_id": "different-response",
-                    "status": "running",
-                    "kwargs": {
-                        "command": {
-                            "resume": {
-                                "interrupt-1": {"decisions": [{"type": "reject"}]}
-                            }
-                        }
-                    },
-                }
-            ],
-            [],
-        ),
-        (
-            [
-                {
-                    "run_id": "matching-resume-a",
-                    "status": "running",
-                    "kwargs": {
-                        "command": {
-                            "resume": {
-                                "interrupt-1": {"decisions": [{"type": "approve"}]}
-                            }
-                        }
-                    },
-                },
-                {
-                    "run_id": "matching-resume-b",
-                    "status": "running",
-                    "kwargs": {
-                        "command": {
-                            "resume": {
-                                "interrupt-1": {"decisions": [{"type": "approve"}]}
-                            }
-                        }
-                    },
-                },
-                {"run_id": "missing-kwargs", "status": "running"},
-                {
-                    "run_id": "malformed-command",
-                    "status": "running",
-                    "kwargs": {"command": []},
-                },
-            ],
-            [],
-        ),
-    ],
-    ids=[
-        "matching-resume-among-concurrent-runs",
-        "resumed-run-finished-before-list",
-        "matching-pending-resume",
-        "different-interrupt",
-        "same-interrupt-different-response",
-        "ambiguous-matches-and-malformed-records",
-    ],
-)
-async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
-    active_after_resume: list[dict[str, Any]],
-    expected_run_ids: list[str],
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch,
+@pytest.mark.parametrize("ours_active", [True, False], ids=["active", "finished"])
+async def test_server_gateway_cancels_a_resume_without_run_id_by_its_request_id(
+    ours_active, monkeypatch
 ):
+    """A resume whose start response had no run id is found by its request id,
+    not confused with another client's identical approval."""
     from langgraph.types import Command
 
-    stream = FakeLangGraphThreadStream(
-        "abc12345",
-        events=[
-            {
-                "method": "messages",
-                "params": {
-                    "namespace": [],
-                    "data": {
-                        "event": "content-block-delta",
-                        "delta": {"type": "text-delta", "text": "partial"},
-                    },
-                },
-            },
-        ],
-    )
+    stream = FakeLangGraphThreadStream("abc12345", events=[_root_text_delta("partial")])
     start = stream.run.start
 
     async def start_without_run_id(**kwargs):
-        # A start whose response carried no run id: cleanup falls back to the
-        # resume identity.
         await start(**kwargs)
         return {}
 
     stream.run.start = start_without_run_id
     threads = FakeLangGraphThreadsClient(
-        threads=[],
         states={"abc12345": paused_thread_state("interrupt-1")},
         streams={"abc12345": stream},
     )
     client = FakeLangGraphClient(threads)
     cancel_calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr("EvoScientist.gateway.server._RUN_LOOKUP_PAGE_SIZE", 1)
+    answer = {"interrupt-1": {"decisions": [{"type": "approve"}]}}
 
     class _FakeRunsClient:
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
-            runs = [{"run_id": "other-run", "status": "running"}]
-            if stream.run.starts:
-                runs.extend(active_after_resume)
+            runs = [
+                {
+                    "run_id": "identical-resume",
+                    "status": "running",
+                    "metadata": {"_evoscientist_gateway_request_id": "other"},
+                    "kwargs": {"command": {"resume": answer}},
+                }
+            ]
+            if stream.run.starts and ours_active:
+                runs.append(
+                    {
+                        "run_id": "our-resume",
+                        "status": "pending",
+                        "metadata": stream.run.starts[0]["metadata"],
+                        "kwargs": {"command": {"resume": answer}},
+                    }
+                )
             return [run for run in runs if run["status"] == status][
                 offset : offset + limit
             ]
@@ -3194,23 +3072,12 @@ async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
 
     gen = gateway.stream_events(
-        RunRequest(
-            message=Command(resume={"decisions": [{"type": "approve"}]}),
-            thread_id="abc12345",
-        )
+        RunRequest(message=Command(resume=answer), thread_id="abc12345")
     )
-    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
-        await gen.__anext__()
-        await gen.aclose()
+    await gen.__anext__()
+    await gen.aclose()
 
-    assert cancel_calls == (
-        [("abc12345", expected_run_ids)] if expected_run_ids else []
-    )
-    if not expected_run_ids:
-        assert any(
-            "Could not identify resumed run" in record.message
-            for record in caplog.records
-        )
+    assert cancel_calls == ([("abc12345", ["our-resume"])] if ours_active else [])
 
 
 async def test_server_gateway_cancels_the_resumed_run_by_its_id_on_consumer_abort():
@@ -3247,9 +3114,9 @@ async def test_server_gateway_cancels_the_resumed_run_by_its_id_on_consumer_abor
 
 @pytest.mark.parametrize("multiple_interrupts", [False, True])
 async def test_server_gateway_successful_resume_does_not_list_active_runs(
-    multiple_interrupts, caplog
+    multiple_interrupts,
 ):
-    """Successful resumes need no ownership lookup or ambiguity warnings."""
+    """Successful resumes need no ownership lookup."""
     from langgraph.types import Command
 
     interrupt_ids = ["interrupt-1"]
@@ -3264,22 +3131,20 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
     client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
 
-    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
-        async for _ in gateway.stream_events(
-            RunRequest(
-                message=Command(
-                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
-                ),
-                thread_id="thread",
-            )
-        ):
-            pass
+    async for _ in gateway.stream_events(
+        RunRequest(
+            message=Command(
+                resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
+            ),
+            thread_id="thread",
+        )
+    ):
+        pass
 
     assert [start["input"] for start in stream.run.starts] == [
         {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
     client.runs.list.assert_not_awaited()
-    assert not any("resumed run" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("failure", ["timeout", "cancel"])
@@ -3296,7 +3161,7 @@ async def test_server_gateway_successful_resume_does_not_list_active_runs(
 async def test_server_gateway_cleans_up_resume_accepted_before_start_finishes(
     failure, run_status, multiple_interrupts, response, has_neighbour, monkeypatch
 ):
-    """Record resume identity before the awaited start can fail or cancel."""
+    """A resume accepted before its start returns is found by its request id."""
     import asyncio
 
     from langgraph.types import Command
@@ -3327,8 +3192,8 @@ async def test_server_gateway_cleans_up_resume_accepted_before_start_finishes(
     client = FakeLangGraphClient(threads)
     cancelled = False
     cancel_calls = []
-    # Exercise pagination as well as both active statuses; the neighbour shares
-    # the interrupt id but has a different response and must never be cancelled.
+    # Exercise pagination as well as both active statuses; the neighbour is
+    # another request's run and must never be cancelled.
     monkeypatch.setattr("EvoScientist.gateway.server._RUN_LOOKUP_PAGE_SIZE", 1)
 
     class _FakeRunsClient:
@@ -3339,7 +3204,7 @@ async def test_server_gateway_cleans_up_resume_accepted_before_start_finishes(
                     {
                         "run_id": "other-run",
                         "status": "running",
-                        "kwargs": {"command": {"resume": {"interrupt-1": "other"}}},
+                        "metadata": {"_evoscientist_gateway_request_id": "other"},
                     }
                 )
             if accepted.is_set() and not cancelled:
@@ -3347,7 +3212,7 @@ async def test_server_gateway_cleans_up_resume_accepted_before_start_finishes(
                     {
                         "run_id": "accepted-resume",
                         "status": run_status,
-                        "kwargs": {"command": {"resume": {"interrupt-1": response}}},
+                        "metadata": stream.run.starts[0]["metadata"],
                     }
                 )
             return [run for run in runs if run["status"] == status][
@@ -3433,7 +3298,7 @@ async def test_server_gateway_resume_cleanup_skips_incomplete_run_listing(
             {
                 "run_id": "matching-first-page",
                 "status": "pending",
-                "kwargs": {"command": {"resume": {"interrupt-1": "yes"}}},
+                "metadata": stream.run.starts[0]["metadata"],
             }
         ]
 
