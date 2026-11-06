@@ -1289,7 +1289,8 @@ def run_textual_interactive(
                     lambda: asyncio.ensure_future(self._idle_reader_tick_tui())
                 )
 
-            # Notification path (only when idle and NOT already consuming).
+            # Notification path (only when idle, NOT already consuming, and with
+            # the agent loaded, so a notifier turn does not restart a cancelled load).
             # _notification_consuming is set synchronously at the schedule point
             # so that the next poll tick cannot schedule a second consumer before
             # the first one has a chance to run (fixes overlapping-turn bug).
@@ -1297,6 +1298,7 @@ def run_textual_interactive(
                 has_pending_notifications(self._conversation_tid)
                 and not self._busy
                 and not self._notification_consuming
+                and self._agent_loader.agent is not None
             ):
                 self._notification_consuming = True
                 self.call_later(
