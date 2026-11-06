@@ -135,7 +135,7 @@ def failure_summary(name: str, content: str) -> str:
             message = html.unescape(errors[-1].group(2)).strip()
             return f"{kind}: {message.splitlines()[0]}" if message else kind
         # The error's opening tag can fall in the part a long result loses.
-        return "" if lines[-1].endswith("</error>") else lines[0]
+        return "error" if lines[-1].endswith("</error>") else lines[0]
     # deepagents appends the real status line after the command's own output.
     status = next(
         (line for line in reversed(lines) if line.startswith(_EXECUTE_STATUS)), None

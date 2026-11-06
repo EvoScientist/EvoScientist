@@ -385,12 +385,12 @@ class TestFailureSummary:
         result = '<error type="ValueError">bad&#10;second line</error>'
         assert failure_summary("code_interpreter", result) == "ValueError: bad"
 
-    def test_an_interpreter_error_cut_from_its_tag_names_nothing(self):
+    def test_an_interpreter_error_cut_from_its_tag_still_reads_as_one(self):
         cut = (
             "<stdout>\nrow 0: ok\n... (truncated) ...\n"
             "very long detail\n    at main (eval:3)</error>"
         )
-        assert failure_summary("code_interpreter", cut) == ""
+        assert failure_summary("code_interpreter", cut) == "error"
 
     def test_other_tools_name_their_first_line(self):
         error = "[TOOL ERROR] Tool 'lookup' failed:\n\nValueError: x\n\nYou may retry."
