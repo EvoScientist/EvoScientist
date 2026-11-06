@@ -194,8 +194,9 @@ def _print_ccproxy(config, record) -> None:
             state += f" (pid {pid})"
     else:
         state = (
-            "[red]not running[/red]; the next run tries to start it (the "
-            "server log says why if it cannot)"
+            "[red]not running[/red]; a run or session may start it again. "
+            "After 3 failed tries the server stops trying: the server log "
+            "says why; restart the server (EvoSci server stop)"
         )
     console.print(f"  ccproxy:          port {port}, {state}")
 
