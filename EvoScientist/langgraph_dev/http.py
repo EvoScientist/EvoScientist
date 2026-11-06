@@ -41,7 +41,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
+from EvoScientist.langgraph_dev import (
+    server_home,
+    server_record,
+    workspace_move,
+    workspace_setup,
+)
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -315,6 +320,8 @@ async def register_workspace(request: Request) -> JSONResponse:
     exposure = {"host": cfg.langgraph_dev_host, "tunnel": tunnel_host() is not None}
     try:
         async with workspace_setup.registration_lock():
+            if (refused := await _moving_away(workspace)) is not None:
+                return refused
             await workspace_setup.register_workspace(SessionDirs(workspace))
     except workspace_setup.FolderMissingError:
         return JSONResponse({"error": "folder_missing"}, status_code=400)
@@ -324,6 +331,68 @@ async def register_workspace(request: Request) -> JSONResponse:
             {"error": "setup_failed", "detail": str(exc)}, status_code=500
         )
     return JSONResponse({"workspace_dir": workspace.key} | exposure)
+
+
+async def _moving_away(workspace: Workspace) -> JSONResponse | None:
+    """``409 move_pending`` for the folder a move not done yet leaves."""
+    from EvoScientist.langgraph_dev.registry import REGISTRY
+
+    pending = await asyncio.to_thread(REGISTRY.pending_move)
+    if pending is None or not workspace_move.same_key(pending[0], workspace.key):
+        return None
+    return JSONResponse(
+        {
+            "error": "move_pending",
+            "detail": f"{pending[0]} is being moved to {pending[1]}; finish the "
+            "move first.",
+        },
+        status_code=409,
+    )
+
+
+async def move_workspace(request: Request) -> JSONResponse:
+    """Move the registered project ``old`` to the folder ``new`` (the body's
+    fields), or finish its move when one was cut short: its threads,
+    scheduled tasks, assistants, memory and AutoSkills proposals follow it
+    (see :mod:`~EvoScientist.langgraph_dev.workspace_move`). Answers once it
+    is done with ``{"workspace_dir", "threads", "tasks", "memory",
+    "proposals", "warnings"}``; a move that cannot be made answers ``409``
+    with ``error`` naming why and ``detail``. Needs the local secret.
+    """
+    from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    fields = body if isinstance(body, dict) else {}
+    old = await asyncio.to_thread(read_workspace_or_none, fields.get("old"))
+    new = await asyncio.to_thread(read_workspace_or_none, fields.get("new"))
+    if old is None or new is None:
+        return JSONResponse({"error": "invalid_path"}, status_code=400)
+    try:
+        async with workspace_setup.registration_lock():
+            report = await workspace_move.move_project(old, new)
+    except workspace_move.MoveRefusedError as exc:
+        return JSONResponse({"error": exc.code, "detail": str(exc)}, status_code=409)
+    except Exception as exc:
+        logger.exception("Could not move %s to %s.", old.key, new.key)
+        return JSONResponse(
+            {"error": "move_failed", "detail": str(exc)}, status_code=500
+        )
+    return JSONResponse(
+        {
+            "workspace_dir": report.workspace_dir,
+            "threads": report.threads,
+            "tasks": report.tasks,
+            "memory": report.memory,
+            "proposals": report.proposals,
+            "warnings": report.warnings,
+            "resumed": report.resumed,
+        }
+    )
 
 
 async def reconcile_autoskills(request: Request) -> JSONResponse:
@@ -496,6 +565,10 @@ async def _lifespan(_app: Starlette):
     # serves requests; the file I/O goes to a thread because blockbuster
     # refuses it on the event loop.
     await asyncio.to_thread(load_local_secret)
+    # Before the setups: a move cut short re-points the threads and tasks
+    # they set up.
+    async with workspace_setup.registration_lock():
+        await workspace_move.resume_pending_move()
     await workspace_setup.set_up_at_start()
     await asyncio.to_thread(server_record.mark_serving)
     yield
@@ -525,6 +598,7 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", list_workspaces, methods=["GET"]),
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
+            Route("/api/workspaces/move", move_workspace, methods=["POST"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),

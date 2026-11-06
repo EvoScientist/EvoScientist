@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass
 from functools import cached_property
@@ -102,7 +104,7 @@ async def move_checkpoints(move: Move) -> int:
     ``sessions.db``, every row of a thread and not only its newest (readers
     take the newest stamped row, or the highest ``assistant_id`` over all of
     them): their folders, and the workspace assistant they name. One
-    transaction; returns the number of rows changed."""
+    transaction; returns the number of threads changed."""
     db_path = str(await asyncio.to_thread(get_db_path))
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
@@ -163,7 +165,7 @@ async def _rewrite_checkpoints(
             "IN (SELECT old FROM _move_assistants)"
         )
         async with conn.execute(
-            "SELECT COUNT(*) FROM checkpoints WHERE json_valid(metadata) "
+            "SELECT COUNT(DISTINCT thread_id) FROM checkpoints WHERE json_valid(metadata) "
             f"AND (EXISTS (SELECT 1 {match}) OR {assistant_match})"
         ) as cur:
             (changed,) = await cur.fetchone()
@@ -422,3 +424,283 @@ def move_memory(
             _merge_folder(profiles / old_id, profiles / new_id, keep=keep)
             (result.copied if keep else result.moved).append(old_id)
     return result
+
+
+class MoveRefusedError(RuntimeError):
+    """A move that cannot be made; :attr:`code` names why."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+
+
+@dataclass
+class MoveReport:
+    """What a move did: the new folder, the threads (``sessions.db``) and
+    scheduled tasks it re-pointed, the memory projects and proposals it
+    moved, and what could not be done but does not stop the move."""
+
+    workspace_dir: str
+    threads: int
+    tasks: int
+    memory: list[str]
+    proposals: int
+    warnings: list[str]
+    # It finished a move cut short: what moved before is not counted.
+    resumed: bool = False
+
+
+def same_key(first: str, second: str) -> bool:
+    """Whether two folder keys name the same folder: on macOS and Windows,
+    whose folders ignore case, keys that differ only in case do."""
+    if sys.platform in ("darwin", "win32"):
+        return first.casefold() == second.casefold()
+    return first == second
+
+
+def match_registered(old: Workspace, registered: list[str]) -> str:
+    """The registered key *old* names: its own, else, on macOS and Windows,
+    the one that differs only in case (a folder that is gone keeps the case
+    it was typed in)."""
+    if old.key in registered:
+        return old.key
+    found = [key for key in registered if same_key(key, old.key)]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise MoveRefusedError(
+            "ambiguous_old",
+            f"{old.root} matches more than one registered project: " + ", ".join(found),
+        )
+    raise MoveRefusedError("not_registered", f"{old.root} is not a registered project.")
+
+
+async def _busy(move: Move) -> bool:
+    """Whether a run of the old folder is pending or running: on one of its
+    threads, or on one of its assistants (a queued run has no thread yet)."""
+    from langgraph_runtime.database import connect
+
+    old_assistants = set(move.assistants)
+    async with connect() as conn:
+        threads = {
+            thread.get("thread_id")
+            for thread in conn.store.get("threads") or []
+            if isinstance(thread, dict)
+            and (
+                metadata_of(thread).get("workspace_dir") == move.old.key
+                or str(metadata_of(thread).get("assistant_id")) in old_assistants
+            )
+        }
+        return any(
+            isinstance(run, dict)
+            and run.get("status") in ("pending", "running")
+            and (
+                run.get("thread_id") in threads
+                or str(run.get("assistant_id")) in old_assistants
+            )
+            for run in conn.store.get("runs") or []
+        )
+
+
+def _check_folders(move: Move, *, resuming: bool) -> None:
+    """Blocking."""
+    if not move.new.root.is_dir():
+        if resuming:
+            raise MoveRefusedError(
+                "new_missing",
+                f"The move of {move.old.root} to {move.new.root} is not done, and "
+                f"{move.new.root} no longer exists: put the folder back there and "
+                "run the move again.",
+            )
+        raise MoveRefusedError("new_missing", f"{move.new.root} does not exist.")
+    if resuming:
+        return
+    if move.new.key == move.old.key:
+        raise MoveRefusedError("same_folder", "The two folders are the same.")
+    # A rename that changes only case, on a folder that ignores case.
+    if move.old.root.exists() and not os.path.samefile(move.old.root, move.new.root):
+        raise MoveRefusedError(
+            "old_exists",
+            f"{move.old.root} still exists, so this is a copy, not a move: add "
+            f"{move.new.root} as a new project.",
+        )
+
+
+async def move_project(old: Workspace, new: Workspace) -> MoveReport:
+    """Move the registered project *old* to the folder *new*, or finish its
+    move when one was cut short; the caller holds
+    :func:`~EvoScientist.langgraph_dev.workspace_setup.registration_lock`.
+
+    Refused (:class:`MoveRefusedError`) when *new* does not exist, *old* is
+    not a registered project, its folder still exists (a copy), a run of it
+    is in progress, or another move is not done yet.
+    """
+    from .registry import REGISTRY
+
+    pending = await asyncio.to_thread(REGISTRY.pending_move)
+    if pending is None:
+        registered = await asyncio.to_thread(REGISTRY.registered)
+        move = Move(Workspace(match_registered(old, registered)), new)
+        await asyncio.to_thread(_check_folders, move, resuming=False)
+    else:
+        try:
+            same_old = match_registered(old, [pending[0]]) == pending[0]
+        except MoveRefusedError:
+            same_old = False
+        if not same_old or not same_key(new.key, pending[1]):
+            raise MoveRefusedError(
+                "move_pending",
+                f"The move of {pending[0]} to {pending[1]} is not done yet: run "
+                "it again to finish it.",
+            )
+        move = Move(Workspace(pending[0]), Workspace(pending[1]))
+        await asyncio.to_thread(_check_folders, move, resuming=True)
+    if await _busy(move):
+        raise MoveRefusedError(
+            "busy", f"A run of {move.old.root} is in progress; wait for it to end."
+        )
+    if pending is None:
+        await asyncio.to_thread(REGISTRY.record_move, move.old.key, move.new.key)
+    report = await _run(move)
+    report.resumed = pending is not None
+    return report
+
+
+async def resume_pending_move() -> None:
+    """At the server's start: finish a move that was cut short. Logged on
+    failure; the next ``move`` call, or the next start, tries again."""
+    from .registry import REGISTRY
+
+    pending = await asyncio.to_thread(REGISTRY.pending_move)
+    if pending is None:
+        return
+    move = Move(Workspace(pending[0]), Workspace(pending[1]))
+    try:
+        await asyncio.to_thread(_check_folders, move, resuming=True)
+        report = await _run(move)
+    except Exception:
+        logger.warning(
+            "Could not finish moving %s to %s; run the move again.",
+            pending[0],
+            pending[1],
+            exc_info=True,
+        )
+    else:
+        logger.info("Finished moving %s to %s.", pending[0], pending[1])
+        for warning in report.warnings:
+            logger.warning("%s", warning)
+
+
+def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
+    """Move the old folder's memory projects; with the map of old ids to
+    the new one, for the proposals. Blocking."""
+    from .. import paths
+    from ..memory.autoskills.proposals import proposal_project_ids
+    from ..memory.project import path_project_ids, resolve_project_id
+    from .registry import REGISTRY
+
+    memory_dir = paths.MEMORIES_DIR
+    old_ids = {
+        project_id
+        for project_id in path_project_ids(move.old.root)
+        | proposal_project_ids(memory_dir, move.old.key)
+        if any(
+            (memory_dir / kind / "projects" / project_id).is_dir()
+            for kind in ("observations", "profile")
+        )
+    }
+    if not old_ids:
+        return MemoryMove(moved=[], copied=[]), {}
+    new_id = resolve_project_id(move.new.root)
+    shared = {
+        project_id
+        for key in REGISTRY.registered()
+        if key not in (move.old.key, move.new.key)
+        and Path(key).is_dir()
+        and (project_id := resolve_project_id(key)) in old_ids
+    }
+    moved = move_memory(move, memory_dir, old_ids=old_ids, new_id=new_id, shared=shared)
+    return moved, {old_id: new_id for old_id in old_ids if old_id != new_id}
+
+
+async def _delete_assistants(workspace: Workspace) -> None:
+    """Delete *workspace*'s workspace assistants; one already gone is
+    skipped."""
+    from langgraph_runtime.database import connect
+    from langgraph_runtime.ops import Assistants
+    from starlette.exceptions import HTTPException
+
+    from .assistants import workspace_assistant_ids
+
+    async with connect() as conn:
+        for assistant_id in workspace_assistant_ids(workspace):
+            try:
+                async for _ in await Assistants.delete(conn, uuid.UUID(assistant_id)):
+                    pass
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+
+
+def _move_default_workdir(move: Move) -> str | None:
+    """Point ``default_workdir`` in the configuration file at the new
+    folder when it names the old one, so the next launch registers the new
+    folder; why it could not, or None. Blocking."""
+    from ..config import store
+    from ..config.settings import set_config_values
+
+    try:
+        value = store.read_config_mapping().get("default_workdir")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        if Workspace(value.strip()).key != move.old.key:
+            return None
+        set_config_values({"default_workdir": str(move.new.root)})
+    except Exception as exc:
+        return f"default_workdir still names {move.old.root}: {exc}"
+    return None
+
+
+async def _run(move: Move) -> MoveReport:
+    """Every step of a move, in order, each re-pointing only what still
+    names the old folder:
+
+    1. the old store import's marks, before the new folder's setup reads
+       the moved store;
+    2. the threads, before anything runs on the new folder's assistants (a
+       run into a thread still bound to the old folder is refused);
+    3. the new folder's setup: its assistants, registration, threads and
+       AutoSkills cron;
+    4. the scheduled tasks, now that the new assistants exist;
+    5. the memory, before the proposals, which name its old ids;
+    6. the old folder's assistants, after every task left them (deleting
+       one deletes its tasks), then its registry row and ``default_workdir``.
+    """
+    from .. import paths, sessions
+    from ..memory.autoskills.proposals import move_proposals
+    from . import workspace_setup
+    from .registry import REGISTRY
+
+    await drop_import_marks(move)
+    threads = await move_checkpoints(move)
+    await move_threads(move)
+    await workspace_setup.register_workspace(SessionDirs(move.new))
+    tasks, _system = await move_crons(move)
+    memory, project_ids = await asyncio.to_thread(_move_memory, move)
+    proposals = await asyncio.to_thread(
+        move_proposals, paths.MEMORIES_DIR, move.old.key, move.new.key, project_ids
+    )
+    await _delete_assistants(move.old)
+    await asyncio.to_thread(REGISTRY.forget, move.old.key)
+    workspace_setup.SET_UP.discard(move.old.key)
+    sessions.RESTORED_WORKSPACES.discard(move.old.key)
+    warning = await asyncio.to_thread(_move_default_workdir, move)
+    await asyncio.to_thread(REGISTRY.finish_move, move.old.key)
+    return MoveReport(
+        workspace_dir=move.new.key,
+        threads=threads,
+        tasks=tasks,
+        memory=memory.moved + memory.copied,
+        proposals=proposals,
+        warnings=[warning] if warning else [],
+    )

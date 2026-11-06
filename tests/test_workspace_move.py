@@ -86,7 +86,7 @@ async def test_move_checkpoints_repoints_every_row_of_old_threads(move, other):
         ]
     )
 
-    assert await workspace_move.move_checkpoints(move) == 2
+    assert await workspace_move.move_checkpoints(move) == 1
 
     first, second = await _metadata("t1")
     assert first == {
@@ -337,3 +337,221 @@ def test_move_proposals_gives_every_proposal_to_new_folder(tmp_path, move, other
     assert _manifest(memory, "a")["project_id"] == "P-new"
     assert _manifest(memory, "b")["workspace_dir"] == other.key
     assert proposals.move_proposals(memory, move.old.key, move.new.key, {}) == 0
+
+
+# -- the whole move ----------------------------------------------------------
+
+
+@pytest.fixture
+def moving(runtime_store, monkeypatch, tmp_path):
+    """A registered project whose folder was moved, with its assistants, one
+    thread and one scheduled task; the setup's background work skipped."""
+    from EvoScientist.langgraph_dev import registry, workspace_setup
+    from EvoScientist.langgraph_dev.assistants import ensure_workspace_assistants
+
+    projects = registry.Registry()
+    monkeypatch.setattr(registry, "REGISTRY", projects)
+    monkeypatch.setattr(workspace_setup, "warm_up", lambda workspace: None)
+
+    async def no_reconcile(_workspace):
+        return None
+
+    monkeypatch.setattr(workspace_setup, "_reconcile_autoskills", no_reconcile)
+    monkeypatch.setattr(project, "_run_git", lambda args, cwd: None)
+    old = Workspace(tmp_path / "old")
+    old.root.mkdir()
+    new = Workspace(tmp_path / "new")
+    new.root.mkdir()
+    projects.set_registered(old.key, True)
+    return projects, old, new, ensure_workspace_assistants
+
+
+async def _arrange(moving):
+    projects, old, new, ensure = moving
+    await ensure(old)
+    old.root.rmdir()
+    task = _cron(chat_assistant_id(old), old, run_kind="scheduled_task")
+    import langgraph_runtime_inmem.database as db
+
+    db.GLOBAL_STORE["crons"].append(task)
+    await _put_rows(
+        [
+            (
+                str(uuid.uuid4()),
+                "1",
+                {"workspace_dir": old.key, "assistant_id": chat_assistant_id(old)},
+            )
+        ]
+    )
+    return projects, old, new, task
+
+
+async def test_move_project_moves_threads_tasks_and_registration(moving):
+    projects, old, new, task = await _arrange(moving)
+
+    report = await workspace_move.move_project(old, new)
+
+    assert (report.workspace_dir, report.threads, report.tasks) == (new.key, 1, 1)
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+    assert old.key not in projects.known()
+    assert projects.is_registered(new.key)
+    assert projects.pending_move() is None
+    import langgraph_runtime_inmem.database as db
+
+    stored = {str(a["assistant_id"]) for a in db.GLOBAL_STORE["assistants"]}
+    assert chat_assistant_id(new) in stored
+    assert chat_assistant_id(old) not in stored
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+    assert refused.value.code == "not_registered"
+
+
+async def test_move_project_finishes_move_cut_short_at_start(moving):
+    projects, old, new, task = await _arrange(moving)
+    projects.record_move(old.key, new.key)
+
+    await workspace_move.resume_pending_move()
+
+    assert projects.pending_move() is None
+    assert projects.is_registered(new.key)
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(new))
+
+
+async def test_move_project_refuses_other_move_while_one_is_pending(moving, tmp_path):
+    projects, old, new, _task = await _arrange(moving)
+    projects.record_move(old.key, new.key)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, Workspace(elsewhere))
+
+    assert refused.value.code == "move_pending"
+
+
+@pytest.mark.parametrize(
+    "case", ["old_exists", "new_missing", "not_registered", "busy"]
+)
+async def test_move_project_refuses_move_it_cannot_make(moving, tmp_path, case):
+    projects, old, new, _task = await _arrange(moving)
+    if case == "old_exists":
+        old.root.mkdir()
+    elif case == "new_missing":
+        new.root.rmdir()
+    elif case == "not_registered":
+        old = Workspace(tmp_path / "unknown")
+    else:
+        import langgraph_runtime_inmem.database as db
+
+        db.GLOBAL_STORE["runs"].append(
+            {"assistant_id": chat_assistant_id(old), "status": "pending"}
+        )
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+
+    assert refused.value.code == case
+    assert projects.pending_move() is None
+
+
+def test_move_default_workdir_follows_old_folder(monkeypatch, move, other):
+    from EvoScientist.config import settings, store
+
+    written = []
+    monkeypatch.setattr(
+        settings, "set_config_values", lambda changes: written.append(changes)
+    )
+    for value, expected in [(f"{move.old.key}/", 1), (other.key, 1)]:
+        monkeypatch.setattr(
+            store, "read_config_mapping", lambda value=value: {"default_workdir": value}
+        )
+        assert workspace_move._move_default_workdir(move) is None
+        assert len(written) == expected
+
+    assert written == [{"default_workdir": str(move.new.root)}]
+
+
+# -- the route -----------------------------------------------------------------
+
+
+@pytest.fixture
+def server(monkeypatch, no_workspace_setup):
+    from starlette.testclient import TestClient
+
+    from EvoScientist import local_secret, paths
+    from EvoScientist.langgraph_dev import registry
+    from EvoScientist.langgraph_dev.http import app
+
+    monkeypatch.setattr(registry, "REGISTRY", registry.Registry())
+    monkeypatch.setattr(local_secret, "_value", None)
+    with TestClient(
+        app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)
+    ) as client:
+        value = (paths.SERVER_HOME / local_secret.FILE_NAME).read_text()
+        yield client, {local_secret.HEADER: value}
+
+
+def test_move_route_needs_local_secret(server, move):
+    client, _secret = server
+
+    response = client.post(
+        "/api/workspaces/move", json={"old": move.old.key, "new": move.new.key}
+    )
+
+    assert response.status_code == 403
+
+
+def test_move_route_answers_refusal_with_its_code(server, move):
+    client, secret = server
+
+    response = client.post(
+        "/api/workspaces/move",
+        json={"old": move.old.key, "new": move.new.key},
+        headers=secret,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "not_registered"
+
+
+def test_register_route_refuses_folder_being_moved_away(server, move, tmp_path):
+    from EvoScientist.langgraph_dev import registry
+
+    client, secret = server
+    move.old.root.mkdir()
+    registry.REGISTRY.record_move(move.old.key, move.new.key)
+
+    response = client.post(
+        "/api/workspaces", json={"workspace_dir": move.old.key}, headers=secret
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "move_pending"
+
+
+@pytest.mark.parametrize(("platform", "same"), [("darwin", True), ("linux", False)])
+def test_same_key_ignores_case_where_folders_do(monkeypatch, platform, same):
+    monkeypatch.setattr(workspace_move.sys, "platform", platform)
+
+    assert workspace_move.same_key("/u/Proj", "/u/proj") is same
+
+
+async def test_move_project_says_when_it_finished_earlier_move(moving):
+    projects, old, new, _task = await _arrange(moving)
+    projects.record_move(old.key, new.key)
+
+    report = await workspace_move.move_project(old, new)
+
+    assert report.resumed is True
+
+
+async def test_move_project_pending_without_new_folder_says_to_put_it_back(moving):
+    projects, old, new, _task = await _arrange(moving)
+    projects.record_move(old.key, new.key)
+    new.root.rmdir()
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+
+    assert refused.value.code == "new_missing"
+    assert "put the folder back" in str(refused.value)
