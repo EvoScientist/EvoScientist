@@ -45,7 +45,7 @@ fields beyond `type` are listed below.
 | `thinking`             | `content`, `id`                                            | Model reasoning text |
 | `text`                 | `content`                                                 | Assistant output text |
 | `tool_call`            | `name`, `args`, `id`                                      | Tool invocation |
-| `tool_result`          | `name`, `content`, `success`, `id`                       | Tool result (`id` matches the `tool_call`); `success` is false when the tool reported an error, an `execute` command exited non-zero (even `grep` finding nothing), `code_interpreter` threw, or another tool's output (other than `write_todos`, which repeats the todo list) starts with `[FAILED]` / `[TOOL ERROR]` or shows an error in its first three lines |
+| `tool_result`          | `name`, `content`, `success`, `id`                       | Tool result (`id` matches the `tool_call`); `success` is false when the tool reported an error, an `execute` command exited non-zero (even `grep` finding nothing), `code_interpreter` threw, or another tool's output (other than `write_todos`, which repeats the todo list) starts with `[FAILED]` / `[TOOL ERROR]` or shows an error in its first three lines; `content` is cut to about 2000 characters, keeping its start and end around a `... (truncated) ...` line |
 | `subagent_start`       | `name`, `description`                                     | Sub-agent delegation begins |
 | `subagent_tool_call`   | `subagent`, `name`, `args`, `id`                          | Tool call inside a sub-agent |
 | `subagent_tool_result` | `subagent`, `name`, `content`, `success`, `id`            | Tool result inside a sub-agent; `success` as for `tool_result` |
