@@ -495,6 +495,7 @@ class TestBuildConnections:
     def test_node_server_gets_path_without_empty_or_relative_entries(
         self, monkeypatch, node_rules, tmp_path, command
     ):
+        """Node stdio servers get a cleaned PATH where relative entries are dropped."""
         first = str(tmp_path / "opt" / "node24" / "bin")
         second = str(tmp_path / "usr" / "bin")
         monkeypatch.setenv(
@@ -508,6 +509,7 @@ class TestBuildConnections:
     def test_clean_path_reaches_node_server_unchanged(
         self, monkeypatch, node_rules, tmp_path
     ):
+        """An already-clean PATH with absolute entries reaches the server unchanged."""
         clean = os.pathsep.join(
             [str(tmp_path / "opt" / "node24" / "bin"), str(tmp_path / "usr" / "bin")]
         )
@@ -520,6 +522,7 @@ class TestBuildConnections:
     def test_node_server_keeps_its_own_path_from_mcp_yaml(
         self, monkeypatch, node_rules, tmp_path, path_key
     ):
+        """A configured PATH in mcp.yaml env is preserved as written."""
         monkeypatch.setenv(
             "PATH", os.pathsep.join([".", str(tmp_path / "usr" / "bin")])
         )
@@ -534,12 +537,19 @@ class TestBuildConnections:
         }
         env = _build_connections(config)["fs"]["env"]
         assert env[path_key] == own
-        assert [k for k in env if k.upper() == "PATH"] == [path_key]
+        if os.name == "nt":
+            assert [k for k in env if k.upper() == "PATH"] == [path_key]
+        elif path_key == "Path":
+            # On POSIX, Path does not mask PATH, so PATH is cleaned from host
+            assert env["PATH"] == str(tmp_path / "usr" / "bin")
+        else:
+            assert env["PATH"] == own
 
     @pytest.mark.skipif(os.name == "nt", reason="#!/usr/bin/env shebang is POSIX")
     def test_env_node_shebang_with_cleaned_path_skips_fake_node_in_cwd(
         self, monkeypatch, node_rules, tmp_path
     ):
+        """A real #!/usr/bin/env node shebang does not resolve to a node in cwd."""
         import subprocess
 
         cwd = tmp_path / "cwd"

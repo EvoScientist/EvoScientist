@@ -248,6 +248,8 @@ def test_which_on_path_reads_a_given_path(tmp_path, monkeypatch):
 def test_clean_path_drops_empty_and_relative_entries_and_keeps_absolute_ones(
     tmp_path, monkeypatch
 ):
+    """Relative, dot, and empty entries are dropped, while absolute entries
+    are retained in their original order."""
     first = str(tmp_path / "opt" / "node24" / "bin")
     second = f"{tmp_path / 'usr' / 'bin'}/"
     raw = os.pathsep.join(["", ".", "bin", "./node_modules/.bin", first, second])
@@ -259,9 +261,38 @@ def test_clean_path_drops_empty_and_relative_entries_and_keeps_absolute_ones(
 
 
 def test_clean_path_reads_quoted_entries_on_windows(tmp_path, windows_lookup):
+    """Windows quoted entries are unquoted and normalized without losing
+    their absolute status."""
     quoted = f'"{tmp_path / "Program Files" / "nodejs"}"'
     raw = os.pathsep.join(["", ".", '"relative"', quoted])
     assert _install.clean_path(raw) == quoted
+
+
+def test_clean_path_drops_windows_drive_relative_entries(tmp_path, windows_lookup):
+    """Entries rooted to the current drive without a drive letter (such as \\bin)
+    or drive-relative (C:bin) are excluded on Windows."""
+    raw = os.pathsep.join(
+        [
+            r"\bin",
+            "/bin",
+            "C:bin",
+            "bin",
+            r"C:\Program Files\nodejs",
+            r"\\server\share\bin",
+        ]
+    )
+    cleaned = _install.clean_path(raw)
+    assert cleaned == os.pathsep.join(
+        [r"C:\Program Files\nodejs", r"\\server\share\bin"]
+    )
+
+
+def test_clean_path_returns_dev_null_on_posix_when_no_entries_remain(monkeypatch):
+    """On POSIX, when no absolute entries remain, /dev/null is returned so
+    an empty PATH never resolves against the current directory."""
+    monkeypatch.setattr(_install, "_WINDOWS", False)
+    raw = os.pathsep.join(["", ".", "bin", "./node_modules/.bin"])
+    assert _install.clean_path(raw) == "/dev/null"
 
 
 def test_which_on_path_reads_quoted_entries(tmp_path, monkeypatch, windows_lookup):

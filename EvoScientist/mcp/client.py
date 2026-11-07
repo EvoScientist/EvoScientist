@@ -902,7 +902,10 @@ def _server_path(server: dict[str, Any]) -> str | None:
     if not isinstance(env, dict):
         return None
     for key, value in env.items():
-        if isinstance(key, str) and key.upper() == "PATH" and isinstance(value, str):
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        match = key.upper() == "PATH" if os.name == "nt" else key == "PATH"
+        if match:
             return value
     return None
 
@@ -1041,7 +1044,10 @@ def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
 
     env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
     extra = npm_network_env(os.environ)
-    if not any(k.upper() == "PATH" for k in env):
+    has_path = any(
+        (k.upper() == "PATH" if os.name == "nt" else k == "PATH") for k in env
+    )
+    if not has_path:
         extra["PATH"] = clean_path()
     # An unresolved command (no npx found) has no folder to read npm from; a
     # bare name would make the lookup try the current directory. npm reads the
