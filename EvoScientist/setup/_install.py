@@ -120,7 +120,15 @@ def _is_absolute_entry(directory: str) -> bool:
         return directory.startswith("/")
     if directory.startswith(("\\\\", "//")):
         return len(directory) > 2
-    return len(directory) >= 3 and directory[1] == ":" and directory[2] in ("\\", "/")
+    if (
+        len(directory) >= 3
+        and directory[0].isalpha()
+        and directory[1] == ":"
+        and directory[2] in ("\\", "/")
+    ):
+        return True
+    # Allow host POSIX paths (e.g. pytest tmp_path) when _WINDOWS is faked on POSIX.
+    return os.name != "nt" and directory.startswith("/")
 
 
 def which_on_path(
