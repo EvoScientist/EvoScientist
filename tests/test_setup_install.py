@@ -245,6 +245,25 @@ def test_which_on_path_reads_a_given_path(tmp_path, monkeypatch):
     assert _install.which_on_path("npx", path=".") is None
 
 
+def test_clean_path_drops_empty_and_relative_entries_and_keeps_absolute_ones(
+    tmp_path, monkeypatch
+):
+    first = str(tmp_path / "opt" / "node24" / "bin")
+    second = f"{tmp_path / 'usr' / 'bin'}/"
+    raw = os.pathsep.join(["", ".", "bin", "./node_modules/.bin", first, second])
+    monkeypatch.setenv("PATH", raw)
+    expected = os.pathsep.join([first, second])
+    assert _install.clean_path() == expected
+    assert _install.clean_path(raw) == expected
+    assert _install.clean_path(expected) == expected
+
+
+def test_clean_path_reads_quoted_entries_on_windows(tmp_path, windows_lookup):
+    quoted = f'"{tmp_path / "Program Files" / "nodejs"}"'
+    raw = os.pathsep.join(["", ".", '"relative"', quoted])
+    assert _install.clean_path(raw) == quoted
+
+
 def test_which_on_path_reads_quoted_entries(tmp_path, monkeypatch, windows_lookup):
     real = _exe(tmp_path / "Program Files" / "Git" / "cmd", "git.exe")
     monkeypatch.setenv("PATH", f'"{real.parent}"')
