@@ -985,15 +985,17 @@ def test_a_manifest_that_is_a_fifo_never_blocks_the_listing(tmp_path):
 
 def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
-    reads = []
+    draft = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    reads = {installed: [], draft: []}
     real_open = Path.open
 
     class Recorded:
-        def __init__(self, handle):
+        def __init__(self, handle, sizes):
             self._handle = handle
+            self._sizes = sizes
 
         def read(self, size=-1):
-            reads.append(size)
+            self._sizes.append(size)
             return self._handle.read(size)
 
         def __enter__(self):
@@ -1005,8 +1007,9 @@ def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch)
     def recording_open(self, *args, **kwargs):
         handle = real_open(self, *args, **kwargs)
         mode = args[0] if args else kwargs.get("mode", "r")
-        if "b" in mode and Path(self).is_relative_to(installed):
-            return Recorded(handle)
+        for root, sizes in reads.items():
+            if "b" in mode and Path(self).is_relative_to(root):
+                return Recorded(handle, sizes)
         return handle
 
     monkeypatch.setattr(Path, "open", recording_open)
@@ -1014,8 +1017,32 @@ def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch)
         result = revert_skill_proposal(memory_dir, "focused-validation")
 
     assert result["reverted"] is True, result
-    assert reads
-    assert all(0 < size <= 1 << 20 for size in reads), reads
+    for sizes in reads.values():
+        assert sizes
+        assert all(0 < size <= 1 << 20 for size in sizes), reads
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_revert_compares_every_chunk(tmp_path, monkeypatch, changed):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    monkeypatch.setattr(module, "_COMPARE_CHUNK", 4)
+    if changed:
+        # Same size and the same first chunk; the edit sits in the third chunk.
+        (installed / "scripts" / "check.py").write_text(
+            "print('chock')\n", encoding="utf-8"
+        )
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    if changed:
+        assert result["error"] == "skill_changed", result
+        assert (installed / "scripts" / "check.py").is_file()
+    else:
+        assert result["reverted"] is True, result
+        assert not installed.exists()
 
 
 @pytest.mark.skipif(
