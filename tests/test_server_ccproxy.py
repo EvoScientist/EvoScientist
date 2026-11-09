@@ -557,6 +557,66 @@ def test_end_tree_kills_process_it_may_not_wait_for(monkeypatch):
     assert steps == ["terminate", "kill"]
 
 
+class _Untouchable(_Process):
+    """A process this user may neither signal nor wait for."""
+
+    def children(self, recursive=False):
+        return []
+
+    def terminate(self):
+        import psutil
+
+        raise psutil.AccessDenied(self.pid)
+
+    kill = terminate
+
+
+def _refuse_wait(monkeypatch):
+    import psutil
+
+    def refuse(procs, timeout):
+        raise psutil.AccessDenied(77)
+
+    monkeypatch.setattr(psutil, "wait_procs", refuse)
+
+
+def test_end_tree_says_when_it_could_not_end_process(monkeypatch):
+    import psutil
+
+    _refuse_wait(monkeypatch)
+
+    with pytest.raises(psutil.AccessDenied):
+        ccproxy_manager.end_tree(_Untouchable(77, 123.5, []))
+
+
+def test_stop_recorded_ccproxy_keeps_record_it_could_not_stop(monkeypatch, tmp_path):
+    """A later start or update tries again."""
+    import psutil
+
+    _refuse_wait(monkeypatch)
+    monkeypatch.setattr(
+        psutil, "Process", lambda pid: _Untouchable(pid, 1.0, ["ccproxy", "serve"])
+    )
+    monkeypatch.setattr(paths, "SERVER_HOME", tmp_path)
+    (tmp_path / "ccproxy.pid").write_text("77")
+
+    assert ccproxy_manager.stop_recorded_ccproxy() is None
+    assert (tmp_path / "ccproxy.pid").exists()
+
+
+def test_end_ccproxy_reports_ccproxy_it_could_not_stop(monkeypatch):
+    import psutil
+
+    _refuse_wait(monkeypatch)
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda pid: _Untouchable(pid, 123.5, ["ccproxy", "serve", "--port", "8000"]),
+    )
+
+    assert ccproxy_manager.end_ccproxy(77, None, 8000) is False
+
+
 def test_spawn_ccproxy_output_goes_where_asked(monkeypatch):
     """The server's ccproxy writes to its log, a session's to nowhere."""
     calls = []

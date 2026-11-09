@@ -391,10 +391,19 @@ def stop_recorded_ccproxy() -> int | None:
     if proc is ...:
         # Kept: it may still be ours, and a later stop can try again.
         return None
-    record.unlink(missing_ok=True)
     if proc is None:
+        record.unlink(missing_ok=True)
         return None
-    return proc.pid if end_tree(proc) else None
+    import psutil
+
+    try:
+        ended = end_tree(proc)
+    except psutil.AccessDenied:
+        # Kept, so a later start or update tries again.
+        logger.warning("Could not stop the older release's ccproxy (pid %d).", proc.pid)
+        return None
+    record.unlink(missing_ok=True)
+    return proc.pid if ended else None
 
 
 def end_ccproxy(pid: int, created: float | None, port: int) -> bool:
@@ -410,7 +419,13 @@ def end_ccproxy(pid: int, created: float | None, port: int) -> bool:
     same = created is not None and _same_process(pid, created)
     if not same and not _serves_on(proc, port):
         return False
-    return end_tree(proc)
+    import psutil
+
+    try:
+        return end_tree(proc)
+    except psutil.AccessDenied:
+        logger.warning("Could not stop ccproxy (pid %d): access denied.", pid)
+        return False
 
 
 def _serves_on(proc, port: int) -> bool:
@@ -429,7 +444,9 @@ def _serves_on(proc, port: int) -> bool:
 
 def end_tree(proc) -> bool:
     """Terminate the psutil process *proc* and its descendants, killing what
-    is left after 5 seconds; False when it was already gone."""
+    is left after 5 seconds; False when it was already gone. Raises
+    ``psutil.AccessDenied`` when a kill was refused: that process may run
+    on."""
     import psutil
 
     try:
@@ -447,7 +464,14 @@ def end_tree(proc) -> bool:
         # A process this user may signal but not wait for (Windows): the
         # kill below is the last try, and a refused one leaves it as it is.
         alive = tree
+    refused: psutil.AccessDenied | None = None
     for member in alive:
-        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+        try:
             member.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied as exc:
+            refused = exc
+    if refused is not None:
+        raise refused
     return True
