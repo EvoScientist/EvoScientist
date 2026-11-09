@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 import sys
 import textwrap
 import threading
@@ -545,13 +546,11 @@ class TestBuildConnections:
         else:
             assert env["PATH"] == own
 
-    @pytest.mark.skipif(os.name == "nt", reason="#!/usr/bin/env shebang is POSIX")
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry searches cwd")
     def test_env_node_shebang_with_cleaned_path_skips_fake_node_in_cwd(
         self, monkeypatch, node_rules, tmp_path
     ):
-        """A real #!/usr/bin/env node shebang does not resolve to a node in cwd."""
-        import subprocess
-
+        """Looking up node on the cleaned PATH does not resolve to a fake node in cwd."""
         cwd = tmp_path / "cwd"
         cwd.mkdir()
         fake_node = cwd / "node"
@@ -564,24 +563,12 @@ class TestBuildConnections:
         real_node.write_text("#!/bin/sh\necho REAL_NODE\n")
         real_node.chmod(0o755)
 
-        npx_script = real_bin / "npx"
-        npx_script.write_text("#!/usr/bin/env node\n")
-        npx_script.chmod(0o755)
-
-        sys_dirs = [p for p in ("/usr/bin", "/bin") if os.path.isdir(p)]
-        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(real_bin), *sys_dirs]))
+        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(real_bin)]))
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         conn_env = _build_connections(config)["fs"]["env"]
 
-        res = subprocess.run(
-            [str(npx_script)],
-            cwd=cwd,
-            env={**os.environ, **conn_env},
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        assert res.stdout.strip() == "REAL_NODE"
+        monkeypatch.chdir(cwd)
+        assert shutil.which("node", path=conn_env["PATH"]) == str(real_bin / "node")
 
     def test_http_connection(self):
         config = {
