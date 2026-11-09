@@ -903,6 +903,7 @@ def create_rubric_middleware(
     from langchain_core._api import LangChainBetaWarning
 
     from .model_retry import ModelCallBoundaryMiddleware
+    from .windows_paths import WindowsFilePathMiddleware
 
     # Eviction thresholds off: both eviction paths write files through the
     # backend, which would let the grader touch the shared workspace.
@@ -921,6 +922,8 @@ def create_rubric_middleware(
             grader_middleware=[
                 *([model_retry] if model_retry is not None else []),
                 grader_fs,
+                # The transcript can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 _GraderCallBudget(max_calls=GRADER_MAX_CALLS),
                 # create_agent does not add it; after every middleware that
                 # edits the request, so it sees the final one.

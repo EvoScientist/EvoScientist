@@ -1,18 +1,27 @@
 """Windows host paths must survive the file tools' virtual-path validation."""
 
+import asyncio
 import os
 from dataclasses import asdict
 from pathlib import PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from deepagents import FilesystemMiddleware
 from deepagents.backends.protocol import GlobResult, GrepResult, LsResult
 from deepagents.backends.utils import file_data_to_string, validate_path
+from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from EvoScientist import agent_shell, backends, paths
 from EvoScientist.channels.base import Channel, RawIncoming
 from EvoScientist.cli.file_mentions import resolve_file_mentions
+from EvoScientist.middleware import windows_paths
+from EvoScientist.middleware.windows_paths import WindowsFilePathMiddleware
 from EvoScientist.stream.events import build_agent_stream_input
 
 
@@ -403,3 +412,220 @@ def test_channel_annotation_names_the_file_tool_path():
 
     assert message.content == "Read the paper\n[document: /C:/project/media/paper.pdf]"
     assert message.media == [local]
+
+
+def _tool_request(name, args):
+    return ToolCallRequest(
+        tool_call={"name": name, "args": args, "id": "call-1"},
+        tool=None,
+        state={},
+        runtime=None,
+    )
+
+
+def _rewritten(request, *, asynchronous=False):
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return "done"
+
+    async def ahandler(req):
+        seen.append(req)
+        return "done"
+
+    mw = WindowsFilePathMiddleware()
+    if asynchronous:
+        assert asyncio.run(mw.awrap_tool_call(request, ahandler)) == "done"
+    else:
+        assert mw.wrap_tool_call(request, handler) == "done"
+    return seen[0]
+
+
+_PATH_ARG = {
+    "read_file": "file_path",
+    "write_file": "file_path",
+    "edit_file": "file_path",
+    "delete": "file_path",
+    "ls": "path",
+    "glob": "path",
+    "grep": "path",
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_PATH_ARG))
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    "drive_path",
+    [r"C:\Users\me\ws\a.md", "C:/Users/me/ws/a.md", r"c:\Users/me/ws/a.md"],
+)
+def test_middleware_rewrites_the_path_argument(
+    monkeypatch, tool, asynchronous, drive_path
+):
+    monkeypatch.setattr(windows_paths, "os", SimpleNamespace(name="nt"))
+    arg = _PATH_ARG[tool]
+    request = _tool_request(tool, {arg: drive_path, "content": r"C:\keep"})
+
+    seen = _rewritten(request, asynchronous=asynchronous)
+
+    expected = "/" + drive_path.replace("\\", "/")
+    assert seen.tool_call["args"] == {arg: expected, "content": r"C:\keep"}
+    assert seen.tool_call["id"] == "call-1"
+    assert request.tool_call["args"][arg] == drive_path
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("write_file", {"file_path": "/artifacts/a.md"}),
+        ("write_file", {"file_path": "/C:/Users/me/ws/a.md"}),
+        ("write_file", {"file_path": "/c/Users/me/ws/a.md"}),
+        ("grep", {"pattern": "x", "path": None}),
+        ("read_file", {"path": r"C:\Users\me\ws\a.md"}),
+        ("execute", {"command": r"type C:\Users\me\ws\a.md"}),
+    ],
+)
+def test_middleware_leaves_other_calls_alone(monkeypatch, name, args):
+    monkeypatch.setattr(windows_paths, "os", SimpleNamespace(name="nt"))
+    request = _tool_request(name, args)
+    assert _rewritten(request) is request
+
+
+def test_middleware_does_nothing_off_windows(monkeypatch):
+    monkeypatch.setattr(windows_paths, "os", SimpleNamespace(name="posix"))
+    request = _tool_request("write_file", {"file_path": r"C:\Users\me\ws\a.md"})
+    assert _rewritten(request) is request
+
+
+class _ScriptedToolModel(BaseChatModel):
+    replies: list
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-tools"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self.replies.pop(0))])
+
+
+def test_agent_file_tool_takes_a_drive_path(tmp_path):
+    """Through a real agent: on Windows the file lands in the workspace; elsewhere
+    a drive path stays refused and nothing is written."""
+    workspace = tmp_path / "EvoScientist"
+    workspace.mkdir()
+    backend = backends.CustomSandboxBackend(str(workspace))
+    target = (
+        str(backend.cwd / "artifacts" / "a.md")
+        if os.name == "nt"
+        else (r"C:\Users\me\EvoScientist\artifacts\a.md")
+    )
+    model = _ScriptedToolModel(
+        replies=[
+            AIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {"file_path": target, "content": "hello"},
+                        "id": "call-1",
+                    }
+                ],
+            ),
+            AIMessage("done"),
+        ]
+    )
+    agent = create_agent(
+        model=model,
+        tools=[],
+        middleware=[
+            FilesystemMiddleware(backend=backend, tools=["read_file", "write_file"]),
+            WindowsFilePathMiddleware(),
+        ],
+    )
+
+    result = agent.invoke({"messages": [HumanMessage("write it")]})
+
+    tool_message = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    if os.name == "nt":
+        assert tool_message.status == "success"
+        assert (workspace / "artifacts" / "a.md").read_text(encoding="utf-8") == "hello"
+    else:
+        assert tool_message.status == "error"
+        assert "Windows absolute paths are not supported" in tool_message.content
+        assert [p.name for p in workspace.iterdir()] == []
+
+
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock(), MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+@pytest.mark.parametrize("for_async_subagent", [False, True])
+def test_main_agent_stack_mounts_the_middleware(
+    mock_config, mock_model, mock_ts, for_async_subagent, workspace
+):
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+
+    mw = _get_default_middleware(
+        workspace=workspace, for_async_subagent=for_async_subagent
+    )
+    assert sum(isinstance(m, WindowsFilePathMiddleware) for m in mw) == 1
+
+
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+def test_subagent_stack_mounts_the_middleware(mock_model, workspace):
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    subs = [{"name": "test-agent"}]
+
+    _inject_subagent_middleware(subs, workspace=workspace)
+
+    assert (
+        sum(isinstance(m, WindowsFilePathMiddleware) for m in subs[0]["middleware"])
+        == 1
+    )
+
+
+def test_grader_mounts_the_middleware(tmp_path):
+    from deepagents.backends import FilesystemBackend
+
+    from EvoScientist.middleware.rubric import create_rubric_middleware
+    from tests.fakes.rubric import ScriptedGrader
+
+    rubric = create_rubric_middleware(
+        model=ScriptedGrader(verdicts=[]),
+        backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
+        max_iterations=3,
+    )
+    assert any(
+        isinstance(m, WindowsFilePathMiddleware) for m in rubric._grader_middleware
+    )
+
+
+def test_goal_drafter_mounts_the_middleware(monkeypatch):
+    import langchain.agents
+
+    from EvoScientist.middleware.goal import GoalDrafter
+
+    captured = {}
+    monkeypatch.setattr(
+        langchain.agents,
+        "create_agent",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+    GoalDrafter(model=MagicMock(), backend=SimpleNamespace())._ensure_agent()
+
+    assert any(isinstance(m, WindowsFilePathMiddleware) for m in captured["middleware"])

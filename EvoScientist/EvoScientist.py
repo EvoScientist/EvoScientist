@@ -355,6 +355,7 @@ def _inject_subagent_middleware(
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
@@ -408,6 +409,7 @@ def _inject_subagent_middleware(
             create_context_editing_middleware(chat_model),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
+            WindowsFilePathMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
             # Inside the retry layer: marks each provider call for the
@@ -991,6 +993,7 @@ def _get_default_middleware(
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
@@ -1090,6 +1093,7 @@ def _get_default_middleware(
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        WindowsFilePathMiddleware(),
         # deepagents 0.7.0 dropped TodoListMiddleware from its defaults;
         # EXPERIMENT_WORKFLOW planning and the todo UI pipeline require it.
         TodoListMiddleware(),
