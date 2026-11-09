@@ -1726,6 +1726,36 @@ def test_run_locks_are_dropped_once_unused(server, served, secret, fake_runs):
     assert autoskills_api._RUN_LOCKS == {}
 
 
+async def test_run_now_reads_the_setting_once_it_holds_the_lock(
+    served, fake_runs, monkeypatch
+):
+    import asyncio
+
+    from EvoScientist import config as config_module
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    start, _find = fake_runs
+    enabled = [True]
+    monkeypatch.setattr(
+        config_module,
+        "get_effective_config",
+        lambda *args, **kwargs: EvoScientistConfig(
+            memory_skill_synthesis_enabled=enabled[0]
+        ),
+    )
+    entry = (asyncio.get_running_loop(), served.key)
+    async with autoskills_api._run_lock(served.key):
+        waiting = asyncio.create_task(autoskills_api.run_now(str(served.root)))
+        while autoskills_api._RUN_LOCKS[entry][1] < 2:
+            await asyncio.sleep(0.01)
+        # Turned off while the request waits for another start.
+        enabled[0] = False
+
+    assert await waiting == (409, {"error": "autoskills_off"})
+    start.assert_not_called()
+
+
 async def test_run_locks_are_dropped_when_their_users_are_cancelled():
     import asyncio
     import contextlib

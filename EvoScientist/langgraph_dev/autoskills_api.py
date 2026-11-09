@@ -483,10 +483,11 @@ async def run_now(workspace_dir: object) -> tuple[int, dict[str, Any]]:
     try:
         if not await asyncio.to_thread(_served, workspace):
             return 404, {"error": "not_served"}
-        config = await asyncio.to_thread(get_effective_config)
-        if not config.memory_skill_synthesis_enabled:
-            return 409, {"error": "autoskills_off"}
         async with _run_lock(workspace.key):
+            # Read under the lock: a start that waited sees a setting changed meanwhile.
+            config = await asyncio.to_thread(get_effective_config)
+            if not config.memory_skill_synthesis_enabled:
+                return 409, {"error": "autoskills_off"}
             running = await schedule.afind_running_autoskill(
                 config, workspace_dir=workspace.key
             )
