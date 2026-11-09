@@ -657,7 +657,10 @@ def test_ensure_reports_start_lock_it_cannot_use(server, monkeypatch, tmp_path):
     assert server.spawns == []
 
 
-def test_ensure_waits_for_another_start_and_reuses_its_server(server):
+def test_ensure_waits_for_another_start_and_reuses_its_server(server, monkeypatch):
+    # The other start finishes: the short fixture budget could run out first
+    # on a loaded machine.
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
     holder = LockHolder()
     waits: list = []
 
@@ -1471,6 +1474,9 @@ def test_ensure_started_result_carries_serving_record(server, monkeypatch):
 
     monkeypatch.setattr(manager, "_spawn_server", _starting)
     server.on_pause = _serving
+    # The start succeeds: a budget the fixture keeps short for failed starts
+    # would make a loaded machine fail it.
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
 
     result = manager.ensure_server(_config())
 
