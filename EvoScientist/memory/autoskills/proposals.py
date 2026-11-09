@@ -265,9 +265,26 @@ def move_proposals(
         project_id = manifest.get("project_id")
         if isinstance(project_id, str) and project_id in project_ids:
             manifest["project_id"] = project_ids[project_id]
+        # The list and Undo read where an approval installed, so it moves too.
+        for key in ("approved_skill_path", "workspace_shadow"):
+            moved_path = _moved_path(manifest.get(key), old_key, new_key)
+            if moved_path is not None:
+                manifest[key] = moved_path
         _write_manifest(manifest_path, manifest)
         moved += 1
     return moved
+
+
+def _moved_path(value: object, old_key: str, new_key: str) -> str | None:
+    """*value* at its place under *new_key*, or None unless it is under *old_key*;
+    spelled as the key is, so a parent whose case changed still matches."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        relative = paths.normalize_path(value).relative_to(old_key)
+    except paths.PATH_ERRORS:
+        return None
+    return str(Path(new_key) / relative)
 
 
 def _proposal_from_manifest(

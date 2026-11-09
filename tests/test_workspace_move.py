@@ -342,6 +342,81 @@ def test_move_proposals_gives_every_proposal_to_new_folder(tmp_path, move, other
     assert proposals.move_proposals(memory, move.old.key, move.new.key, {}) == 0
 
 
+def test_move_proposals_names_an_approved_skill_at_its_new_place(tmp_path, move):
+    memory = tmp_path / "memories"
+    elsewhere = tmp_path / "global-skills" / "b"
+    for name, installed in (("a", move.old.skills_dir / "a"), ("b", elsewhere)):
+        _proposal(memory, name, move.old, "P-old")
+        manifest = _manifest(memory, name)
+        manifest["approved_skill_path"] = str(installed)
+        manifest["workspace_shadow"] = str(move.old.skills_dir / name)
+        path = memory / proposals.AUTOSKILL_PROPOSALS_DIR / name / "manifest.json"
+        path.write_text(json.dumps(manifest))
+
+    proposals.move_proposals(memory, move.old.key, move.new.key, {})
+
+    assert _manifest(memory, "a")["approved_skill_path"] == str(
+        move.new.skills_dir / "a"
+    )
+    assert _manifest(memory, "a")["workspace_shadow"] == str(move.new.skills_dir / "a")
+    assert _manifest(memory, "b")["approved_skill_path"] == str(elsewhere)
+    assert _manifest(memory, "b")["workspace_shadow"] == str(move.new.skills_dir / "b")
+
+
+def test_move_proposals_names_the_skill_after_its_parent_changed_case(tmp_path):
+    """macOS spells the old folder's surviving parent as it now is on disk."""
+    memory = tmp_path / "memories"
+    old = Workspace(tmp_path / "Parent" / "proj")
+    old.root.mkdir(parents=True)
+    _proposal(memory, "a", old, "P-old")
+    manifest = _manifest(memory, "a")
+    manifest["approved_skill_path"] = str(old.skills_dir / "a")
+    path = memory / proposals.AUTOSKILL_PROPOSALS_DIR / "a" / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    (tmp_path / "Parent").rename(tmp_path / "parent")
+    (tmp_path / "parent" / "proj").rename(tmp_path / "parent" / "moved")
+    new = Workspace(tmp_path / "parent" / "moved")
+
+    old_as_stored = workspace_move.Move(Workspace(old.root), new).old_as_stored
+    proposals.move_proposals(memory, old_as_stored, new.key, {})
+
+    assert _manifest(memory, "a")["approved_skill_path"] == str(new.skills_dir / "a")
+
+
+def test_an_approval_in_a_moved_project_can_still_be_undone(tmp_path, monkeypatch):
+    monkeypatch.setattr(proposals, "_notify_approved_skill", lambda: None)
+    memory = tmp_path / "memories"
+    old = Workspace(tmp_path / "old")
+    old.root.mkdir()
+    folder = proposals.autoskill_proposals_dir(memory) / "moved-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: moved-skill\ndescription: Use when moving.\n---\n\nSteps.\n"
+    )
+    submitted = proposals.submit_autoskill_proposal(
+        memory_dir=memory,
+        skill_name="moved-skill",
+        cluster_hash="cluster-moved",
+        source_observation_ids=["O-1", "O-2", "O-3"],
+        rationale="Moved.",
+        skills_dir=old.skills_dir,
+        workspace_dir=old.root,
+    )
+    assert submitted["submitted"] is True, submitted
+    approved = proposals.approve_skill_proposal(
+        memory, "moved-skill", skills_dir=old.skills_dir, workspace_dir=old.root
+    )
+    assert approved["approved"] is True, approved
+    old.root.rename(tmp_path / "new")
+    new = Workspace(tmp_path / "new")
+
+    proposals.move_proposals(memory, old.key, new.key, {})
+    reverted = proposals.revert_skill_proposal(memory, "moved-skill")
+
+    assert reverted["reverted"] is True, reverted
+    assert not (new.skills_dir / "moved-skill").exists()
+
+
 # -- the whole move ----------------------------------------------------------
 
 
