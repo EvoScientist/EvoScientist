@@ -778,11 +778,11 @@ async def move_again_where_lost() -> None:
         move = Move(Workspace.as_stored(done_old), Workspace.as_stored(done_new))
         if present.isdisjoint(move.assistants):
             continue
-        # A round trip, or a project made again in the old folder: its
-        # assistants are its own.
-        if not await asyncio.to_thread(_still_moved, move):
-            continue
         try:
+            # A round trip, or a project made again in the old folder: its
+            # assistants are its own.
+            if not await asyncio.to_thread(_still_moved, move):
+                continue
             # Its assistants were not set up: the next start tries again.
             await asyncio.to_thread(_check_folders, move, resuming=True)
             await _move_again(move)

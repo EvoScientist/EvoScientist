@@ -1101,3 +1101,25 @@ def test_server_start_moves_in_order(monkeypatch, no_workspace_setup):
         pass
 
     assert steps == ["resume", "set up", "again", "serving"]
+
+
+async def test_start_logs_a_registry_it_cannot_read(moving, monkeypatch, caplog):
+    """A locked sessions.db does not stop the server's start."""
+    import copy
+    import sqlite3
+
+    import langgraph_runtime_inmem.database as db
+
+    _projects, old, new, _task = await _arrange(moving)
+    saved = copy.deepcopy(db.GLOBAL_STORE["assistants"])
+    await workspace_move.move_project(old, new)
+    db.GLOBAL_STORE["assistants"] = saved
+
+    def locked(_move):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(workspace_move, "_still_moved", locked)
+
+    await workspace_move.move_again_where_lost()
+
+    assert "Could not move" in caplog.text
