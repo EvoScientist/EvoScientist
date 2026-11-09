@@ -1672,6 +1672,18 @@ def _is_cache(name: str) -> bool:
     return len(parts) > 1 and parts[-2] == "__pycache__" and name.endswith(".pyc")
 
 
+def _unlink_checked(path: Path) -> None:
+    """Delete a file revert has checked; on Windows a read-only copy (the
+    approval kept the draft's attribute) refuses until the attribute is cleared."""
+    try:
+        path.unlink()
+    except PermissionError:
+        if os.name != "nt":
+            raise
+        os.chmod(path, stat.S_IWRITE)
+        path.unlink()
+
+
 def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
     """Delete a new skill's files while each is still one the approval copied.
 
@@ -1706,7 +1718,7 @@ def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
         # Re-checked right before each delete, so a change made meanwhile survives.
         if not unchanged(name, path):
             return False
-        path.unlink()
+        _unlink_checked(path)
     for dirpath, _dirnames, _filenames in os.walk(
         installed, topdown=False, onerror=_raise
     ):

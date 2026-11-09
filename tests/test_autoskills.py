@@ -936,6 +936,49 @@ def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
     assert not installed.exists()
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32" and os.geteuid() == 0, reason="root ignores modes"
+)
+def test_revert_removes_a_read_only_copy_on_windows(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    draft = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    draft.chmod(0o444)
+    try:
+        _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    finally:
+        draft.chmod(0o644)
+    installed = skills_dir / "focused-validation"
+    assert not os.access(installed / "SKILL.md", os.W_OK)
+
+    class WindowsOs:
+        """The module's ``os``, reading as Windows."""
+
+        name = "nt"
+
+        def __getattr__(self, attr):
+            return getattr(os, attr)
+
+    real_unlink = Path.unlink
+
+    def windows_unlink(self, *args, **kwargs):
+        # Windows refuses to delete a read-only file.
+        if not os.stat(self).st_mode & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(module, "os", WindowsOs())
+    monkeypatch.setattr(Path, "unlink", windows_unlink)
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True, result
+    assert not installed.exists()
+
+
 def test_revert_removes_a_copied_cache_the_browser_rewrote(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
