@@ -1471,6 +1471,9 @@ def test_ensure_started_result_carries_serving_record(server, monkeypatch):
 
     monkeypatch.setattr(manager, "_spawn_server", _starting)
     server.on_pause = _serving
+    # The start succeeds: a budget the fixture keeps short for failed starts
+    # would make a loaded machine fail it.
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
 
     result = manager.ensure_server(_config())
 
