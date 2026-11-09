@@ -266,8 +266,7 @@ class TestEvoScientistConfig:
 
         serve/single-shot/standalone default to ``inherit`` (so a global
         ``langgraph_server`` moves them); the interactive CLI and TUI default to
-        ``local``, so the global flag can't move them (the server path is lossy
-        there until #413/#454 close).
+        ``local``, so the global flag can't move them.
         """
         config = EvoScientistConfig(gateway_backend="langgraph_server")
         for surface in (

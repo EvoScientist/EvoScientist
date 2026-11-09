@@ -249,8 +249,8 @@ def _interactive() -> bool:
 
 
 def _busy_work(url: str) -> str | None:
-    """What the server at *url* is running that a stop would end, or None
-    when it is idle (or cannot be asked)."""
+    """What a stop of the server at *url* would interrupt, and what becomes
+    of it, or None when the server is idle (or cannot be asked)."""
     from ..deploy.busy import (
         backend_has_active_runs,
         has_busy_thread,
@@ -262,18 +262,20 @@ def _busy_work(url: str) -> str | None:
     work = []
     jobs = running_bg_process_names(url)
     if jobs:
-        work.append(f"background jobs: {', '.join(jobs)}")
+        work.append(f"background jobs that a stop ends ({', '.join(jobs)})")
     if has_busy_thread(url):
-        work.append("a run in progress")
+        work.append(
+            "a run in progress that a stop cuts and that runs again at the next start"
+        )
     return "; ".join(work) or "work in progress"
 
 
 def _stop_busy_server_anyway(record) -> bool:
     """Whether to go on with a stop: always when it ends no server or an
-    idle one; for a busy one, after asking, since it serves every project and
-    its runs and background jobs are not kept. Without a terminal to ask in,
-    it is refused (exit 1), as ``EvoSci update`` does; ``--yes`` skips the
-    question."""
+    idle one; for a busy one, after asking, since it serves every project:
+    its background jobs end and its runs run again at its next start.
+    Without a terminal to ask in, it is refused (exit 1), as ``EvoSci
+    update`` does; ``--yes`` skips the question."""
     from ..langgraph_dev.manager import _is_port_occupied
 
     # The server the stop ends is the recorded one, whatever its port; a
@@ -287,8 +289,7 @@ def _stop_busy_server_anyway(record) -> bool:
     if work is None:
         return True
     message = (
-        f"The background agent server is busy ({work}). Stopping it ends that "
-        "work, for every project using the server."
+        f"The background agent server is busy, for every project using it: {work}."
     )
     if not _interactive():
         console.print(
