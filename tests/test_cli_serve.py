@@ -5,9 +5,6 @@ from __future__ import annotations
 import os
 import signal
 
-import pytest
-import typer
-
 import EvoScientist.ccproxy_manager as ccproxy_mod
 from EvoScientist.cli import commands
 from EvoScientist.paths import SessionDirs, Workspace
@@ -293,17 +290,15 @@ def test_serve_says_where_its_dangerous_flag_applies(monkeypatch, tmp_path):
     assert noted == ["local"]
 
 
-def test_serve_ccproxy_failure_keeps_install_hint(monkeypatch, tmp_path, capsys):
-    """The hint's ``[oauth]`` extra is text, not markup."""
-
-    def missing(config, *, lasting):
-        raise RuntimeError("Install it with: pip install 'evoscientist[oauth]'")
-
-    monkeypatch.setattr(commands, "uses_oauth", lambda _config: True)
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", missing)
+def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
+    """The server starts ccproxy; the session only points at it."""
+    pointed: list[int] = []
+    monkeypatch.setattr(ccproxy_mod, "uses_oauth", lambda _config: True)
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", pointed.append)
     ws = str((tmp_path / "ws").resolve())
+    config = serve_config(default_workdir=ws)
+    config.ccproxy_port = 8123
 
-    with pytest.raises(typer.Exit):
-        run_serve_once(monkeypatch, serve_config(default_workdir=ws), workdir=ws)
+    run_serve_once(monkeypatch, config, workdir=ws)
 
-    assert "evoscientist[oauth]" in capsys.readouterr().out
+    assert pointed == [8123]

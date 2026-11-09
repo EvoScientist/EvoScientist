@@ -119,8 +119,8 @@ def _shorten_path(path: str) -> str:
 
 
 def _agent_shell_notices(backend: str | None = None) -> list[str]:
-    """The agent shell's setup hint, the server's drift warnings, a server
-    unavailable for this project, one reachable from other machines and where
+    """The agent shell's setup hint, the server's ccproxy missing, the
+    server's drift warnings, a server unavailable for this project, one reachable from other machines and where
     a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
     They also go to the terminal or the log, which Textual hides while the
@@ -149,6 +149,7 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     older = lg_manager.OLDER_SERVER
     notices = [
         setup_hint(),
+        lg_manager.CCPROXY_MISSING,
         older,
         drift,
         lg_manager.AGENT_SHELL_DRIFT,

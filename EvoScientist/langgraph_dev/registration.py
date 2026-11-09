@@ -13,6 +13,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -22,6 +23,8 @@ from .boundary import is_loopback_host
 # Seconds a registration may take: it restores the project's threads, which
 # reads every checkpoint in sessions.db.
 REGISTRATION_TIMEOUT = 120.0
+# A move rewrites a project's threads: seconds, but not bounded.
+MOVE_TIMEOUT = 30 * 60.0
 # Seconds the read of the server's instance may take.
 INSTANCE_TIMEOUT = 10.0
 # Seconds each read of ``EvoSci server status`` may take.
@@ -203,7 +206,14 @@ def _require_own_server(url: str, *, timeout: float = INSTANCE_TIMEOUT) -> str:
     return secret
 
 
-def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Response:
+def _post_with_secret(
+    url: str,
+    path: str,
+    body: dict,
+    *,
+    what: str,
+    timeout: float = REGISTRATION_TIMEOUT,
+) -> httpx.Response:
     """POST *body* to the server at *url* with the local secret, once it
     answers with the same ``instance``: a different server on the port (another
     user's, another data folder's) does not get it. The instance is public, so
@@ -219,7 +229,7 @@ def _post_with_secret(url: str, path: str, body: dict, *, what: str) -> httpx.Re
             f"{url}{path}",
             json=body,
             headers={**LANGGRAPH_DEV_AUTH_HEADERS, HEADER: secret},
-            timeout=REGISTRATION_TIMEOUT,
+            timeout=timeout,
             # Loopback: a system proxy must not intercept it.
             trust_env=False,
         )
@@ -257,6 +267,40 @@ def served_projects(url: str) -> list[dict[str, object]]:
         for project in projects
         if isinstance(project, dict) and isinstance(project.get("workspace_dir"), str)
     ]
+
+
+def ensure_ccproxy(*, url: str) -> str | None:
+    """Ask the server at *url* to start its ccproxy when it is not running;
+    why it does not serve, or None."""
+    from ..ccproxy_manager import START_BUDGET_SECONDS
+
+    url = url.rstrip("/")
+    try:
+        # A start can take ccproxy's whole start budget.
+        response = _post_with_secret(
+            url,
+            "/api/ccproxy/ensure",
+            {},
+            what="reach",
+            timeout=START_BUDGET_SECONDS + 30,
+        )
+    except RegistrationError as exc:
+        return str(exc)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if response.status_code == 200 and body.get("serving") is True:
+        return None
+    if body.get("error") == "local_secret_required":
+        return _other_server(url)
+    return str(
+        body.get("detail")
+        or f"The EvoScientist server at {url} did not start its ccproxy "
+        f"(HTTP {response.status_code})."
+    )
 
 
 def reconcile_autoskills(*, url: str) -> list[str]:
@@ -365,6 +409,63 @@ def apply_autoskills_settings(config: object) -> str | None:
     if failed:
         return "AutoSkills was not rescheduled for: " + "; ".join(failed)
     return None
+
+
+def move_folder(old: Workspace, new: Workspace, *, url: str) -> dict[str, Any]:
+    """Ask the server at *url* to move the registered project *old* to the
+    folder *new* (``POST /api/workspaces/move``); what it reports moving.
+
+    Raises :class:`OlderServerError` for a server without the move, and
+    :class:`RegistrationError` with the server's reason when the move is
+    refused or fails.
+    """
+    url = url.rstrip("/")
+    # First, and unwrapped: a server that does not answer, or is not this
+    # data folder's, is moving nothing.
+    _require_own_server(url)
+    try:
+        response = _post_with_secret(
+            url,
+            "/api/workspaces/move",
+            {"old": old.key, "new": new.key},
+            what=f"move {old.root} with",
+            timeout=MOVE_TIMEOUT,
+        )
+    except RegistrationError as exc:
+        # The request was sent, then cut or timed out: the server may go on.
+        if not isinstance(exc.__cause__, httpx.HTTPError):
+            raise
+        raise RegistrationError(
+            f"{exc} The server may still be moving it: run the same command again "
+            "to see it finish."
+        ) from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+    if response.status_code == 200:
+        return body
+    if response.status_code == 404 and "error" not in body:
+        raise OlderServerError()
+    error = body.get("error")
+    if error == "local_secret_required":
+        raise RegistrationError(_other_server(url))
+    detail = body.get("detail")
+    if response.status_code == 409 and detail:
+        raise RegistrationError(str(detail))
+    if error == "move_failed" and body.get("pending") is not False:
+        raise RegistrationError(
+            f"The EvoScientist server at {url} could not finish moving "
+            f"{old.root}{f' ({detail})' if detail else ''}. Fix the cause and "
+            "run the same command again to finish it."
+        )
+    reason = ": ".join(str(part) for part in (error, detail) if part)
+    raise RegistrationError(
+        f"The EvoScientist server at {url} did not move {old.root} "
+        f"(HTTP {response.status_code}{f', {reason}' if reason else ''})."
+    )
 
 
 def register_folder(workspace: Workspace, *, url: str) -> ServerExposure:

@@ -27,6 +27,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.7": 500_000,
     "grok-4.6": 500_000,
     "grok-4.5": 500_000,
+    # Tencent HY4 via OpenRouter (1M); langchain-openrouter has no profile for it.
+    "hy4": 1_048_576,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
