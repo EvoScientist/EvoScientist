@@ -1270,7 +1270,9 @@ class _V3EventProcessor:
         if data is None:
             return []
         interrupt_id = str(data.get("interrupt_id") or "default")
-        return self._process_interrupt_value(interrupt_id, data.get("value"))
+        # ``langchain_protocol.InputRequestedData`` carries the interrupt
+        # value as ``payload``.
+        return self._process_interrupt_value(interrupt_id, data.get("payload"))
 
     def _process_interrupt_value(
         self,
