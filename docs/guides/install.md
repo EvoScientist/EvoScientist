@@ -80,7 +80,7 @@ tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
 A package that went into the environment another way (on Windows, or with an
 older release, when you added a channel or an MCP server) is not in the
 receipt and is removed; add it again afterwards. Close EvoScientist and stop
-the background agent server (`EvoSci server stop`; with 0.4.0 or 0.4.1,
+the background agent server (`EvoSci server stop`; with 0.4.0 to 0.4.2,
 `EvoSci service stop`) first: it keeps running after your sessions end. On
 Windows the script stops and names the EvoScientist processes that still run,
 because a running process keeps the files locked.
@@ -116,7 +116,7 @@ download or build that fails leaves the installed version as it was.
 
 There is no `--uninstall` option. First stop the background agent server,
 which keeps running after your sessions end: `EvoSci server stop` (with 0.4.0
-or 0.4.1, `EvoSci service stop`). Then, on macOS and Linux:
+to 0.4.2, `EvoSci service stop`). Then, on macOS and Linux:
 
 1. Remove the package with the uv the script installed, which
    `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or

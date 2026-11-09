@@ -1,4 +1,4 @@
-"""``EvoSci service``: what ``EvoSci server`` was called in 0.4.0 and 0.4.1,
+"""``EvoSci service``: what ``EvoSci server`` was called in 0.4.0 to 0.4.2,
 kept for one release. Each command says so and runs its ``EvoSci server``
 one.
 """

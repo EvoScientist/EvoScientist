@@ -66,7 +66,7 @@ server_app = typer.Typer(
     "Anthropic OAuth)"
 )
 app.add_typer(server_app, name="server")
-# What `server` was called in 0.4.0 and 0.4.1, kept for one release.
+# What `server` was called in 0.4.0 to 0.4.2, kept for one release.
 service_app = typer.Typer(help="Deprecated: use EvoSci server")
 app.add_typer(service_app, name="service")
 
