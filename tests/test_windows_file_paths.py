@@ -55,18 +55,23 @@ async def test_posix_attachment_reference_unchanged():
         "/c:/project/media/paper.pdf",
         "/c/project/media/paper.pdf",
         "/C/Project/media/paper.pdf",
+        # Another name of the folder, matched once resolved.
+        "/M:/paper.pdf",
+        "/Z:/media/paper.pdf",
     ],
 )
 def test_windows_file_tool_alias_reaches_media_folder(monkeypatch, key):
     # Exercise Windows path semantics without replacing the process-wide os.name.
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(backends, "Path", _WinPath)
     backend = object.__new__(backends.CustomSandboxBackend)
-    backend._media_dir = PureWindowsPath("C:/project/media")
+    backend._media_dir = _WinPath("C:/project/media")
     backend._media_real = backend._media_dir
 
     assert backend._media_relative(validate_path(key)) == PureWindowsPath("paper.pdf")
     assert backend._media_relative("/C:/project/media-other/paper.pdf") is None
+    assert backend._media_relative("/Y:/media/paper.pdf") is None
 
 
 @pytest.mark.parametrize("dangerous", [False, True])
@@ -92,12 +97,15 @@ def test_windows_file_tool_alias_resolves_working_directory(
 
 class _WinPath(PureWindowsPath):
     """Windows path semantics with a fake ``resolve()``: ``Z:`` is a ``subst``
-    drive for ``C:/project``, ``Y:`` an unreachable drive."""
+    drive for ``C:/project``, ``M:`` one for ``C:/project/media``, ``Y:`` an
+    unreachable drive."""
 
     def resolve(self, strict=False):
         drive = self.drive.upper()
         if drive == "Z:":
             return _WinPath("C:/project", *self.parts[1:])
+        if drive == "M:":
+            return _WinPath("C:/project/media", *self.parts[1:])
         if drive == "Y:":
             raise OSError("drive not ready")
         return self
@@ -294,15 +302,23 @@ def test_windows_git_bash_path_reaches_media_folder(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "key", ["/C:/project/media/paper.pdf", "/c/project/media/paper.pdf"]
+    "key",
+    [
+        "/C:/project/media/paper.pdf",
+        "/c/project/media/paper.pdf",
+        "/M:/paper.pdf",
+        # The media folder inside the working folder, named through an alias of it.
+        "/Z:/media/paper.pdf",
+    ],
 )
 def test_media_folder_stays_read_only_by_every_spelling(monkeypatch, key):
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(backends, "Path", _WinPath)
     backend = object.__new__(backends.CustomSandboxBackend)
     backend._dangerous = False
     backend._refuse_delete = False
-    backend._media_dir = PureWindowsPath("C:/project/media")
+    backend._media_dir = _WinPath("C:/project/media")
     backend._media_real = backend._media_dir
 
     error = backends.CustomSandboxBackend._MEDIA_READ_ONLY_ERROR
@@ -330,6 +346,32 @@ def test_windows_git_bash_path_cannot_change_media_folder(tmp_path):
     ]
     assert (media / "paper.txt").read_text(encoding="utf-8") == "hello"
     assert not (run / real[0].lower()).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows junction")
+def test_windows_junction_to_media_folder_is_read_only(tmp_path):
+    media = tmp_path / "workspace" / "media"
+    media.mkdir(parents=True)
+    (media / "paper.txt").write_text("hello", encoding="utf-8")
+    run = tmp_path / "workspace" / "runs" / "r1"
+    run.mkdir(parents=True)
+    junction = tmp_path / "media-link"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(media)],
+        check=True,
+        capture_output=True,
+    )
+    backend = backends.CustomSandboxBackend(str(run), media_dir=media)
+    alias = paths.file_tool_path(junction / "paper.txt")
+
+    read = backend.read(alias)
+
+    assert read.error is None
+    assert file_data_to_string(read.file_data) == "hello"
+    assert backend.write(alias, "x").error
+    assert backend.edit(alias, "hello", "x").error
+    assert backend.delete(alias).error
+    assert (media / "paper.txt").read_text(encoding="utf-8") == "hello"
 
 
 @pytest.mark.parametrize("key", ["/D:/", "/d:/"])

@@ -2462,7 +2462,10 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Compared as paths, not strings, so Windows keys with backslashes or
         another drive-letter case match too, and a Git Bash key (``/c/...``)
-        is read as the drive path it names, as ``_resolve_path`` reads it.
+        is read as the drive path it names, as ``_resolve_path`` reads it. A
+        Windows drive path that names the folder under another name (a
+        junction, a ``subst`` drive, an 8.3 short name) matches once resolved,
+        as the working folder does.
         """
         if self._media_dir is None:
             return None
@@ -2475,6 +2478,11 @@ class CustomSandboxBackend(LocalShellBackend):
                 return path.relative_to(base)
             except ValueError:
                 continue
+        if _is_windows() and _DRIVE_PATH_RE.match(str(path)):
+            try:
+                return path.resolve().relative_to(self._media_real)
+            except (ValueError, OSError, RuntimeError):
+                return None
         return None
 
     def _media_path(self, key: str) -> Path | None:
