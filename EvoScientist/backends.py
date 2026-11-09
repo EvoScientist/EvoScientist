@@ -2399,7 +2399,7 @@ class CustomSandboxBackend(LocalShellBackend):
                 virtual = relative.as_posix()
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
-        if _DRIVE_PATH_RE.match(key):
+        if _is_windows() and _DRIVE_PATH_RE.match(key):
             relative = self._working_relative(key)
             if relative is None:
                 # An OSError, so the file tools report it as an error message

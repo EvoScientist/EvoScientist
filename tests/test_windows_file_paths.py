@@ -107,6 +107,7 @@ def _windows_backend(monkeypatch, *, dangerous=False):
     """A sandbox at ``C:/project`` with Windows path semantics; the parent
     resolver returns the key it is handed."""
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
     monkeypatch.setattr(backends, "Path", _WinPath)
     monkeypatch.setattr(
         backends.LocalShellBackend, "_resolve_path", lambda _self, key: key
@@ -195,6 +196,12 @@ def test_windows_junction_to_workspace_reaches_it(tmp_path):
     assert not (workspace / link[0].lower()).exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX path semantics")
+def test_drive_shaped_name_unchanged_off_windows(tmp_path):
+    backend = backends.CustomSandboxBackend(str(tmp_path))
+    assert backend._resolve_path("C:/notes.md") == backend.cwd / "C:" / "notes.md"
+
+
 def test_git_bash_path_not_read_off_windows(monkeypatch):
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="posix"))
     monkeypatch.setattr(backends, "Path", PurePosixPath)
@@ -229,6 +236,7 @@ async def test_file_tools_report_drive_path_outside_workspace(
 ):
     backend = backends.CustomSandboxBackend(str(tmp_path))
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
     monkeypatch.setattr(backends, "Path", _WinPath)
     backend.cwd = _WinPath("C:/project")
     tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
