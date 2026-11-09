@@ -6,12 +6,11 @@ before it has stopped its backend, and the backend, which runs outside that
 job, would keep running with nobody to stop it. The backend joins a job that
 only this process holds, with ``KILL_ON_JOB_CLOSE``: Windows closes the handle
 when this process ends however it ends, and that ends the backend and
-everything it started. A ccproxy this command starts joins the same job; one
-reused from another session does not.
+everything it started. The server puts its ccproxy in a job of its own (see
+:meth:`BackendJob.adopt`).
 
-The handle is closed only after ``stop_langgraph_dev()`` and ``stop_ccproxy()``
-have returned, so the job never ends a process this command still means to
-run or stop itself.
+The handle is closed only after ``stop_langgraph_dev()`` has returned, so the
+job never ends a process this command still means to run or stop itself.
 """
 
 from __future__ import annotations
@@ -73,8 +72,9 @@ class BackendJob:
             api.resume(int(process._handle))
 
     def adopt(self, process: subprocess.Popen) -> None:
-        """Put an already running ``process`` in the job (ccproxy). It needs
-        no suspended start: what matters is that it ends with the command."""
+        """Put an already running ``process`` in the job (the server's
+        ccproxy). It needs no suspended start: what matters is that it ends
+        with the job's holder."""
         if self._handle is None:
             self._missing.append("ccproxy")
             return

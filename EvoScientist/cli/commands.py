@@ -18,7 +18,6 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..ccproxy_manager import uses_oauth
 from ..commands.base import (
     ChannelRuntime,
     Command,
@@ -42,7 +41,7 @@ from ..stream.console import console
 from . import (
     async_notifier,
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
-    service_cmd,  # noqa: F401 — registers `EvoSci service` / `EvoSci ccproxy`
+    service_cmd,  # noqa: F401 — registers `EvoSci service`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
@@ -120,18 +119,6 @@ def _interactive_start(prompt: str | None) -> bool:
     """True when a person is at the terminal: no ``-p`` and both streams are ttys."""
     streams = (sys.stdin, sys.stdout)
     return not prompt and all(s is not None and s.isatty() for s in streams)
-
-
-def _providers_in_use(config: Any) -> set[str]:
-    """Providers of the main, auxiliary and fallback models."""
-    from ..config.onboard.wizard import _active_llm_providers
-
-    fallbacks = {
-        entry.rsplit(":", 1)[1].strip()
-        for entry in (config.model_fallbacks or "").split(",")
-        if ":" in entry
-    }
-    return _active_llm_providers(config) | fallbacks
 
 
 def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
@@ -309,7 +296,7 @@ def onboard(
 
 
 def _offer_server_start() -> None:
-    """After onboarding: offer to start the background agent service, which
+    """After onboarding: offer to start the background agent server, which
     registers ``default_workdir``. A running one keeps the settings it started with;
     say how to apply the new ones."""
     import questionary
@@ -324,21 +311,21 @@ def _offer_server_start() -> None:
     record = manager.read_record(older=True)
     if record is not None or manager.is_langgraph_dev_running(port=port, host=host):
         if manager.is_lasting(record):
-            # ``EvoSci service start`` registers ``default_workdir``.
+            # ``EvoSci server start`` registers ``default_workdir``.
             start_again = (
-                "then [bold]EvoSci service start[/bold]"
+                "then [bold]EvoSci server start[/bold]"
                 if config.default_workdir
                 else "and it starts again once an EvoSci session needs it"
             )
             console.print(
-                "[dim]The background agent service runs with your previous "
+                "[dim]The background agent server runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "
-                f"service stop[/bold], {start_again} (this ends its running "
+                f"server stop[/bold], {start_again} (this ends its running "
                 "background work).[/dim]"
             )
         else:
             console.print(
-                "[dim]A server that is not the background service runs on the "
+                "[dim]A server that is not the background server runs on the "
                 "port (an EvoSci deploy, the desktop app or an older release); "
                 "the new settings apply once it restarts.[/dim]"
             )
@@ -347,15 +334,15 @@ def _offer_server_start() -> None:
         # A start here would register this folder (often the home folder) as
         # a project; the first session in a project starts it instead.
         console.print(
-            "[dim]The background agent service starts with your next EvoSci "
+            "[dim]The background agent server starts with your next EvoSci "
             "session in a project, and keeps running for every session until "
-            "[bold]EvoSci service stop[/bold].[/dim]"
+            "[bold]EvoSci server stop[/bold].[/dim]"
         )
         return
     project = start_workspace_path(None, config.default_workdir)
     answer = questionary.confirm(
-        f"Start the background agent service for {project} now? It keeps "
-        "running for every EvoSci session until `EvoSci service stop`.",
+        f"Start the background agent server for {project} now? It keeps "
+        "running for every EvoSci session until `EvoSci server stop`.",
         default=True,
         style=CONFIRM_STYLE,
         qmark=QMARK,
@@ -363,13 +350,13 @@ def _offer_server_start() -> None:
     if not answer:
         return
     try:
-        start_background(None, with_ccproxy=True)
+        start_background(None)
     except typer.Exit:
         console.print("[dim]It starts with your next EvoSci session.[/dim]")
     except Exception as exc:
-        # The configuration is saved; the service starts with the next session.
+        # The configuration is saved; the server starts with the next session.
         console.print(
-            f"[yellow]Could not start the background agent service "
+            f"[yellow]Could not start the background agent server "
             f"({escape(str(exc))}); it starts with your next EvoSci "
             "session.[/yellow]"
         )
@@ -820,7 +807,8 @@ def _ensure_async_subagent_server(
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when the server
     cannot be used for *dirs* (``ServerUnusableError``): the server is from
-    an older EvoScientist, or the project's folder is gone.
+    an older EvoScientist, the project's folder is gone, or the server could
+    not start the ccproxy Anthropic's OAuth goes through.
     """
     from ..langgraph_dev.manager import ensure_server
     from ..langgraph_dev.registration import ServerUnusableError
@@ -867,10 +855,12 @@ def print_exposure_warnings(exposure: Any, *, to: Any = None) -> None:
 
 def _print_server_notices() -> None:
     """What the user should know about the server a start found or started:
-    an older release's server, drift since its launch, and a public bind or
-    tunnel."""
+    its ccproxy missing, an older release's server, drift since its launch,
+    and a public bind or tunnel."""
     from ..langgraph_dev import manager as _lg_manager
 
+    if _lg_manager.CCPROXY_MISSING is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.CCPROXY_MISSING)}[/yellow]")
     if _lg_manager.OLDER_SERVER is not None:
         console.print(f"[yellow]⚠ {escape(_lg_manager.OLDER_SERVER)}[/yellow]")
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
@@ -2250,17 +2240,9 @@ def serve(
 
     _require_chatgpt_sign_in(config, interactive=False)
 
-    # Auto-start ccproxy when Anthropic uses OAuth mode
-    if uses_oauth(config):
-        try:
-            from ..ccproxy_manager import maybe_start_ccproxy
+    from ..ccproxy_manager import use_server_ccproxy
 
-            # It outlives this session, for every session and the background
-            # server to share (EvoSci ccproxy stop / service stop).
-            maybe_start_ccproxy(config, lasting=True)
-        except RuntimeError as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
-            raise typer.Exit(1) from exc
+    use_server_ccproxy(config)
 
     if not config.channel_enabled:
         console.print("[red]No channels configured.[/red]")
@@ -3160,8 +3142,7 @@ def _main_callback(
 
     # Resolve the output format first. In stream-json mode stdout must carry
     # only JSONL, so establish the mode and redirect the console to stderr
-    # BEFORE anything below (ccproxy startup, validation) can print a
-    # human-readable line to stdout.
+    # BEFORE anything below (validation) can print a human-readable line to stdout.
     effective_output_format = (output_format or "text").lower()
     if effective_output_format not in ("text", "stream-json"):
         raise typer.BadParameter("--output-format must be 'text' or 'stream-json'")
@@ -3229,7 +3210,9 @@ def _main_callback(
     config = get_effective_config(cli_overrides)
     if auth_mode:
         # oauth only for subscriptions a configured model can use; api_key always.
-        in_use = _providers_in_use(config)
+        from ..config.settings import providers_in_use
+
+        in_use = providers_in_use(config)
         for provider in ("anthropic", "openai"):
             if auth_mode == "api_key" or provider in in_use:
                 setattr(config, f"{provider}_auth_mode", auth_mode)
@@ -3250,17 +3233,9 @@ def _main_callback(
 
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
 
-    # Auto-start ccproxy when Anthropic uses OAuth mode
-    if uses_oauth(config):
-        try:
-            from ..ccproxy_manager import maybe_start_ccproxy
+    from ..ccproxy_manager import use_server_ccproxy
 
-            # It outlives this session, for every session and the background
-            # server to share (EvoSci ccproxy stop / service stop).
-            maybe_start_ccproxy(config, lasting=True)
-        except RuntimeError as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
-            raise typer.Exit(1) from exc
+    use_server_ccproxy(config)
 
     show_thinking = config.show_thinking if not no_thinking else False
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)

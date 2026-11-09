@@ -41,7 +41,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
+from EvoScientist.langgraph_dev import (
+    server_ccproxy,
+    server_home,
+    server_record,
+    workspace_setup,
+)
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -326,6 +331,16 @@ async def register_workspace(request: Request) -> JSONResponse:
     return JSONResponse({"workspace_dir": workspace.key} | exposure)
 
 
+async def ensure_ccproxy(request: Request) -> JSONResponse:
+    """Start the server's ccproxy for a session that found nothing answering
+    on ``ccproxy_port``: ``{"serving": <bool>, "detail": <why not, or
+    null>}``. Needs the local secret."""
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    detail = await asyncio.to_thread(server_ccproxy.ensure_for_session)
+    return JSONResponse({"serving": detail is None, "detail": detail})
+
+
 async def reconcile_autoskills(request: Request) -> JSONResponse:
     """Reconcile every served project's AutoSkills cron with the server's
     configuration, after a client changed it: ``{"projects": <count>,
@@ -495,10 +510,17 @@ async def _lifespan(_app: Starlette):
     # graphs and started its cron scheduler and run workers, and before it
     # serves requests; the file I/O goes to a thread because blockbuster
     # refuses it on the event loop.
+    # First: runs that start meanwhile wait for it, and the server marks
+    # itself serving only once ccproxy serves.
+    await asyncio.to_thread(server_ccproxy.start_serving)
     await asyncio.to_thread(load_local_secret)
     await workspace_setup.set_up_at_start()
     await asyncio.to_thread(server_record.mark_serving)
-    yield
+    try:
+        yield
+    finally:
+        if server_ccproxy.needed():
+            await asyncio.to_thread(server_ccproxy.request_stop)
 
 
 def _build_app() -> Starlette:
@@ -526,6 +548,7 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
+            Route("/api/ccproxy/ensure", ensure_ccproxy, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
             Route("/api/settings", get_settings, methods=["GET"]),
@@ -540,10 +563,11 @@ def _build_app() -> Starlette:
 
 # langgraph-api imports this app before its runtime loads the store, so the
 # server (the process working in the server home) takes its data folder's lock,
-# records itself for its clients and backs the store up first; anything else
+# records itself for its clients, ends a ccproxy its predecessor left and backs
+# the store up first (quickly: langgraph-api times this import); anything else
 # importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
-    server_record.write_record()
+    server_ccproxy.start(server_record.write_record())
     server_home.back_up_store()
 app = _build_app()
