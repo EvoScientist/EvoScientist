@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import subprocess
 from dataclasses import asdict
 from pathlib import PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
@@ -111,6 +110,13 @@ class _WinPath(PureWindowsPath):
         return self
 
 
+def _make_junction(link, target):
+    """A Windows junction *link* -> *target*, without a shell or admin rights."""
+    import _winapi
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
 def _windows_backend(monkeypatch, *, dangerous=False):
     """A sandbox at ``C:/project`` with Windows path semantics; the parent
     resolver returns the key it is handed."""
@@ -185,11 +191,7 @@ def test_windows_junction_to_workspace_reaches_it(tmp_path):
     workspace = tmp_path / "EvoScientist"
     (workspace / "artifacts").mkdir(parents=True)
     junction = tmp_path / "link"
-    subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(junction), str(workspace)],
-        check=True,
-        capture_output=True,
-    )
+    _make_junction(junction, workspace)
     backend = backends.CustomSandboxBackend(str(workspace))
     link = junction.as_posix()
     git_bash = f"/{link[0].lower()}{link[2:]}"
@@ -356,11 +358,7 @@ def test_windows_junction_to_media_folder_is_read_only(tmp_path):
     run = tmp_path / "workspace" / "runs" / "r1"
     run.mkdir(parents=True)
     junction = tmp_path / "media-link"
-    subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(junction), str(media)],
-        check=True,
-        capture_output=True,
-    )
+    _make_junction(junction, media)
     backend = backends.CustomSandboxBackend(str(run), media_dir=media)
     alias = paths.file_tool_path(junction / "paper.txt")
 
