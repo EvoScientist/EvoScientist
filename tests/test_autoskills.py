@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -934,6 +935,52 @@ def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
 
     assert result["reverted"] is True, result
     assert not installed.exists()
+
+
+def _open_descriptor_count() -> int:
+    for folder in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(folder):
+            return len(os.listdir(folder))
+    raise AssertionError("no descriptor listing on this platform")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptor listing")
+def test_reading_a_folder_named_like_a_file_leaves_no_descriptor_open(tmp_path):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    folder = tmp_path / "manifest.json"
+    folder.mkdir()
+    before = _open_descriptor_count()
+    for _ in range(20):
+        assert module._read_manifest(folder) is None
+        assert module._read_regular(folder, 10) is None
+
+    assert _open_descriptor_count() == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="FIFOs are POSIX")
+def test_a_manifest_that_is_a_fifo_never_blocks_the_listing(tmp_path):
+    import threading
+
+    memory_dir = tmp_path / "memories"
+    _submit_focused_validation(memory_dir, tmp_path / "skills")
+    fifo = autoskill_proposals_dir(memory_dir) / "fifo-draft" / "manifest.json"
+    fifo.parent.mkdir()
+    os.mkfifo(fifo)
+    listed = []
+    reader = threading.Thread(
+        target=lambda: listed.extend(list_skill_proposals(memory_dir)), daemon=True
+    )
+    reader.start()
+    reader.join(5)
+    finished = not reader.is_alive()
+    # Lets a reader that blocked on the FIFO go, whatever the result.
+    with contextlib.suppress(OSError):
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+    reader.join(5)
+
+    assert finished
+    assert [p.proposal_id for p in listed] == ["focused-validation"]
 
 
 def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch):

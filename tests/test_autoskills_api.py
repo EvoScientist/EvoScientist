@@ -783,7 +783,9 @@ def test_a_file_whose_read_fails_after_its_open_is_not_found(tmp_path, monkeypat
         def fstat(_fd):
             raise OSError(5, "Input/output error")
 
-    monkeypatch.setattr(autoskills_api, "os", FailingFstat())
+    from EvoScientist.memory.autoskills import proposals
+
+    monkeypatch.setattr(proposals, "os", FailingFstat())
 
     assert autoskills_api._read_text(path) == (404, {"error": "not_found"})
 

@@ -16,7 +16,6 @@ import contextlib
 import json
 import logging
 import os
-import stat
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -25,11 +24,11 @@ from typing import Any, Literal
 from EvoScientist import paths
 from EvoScientist.langgraph_dev import folder_check, registry
 from EvoScientist.memory.autoskills.proposals import (
-    _OPEN_FLAGS,
     _SKILL_SCOPES,
     InstallTarget,
     SkillProposal,
     _failure_text,
+    _read_regular,
     _resolves_within_root,
     approve_skill_proposal,
     copied_files,
@@ -102,23 +101,11 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
     return key
 
 
-def _read_head(path: Path, size: int) -> bytes | None:
-    """Up to ``size`` bytes of a regular file, or None; a FIFO never blocks it."""
-    try:
-        fd = os.open(path, _OPEN_FLAGS)
-        with os.fdopen(fd, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                return None
-            return handle.read(size)
-    except OSError:
-        return None
-
-
 def _inline(path: Path, folder: Path) -> tuple[str, bool]:
     """The start of a draft's text file, and whether it was cut."""
     # A character takes at most four bytes, so one byte more shows a longer text.
     limit = MAX_INLINE_CHARS * 4 + 1
-    data = _read_head(path, limit) if _resolves_within_root(path, folder) else None
+    data = _read_regular(path, limit) if _resolves_within_root(path, folder) else None
     if data is None:
         return "", False
     text = data.decode("utf-8", errors="replace")
@@ -274,7 +261,7 @@ def _relative_path(value: str) -> str | None:
 
 def _read_text(path: Path) -> tuple[int, str | dict[str, Any]]:
     """A regular file's text, read once and never past the size limit."""
-    data = _read_head(path, MAX_FILE_BYTES + 1)
+    data = _read_regular(path, MAX_FILE_BYTES + 1)
     if data is None:
         return 404, {"error": "not_found"}
     if len(data) > MAX_FILE_BYTES:

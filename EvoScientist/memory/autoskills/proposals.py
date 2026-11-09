@@ -122,12 +122,15 @@ def proposal_virtual_path(skill_name: str) -> str:
 
 
 def _read_manifest(path: Path) -> dict[str, Any] | None:
+    raw = _read_regular(path)
+    if raw is None:
+        return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
         # A value no decision could write back or send (a lone surrogate, NaN)
         # makes the manifest corrupt.
         json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    except (OSError, ValueError, RecursionError):
+    except (ValueError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -727,6 +730,24 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
 _NO_FILE_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 _NO_FILE_WINERRORS = frozenset({21, 123, 1921})
 _OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _read_regular(path: Path, size: int = -1) -> bytes | None:
+    """Up to *size* bytes of *path* if it is a regular file, else None: never
+    blocks on a FIFO and never leaves its descriptor open."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read(size)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _is_regular_file(path: Path) -> bool:
