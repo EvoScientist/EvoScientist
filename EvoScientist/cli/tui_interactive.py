@@ -731,6 +731,7 @@ def run_textual_interactive(
             self._channel_start_task: asyncio.Task[None] | None = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
+            self._channel_autostart_done = False
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -1250,9 +1251,15 @@ def run_textual_interactive(
 
         async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
+            # Once per session, and only after an agent exists. The flag
+            # flips before the attempt, so a failed start is not retried
+            # and /channel stop is not undone by /new, /resume, or /model.
+            if self._channel_autostart_done:
+                return
             try:
                 if self._exiting or self._agent_loader.agent is None:
                     return
+                self._channel_autostart_done = True
                 from ..config import load_config
 
                 cfg = await asyncio.to_thread(load_config)

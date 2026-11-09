@@ -269,6 +269,7 @@ async def test_startup_poll_delivers_after_agent_load_recovers(
             await _until(lambda: runs.started[-1:] == ["from the channel"])
             await _until(lambda: _idle(app, runs))
             await app._start_channels()
+            assert channels.await_count == 1
             assert app._channel_timer is timer
             assert runs.peak == 1
             app.force_quit()
@@ -276,6 +277,77 @@ async def test_startup_poll_delivers_after_agent_load_recovers(
     finally:
         release.set()
         runs.finish_all()
+
+
+async def test_stopped_channels_are_not_restarted_by_a_later_load(
+    monkeypatch, workspace
+):
+    """Auto-start runs once; a later load does not reconnect stopped channels."""
+    running = {"on": False}
+
+    def load_agent(**_kwargs):
+        return object()
+
+    def mark_running(*_args, **_kwargs):
+        running["on"] = True
+        return []
+
+    def channels_running(*_args, **_kwargs) -> bool:
+        return running["on"]
+
+    runs = _Runs()
+    app = await capture_app(monkeypatch, workspace)
+    app._dirs = SessionDirs(workspace)
+    app._runtime_gateways = SimpleNamespace(graph_gateway=runs.gateway)
+    monkeypatch.setattr(app._agent_loader, "_loader_fn", load_agent)
+    channels = AsyncMock(side_effect=mark_running)
+    monkeypatch.setattr(tui_mod, "_auto_start_channel_in_worker", channels)
+    monkeypatch.setattr(tui_mod, "_channels_is_running", channels_running)
+    monkeypatch.setattr(
+        "EvoScientist.config.load_config",
+        lambda: EvoScientistConfig(channel_enabled="telegram"),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config",
+        lambda: SimpleNamespace(model="test-model", provider="openai"),
+    )
+    try:
+        async with app.run_test(size=(100, 40)):
+            await _until(
+                lambda: (
+                    channels.await_count == 1
+                    and app._channel_start_task is not None
+                    and app._channel_start_task.done()
+                )
+            )
+            assert running["on"] is True
+            first = app._channel_start_task
+            # /channel stop leaves channels down. A second load must not
+            # treat that as "never started" and connect again.
+            running["on"] = False
+            replacement = object()
+            ctx = CommandContext(
+                dirs=app._dirs,
+                agent=replacement,
+                thread_id=app._conversation_tid,
+                ui=app,
+            )
+            await tui_mod._sync_tui_command_completion(
+                app,
+                ctx,
+                app._agent_loader.agent,
+                SimpleNamespace(name="/model"),
+            )
+            assert app._agent_loader.agent is replacement
+            second = app._channel_start_task
+            assert second is not None
+            assert second is not first
+            await second
+            assert channels.await_count == 1
+            app.force_quit()
+    finally:
+        app._channel_start_stop.set()
+        await asyncio.gather(*list(app._background_tasks), return_exceptions=True)
 
 
 async def test_replacing_initial_agent_does_not_wait_for_channel_startup(
