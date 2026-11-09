@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import subprocess
 from dataclasses import asdict
 from pathlib import PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
@@ -89,18 +90,31 @@ def test_windows_file_tool_alias_resolves_working_directory(
     )
 
 
+class _WinPath(PureWindowsPath):
+    """Windows path semantics with a fake ``resolve()``: ``Z:`` is a ``subst``
+    drive for ``C:/project``, ``Y:`` an unreachable drive."""
+
+    def resolve(self, strict=False):
+        drive = self.drive.upper()
+        if drive == "Z:":
+            return _WinPath("C:/project", *self.parts[1:])
+        if drive == "Y:":
+            raise OSError("drive not ready")
+        return self
+
+
 def _windows_backend(monkeypatch, *, dangerous=False):
     """A sandbox at ``C:/project`` with Windows path semantics; the parent
     resolver returns the key it is handed."""
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    monkeypatch.setattr(backends, "Path", _WinPath)
     monkeypatch.setattr(
         backends.LocalShellBackend, "_resolve_path", lambda _self, key: key
     )
     backend = object.__new__(backends.CustomSandboxBackend)
     backend._dangerous = dangerous
     backend._media_dir = None
-    backend.cwd = PureWindowsPath("C:/project")
+    backend.cwd = _WinPath("C:/project")
     return backend
 
 
@@ -135,11 +149,50 @@ def test_dangerous_git_bash_path_resolves_to_drive(monkeypatch, key, expected):
     assert backend._resolve_path(validate_path(key)) == expected
 
 
-@pytest.mark.parametrize("key", ["/C:/other/a.md", "/d:/data/a.md", "/C:/"])
+@pytest.mark.parametrize(
+    "key", ["/C:/other/a.md", "/d:/data/a.md", "/C:/", "/Y:/project/a.md"]
+)
 def test_drive_path_outside_working_folder_is_refused(monkeypatch, key):
     backend = _windows_backend(monkeypatch)
     with pytest.raises(PermissionError, match="outside the workspace"):
         backend._resolve_path(validate_path(key))
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("/Z:/artifacts/a.md", "/artifacts/a.md"),
+        ("/z:/", "/"),
+        ("/z/artifacts/a.md", "/artifacts/a.md"),
+    ],
+)
+def test_other_name_of_working_folder_resolves_into_it(monkeypatch, key, expected):
+    backend = _windows_backend(monkeypatch)
+    assert backend._resolve_path(validate_path(key)) == expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows junction")
+def test_windows_junction_to_workspace_reaches_it(tmp_path):
+    workspace = tmp_path / "EvoScientist"
+    (workspace / "artifacts").mkdir(parents=True)
+    junction = tmp_path / "link"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(workspace)],
+        check=True,
+        capture_output=True,
+    )
+    backend = backends.CustomSandboxBackend(str(workspace))
+    link = junction.as_posix()
+    git_bash = f"/{link[0].lower()}{link[2:]}"
+
+    first = backend.write(paths.file_tool_path(junction / "artifacts" / "a.md"), "a")
+    second = backend.write(f"{git_bash}/artifacts/b.md", "b")
+
+    assert first.error is None
+    assert second.error is None
+    assert (workspace / "artifacts" / "a.md").read_text(encoding="utf-8") == "a"
+    assert (workspace / "artifacts" / "b.md").read_text(encoding="utf-8") == "b"
+    assert not (workspace / link[0].lower()).exists()
 
 
 def test_git_bash_path_not_read_off_windows(monkeypatch):
@@ -176,8 +229,8 @@ async def test_file_tools_report_drive_path_outside_workspace(
 ):
     backend = backends.CustomSandboxBackend(str(tmp_path))
     monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(backends, "Path", PureWindowsPath)
-    backend.cwd = PureWindowsPath("C:/project")
+    monkeypatch.setattr(backends, "Path", _WinPath)
+    backend.cwd = _WinPath("C:/project")
     tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
     runtime = SimpleNamespace(tool_call_id="call-1", state={})
 

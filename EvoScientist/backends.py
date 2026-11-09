@@ -2363,7 +2363,9 @@ class CustomSandboxBackend(LocalShellBackend):
         On Windows a Git Bash path (``/c/...``) is read as the drive path it
         names when that lies in the working folder or the media folder;
         otherwise it stays a workspace path, so a workspace folder named with
-        one letter is still reached. A drive path anywhere else is refused.
+        one letter is still reached. A drive path that reaches the working
+        folder under another name (a junction, a ``subst`` drive, an 8.3 short
+        name) is mapped into it once resolved; one anywhere else is refused.
 
         In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
         alias or Git Bash path and let the parent resolve real absolute paths
@@ -2374,7 +2376,7 @@ class CustomSandboxBackend(LocalShellBackend):
         if self._dangerous:
             return super()._resolve_path(drive_path or key)
 
-        if drive_path is not None and Path(drive_path).is_relative_to(self.cwd):
+        if drive_path is not None and self._working_relative(drive_path) is not None:
             key = drive_path
 
         media_path = self._media_path(key)
@@ -2398,14 +2400,18 @@ class CustomSandboxBackend(LocalShellBackend):
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         if _DRIVE_PATH_RE.match(key):
-            # An OSError, so the file tools report it as an error message
-            # rather than raising.
-            raise PermissionError(
-                errno.EACCES,
-                "Path is outside the workspace; file tools reach only paths "
-                "inside it, and '/' is its root",
-                key,
-            )
+            relative = self._working_relative(key)
+            if relative is None:
+                # An OSError, so the file tools report it as an error message
+                # rather than raising.
+                raise PermissionError(
+                    errno.EACCES,
+                    "Path is outside the workspace; file tools reach only paths "
+                    "inside it, and '/' is its root",
+                    key,
+                )
+            virtual = relative.as_posix()
+            return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -2431,6 +2437,23 @@ class CustomSandboxBackend(LocalShellBackend):
                 break
 
         return super()._resolve_path(key)
+
+    def _working_relative(self, drive_path: str) -> Path | None:
+        """A Windows *drive_path* relative to the working folder, or None.
+
+        Compared as written, then resolved: the working folder is the resolved
+        one, so a junction, a ``subst`` drive or an 8.3 short name of it only
+        matches once resolved.
+        """
+        path = Path(drive_path)
+        try:
+            return path.relative_to(self.cwd)
+        except ValueError:
+            pass
+        try:
+            return path.resolve().relative_to(self.cwd)
+        except (ValueError, OSError, RuntimeError):
+            return None
 
     # Windows attachment references use a /C:/... file-tool alias so they
     # pass deepagents' validation before reaching this backend.
