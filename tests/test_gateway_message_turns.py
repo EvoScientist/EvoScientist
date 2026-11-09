@@ -199,8 +199,9 @@ async def test_pause_prompt_comes_from_the_envelope_before_state_lists_it(namesp
 
 
 async def test_pause_of_several_interrupts_prompts_each_once():
-    """The server sends one ``input.requested`` for a step that raised several
-    interrupts; the others come from thread state, without repeating it."""
+    """The turn stops at the root ``interrupted`` that follows the first
+    interrupting task's envelope; the step's other interrupts come from thread
+    state, without repeating the envelope's prompt."""
     second = {"id": "interrupt-2", "value": _STATE_INTERRUPT["value"]}
     stream = FakeLangGraphThreadStream(
         THREAD_ID,

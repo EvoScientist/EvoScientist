@@ -1278,10 +1278,10 @@ class LangGraphServerGateway:
         """The prompts of a turn that saw its own pause, read from thread state.
 
         The ``input.requested`` envelope already gave a prompt when *prompted*;
-        the state adds the rest: the server sends one envelope for a step that
-        raised several interrupts, and none for a pause seen only as a root
-        ``lifecycle: interrupted``. The processor drops a prompt it already
-        emitted. ``stream.interrupts`` is no source: a new stream replays
+        the state adds the rest: the turn stops at the root ``interrupted`` that
+        follows the first interrupting task's envelopes, before another task's,
+        and a pause seen only as a root ``lifecycle: interrupted`` has none. The
+        processor drops a prompt it already emitted. ``stream.interrupts`` is no source: a new stream replays
         interrupts that were already answered, the SDK leaves their value empty
         (the server sends it as ``data.payload``), and ``stream.interrupted``
         comes from a separate SSE that can lag this one.
