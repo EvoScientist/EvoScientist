@@ -57,13 +57,15 @@ def _draft(
 ) -> dict:
     folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / name
     folder.mkdir(parents=True, exist_ok=True)
+    # LF on every platform: the routes return the bytes as they are on disk.
     (folder / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: Use when testing {name}.\n---\n\n{body}\n",
         encoding="utf-8",
+        newline="\n",
     )
     for relative, text in (files or {}).items():
         (folder / relative).parent.mkdir(parents=True, exist_ok=True)
-        (folder / relative).write_text(text, encoding="utf-8")
+        (folder / relative).write_text(text, encoding="utf-8", newline="\n")
     result = submit_autoskill_proposal(
         memory_dir=paths.MEMORIES_DIR,
         skill_name=name,
