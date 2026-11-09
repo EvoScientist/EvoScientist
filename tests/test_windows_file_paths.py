@@ -487,15 +487,16 @@ def _rewritten(request, *, asynchronous=False):
     return seen[0]
 
 
-_PATH_ARG = {
-    "read_file": "file_path",
-    "write_file": "file_path",
-    "edit_file": "file_path",
-    "delete": "file_path",
-    "ls": "path",
-    "glob": "path",
-    "grep": "path",
-}
+_PATH_ARG = windows_paths._PATH_ARGS
+
+
+def test_middleware_covers_every_file_tool_path_argument(tmp_path):
+    backend = backends.CustomSandboxBackend(str(tmp_path))
+    tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
+
+    assert set(_PATH_ARG) == set(tools) - {"execute"}
+    for name, arg in _PATH_ARG.items():
+        assert arg in tools[name].args, name
 
 
 @pytest.mark.parametrize("tool", sorted(_PATH_ARG))
