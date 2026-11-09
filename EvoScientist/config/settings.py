@@ -331,11 +331,9 @@ class EvoScientistConfig:
     # pick its own backend; ``"inherit"`` defers to the global ``gateway_backend``
     # above. The fixed-workspace surfaces (serve, single-shot, standalone) default
     # to ``inherit``, so the global flag moves them. The interactive CLI and TUI
-    # default to ``local`` instead: the server path is still lossy there (the
-    # per-session workspace is not applied server-side, #413, and per-run config
-    # is dropped on resume, #454), so a global ``langgraph_server`` must not move
-    # them - reaching the server backend on those surfaces takes an explicit
-    # ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
+    # default to ``local`` instead, so a global ``langgraph_server`` does not
+    # move them - reaching the server backend on those surfaces takes an
+    # explicit ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
     # never read these fields directly for a routing decision.
     gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
     gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (
@@ -1556,6 +1554,19 @@ def get_effective_config(
     return EvoScientistConfig(**data)
 
 
+def providers_in_use(config: Any) -> set[str]:
+    """Providers of the main, auxiliary and fallback models."""
+    providers = {config.provider}
+    if config.auxiliary_provider:
+        providers.add(config.auxiliary_provider)
+    providers |= {
+        entry.rsplit(":", 1)[1].strip()
+        for entry in (config.model_fallbacks or "").split(",")
+        if ":" in entry
+    }
+    return providers
+
+
 def apply_config_to_env(config: EvoScientistConfig) -> None:
     """Apply config API keys to environment variables if not already set.
 
@@ -1670,6 +1681,8 @@ def _apply_config_to_env(config: EvoScientistConfig) -> None:
     # Written for both values: get_chat_model reads it, and the langgraph dev
     # subprocess re-resolves config without the CLI's --auth-mode override.
     os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = config.openai_auth_mode
+    # The server decides from it whether it starts ccproxy.
+    os.environ["EVOSCIENTIST_ANTHROPIC_AUTH_MODE"] = config.anthropic_auth_mode
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)

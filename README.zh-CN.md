@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.2" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -161,6 +161,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 11 月 6 日]** **[v0.4.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.2)** — Claude、OpenAI、OpenRouter 与 DeepSeek 共用一个 `reasoning_effort`，默认 `high`；新增模型：腾讯 HY4（OpenRouter），取代 HY4 Preview 与 HY3；失去跟踪的后台进程会被报告，而不是静默丢失；移除项目时会停止它在服务器上的工作；失败的命令显示为失败；deepagents 0.7.34。
 - **[2026 年 11 月 3 日]** **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** — WebUI 与桌面应用可在任意项目中共用同一个后台服务器（WebUI 0.5）；Windows 上被服务器停止打断的运行会在下次启动时重新运行；在服务器上取消运行会停止它启动的 shell 命令；工具报错更清晰；修复恢复定时任务、后台进程查询和 `EvoSci deploy --tunnel` 的问题；移除 v0.3.8 之前数据的兼容代码。
 - **[2026 年 10 月 31 日]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — 所有项目共用一个后台服务（用 `EvoSci server stop` 停止）；新增模型：GPT-6.1 Terra（OpenAI 与 OpenRouter）；项目 `.env` 只保存 `EvoSci` 命令自身的设置；安装更稳健、shell 沙箱更严格、`EvoSci update` 更安全；macOS 只支持 Apple 芯片；修复 memory worker、serve 后续轮次和独立渠道等问题。
 - **[2026 年 10 月 24 日]** **[v0.3.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.8)** — 桌面应用铺垫：`EvoSci deploy --json` 与供 WebUI 使用的设置 API；新增模型：Kimi K3.1 Pro（Moonshot 与 OpenRouter）、MiniMax M3.1 Flash（MiniMax 与 OpenRouter），Kimi 与 MiniMax 列表分别精简为 K3.1 Pro / K3 与 M3.1 Flash / M3；路由类提供商只使用各自的 API key；memory worker 写入有上限；工具筛选始终保留内置工具；修复重启后定时任务失效、Windows 输出、退出卡住、独立渠道退出和 MCP 服务器无响应等问题；deepagents 0.7.32。
@@ -499,7 +500,7 @@ export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 
 所有智能体都从 `config.yaml` 或环境变量中读取密钥。项目目录中的 `.env` 只包含在该目录启动的 `EvoSci` 命令自身的设置，例如 `EVOSCIENTIST_DEFAULT_MODE` 或 `EVOSCIENTIST_UI_BACKEND`；其中凡是 EvoScientist 读取的密钥或其他设置，都会被 `EvoSci` 忽略并给出警告。其中的其他变量（例如 `HF_TOKEN`）同样会被忽略：请在启动 EvoSci 之前在 shell 中 export。
 
-后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci service start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci service stop` 再重新启动。
+后台服务器沿用启动它的那个会话的环境，供所有项目使用，直到它被停止：一个项目的 export（conda 环境、direnv、按项目设置的 `AWS_PROFILE`）会进入其他所有项目中智能体的 shell 和 `mcp.yaml` 里的 `${VAR}`，而之后再 export 的变量不会到达它。请在一个具备所有项目所需环境的 shell 中用 `EvoSci server start --workdir <项目>` 启动它；修改环境后，运行 `EvoSci server stop` 再重新启动。
 
 项目的对话、定时任务、记忆和 AutoSkills 提案都按路径保存在项目文件夹之外，所以移动或重命名后的文件夹会成为一个新的空项目（有远程仓库的 git 项目的记忆仍会跟随它）。用 `EvoSci workspace move <旧文件夹> <新文件夹>` 把项目迁移过去：它不移动任何文件；如果旧文件夹仍然存在（复制而非移动），它会拒绝执行，复制出的文件夹是一个新项目。
 
@@ -545,7 +546,7 @@ EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；�
 <details>
 <summary>Desktop WebUI</summary>
 
-将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci service stop`；WebUI 会显示在该服务器上注册的所有项目：
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端。WebUI 关闭后服务器继续运行，供所有 EvoSci 会话共用，直到 `EvoSci server stop`；WebUI 会显示在该服务器上注册的所有项目：
 
 ```bash
 EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用

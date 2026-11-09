@@ -269,6 +269,40 @@ def served_projects(url: str) -> list[dict[str, object]]:
     ]
 
 
+def ensure_ccproxy(*, url: str) -> str | None:
+    """Ask the server at *url* to start its ccproxy when it is not running;
+    why it does not serve, or None."""
+    from ..ccproxy_manager import START_BUDGET_SECONDS
+
+    url = url.rstrip("/")
+    try:
+        # A start can take ccproxy's whole start budget.
+        response = _post_with_secret(
+            url,
+            "/api/ccproxy/ensure",
+            {},
+            what="reach",
+            timeout=START_BUDGET_SECONDS + 30,
+        )
+    except RegistrationError as exc:
+        return str(exc)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if response.status_code == 200 and body.get("serving") is True:
+        return None
+    if body.get("error") == "local_secret_required":
+        return _other_server(url)
+    return str(
+        body.get("detail")
+        or f"The EvoScientist server at {url} did not start its ccproxy "
+        f"(HTTP {response.status_code})."
+    )
+
+
 def reconcile_autoskills(*, url: str) -> list[str]:
     """Ask the server at *url* to reconcile every served project's AutoSkills
     cron with its configuration (after ``/autoskills`` changed it); why each

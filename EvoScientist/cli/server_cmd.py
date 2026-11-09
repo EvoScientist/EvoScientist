@@ -1,9 +1,8 @@
 """``EvoSci server`` — start, inspect and stop the background langgraph dev
-server.
+server, and with Anthropic OAuth the ccproxy it starts.
 
 The server outlives the sessions that use it, so it needs an explicit way to
-start, see and stop it. ``EvoSci service`` (:mod:`.service_cmd`) covers it
-together with ccproxy.
+start, see and stop it.
 """
 
 from __future__ import annotations
@@ -47,16 +46,14 @@ def server_start(
     ),
 ) -> None:
     """Start the background langgraph dev server and leave it running, for
-    every EvoSci session to share; `EvoSci server stop` stops it. Only the
-    server: `EvoSci service start` also starts ccproxy."""
-    start_background(workdir, with_ccproxy=False)
+    every EvoSci session to share; `EvoSci server stop` stops it. With
+    Anthropic OAuth it starts its ccproxy too."""
+    start_background(workdir)
 
 
-def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
-    """``EvoSci server start`` / ``EvoSci service start``: start the server,
-    or reuse a running one, for a project, and with *with_ccproxy* also the
-    ccproxy it uses with Anthropic OAuth."""
-    from ..ccproxy_manager import is_ccproxy_running, uses_oauth
+def start_background(workdir: str | None) -> None:
+    """``EvoSci server start``: start the server, or reuse a running one, for
+    a project."""
     from ..config import get_effective_config
     from ..langgraph_dev import manager
     from ..langgraph_dev.registration import ServerUnusableError
@@ -72,12 +69,11 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
     project = _prepare_workdir_or_exit(
         start_workspace_path(workdir, config.default_workdir)
     )
-    oauth = uses_oauth(config)
     try:
         with console.status(
             "[dim]Starting the background agent server...[/dim]", spinner="dots"
         ):
-            result = manager.serve_project(config, project, with_ccproxy=with_ccproxy)
+            result = manager.serve_project(config, project)
     except (ServerUnusableError, RuntimeError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -91,11 +87,7 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
         if result.reason is not None:
             console.print(f"[dim]{escape(result.reason)}[/dim]")
         raise typer.Exit(1)
-    stop = "EvoSci service stop" if with_ccproxy else "EvoSci server stop"
-    start_cmd = (
-        f"EvoSci {'service' if with_ccproxy else 'server'} start "
-        f"--workdir {escape(command_arg(project))}"
-    )
+    start_cmd = f"EvoSci server start --workdir {escape(command_arg(project))}"
     url = result.url
     if not result.started:
         console.print(
@@ -104,7 +96,7 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
         )
         if not manager.is_lasting(result.record):
             console.print(
-                "[yellow]⚠ It is not the background service: an EvoSci deploy, "
+                "[yellow]⚠ It is not the background server: an EvoSci deploy, "
                 "the desktop app, an older release or another program runs it, "
                 "and it may stop with its owner; then the next session or "
                 f"[bold]{start_cmd}[/bold] starts the background one.[/yellow]"
@@ -113,21 +105,16 @@ def start_background(workdir: str | None, *, with_ccproxy: bool) -> None:
         console.print(
             f"[green]✓[/green] Background agent server running at {url}; it "
             f"serves {escape(str(project))} and every other registered project, "
-            f"and keeps running for every EvoSci session until [bold]{stop}[/bold]."
-        )
-    if oauth and not with_ccproxy and not is_ccproxy_running(config.ccproxy_port):
-        console.print(
-            "[yellow]⚠ Anthropic uses OAuth, and ccproxy is not running: start it "
-            "with [bold]EvoSci ccproxy start[/bold] (or use [bold]EvoSci service "
-            "start[/bold]).[/yellow]"
+            "and keeps running for every EvoSci session until "
+            "[bold]EvoSci server stop[/bold]."
         )
     _print_server_notices()
 
 
 @server_app.command("status")
 def server_status() -> None:
-    """Show the background langgraph dev server's state and the projects it
-    serves."""
+    """Show the background langgraph dev server's state, its ccproxy with
+    Anthropic OAuth, and the projects it serves."""
     from ..config import get_effective_config
     from ..langgraph_dev import server_record
     from ..langgraph_dev.boundary import is_wildcard_host
@@ -180,6 +167,9 @@ def server_status() -> None:
             )
         if record.older:
             console.print(f"  [yellow]{escape(OLDER_SERVER_MESSAGE)}[/yellow]")
+        if not record.older:
+            # An older release's server starts no ccproxy of its own.
+            _print_ccproxy(config, record)
     else:
         console.print(
             "  [yellow]no ownership record — externally managed or older server"
@@ -187,6 +177,28 @@ def server_status() -> None:
         )
     if running:
         _print_projects(langgraph_dev_url(port=port, host=host))
+
+
+def _print_ccproxy(config, record) -> None:
+    """Show the ccproxy the server starts with Anthropic OAuth."""
+    from ..ccproxy_manager import is_ccproxy_running, uses_oauth
+    from ..langgraph_dev import server_record
+
+    if not uses_oauth(config):
+        return
+    port = config.ccproxy_port
+    pid = record.fields.get(server_record.CCPROXY_PID_KEY)
+    if is_ccproxy_running(port):
+        state = "[green]running[/green]"
+        if isinstance(pid, int):
+            state += f" (pid {pid})"
+    else:
+        state = (
+            "[red]not running[/red]; a run or session may start it again. "
+            "After 3 failed tries the server stops trying: the server log "
+            "says why; restart the server (EvoSci server stop)"
+        )
+    console.print(f"  ccproxy:          port {port}, {state}")
 
 
 def _print_projects(url: str) -> None:
@@ -226,7 +238,9 @@ def server_stop(
         False, "--yes", "-y", help="Stop it even while it runs work"
     ),
 ) -> None:
-    """Stop the background langgraph dev server started by EvoSci."""
+    """Stop the background langgraph dev server started by EvoSci, and its
+    ccproxy. A server that EvoSci deploy or the desktop app owns is left
+    running, and a busy one is stopped after asking."""
     stop_server(yes=yes)
 
 
@@ -235,8 +249,8 @@ def _interactive() -> bool:
 
 
 def _busy_work(url: str) -> str | None:
-    """What the server at *url* is running that a stop would end, or None
-    when it is idle (or cannot be asked)."""
+    """What a stop of the server at *url* would interrupt, and what becomes
+    of it, or None when the server is idle (or cannot be asked)."""
     from ..deploy.busy import (
         backend_has_active_runs,
         has_busy_thread,
@@ -248,18 +262,20 @@ def _busy_work(url: str) -> str | None:
     work = []
     jobs = running_bg_process_names(url)
     if jobs:
-        work.append(f"background jobs: {', '.join(jobs)}")
+        work.append(f"background jobs that a stop ends ({', '.join(jobs)})")
     if has_busy_thread(url):
-        work.append("a run in progress")
+        work.append(
+            "a run in progress that a stop cuts and that runs again at the next start"
+        )
     return "; ".join(work) or "work in progress"
 
 
 def _stop_busy_server_anyway(record) -> bool:
     """Whether to go on with a stop: always when it ends no server or an
-    idle one; for a busy one, after asking, since it serves every project and
-    its runs and background jobs are not kept. Without a terminal to ask in,
-    it is refused (exit 1), as ``EvoSci update`` does; ``--yes`` skips the
-    question."""
+    idle one; for a busy one, after asking, since it serves every project:
+    its background jobs end and its runs run again at its next start.
+    Without a terminal to ask in, it is refused (exit 1), as ``EvoSci
+    update`` does; ``--yes`` skips the question."""
     from ..langgraph_dev.manager import _is_port_occupied
 
     # The server the stop ends is the recorded one, whatever its port; a
@@ -273,8 +289,7 @@ def _stop_busy_server_anyway(record) -> bool:
     if work is None:
         return True
     message = (
-        f"The background agent server is busy ({work}). Stopping it ends that "
-        "work, for every project using the server."
+        f"The background agent server is busy, for every project using it: {work}."
     )
     if not _interactive():
         console.print(
@@ -287,11 +302,11 @@ def _stop_busy_server_anyway(record) -> bool:
     return False
 
 
-def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
-    """``EvoSci server stop``; with *keep_owned* (``EvoSci service stop``), a
-    server that ``EvoSci deploy`` or the desktop app owns is left running.
-    Either command leaves a server it may not end (another user's or an
-    elevated one) or could not open running, says why and exits 1. A busy
+def stop_server(*, yes: bool = False) -> bool:
+    """``EvoSci server stop``: a server that ``EvoSci deploy`` or the desktop
+    app owns is left running. A server it may not end (another user's or an
+    elevated one) or could not open is left running too; it says why and
+    exits 1. A busy
     server is stopped only after asking, or with *yes*; a server that took
     the place of the one asked about, or appeared meanwhile, is not stopped.
     Whether it was left running."""
@@ -306,8 +321,8 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     )
 
     record, lock = manager.read_record_and_lock()
-    # A server service stop leaves running needs no question about its work.
-    kept = keep_owned and owned_by_its_starter(record)
+    # A server the stop leaves running needs no question about its work.
+    kept = owned_by_its_starter(record)
     if not yes and not kept:
         if not _stop_busy_server_anyway(record):
             return True
@@ -341,11 +356,15 @@ def stop_server(*, keep_owned: bool = False, yes: bool = False) -> bool:
     config = get_effective_config()
     port, host = configured_address(config)
     try:
-        pid = manager.stop_server(keep_owned=keep_owned, record=record)
+        pid = manager.stop_server(keep_owned=True, record=record)
     except ServerKeptError as exc:
         console.print(f"[yellow]⚠ {escape(str(exc))}[/yellow]")
         if isinstance(exc, ServerStopFailedError):
             raise typer.Exit(1) from None
+        console.print(
+            "[dim]If its owner is gone, stop it by hand: "
+            f"[bold]{manual_stop_command(record.port)}[/bold][/dim]"
+        )
         return True
     if pid is not None:
         console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")

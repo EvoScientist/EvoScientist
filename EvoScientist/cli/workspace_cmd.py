@@ -25,7 +25,6 @@ def workspace_move(
     """Carry a project over to the folder you moved or renamed it to: its
     conversations, scheduled tasks, memory and AutoSkills proposals follow
     it. Moves no files. A folder copied, not moved, is a new project."""
-    from ..ccproxy_manager import is_ccproxy_running, uses_oauth
     from ..config import get_effective_config
     from ..langgraph_dev import manager, registration
     from ..paths import PATH_ERRORS, Workspace
@@ -45,7 +44,7 @@ def workspace_move(
             "[dim]Starting the background agent server...[/dim]", spinner="dots"
         ):
             # No project to register: the old folder is gone.
-            result = manager.serve_project(config, None, with_ccproxy=False)
+            result = manager.serve_project(config, None)
     except (registration.ServerUnusableError, RuntimeError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -65,12 +64,6 @@ def workspace_move(
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
     _print_report(shown_old, new_project.root, report)
-    if uses_oauth(config) and not is_ccproxy_running(config.ccproxy_port):
-        console.print(
-            "[yellow]⚠ Anthropic uses OAuth, and ccproxy is not running: start it "
-            "with [bold]EvoSci ccproxy start[/bold] (or use [bold]EvoSci service "
-            "start[/bold]).[/yellow]"
-        )
 
 
 def _print_report(old, new, report: dict) -> None:

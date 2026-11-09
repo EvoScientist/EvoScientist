@@ -61,17 +61,14 @@ app.add_typer(sessions_app, name="sessions")
 
 # Background langgraph dev server management: the server outlives the sessions
 # that use it, so it needs a first-class way to start, inspect and stop it.
-server_app = typer.Typer(help="Manage the background langgraph dev server")
-app.add_typer(server_app, name="server")
-# The background agent service: the server and, with Anthropic OAuth, the
-# ccproxy it and the sessions route through.
-service_app = typer.Typer(
-    help="Manage the background agent service (the server, and ccproxy with "
+server_app = typer.Typer(
+    help="Manage the background langgraph dev server (and its ccproxy with "
     "Anthropic OAuth)"
 )
+app.add_typer(server_app, name="server")
+# What `server` was called in 0.4.0 to 0.4.2, kept for one release.
+service_app = typer.Typer(help="Deprecated: use EvoSci server")
 app.add_typer(service_app, name="service")
-ccproxy_app = typer.Typer(help="Manage ccproxy, which Anthropic OAuth routes through")
-app.add_typer(ccproxy_app, name="ccproxy")
 # Projects the background server serves, by folder.
 workspace_app = typer.Typer(help="Manage projects (the folders EvoSci works in)")
 app.add_typer(workspace_app, name="workspace")
