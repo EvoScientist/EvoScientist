@@ -1,10 +1,12 @@
 """Windows host paths must survive the file tools' virtual-path validation."""
 
+import os
 from dataclasses import asdict
-from pathlib import PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
+from deepagents import FilesystemMiddleware
 from deepagents.backends.protocol import GlobResult, GrepResult, LsResult
 from deepagents.backends.utils import file_data_to_string, validate_path
 
@@ -70,6 +72,149 @@ def test_windows_file_tool_alias_resolves_working_directory(
     assert (
         backend._resolve_path(validate_path(f"/{drive}:/project/paper.pdf")) == expected
     )
+
+
+def _windows_backend(monkeypatch, *, dangerous=False):
+    """A sandbox at ``C:/project`` with Windows path semantics; the parent
+    resolver returns the key it is handed."""
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    monkeypatch.setattr(
+        backends.LocalShellBackend, "_resolve_path", lambda _self, key: key
+    )
+    backend = object.__new__(backends.CustomSandboxBackend)
+    backend._dangerous = dangerous
+    backend._media_dir = None
+    backend.cwd = PureWindowsPath("C:/project")
+    return backend
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("/c/project/artifacts/a.md", "/artifacts/a.md"),
+        ("/C/Project/artifacts/a.md", "/artifacts/a.md"),
+        ("/c/project", "/"),
+        # Outside the working folder: a workspace folder named with one letter.
+        ("/c/data.csv", "/c/data.csv"),
+        ("/c/Users/me/notes.md", "/c/Users/me/notes.md"),
+        ("/x/data.csv", "/x/data.csv"),
+    ],
+)
+def test_git_bash_path_resolves_into_working_folder(monkeypatch, key, expected):
+    backend = _windows_backend(monkeypatch)
+    assert backend._resolve_path(validate_path(key)) == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("/c/Users/me/a.md", "c:/Users/me/a.md"),
+        ("/d/data", "d:/data"),
+        ("/c", "c:/"),
+        ("/tmp/a.md", "/tmp/a.md"),
+    ],
+)
+def test_dangerous_git_bash_path_resolves_to_drive(monkeypatch, key, expected):
+    backend = _windows_backend(monkeypatch, dangerous=True)
+    assert backend._resolve_path(validate_path(key)) == expected
+
+
+@pytest.mark.parametrize("key", ["/C:/other/a.md", "/d:/data/a.md", "/C:/"])
+def test_drive_path_outside_working_folder_is_refused(monkeypatch, key):
+    backend = _windows_backend(monkeypatch)
+    with pytest.raises(PermissionError, match="outside the workspace"):
+        backend._resolve_path(validate_path(key))
+
+
+def test_git_bash_path_not_read_off_windows(monkeypatch):
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(backends, "Path", PurePosixPath)
+    monkeypatch.setattr(
+        backends.LocalShellBackend, "_resolve_path", lambda _self, key: key
+    )
+    backend = object.__new__(backends.CustomSandboxBackend)
+    backend._dangerous = False
+    backend._media_dir = None
+    backend.cwd = PurePosixPath("/home/u/project")
+
+    assert paths.git_bash_drive_path("/c/home/u/project/a.md") is None
+    key = "/c/home/u/project/a.md"
+    assert backend._resolve_path(key) == key
+
+
+_TOOL_ARGS = {
+    "ls": {"path": "/C:/other"},
+    "read_file": {"file_path": "/C:/other/a.md"},
+    "write_file": {"file_path": "/C:/other/a.md", "content": "x"},
+    "edit_file": {"file_path": "/C:/other/a.md", "old_string": "x", "new_string": "y"},
+    "delete": {"file_path": "/C:/other/a.md"},
+    "glob": {"pattern": "*.md", "path": "/C:/other"},
+    "grep": {"pattern": "x", "path": "/C:/other"},
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_file_tools_report_drive_path_outside_workspace(
+    tmp_path, monkeypatch, tool, asynchronous
+):
+    backend = backends.CustomSandboxBackend(str(tmp_path))
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    backend.cwd = PureWindowsPath("C:/project")
+    tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
+    runtime = SimpleNamespace(tool_call_id="call-1", state={})
+
+    if asynchronous:
+        message = await tools[tool].coroutine(runtime=runtime, **_TOOL_ARGS[tool])
+    else:
+        message = tools[tool].func(runtime=runtime, **_TOOL_ARGS[tool])
+
+    assert message.status == "error"
+    assert "outside the workspace" in message.content
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows drive paths")
+def test_windows_file_tools_reach_workspace_by_git_bash_path(tmp_path):
+    workspace = tmp_path / "EvoScientist"
+    (workspace / "artifacts").mkdir(parents=True)
+    backend = backends.CustomSandboxBackend(str(workspace))
+    tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
+    runtime = SimpleNamespace(tool_call_id="call-1", state={})
+    root = backend.cwd.as_posix()
+    git_bash = f"/{root[0].lower()}{root[2:]}"
+    outside = tmp_path / "outside" / "a.md"
+
+    inside = tools["write_file"].func(
+        runtime=runtime, file_path=f"{git_bash}/artifacts/a.md", content="hello"
+    )
+    refused = tools["write_file"].func(
+        runtime=runtime, file_path=paths.file_tool_path(outside), content="hello"
+    )
+
+    assert inside.status == "success"
+    assert (workspace / "artifacts" / "a.md").read_text(encoding="utf-8") == "hello"
+    assert not (workspace / root[0].lower()).exists()
+    assert refused.status == "error"
+    assert "outside the workspace" in refused.content
+    assert not outside.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows drive paths")
+def test_windows_git_bash_path_reaches_media_folder(tmp_path):
+    media = tmp_path / "workspace" / "media"
+    media.mkdir(parents=True)
+    (media / "paper.txt").write_text("hello", encoding="utf-8")
+    run = tmp_path / "workspace" / "runs" / "r1"
+    run.mkdir(parents=True)
+    backend = backends.CustomSandboxBackend(str(run), media_dir=media)
+    real = media.resolve().as_posix()
+
+    read = backend.read(f"/{real[0].lower()}{real[2:]}/paper.txt")
+
+    assert read.error is None
+    assert file_data_to_string(read.file_data) == "hello"
 
 
 @pytest.mark.parametrize("key", ["/D:/", "/d:/"])

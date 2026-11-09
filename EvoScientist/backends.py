@@ -2360,12 +2360,25 @@ class CustomSandboxBackend(LocalShellBackend):
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
+        On Windows a Git Bash path (``/c/...``) is read as the drive path it
+        names when that lies in the working folder or the media folder;
+        otherwise it stays a workspace path, so a workspace folder named with
+        one letter is still reached. A drive path anywhere else is refused.
+
         In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
-        alias and let the parent resolve real absolute paths as-is.
+        alias or Git Bash path and let the parent resolve real absolute paths
+        as-is.
         """
         key = paths.host_file_tool_path(key)
+        drive_path = paths.git_bash_drive_path(key)
         if self._dangerous:
-            return super()._resolve_path(key)
+            return super()._resolve_path(drive_path or key)
+
+        if drive_path is not None and (
+            Path(drive_path).is_relative_to(self.cwd)
+            or self._media_relative(drive_path) is not None
+        ):
+            key = drive_path
 
         media_path = self._media_path(key)
         if media_path is not None:
@@ -2386,6 +2399,16 @@ class CustomSandboxBackend(LocalShellBackend):
             else:
                 virtual = relative.as_posix()
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
+        if _DRIVE_PATH_RE.match(key):
+            # An OSError, so the file tools report it as an error message
+            # rather than raising.
+            raise PermissionError(
+                errno.EACCES,
+                "Path is outside the workspace; file tools reach only paths "
+                "inside it, and '/' is its root",
+                key,
+            )
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
