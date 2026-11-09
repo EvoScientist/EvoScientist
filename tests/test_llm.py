@@ -97,6 +97,7 @@ class TestModelsRegistry:
             "openrouter",
             "requesty",
             "opper",
+            "standardcompute",
             "zhipu",
             "zhipu-code",
             "volcengine",
@@ -559,6 +560,58 @@ class TestThirdPartyRouting:
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
         assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_standardcompute_routes_through_openai(self, mock_init, monkeypatch):
+        """The routed default resolves through the registry to Standard Compute."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("STANDARDCOMPUTE_API_KEY", "sc-key-123")
+
+        get_chat_model("StandardCompute", provider="standardcompute")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "StandardCompute"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.stdcmpt.com/v1"
+        assert call_kwargs["api_key"] == "sc-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_standardcompute_pinned_short_name(self, mock_init, monkeypatch):
+        """A short name resolves to Standard Compute's vendor/model id."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("STANDARDCOMPUTE_API_KEY", "sc-key")
+
+        get_chat_model("claude-sonnet-5.5", provider="standardcompute")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "anthropic/claude-sonnet-5.5"
+        assert call_kwargs["base_url"] == "https://api.stdcmpt.com/v1"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_standardcompute_omits_unconfigured_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """The routed model mixes reasoning and non-reasoning models, so no default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("STANDARDCOMPUTE_API_KEY", "sc-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("StandardCompute", provider="standardcompute")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_standardcompute_forwards_explicit_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """An explicit effort reaches the request unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("STANDARDCOMPUTE_API_KEY", "sc-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("StandardCompute", provider="standardcompute")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_opper_routes_through_openai(self, mock_init, monkeypatch):
@@ -4306,6 +4359,69 @@ class TestValidateOpperKey:
         with patch("httpx.get") as mock_get:
             mock_get.return_value.status_code = status
             is_valid, msg = validate_opper_key("op-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+        assert str(status) in msg
+
+
+# =============================================================================
+# Test validate_standardcompute_key
+# =============================================================================
+
+
+class TestValidateStandardComputeKey:
+    """The Standard Compute key validator probes the model catalog with the key.
+
+    All HTTP calls are mocked, so the unit tests hit no network.
+    """
+
+    def test_empty_key_skipped(self):
+        from EvoScientist.config.onboard.validators import (
+            validate_standardcompute_key,
+        )
+
+        is_valid, msg = validate_standardcompute_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_probes_the_model_catalog_with_bearer_key(self):
+        from EvoScientist.config.onboard.validators import (
+            validate_standardcompute_key,
+        )
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            is_valid, msg = validate_standardcompute_key("sc-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+        assert mock_get.call_args.args[0] == "https://api.stdcmpt.com/v1/models"
+        headers = mock_get.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer sc-key"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejected_means_invalid(self, status):
+        from EvoScientist.config.onboard.validators import (
+            validate_standardcompute_key,
+        )
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_standardcompute_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        from EvoScientist.config.onboard.validators import (
+            validate_standardcompute_key,
+        )
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_standardcompute_key("sc-key")
 
         assert is_valid is False
         assert "inconclusive" in msg.lower()

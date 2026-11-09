@@ -201,6 +201,7 @@ _HOST_TO_PROVIDER: dict[str, str] = {
     "openrouter.ai": "openrouter",
     "api.novita.ai": "novita",
     "api.opper.ai": "opper",
+    "api.stdcmpt.com": "standardcompute",
     "api.xiaomimimo.com": "xiaomi",
     # Token Plan regions share the xiaomi tag
     "token-plan-cn.xiaomimimo.com": "xiaomi",

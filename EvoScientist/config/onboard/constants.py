@@ -37,6 +37,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "requesty",
         "novita",
         "opper",
+        "standardcompute",
         "custom-openai",
         "custom-anthropic",
     }

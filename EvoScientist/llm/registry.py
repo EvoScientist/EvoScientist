@@ -30,6 +30,7 @@ _NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
 _XIAOMI_ANTHROPIC_BASE_URL = "https://api.xiaomimimo.com/anthropic"
 _XIAOMI_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
 _OPPER_BASE_URL = "https://api.opper.ai/v3/compat"
+_STANDARDCOMPUTE_BASE_URL = "https://api.stdcmpt.com/v1"
 
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -46,6 +47,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "novita": (_NOVITA_BASE_URL, "NOVITA_API_KEY"),
     "opper": (_OPPER_BASE_URL, "OPPER_API_KEY"),
+    "standardcompute": (_STANDARDCOMPUTE_BASE_URL, "STANDARDCOMPUTE_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -131,6 +133,19 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.8-flash", "gemini-3.8-flash", "opper"),
     ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
     ("mistral-large-2512", "mistral-large-2512", "opper"),
+    # Standard Compute (OpenAI-compatible gateway). ``StandardCompute`` is the
+    # routed default: each request goes to the cheapest enabled model that can
+    # handle it, with automatic fallback. The other entries pin one model by
+    # its vendor/model id. Listed before the native providers and OpenRouter
+    # so shared short names keep resolving to them (the dict below is
+    # last-entry-wins); Standard Compute is selected explicitly via
+    # get_models_for_provider.
+    ("StandardCompute", "StandardCompute", "standardcompute"),
+    ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "standardcompute"),
+    ("gpt-6.1-sol", "openai/gpt-6.1-sol", "standardcompute"),
+    ("gemini-3.8-flash", "google/gemini-3.8-flash", "standardcompute"),
+    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "standardcompute"),
+    ("kimi-k3", "moonshotai/kimi-k3", "standardcompute"),
     # Google GenAI
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),

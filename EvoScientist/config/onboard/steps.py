@@ -340,6 +340,10 @@ def _step_provider(
             value="opper",
         ),
         Choice(
+            title="Standard Compute (OpenAI-compatible gateway, routed or pinned models)",
+            value="standardcompute",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),

@@ -309,6 +309,36 @@ def check_opper_key(api_key: str) -> KeyCheck:
         return _classify_validation_error(e)
 
 
+def check_standardcompute_key(api_key: str) -> KeyCheck:
+    """Check a Standard Compute API key via the ``/models`` endpoint.
+
+    The model catalog is public without a key, but a supplied key is checked:
+    an invalid one returns 401 (verified against the live endpoint), so a
+    bearer-authenticated GET is enough and no sentinel-model request is needed.
+
+    - valid key → 200 (the model catalog);
+    - invalid key → 401/403;
+    - 429 (rate-limit) / 5xx (gateway incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+    """
+    if not api_key:
+        return _SKIPPED
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://api.stdcmpt.com/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            return KeyCheck("valid", "Valid")
+        return _status_result(resp.status_code)
+    except Exception as e:
+        return _classify_validation_error(e)
+
+
 def check_atlascloud_key(api_key: str) -> KeyCheck:
     """Check an Atlas Cloud key with a nonexistent sentinel model.
 
@@ -742,6 +772,12 @@ PROVIDERS: dict[str, KeySpec] = {
         "Requesty", "requesty_api_key", "REQUESTY_API_KEY", "check_requesty_key"
     ),
     "opper": _key("Opper", "opper_api_key", "OPPER_API_KEY", "check_opper_key"),
+    "standardcompute": _key(
+        "Standard Compute",
+        "standardcompute_api_key",
+        "STANDARDCOMPUTE_API_KEY",
+        "check_standardcompute_key",
+    ),
     "novita": _key("Novita", "novita_api_key", "NOVITA_API_KEY", "check_novita_key"),
     "deepseek": _key(
         "DeepSeek", "deepseek_api_key", "DEEPSEEK_API_KEY", "check_deepseek_key"

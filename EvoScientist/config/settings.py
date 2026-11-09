@@ -230,6 +230,7 @@ class EvoScientistConfig:
     mimo_token_plan_api_key: str = ""
     mimo_token_plan_base_url: str = ""
     opper_api_key: str = ""
+    standardcompute_api_key: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -844,6 +845,7 @@ API_KEY_FIELDS: frozenset[str] = frozenset(
         "mimo_api_key",
         "mimo_token_plan_api_key",
         "opper_api_key",
+        "standardcompute_api_key",
         "deepseek_api_key",
         "zhipu_api_key",
         "volcengine_api_key",
@@ -1228,6 +1230,7 @@ _ENV_MAPPINGS = {
     "mimo_token_plan_api_key": "MIMO_TOKEN_PLAN_API_KEY",
     "mimo_token_plan_base_url": "MIMO_TOKEN_PLAN_BASE_URL",
     "opper_api_key": "OPPER_API_KEY",
+    "standardcompute_api_key": "STANDARDCOMPUTE_API_KEY",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -1628,6 +1631,10 @@ def _apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["MIMO_TOKEN_PLAN_BASE_URL"] = config.mimo_token_plan_base_url
     if config.opper_api_key and not os.environ.get("OPPER_API_KEY"):
         os.environ["OPPER_API_KEY"] = config.opper_api_key
+    if config.standardcompute_api_key and not os.environ.get(
+        "STANDARDCOMPUTE_API_KEY"
+    ):
+        os.environ["STANDARDCOMPUTE_API_KEY"] = config.standardcompute_api_key
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):

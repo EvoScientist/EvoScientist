@@ -3,9 +3,10 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, Opper, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
-DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-
-compatible endpoints) and convenient short names for common models.
+Novita, Opper, Standard Compute, Xiaomi MiMo (Anthropic-compatible), ZhipuAI,
+Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
+OpenAI/Anthropic-compatible endpoints) and convenient short names for common
+models.
 """
 
 from __future__ import annotations
@@ -159,11 +160,12 @@ def _apply_openai_compat_reasoning_config(
             kwargs["reasoning_effort"] = effort
         return
 
-    if provider == "opper" and configured:
+    if provider in ("opper", "standardcompute") and configured:
         # Opper's compat ChatRequest accepts the standard OpenAI
         # ``reasoning_effort`` field, but the pool spans reasoning and
         # non-reasoning models, so forward an explicit setting only rather
-        # than defaulting one on the user's behalf.
+        # than defaulting one on the user's behalf. Standard Compute's routed
+        # ``StandardCompute`` model mixes the same way.
         kwargs.setdefault("reasoning_effort", configured)
         return
 
