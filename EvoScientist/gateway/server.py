@@ -1549,6 +1549,13 @@ class LangGraphServerGateway:
                 yield event
             raise
         except Exception as exc:
+            if emitted_interrupt:
+                # The turn already shows its prompt; cancel or repair could
+                # stop a task still working or clear the pause it answers.
+                yield emitter.error(str(exc)).data
+                for event in tracker.finish():
+                    yield event
+                raise
             # Cancel this request's run, then repair, both before the first yield:
             # a consumer that stops iterating after the error event (aclose /
             # abandon) triggers GeneratorExit at the yield, so nothing after it

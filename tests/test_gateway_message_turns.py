@@ -538,6 +538,42 @@ async def test_events_stream_ending_early_raises():
         await _turn(gateway, "hi")
 
 
+@pytest.mark.parametrize("drop", ["raises", "ends"])
+async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
+    """A stream lost between the envelope's prompt and the root
+    ``interrupted`` fails the turn without cancelling or repairing the run
+    the prompt belongs to."""
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=[])
+
+    async def lost() -> AsyncIterator[dict[str, Any]]:
+        await stream.run.started.wait()
+        yield _lifecycle("run-1", "running")
+        yield _input_requested([])
+        if drop == "raises":
+            raise ConnectionError("provider connection lost")
+
+    gateway, threads = _gateway(stream)
+    events: list[dict] = []
+
+    async def collect() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id=THREAD_ID)
+        ):
+            events.append(event)
+
+    with (
+        patch.object(
+            FakeLangGraphThreadStream, "events", property(lambda self: lost())
+        ),
+        pytest.raises((ConnectionError, RuntimeError)),
+    ):
+        await collect()
+
+    assert [e["type"] for e in events] == ["interrupt", "error"]
+    assert gateway.thread_store.client.runs.cancelled == []
+    assert threads.state_updates == []
+
+
 # --- state: resume and retry read events like a new message ----------------
 
 
