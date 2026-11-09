@@ -1638,10 +1638,20 @@ def _regular_files(root: Path) -> dict[str, Path] | None:
     return files
 
 
+_COMPARE_CHUNK = 1 << 20
+
+
 def _same_bytes(installed: Path, copied: Path) -> bool:
     if installed.lstat().st_size != copied.stat().st_size:
         return False
-    return installed.read_bytes() == copied.read_bytes()
+    # In chunks: a skill may carry a large data file, and revert runs in the server.
+    with installed.open("rb") as left, copied.open("rb") as right:
+        while True:
+            chunk = left.read(_COMPARE_CHUNK)
+            if chunk != right.read(_COMPARE_CHUNK):
+                return False
+            if not chunk:
+                return True
 
 
 def _still_plain(installed: Path, path: Path) -> bool:

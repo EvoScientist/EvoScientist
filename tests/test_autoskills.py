@@ -936,6 +936,41 @@ def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
     assert not installed.exists()
 
 
+def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    reads = []
+    real_open = Path.open
+
+    class Recorded:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def read(self, size=-1):
+            reads.append(size)
+            return self._handle.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self._handle.close()
+
+    def recording_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if "b" in mode and Path(self).is_relative_to(installed):
+            return Recorded(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["reverted"] is True, result
+    assert reads
+    assert all(0 < size <= 1 << 20 for size in reads), reads
+
+
 @pytest.mark.skipif(
     sys.platform != "win32" and os.geteuid() == 0, reason="root ignores modes"
 )
