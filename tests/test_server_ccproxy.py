@@ -532,6 +532,31 @@ def test_end_tree_ends_process_whose_children_it_cannot_list(monkeypatch):
     assert ended == [77]
 
 
+def test_end_tree_kills_process_it_may_not_wait_for(monkeypatch):
+    """Windows can refuse the wait on another user's or an elevated process;
+    the server start that ends an older release's ccproxy goes on."""
+    import psutil
+
+    class _Unwaitable(_Process):
+        def children(self, recursive=False):
+            return []
+
+        def terminate(self):
+            steps.append("terminate")
+
+        def kill(self):
+            steps.append("kill")
+
+    def refuse(procs, timeout):
+        raise psutil.AccessDenied(77)
+
+    steps = []
+    monkeypatch.setattr(psutil, "wait_procs", refuse)
+
+    assert ccproxy_manager.end_tree(_Unwaitable(77, 123.5, [])) is True
+    assert steps == ["terminate", "kill"]
+
+
 def test_spawn_ccproxy_output_goes_where_asked(monkeypatch):
     """The server's ccproxy writes to its log, a session's to nowhere."""
     calls = []

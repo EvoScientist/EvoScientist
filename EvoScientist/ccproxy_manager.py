@@ -441,7 +441,12 @@ def end_tree(proc) -> bool:
     for member in tree:
         with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             member.terminate()
-    _gone, alive = psutil.wait_procs(tree, timeout=5)
+    try:
+        _gone, alive = psutil.wait_procs(tree, timeout=5)
+    except psutil.AccessDenied:
+        # A process this user may signal but not wait for (Windows): the
+        # kill below is the last try, and a refused one leaves it as it is.
+        alive = tree
     for member in alive:
         with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             member.kill()
