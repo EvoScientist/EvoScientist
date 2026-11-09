@@ -48,7 +48,13 @@ async def test_posix_attachment_reference_unchanged():
 
 
 @pytest.mark.parametrize(
-    "key", ["/C:/project/media/paper.pdf", "/c:/project/media/paper.pdf"]
+    "key",
+    [
+        "/C:/project/media/paper.pdf",
+        "/c:/project/media/paper.pdf",
+        "/c/project/media/paper.pdf",
+        "/C/Project/media/paper.pdf",
+    ],
 )
 def test_windows_file_tool_alias_reaches_media_folder(monkeypatch, key):
     # Exercise Windows path semantics without replacing the process-wide os.name.
@@ -224,6 +230,45 @@ def test_windows_git_bash_path_reaches_media_folder(tmp_path):
 
     assert read.error is None
     assert file_data_to_string(read.file_data) == "hello"
+
+
+@pytest.mark.parametrize(
+    "key", ["/C:/project/media/paper.pdf", "/c/project/media/paper.pdf"]
+)
+def test_media_folder_stays_read_only_by_every_spelling(monkeypatch, key):
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "Path", PureWindowsPath)
+    backend = object.__new__(backends.CustomSandboxBackend)
+    backend._dangerous = False
+    backend._refuse_delete = False
+    backend._media_dir = PureWindowsPath("C:/project/media")
+    backend._media_real = backend._media_dir
+
+    error = backends.CustomSandboxBackend._MEDIA_READ_ONLY_ERROR
+    assert backend.write(key, "x").error == error
+    assert backend.edit(key, "a", "b").error == error
+    assert backend.delete(key).error == error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows drive paths")
+def test_windows_git_bash_path_cannot_change_media_folder(tmp_path):
+    media = tmp_path / "workspace" / "media"
+    media.mkdir(parents=True)
+    (media / "paper.txt").write_text("hello", encoding="utf-8")
+    run = tmp_path / "workspace" / "runs" / "r1"
+    run.mkdir(parents=True)
+    backend = backends.CustomSandboxBackend(str(run), media_dir=media)
+    real = media.resolve().as_posix()
+    folder = f"/{real[0].lower()}{real[2:]}"
+
+    assert backend.write(f"{folder}/paper.txt", "x").error
+    assert backend.edit(f"{folder}/paper.txt", "hello", "x").error
+    assert backend.delete(folder).error
+    assert [e["path"] for e in backend.ls(folder).entries] == [
+        paths.file_tool_path(media / "paper.txt")
+    ]
+    assert (media / "paper.txt").read_text(encoding="utf-8") == "hello"
+    assert not (run / real[0].lower()).exists()
 
 
 @pytest.mark.parametrize("key", ["/D:/", "/d:/"])
