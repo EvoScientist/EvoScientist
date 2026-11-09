@@ -357,8 +357,13 @@ async def move_workspace(request: Request) -> JSONResponse:
     scheduled tasks, assistants, memory and AutoSkills proposals follow it
     (see :mod:`~EvoScientist.langgraph_dev.workspace_move`). Answers once it
     is done with ``{"workspace_dir", "threads", "tasks", "memory",
-    "proposals", "warnings"}``; a move that cannot be made answers ``409``
-    with ``error`` naming why and ``detail``. Needs the local secret.
+    "proposals", "warnings", "resumed", "moved"}`` (``resumed``: it
+    finished, or repeated, a move asked before; ``moved`` False: it moved
+    nothing, as the old folder is a project again). A move that cannot be made answers
+    ``409`` with ``error`` naming why and ``detail``; a folder that cannot be
+    read ``400 invalid_path``; a failure ``500 move_failed`` with ``detail``
+    and, when it could be read, ``pending`` (whether the move waits to be
+    finished). Needs the local secret.
     """
     from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
 
@@ -398,6 +403,7 @@ async def move_workspace(request: Request) -> JSONResponse:
             "proposals": report.proposals,
             "warnings": report.warnings,
             "resumed": report.resumed,
+            "moved": report.moved,
         }
     )
 

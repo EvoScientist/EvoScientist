@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from functools import cached_property
@@ -39,6 +40,9 @@ from .server_crons import is_system_cron, metadata_of
 logger = logging.getLogger(__name__)
 
 _FOLDER_KEYS = ("workspace_dir", "run_dir")
+# Tries and the pause between them for a rename a virus scan refuses.
+_RENAME_TRIES = 5
+_RENAME_PAUSE = 0.2
 # What :func:`~EvoScientist.memory.project.resolve_project_id` gives.
 _PROJECT_ID = re.compile(r"P-[0-9a-f]{16}")
 
@@ -362,6 +366,19 @@ class MemoryMove:
     copied: list[str]
 
 
+def _renamed(source: Path, target: Path) -> None:
+    """``os.replace`` *source* to *target*, tried again for a moment while
+    it is refused: on Windows a virus scan holds a file just written."""
+    for attempt in range(_RENAME_TRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _RENAME_TRIES - 1:
+                raise
+            time.sleep(_RENAME_PAUSE)
+
+
 def _merge_folder(source: Path, target: Path, *, keep: bool) -> None:
     """Give *target* every file of *source* it lacks; remove *source*
     unless *keep*. Renamed whole when *target* does not exist yet."""
@@ -369,7 +386,7 @@ def _merge_folder(source: Path, target: Path, *, keep: bool) -> None:
         return
     if not keep and not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        source.rename(target)
+        _renamed(source, target)
         return
     for path in sorted(source.rglob("*")):
         if not path.is_file():
@@ -381,7 +398,7 @@ def _merge_folder(source: Path, target: Path, *, keep: bool) -> None:
         # Published whole: a copy cut short must not pass for a copied file.
         partial = destination.with_name(f".{destination.name}.moving")
         shutil.copy2(path, partial)
-        os.replace(partial, destination)
+        _renamed(partial, destination)
     if not keep:
         shutil.rmtree(source)
 
@@ -408,7 +425,7 @@ def _merge_profile(source: Path, target: Path, old_key: str, template: str) -> N
     # Replaced whole: a write cut short must not lose the new profile.
     partial = target.with_name(f".{target.name}.moving")
     partial.write_text(merged, encoding="utf-8")
-    os.replace(partial, target)
+    _renamed(partial, target)
 
 
 def move_memory(
@@ -475,6 +492,8 @@ class MoveReport:
     warnings: list[str]
     # It finished a move cut short: what moved before is not counted.
     resumed: bool = False
+    # False when it moved nothing: the old folder is a project again.
+    moved: bool = True
 
 
 def same_key(first: str, second: str) -> bool:
@@ -618,7 +637,12 @@ async def move_project(old: Workspace, new: Workspace) -> MoveReport:
                     done_move = Move(
                         Workspace.as_stored(done_old), Workspace.as_stored(done_new)
                     )
-                    await asyncio.to_thread(_check_folders, done_move, resuming=True)
+                    if not await asyncio.to_thread(done_move.new.root.is_dir):
+                        raise MoveRefusedError(
+                            "new_missing",
+                            f"{done_move.old.root} was moved to "
+                            f"{done_move.new.root}, which no longer exists.",
+                        ) from None
                     if await _busy(done_move):
                         raise MoveRefusedError(
                             "busy",
@@ -664,7 +688,13 @@ async def _move_again(move: Move) -> MoveReport:
     (:func:`_still_moved`)."""
     threads = tasks = 0
     warning = None
-    if await asyncio.to_thread(_still_moved, move):
+    still = await asyncio.to_thread(_still_moved, move)
+    if not still:
+        warning = (
+            f"{move.old.root} is a project again, so nothing was moved; "
+            f"{move.new.root} keeps what the earlier move gave it."
+        )
+    else:
         await drop_import_marks(move)
         threads = await move_checkpoints(move)
         await move_threads(move)
@@ -672,7 +702,14 @@ async def _move_again(move: Move) -> MoveReport:
         await _delete_assistants(move.old)
         warning = await asyncio.to_thread(_move_default_workdir, move)
     return MoveReport(
-        move.new.key, threads, tasks, [], 0, [warning] if warning else [], resumed=True
+        move.new.key,
+        threads,
+        tasks,
+        [],
+        0,
+        [warning] if warning else [],
+        resumed=True,
+        moved=still,
     )
 
 
@@ -741,6 +778,10 @@ async def move_again_where_lost() -> None:
         move = Move(Workspace.as_stored(done_old), Workspace.as_stored(done_new))
         if present.isdisjoint(move.assistants):
             continue
+        # A round trip, or a project made again in the old folder: its
+        # assistants are its own.
+        if not await asyncio.to_thread(_still_moved, move):
+            continue
         try:
             # Its assistants were not set up: the next start tries again.
             await asyncio.to_thread(_check_folders, move, resuming=True)
@@ -760,7 +801,6 @@ def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
     from .. import paths
     from ..memory.autoskills.proposals import proposal_project_ids
     from ..memory.project import path_project_ids, resolve_project_id
-    from .registry import REGISTRY
 
     memory_dir = paths.MEMORIES_DIR
     path_ids = path_project_ids(move.old.root)
@@ -786,14 +826,10 @@ def _move_memory(move: Move) -> tuple[MemoryMove, dict[str, str]]:
     if not old_ids:
         return MemoryMove(moved=[], copied=[]), project_ids
     # An id only a proposal names may be a repository's remote id, which its
-    # other clones share: it is copied, never removed.
-    shared = (proposal_ids - path_ids) | {
-        project_id
-        for key in REGISTRY.registered()
-        if key not in (move.old.key, move.new.key)
-        and Path(key).is_dir()
-        and (project_id := resolve_project_id(key)) in old_ids
-    }
+    # other clones share: it is copied, never removed. A path id is the old
+    # folder's alone: another folder gets it only at or inside the old path,
+    # which is gone.
+    shared = proposal_ids - path_ids
     moved = move_memory(move, memory_dir, old_ids=old_ids, new_id=new_id, shared=shared)
     return moved, project_ids
 

@@ -67,6 +67,10 @@ def workspace_move(
 
 
 def _print_report(old, new, report: dict) -> None:
+    if report.get("moved") is False:
+        # Nothing moved: the warning below says why.
+        _print_warnings(report)
+        return
     if report.get("resumed"):
         console.print(
             f"[green]✓[/green] Finished moving {escape(str(old))} to "
@@ -85,9 +89,13 @@ def _print_report(old, new, report: dict) -> None:
             )
             + "."
         )
-    for warning in report.get("warnings") or []:
-        console.print(f"[yellow]⚠ {escape(str(warning))}[/yellow]")
+    _print_warnings(report)
     console.print(
         "[dim]An EvoSci serve still running for the old folder keeps its old "
         "proactive conversations until it is started again in the new one.[/dim]"
     )
+
+
+def _print_warnings(report: dict) -> None:
+    for warning in report.get("warnings") or []:
+        console.print(f"[yellow]⚠ {escape(str(warning))}[/yellow]")

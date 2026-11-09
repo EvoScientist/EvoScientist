@@ -180,3 +180,19 @@ def test_move_folder_says_to_run_again_only_while_move_is_pending(
         )
 
     assert ("run the same command again" in str(raised.value)) is says_again
+
+
+def test_workspace_move_that_moved_nothing_does_not_claim_a_move(folders, server):
+    old, new = folders
+    _asked, answer = server
+    answer["report"] = {
+        "resumed": True,
+        "moved": False,
+        "warnings": ["the old folder is a project again, so nothing was moved"],
+    }
+
+    result = CliRunner().invoke(app, ["workspace", "move", str(old), str(new)])
+
+    assert result.exit_code == 0, result.output
+    assert "Finished moving" not in _text(result)
+    assert "nothing was moved" in _text(result)

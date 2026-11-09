@@ -164,6 +164,7 @@ def _cron(assistant: str, workspace: Workspace, **metadata) -> dict:
         "cron_id": uuid.uuid4(),
         "assistant_id": uuid.UUID(assistant),
         "enabled": False,
+        "next_run_date": "2026-12-01T09:00:00+00:00",
         "metadata": {"workspace_dir": workspace.key, **metadata},
         "payload": {
             "assistant_id": assistant,
@@ -186,6 +187,7 @@ async def test_move_crons_repoints_tasks_and_deletes_system_crons(
     new_assistant = chat_assistant_id(move.new)
     assert task["assistant_id"] == uuid.UUID(new_assistant)
     assert task["enabled"] is False
+    assert task["next_run_date"] == "2026-12-01T09:00:00+00:00"
     assert task["metadata"]["workspace_dir"] == move.new.key
     assert task["payload"]["assistant_id"] == new_assistant
     assert task["payload"]["metadata"]["workspace_dir"] == move.new.key
@@ -842,6 +844,7 @@ async def test_repeated_move_into_folder_since_removed_is_refused(moving):
         await workspace_move.move_project(old, new)
 
     assert refused.value.code == "new_missing"
+    assert "was moved to" in str(refused.value)
 
 
 async def test_repeated_move_repoints_what_a_session_left_open_wrote(moving):
@@ -975,3 +978,126 @@ async def test_start_leaves_move_whose_new_folder_is_missing(moving):
 
     (cron,) = [c for c in db.GLOBAL_STORE["crons"] if c["cron_id"] == task["cron_id"]]
     assert cron["assistant_id"] == uuid.UUID(chat_assistant_id(old))
+
+
+async def test_start_skips_move_undone_by_round_trip(moving, caplog):
+    """A to B, then B back to A: A's assistants are its own again."""
+    _projects, old, new, task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    new.root.rename(old.root)
+    await workspace_move.move_project(new, old)
+
+    await workspace_move.move_again_where_lost()
+
+    assert task["assistant_id"] == uuid.UUID(chat_assistant_id(old))
+    assert "again" not in caplog.text
+
+
+async def test_repeat_into_project_made_again_moves_nothing(moving):
+    projects, old, new, _task = await _arrange(moving)
+    await workspace_move.move_project(old, new)
+    projects.set_registered(old.key, False)
+
+    again = await workspace_move.move_project(old, new)
+
+    assert again.moved is False
+    assert "project again" in again.warnings[0]
+
+
+async def test_busy_sees_run_only_its_thread_ties_to_old_folder(moving):
+    """A run on a graph's own assistant, in one of old's threads."""
+    import langgraph_runtime_inmem.database as db
+
+    _projects, old, new, _task = await _arrange(moving)
+    thread = uuid.uuid4()
+    db.GLOBAL_STORE["threads"].append(
+        {"thread_id": thread, "metadata": {"workspace_dir": old.key}, "config": {}}
+    )
+    db.GLOBAL_STORE["runs"].append(
+        {"thread_id": thread, "assistant_id": "EvoScientist", "status": "running"}
+    )
+
+    with pytest.raises(workspace_move.MoveRefusedError) as refused:
+        await workspace_move.move_project(old, new)
+
+    assert refused.value.code == "busy"
+
+
+def test_move_memory_finishes_copy_cut_short(tmp_path, move, monkeypatch):
+    """A copy that failed leaves the source; the next run publishes it."""
+    memory = tmp_path / "memories"
+    _memory(memory, "P-old", observations=[("O-1.md", "old")])
+    _memory(memory, "P-new", observations=[("O-2.md", "new")])
+    real = workspace_move.shutil.copy2
+    calls = []
+
+    def flaky(source, target):
+        calls.append(source)
+        if len(calls) == 1:
+            raise OSError("cut")
+        return real(source, target)
+
+    monkeypatch.setattr(workspace_move.shutil, "copy2", flaky)
+    with pytest.raises(OSError, match="cut"):
+        workspace_move.move_memory(
+            move, memory, old_ids={"P-old"}, new_id="P-new", shared=set()
+        )
+    folder = memory / "observations" / "projects"
+    assert not (folder / "P-new" / "O-1.md").exists()
+    assert (folder / "P-old" / "O-1.md").exists()
+
+    workspace_move.move_memory(
+        move, memory, old_ids={"P-old"}, new_id="P-new", shared=set()
+    )
+
+    assert (folder / "P-new" / "O-1.md").read_text() == "old"
+    assert not (folder / "P-old").exists()
+
+
+def test_rename_waits_out_a_scan_that_holds_the_file(tmp_path, monkeypatch):
+    """Windows: a virus scan refuses a rename for a moment."""
+    source, target = tmp_path / "a", tmp_path / "b"
+    source.write_text("x")
+    real = workspace_move.os.replace
+    refused = []
+
+    def scanned(src, dst):
+        if not refused:
+            refused.append(src)
+            raise PermissionError("held")
+        return real(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "replace", scanned)
+    monkeypatch.setattr(workspace_move, "_RENAME_PAUSE", 0)
+
+    workspace_move._renamed(source, target)
+
+    assert target.read_text() == "x"
+    assert refused
+
+
+def test_server_start_moves_in_order(monkeypatch, no_workspace_setup):
+    """A move cut short before the setups; a lost one repaired after them."""
+    from starlette.testclient import TestClient
+
+    from EvoScientist.langgraph_dev import (
+        server_ccproxy,
+        server_record,
+        workspace_setup,
+    )
+    from EvoScientist.langgraph_dev.http import app
+
+    steps = []
+
+    async def step(name):
+        steps.append(name)
+
+    monkeypatch.setattr(server_ccproxy, "start_serving", lambda: None)
+    monkeypatch.setattr(workspace_move, "resume_pending_move", lambda: step("resume"))
+    monkeypatch.setattr(workspace_setup, "set_up_at_start", lambda: step("set up"))
+    monkeypatch.setattr(workspace_move, "move_again_where_lost", lambda: step("again"))
+    monkeypatch.setattr(server_record, "mark_serving", lambda: steps.append("serving"))
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)):
+        pass
+
+    assert steps == ["resume", "set up", "again", "serving"]
