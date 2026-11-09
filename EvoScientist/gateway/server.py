@@ -199,25 +199,23 @@ def _resume_target(
 
     A single-key payload keyed by a pending id answers that interrupt
     (``build_hitl_resume`` keys approvals that way). A single-key payload whose
-    value is a mapping, keyed by any other id, is an answer keyed by a stale or
-    hand-built id and raises: answering the pending interrupt with it would
-    pass the wrapper as the answer. Any other payload answers the only pending
-    interrupt: ask_user's ``{"status": "cancelled"}`` (a string value) and
-    ``{"answers": [...], "status": "answered"}`` (two keys) are not keyed.
+    value is a mapping, keyed by any other id, answers that id too, and the
+    server checks it: thread state lists a sub-graph's interrupt only once the
+    sub-graph's other tasks finish, while its prompt arrives at once, and the
+    server refuses a stale or hand-built id. Unwrapping it onto the pending
+    interrupt would pass the wrapper as the answer. Any other payload answers
+    the only pending interrupt: ask_user's ``{"status": "cancelled"}`` (a
+    string value) and ``{"answers": [...], "status": "answered"}`` (two keys)
+    are not keyed.
     """
+    if isinstance(response, Mapping) and len(response) == 1:
+        (key,) = response
+        if str(key) in pending or isinstance(response[key], Mapping):
+            return str(key), response[key]
     if not pending:
         raise RuntimeError(
             f"Thread {thread_id} has no pending interrupt; nothing to resume"
         )
-    if isinstance(response, Mapping) and len(response) == 1:
-        (key,) = response
-        if str(key) in pending:
-            return str(key), response[key]
-        if isinstance(response[key], Mapping):
-            raise RuntimeError(
-                f"Resume payload key {key} does not match a pending interrupt "
-                f"on thread {thread_id}"
-            )
     if len(pending) > 1:
         raise RuntimeError(
             f"Thread {thread_id} has {len(pending)} pending interrupts; "
@@ -999,8 +997,9 @@ class LangGraphServerGateway:
         """
         client = self.thread_store.client
         # The prompt can reach the client before the state lists its
-        # interrupt; an answer sent at once still finds it here because the
-        # turn first waits out the replay's quiet window (``skip_replay``).
+        # interrupt. A root one is listed once the turn has waited out the
+        # replay's quiet window (``skip_replay``); a sub-graph's only once the
+        # sub-graph's other tasks finish, so a keyed answer is sent unlisted.
         state = await client.threads.get_state(thread_id)
         pending = [
             str(interrupt_id)
@@ -1008,29 +1007,35 @@ class LangGraphServerGateway:
             if (interrupt_id := interrupt.get("id"))
         ]
         interrupt_id, answer = _resume_target(thread_id, response, pending)
-        on_run_attempt()
         # The server checks the id; for a subgraph's interrupt it accepts an
         # empty namespace, the only one thread state could give here.
-        reply = await client.http.post(
-            f"/threads/{thread_id}/commands",
-            json={
-                "id": 1,
-                "method": "input.respond",
-                "params": {
-                    "interrupt_id": interrupt_id,
-                    "namespace": [],
-                    "response": answer,
-                    "config": config,
-                    "metadata": dict(metadata) if metadata is not None else None,
+        try:
+            reply = await client.http.post(
+                f"/threads/{thread_id}/commands",
+                json={
+                    "id": 1,
+                    "method": "input.respond",
+                    "params": {
+                        "interrupt_id": interrupt_id,
+                        "namespace": [],
+                        "response": answer,
+                        "config": config,
+                        "metadata": (dict(metadata) if metadata is not None else None),
+                    },
                 },
-            },
-        )
-        # A refused command comes back with a success status.
+            )
+        except BaseException:
+            # A lost reply can still have started the run.
+            on_run_attempt()
+            raise
+        # A refused command comes back with a success status and starts no
+        # run, so it is no run attempt: an unlisted id is the server's to check.
         if isinstance(reply, Mapping) and reply.get("type") == "error":
             raise RuntimeError(
                 f"Thread {thread_id} refused the answer to interrupt "
                 f"{interrupt_id}: {reply.get('error')}: {reply.get('message')}"
             )
+        on_run_attempt()
         return await self._find_run_for_request(thread_id, request_id)
 
     async def _thread_is_busy(self, thread_id: str) -> bool:

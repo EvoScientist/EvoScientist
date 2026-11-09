@@ -2405,15 +2405,26 @@ async def test_server_gateway_resume_answers_the_pending_interrupt_not_a_replaye
         pytest.param({"answers": ["yes"], "status": "answered"}, id="ask-user"),
     ],
 )
-@pytest.mark.parametrize("pending", [["interrupt-1"], ["interrupt-a", "interrupt-b"]])
-async def test_langgraph_server_gateway_resume_raises_on_id_mismatch(pending, answer):
-    """An answer keyed by an id that is not pending is not unwrapped onto the
-    pending interrupt, whatever the answer's shape."""
+@pytest.mark.parametrize(
+    "pending", [[], ["interrupt-1"], ["interrupt-a", "interrupt-b"]]
+)
+async def test_langgraph_server_gateway_resume_sends_an_unlisted_keyed_answer_as_keyed(
+    pending, answer
+):
+    """An answer keyed by an id the state does not list is not unwrapped onto
+    the pending interrupt, whatever the answer's shape: it goes out keyed, and
+    the server refuses a stale id."""
     from langgraph.types import Command
 
     gateway, stream = _resume_gateway(*pending)
+    stream.run.respond_reply = {
+        "type": "error",
+        "id": 1,
+        "error": "no_such_interrupt",
+        "message": "Unknown or already-consumed interrupt: stale-interrupt",
+    }
 
-    with pytest.raises(RuntimeError, match="does not match a pending interrupt"):
+    with pytest.raises(RuntimeError, match=r"refused the answer.*no_such_interrupt"):
         await _resume(
             gateway,
             RunRequest(
@@ -2421,7 +2432,30 @@ async def test_langgraph_server_gateway_resume_raises_on_id_mismatch(pending, an
                 thread_id="abc12345",
             ),
         )
-    assert stream.run.responds == []
+    assert [respond["input"] for respond in stream.run.responds] == [
+        {"stale-interrupt": answer}
+    ]
+
+
+async def test_server_gateway_resume_answers_a_subgraph_interrupt_state_does_not_list_yet():
+    """Thread state lists a sub-graph's interrupt only once the sub-graph's
+    other tasks finish; an answer keyed by the prompt's id is sent before
+    that, and the server applies it."""
+    from langgraph.types import Command
+
+    answer = {"decisions": [{"type": "approve"}]}
+    gateway, stream = _resume_gateway()
+
+    await _resume(
+        gateway,
+        RunRequest(
+            message=Command(resume={"interrupt-sub": answer}), thread_id="abc12345"
+        ),
+    )
+
+    assert [respond["input"] for respond in stream.run.responds] == [
+        {"interrupt-sub": answer}
+    ]
 
 
 async def test_langgraph_server_gateway_resume_answers_a_single_key_list_payload():
@@ -2521,8 +2555,8 @@ async def test_server_gateway_resume_skips_a_state_interrupt_without_an_id():
 
 
 async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
-    """A thread with nothing pending has nothing to answer: the resume is
-    refused before the command is sent."""
+    """An unkeyed answer on a thread with nothing pending has nothing to
+    answer: the resume is refused before the command is sent."""
     from langgraph.types import Command
 
     gateway, stream = _resume_gateway(
@@ -2533,9 +2567,7 @@ async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
         await _resume(
             gateway,
             RunRequest(
-                message=Command(
-                    resume={"answered-1": {"decisions": [{"allowed": True}]}}
-                ),
+                message=Command(resume={"answers": ["yes"], "status": "answered"}),
                 thread_id="abc12345",
             ),
         )
@@ -2657,6 +2689,7 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
         "non-resume-command",
         "unmatched-id-keyed",
         "wrong-hitl-id",
+        "refused-unlisted-id",
         "start",
         "resume-start",
         "multi-resume-start",
@@ -2697,12 +2730,20 @@ async def test_state_repair_requires_this_request_to_attempt_a_run(
         message = Command(resume={"answer": "yes"})
     elif failure == "non-resume-command":
         message = Command(update={"configurable": {"model": "test"}})
-    elif failure == "unmatched-id-keyed":
-        state["interrupts"] = [{"id": "first"}, {"id": "second"}]
-        message = Command(resume={"unknown": {"decisions": [{"type": "approve"}]}})
-    elif failure == "wrong-hitl-id":
-        state["interrupts"] = [{"id": "first"}]
+    elif failure in {"unmatched-id-keyed", "wrong-hitl-id", "refused-unlisted-id"}:
+        # An id the state does not list goes to the server, which refuses it
+        # and starts no run; with nothing listed, a repair would clear ``next``.
+        if failure != "refused-unlisted-id":
+            state["interrupts"] = [{"id": "first"}]
+        if failure == "unmatched-id-keyed":
+            state["interrupts"].append({"id": "second"})
         message = Command(resume={"wrong": {"decisions": [{"type": "approve"}]}})
+        stream.run.respond_reply = {
+            "type": "error",
+            "id": 1,
+            "error": "no_such_interrupt",
+            "message": "Unknown or already-consumed interrupt: wrong",
+        }
     elif failure == "start":
         stream.run.start = AsyncMock(side_effect=RuntimeError("start attempted"))
     else:
