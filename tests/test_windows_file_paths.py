@@ -644,6 +644,60 @@ def test_middleware_does_nothing_off_windows(monkeypatch):
     assert _rewritten(request) is request
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("earlier_tool", "earlier_path", "refused"),
+    [
+        ("write_file", r"C:\Users\me\ws\a.md", True),
+        ("delete", "/C:/Users/me/ws/a.md", True),
+        ("write_file", r"C:\Users\me\ws\b.md", False),
+        ("read_file", r"C:\Users\me\ws\a.md", False),
+    ],
+)
+def test_middleware_refuses_a_parallel_mutation_of_the_same_drive_path(
+    monkeypatch, asynchronous, earlier_tool, earlier_path, refused
+):
+    monkeypatch.setattr(windows_paths, "os", SimpleNamespace(name="nt"))
+    earlier = {
+        "name": earlier_tool,
+        "args": {"file_path": earlier_path},
+        "id": "call-0",
+    }
+    later = {
+        "name": "edit_file",
+        "args": {
+            "file_path": "C:/Users/me/ws/a.md",
+            "old_string": "x",
+            "new_string": "y",
+        },
+        "id": "call-1",
+    }
+    state = {"messages": [AIMessage("", tool_calls=[earlier, later])]}
+    mw = WindowsFilePathMiddleware()
+
+    def run(call):
+        request = ToolCallRequest(tool_call=call, tool=None, state=state, runtime=None)
+        if asynchronous:
+
+            async def ahandler(req):
+                return "done"
+
+            return asyncio.run(mw.awrap_tool_call(request, ahandler))
+        return mw.wrap_tool_call(request, lambda req: "done")
+
+    assert run(earlier) == "done"
+    result = run(later)
+    if refused:
+        assert result.status == "error"
+        assert result.name == "edit_file"
+        assert result.tool_call_id == "call-1"
+        assert result.content == (
+            "Error: parallel file mutations to the same path are not allowed."
+        )
+    else:
+        assert result == "done"
+
+
 class _ScriptedToolModel(BaseChatModel):
     replies: list
 
