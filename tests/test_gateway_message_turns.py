@@ -222,6 +222,69 @@ async def test_pause_of_several_interrupts_prompts_each_once():
     assert events[-1]["type"] == "done"
 
 
+_ANSWERED_INTERRUPT = {
+    "id": "interrupt-0",
+    "value": {
+        "action_requests": [{"name": "execute", "args": {"command": "echo old"}}],
+        "review_configs": _REVIEW_CONFIGS,
+    },
+}
+_SECOND_INTERRUPT = {"id": "interrupt-2", "value": _STATE_INTERRUPT["value"]}
+
+
+@pytest.mark.parametrize(
+    ("envelope", "written_by", "interrupts", "prompts"),
+    [
+        (True, "run-0", [_STATE_INTERRUPT, _ANSWERED_INTERRUPT], ["interrupt-1"]),
+        (
+            True,
+            "run-1",
+            [_STATE_INTERRUPT, _SECOND_INTERRUPT],
+            ["interrupt-1", "interrupt-2"],
+        ),
+        (False, "run-0", [_STATE_INTERRUPT], ["interrupt-1"]),
+    ],
+    ids=["earlier-run", "own-run", "no-envelope"],
+)
+async def test_resume_pause_adds_state_prompts_only_from_its_own_run(
+    envelope, written_by, interrupts, prompts
+):
+    """Once the envelope gave the prompt, only a checkpoint the resumed run
+    wrote adds prompts: the earlier run's can still list the interrupt just
+    answered. Without an envelope prompt the state is the only source."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            *([_input_requested([])] if envelope else []),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        interrupted=True,
+        replay=[_lifecycle("run-0", "running"), _lifecycle("run-0", "interrupted")],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[_ANSWERED_INTERRUPT]
+    )
+    threads.states[THREAD_ID]["metadata"] = {"run_id": "run-0"}
+    respond = stream.run.respond_command
+
+    async def respond_and_pause_again(params):
+        reply = await respond(params)
+        threads.states[THREAD_ID].update(
+            interrupts=interrupts, metadata={"run_id": written_by}
+        )
+        return reply
+
+    stream.run.respond_command = respond_and_pause_again
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert [e["interrupt_id"] for e in events if e["type"] == "interrupt"] == prompts
+
+
 async def test_failed_pause_read_after_a_prompt_keeps_the_turn():
     """The envelope already showed the prompt: a failed state read only logs."""
     stream = FakeLangGraphThreadStream(

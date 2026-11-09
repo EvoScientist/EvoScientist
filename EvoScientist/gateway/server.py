@@ -1273,6 +1273,7 @@ class LangGraphServerGateway:
         *,
         paused: bool,
         prompted: bool,
+        run_id: str,
     ) -> list[GraphEvent]:
         """The prompts of a turn that saw its own pause, read from thread state.
 
@@ -1306,6 +1307,11 @@ class LangGraphServerGateway:
             raise _PauseStateReadError(
                 f"Could not read the pause state for thread {thread_id}"
             ) from exc
+        # Once the envelope gave the prompt, a checkpoint an earlier run wrote
+        # adds nothing: it can still list the interrupt just answered.
+        written_by = (state.get("metadata") or {}).get("run_id")
+        if prompted and written_by is not None and written_by != run_id:
+            return events
         for interrupt in _state_interrupts(state):
             events.extend(
                 await processor.process(
@@ -1530,6 +1536,7 @@ class LangGraphServerGateway:
                     processor,
                     paused=paused,
                     prompted=emitted_interrupt,
+                    run_id=run_id,
                 ):
                     yield event
             for event in tracker.finish():
