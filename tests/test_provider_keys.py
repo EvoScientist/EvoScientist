@@ -313,6 +313,7 @@ def test_each_provider_uses_its_check():
         "requesty": "check_requesty_key",
         "opper": "check_opper_key",
         "novita": "check_novita_key",
+        "uberllm": "check_uberllm_key",
         "deepseek": "check_deepseek_key",
         "zhipu": "check_zhipu_key",
         "zhipu-code": "check_zhipu_key",

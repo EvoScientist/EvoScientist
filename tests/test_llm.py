@@ -82,6 +82,7 @@ class TestModelsRegistry:
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
         assert "novita" in providers
+        assert "uberllm" in providers
         assert "xiaomi" in providers
         assert "xiaomi-token-plan" in providers
 
@@ -110,6 +111,7 @@ class TestModelsRegistry:
             "kimi-coding",
             "atlascloud",
             "novita",
+            "uberllm",
             "xiaomi",
             "xiaomi-token-plan",
         }
@@ -140,6 +142,8 @@ class TestModelsRegistry:
         assert get_models_for_provider("atlas") == []
         novita_models = get_models_for_provider("novita")
         assert ("kimi-k3", "moonshotai/kimi-k3") in novita_models
+        uberllm_models = get_models_for_provider("uberllm")
+        assert ("deepseek-v4-pro", "deepseek/deepseek-v4-pro") in uberllm_models
 
 
 # =============================================================================
@@ -504,6 +508,28 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.novita.ai/openai/v1"
         assert call_kwargs["api_key"] == "novita-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_uberllm_routes_through_openai(self, mock_init, monkeypatch):
+        """UberLLM provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("UBERLLM_API_KEY", "uberllm-key-123")
+
+        get_chat_model("deepseek-v4-pro", provider="uberllm")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "deepseek/deepseek-v4-pro"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.uberllm.dev/v1"
+        assert call_kwargs["api_key"] == "uberllm-key-123"
+
+    def test_uberllm_host_maps_to_provider(self):
+        """Provider error envelopes should identify UberLLM by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.uberllm.dev/v1", "openai") == "uberllm"
+        )
 
     def test_novita_host_maps_to_provider(self):
         """Provider error envelopes should identify Novita by host."""
@@ -1183,7 +1209,7 @@ class TestThirdPartyRouting:
         assert call_kwargs["model"] == "anthropic/claude-sonnet-5.5"
         assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
 
-    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty", "uberllm"])
     @pytest.mark.parametrize(
         "model",
         # A short name the registry no longer lists, and one that resolves to
@@ -1197,7 +1223,7 @@ class TestThirdPartyRouting:
 
         mock_init.assert_not_called()
 
-    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty", "uberllm"])
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_router_does_not_borrow_another_providers_id(
         self, mock_init, monkeypatch, provider

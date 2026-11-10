@@ -437,6 +437,47 @@ def check_novita_key(api_key: str) -> KeyCheck:
         return _classify_validation_error(e)
 
 
+def check_uberllm_key(api_key: str) -> KeyCheck:
+    """Check an UberLLM API key against the gateway's auth layer.
+
+    UberLLM's ``/v1/models`` endpoint is a public catalog and returns HTTP 200
+    for a missing or invalid key (verified against the live endpoint), so it
+    cannot check a key. Like Requesty and Novita, we send a minimal
+    ``/v1/chat/completions`` request with a deliberately nonexistent sentinel
+    model: auth is resolved before the model.
+
+    - invalid/missing key → 401 (confirmed against the live endpoint);
+    - valid key → 404 (model-not-found, auth passed), or 200 if the sentinel
+      ever resolves;
+    - 429 (rate-limit) / 5xx (service incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+    """
+    if not api_key:
+        return _SKIPPED
+
+    try:
+        import httpx
+
+        resp = httpx.post(
+            "https://api.uberllm.dev/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "uberllm/auth-preflight",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=_TIMEOUT,
+        )
+        if resp.status_code in (200, 404):
+            return KeyCheck("valid", "Valid")
+        return _status_result(resp.status_code)
+    except Exception as e:
+        return _classify_validation_error(e)
+
+
 def check_deepseek_key(api_key: str) -> KeyCheck:
     """Check a DeepSeek API key by listing models."""
     return _check_openai_compatible_key(api_key, "https://api.deepseek.com")
@@ -743,6 +784,9 @@ PROVIDERS: dict[str, KeySpec] = {
     ),
     "opper": _key("Opper", "opper_api_key", "OPPER_API_KEY", "check_opper_key"),
     "novita": _key("Novita", "novita_api_key", "NOVITA_API_KEY", "check_novita_key"),
+    "uberllm": _key(
+        "UberLLM", "uberllm_api_key", "UBERLLM_API_KEY", "check_uberllm_key"
+    ),
     "deepseek": _key(
         "DeepSeek", "deepseek_api_key", "DEEPSEEK_API_KEY", "check_deepseek_key"
     ),

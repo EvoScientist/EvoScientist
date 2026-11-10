@@ -3,7 +3,7 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, Opper, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
+Novita, Opper, UberLLM, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
 DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-
 compatible endpoints) and convenient short names for common models.
 """
@@ -498,7 +498,7 @@ def get_chat_model(
     if (
         model_id is None
         and model in MODELS
-        and provider not in ("openrouter", "requesty")
+        and provider not in ("openrouter", "requesty", "uberllm")
     ):
         model_id, default_provider = MODELS[model]
         provider = provider or default_provider
@@ -522,7 +522,7 @@ def get_chat_model(
 
     # Routers address models as ``vendor/model``; a bare id here is a short
     # name outside this router's list.
-    if provider in ("openrouter", "requesty") and "/" not in model_id:
+    if provider in ("openrouter", "requesty", "uberllm") and "/" not in model_id:
         raise UnknownModelError(
             f"Model {model!r} is not in EvoScientist's {provider} model list "
             "(it may have been removed). Pick one with `/model <name> --save`, "

@@ -200,6 +200,7 @@ _HOST_TO_PROVIDER: dict[str, str] = {
     "api.kimi.com": "kimi",  # kimi-coding shares this host
     "openrouter.ai": "openrouter",
     "api.novita.ai": "novita",
+    "api.uberllm.dev": "uberllm",
     "api.opper.ai": "opper",
     "api.xiaomimimo.com": "xiaomi",
     # Token Plan regions share the xiaomi tag

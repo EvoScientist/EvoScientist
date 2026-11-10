@@ -27,6 +27,7 @@ _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 _NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
+_UBERLLM_BASE_URL = "https://api.uberllm.dev/v1"
 _XIAOMI_ANTHROPIC_BASE_URL = "https://api.xiaomimimo.com/anthropic"
 _XIAOMI_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
 _OPPER_BASE_URL = "https://api.opper.ai/v3/compat"
@@ -45,6 +46,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "novita": (_NOVITA_BASE_URL, "NOVITA_API_KEY"),
+    "uberllm": (_UBERLLM_BASE_URL, "UBERLLM_API_KEY"),
     "opper": (_OPPER_BASE_URL, "OPPER_API_KEY"),
     "custom-openai": (
         None,
@@ -94,6 +96,14 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-6-luna", "gpt-6-luna", "custom-openai"),
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
+    # UberLLM (aggregator — OpenAI-compatible, vendor/model IDs). Listed before
+    # the native providers and the other routers so a short name shared with
+    # them keeps resolving there (the dict below is last-entry-wins); UberLLM
+    # is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "uberllm"),
+    ("gpt-5.6-sol", "openai/gpt-5.6-sol", "uberllm"),
+    ("gemini-3.8-flash", "google/gemini-3.8-flash", "uberllm"),
+    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "uberllm"),
     # Anthropic (current generation)
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),

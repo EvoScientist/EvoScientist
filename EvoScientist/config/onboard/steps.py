@@ -336,6 +336,10 @@ def _step_provider(
             value="novita",
         ),
         Choice(
+            title="UberLLM (aggregator — Anthropic, OpenAI, Gemini, DeepSeek, Qwen, etc.)",
+            value="uberllm",
+        ),
+        Choice(
             title="Opper (EU-hosted aggregator — OpenAI, Anthropic, Gemini, Mistral, etc.)",
             value="opper",
         ),
