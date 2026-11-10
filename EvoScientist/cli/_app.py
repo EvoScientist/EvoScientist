@@ -69,6 +69,9 @@ app.add_typer(server_app, name="server")
 # What `server` was called in 0.4.0 to 0.4.2, kept for one release.
 service_app = typer.Typer(help="Deprecated: use EvoSci server")
 app.add_typer(service_app, name="service")
+# Projects the background server serves, by folder.
+workspace_app = typer.Typer(help="Manage projects (the folders EvoSci works in)")
+app.add_typer(workspace_app, name="workspace")
 
 # Configure subcommand group — re-run a single onboarding section.
 configure_app = typer.Typer(
