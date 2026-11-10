@@ -255,6 +255,7 @@ def _run_prompt(
 
     async def _fake_upgrade():
         captured["upgrades"] += 1
+        gateway.thread_store.calls.append(("upgrade", None))
 
     monkeypatch.setattr(sessions_mod, "_upgrade_stored_dirs_safely", _fake_upgrade)
     monkeypatch.setattr(interactive_mod, "cmd_run", _fake_cmd_run)
@@ -337,6 +338,28 @@ def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_p
     assert "[dim]Loading agent...[/dim]" not in got["printed"]
     # Without the checkpointer, the stored folders a resume reads are upgraded.
     assert got["upgrades"] == 1
+
+
+def test_one_shot_resume_on_the_server_gateway_upgrades_before_it_reads(
+    monkeypatch, tmp_path
+):
+    launch, other = tmp_path / "launch", tmp_path / "other"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id="t-other",
+        stored={"workspace_dir": other.as_posix()},
+        backend="langgraph_server",
+        executes_on_server=True,
+    )
+
+    calls = [name for name, _ in got["graph_gateway"].thread_store.calls]
+    assert calls.index("upgrade") < calls.index("get_thread_metadata")
+    assert got["thread_id"] == "t-other"
+    assert got["run_dirs"] == SessionDirs(Workspace(other))
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):

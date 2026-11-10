@@ -3369,7 +3369,8 @@ def _main_callback(
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
-            if not runs_in_process(graph_gateway):
+            in_process = runs_in_process(graph_gateway)
+            if not in_process:
                 # Opening the local checkpointer upgrades the stored folders a
                 # resume reads; without it, upgrade them here (a no-op once
                 # done), as a server that failed or predates it did not.
@@ -3377,9 +3378,7 @@ def _main_callback(
             # The langgraph server keeps its own checkpointer; the local one
             # only backs an in-process agent.
             async with (
-                get_checkpointer()
-                if runs_in_process(graph_gateway)
-                else contextlib.nullcontext()
+                get_checkpointer() if in_process else contextlib.nullcontext()
             ) as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
@@ -3410,7 +3409,7 @@ def _main_callback(
                 else:
                     tid = await graph_gateway.create_thread()
                     session_dirs = dirs
-                if runs_in_process(graph_gateway):
+                if in_process:
                     console.print("[dim]Loading agent...[/dim]")
                 agent = await asyncio.to_thread(
                     _load_agent,
