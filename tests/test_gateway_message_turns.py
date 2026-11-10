@@ -1,8 +1,8 @@
-"""Turns that send a new message on the LangGraph server gateway (#558).
+"""Turns on the LangGraph server gateway (#558, #738).
 
-A new message reads ``stream.events``: it skips the thread's history replay,
-starts the run, keeps only that run's envelopes and stops at its root
-completed/failed or at a pause. Resume turns use ``subscribe``.
+Every turn, a new message or a resume, reads ``stream.events``: it skips the
+thread's history replay, starts the run, keeps only that run's envelopes and
+stops at its root completed/failed or at a pause.
 """
 
 from __future__ import annotations
@@ -170,27 +170,22 @@ def _texts(events: list[dict]) -> list[str]:
 # --- state: pause on a new thread / in a subgraph ---------------------------
 
 
-@pytest.mark.parametrize(
-    "pause",
-    [
-        pytest.param([_input_requested([])], id="root"),
-        pytest.param(
-            [_input_requested(["child:1"]), _lifecycle("run-1", "interrupted")],
-            id="subgraph",
-        ),
-    ],
-)
-async def test_pause_reads_interrupt_from_state_when_lifecycle_lags(pause):
-    # ``stream.interrupted`` comes from a separate SSE and can still be False
-    # when the pause envelope arrives; the envelope carries ``payload``, which
-    # the event processor does not parse, so the interrupt must come from state.
+@pytest.mark.parametrize("namespace", [[], ["child:1"]], ids=["root", "subgraph"])
+async def test_pause_prompt_comes_from_the_envelope_before_state_lists_it(namespace):
+    """#706: when ``input.requested`` arrives the thread state may not list
+    the interrupt yet; the prompt comes from the envelope's ``payload``. A
+    subgraph's pause ends the turn too, at the root ``interrupted`` the server
+    sends right after it."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), *pause],
-        interrupted=False,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested(namespace),
+            _lifecycle("run-1", "interrupted"),
+        ],
         stay_open=True,
     )
-    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+    gateway, threads = _gateway(stream, interrupts=[])
 
     events = await _turn(gateway, "hi")
 
@@ -199,7 +194,139 @@ async def test_pause_reads_interrupt_from_state_when_lifecycle_lags(pause):
         _INTERRUPT_EVENT
     ]
     assert events[-1] == {"type": "done", "content": "", "response": ""}
-    assert THREAD_ID in threads.state_gets
+    # The pre-run read and the pause read, which found nothing yet.
+    assert threads.state_gets == [THREAD_ID, THREAD_ID]
+
+
+async def test_pause_of_several_interrupts_prompts_each_once():
+    """The turn stops at the root ``interrupted`` that follows the first
+    interrupting task's envelope; the step's other interrupts come from thread
+    state, without repeating the envelope's prompt."""
+    second = {"id": "interrupt-2", "value": _STATE_INTERRUPT["value"]}
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        stay_open=True,
+    )
+    gateway, _ = _gateway(stream, interrupts=[_STATE_INTERRUPT, second])
+
+    events = await _turn(gateway, "hi")
+
+    assert [e["interrupt_id"] for e in events if e["type"] == "interrupt"] == [
+        "interrupt-1",
+        "interrupt-2",
+    ]
+    assert events[-1]["type"] == "done"
+
+
+_ANSWERED_INTERRUPT = {
+    "id": "interrupt-0",
+    "value": {
+        "action_requests": [{"name": "execute", "args": {"command": "echo old"}}],
+        "review_configs": _REVIEW_CONFIGS,
+    },
+}
+_SECOND_INTERRUPT = {"id": "interrupt-2", "value": _STATE_INTERRUPT["value"]}
+
+
+@pytest.mark.parametrize(
+    ("envelope", "written_by", "interrupts", "prompts"),
+    [
+        (True, "run-0", [_STATE_INTERRUPT, _ANSWERED_INTERRUPT], ["interrupt-1"]),
+        (
+            True,
+            "run-1",
+            [_STATE_INTERRUPT, _SECOND_INTERRUPT],
+            ["interrupt-1", "interrupt-2"],
+        ),
+        (False, "run-0", [_STATE_INTERRUPT], ["interrupt-1"]),
+    ],
+    ids=["earlier-run", "own-run", "no-envelope"],
+)
+async def test_resume_pause_adds_state_prompts_only_from_its_own_run(
+    envelope, written_by, interrupts, prompts
+):
+    """Once the envelope gave the prompt, only a checkpoint the resumed run
+    wrote adds prompts: the earlier run's can still list the interrupt just
+    answered. Without an envelope prompt the state is the only source."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            *([_input_requested([])] if envelope else []),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        interrupted=True,
+        replay=[_lifecycle("run-0", "running"), _lifecycle("run-0", "interrupted")],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[_ANSWERED_INTERRUPT]
+    )
+    threads.states[THREAD_ID]["metadata"] = {"run_id": "run-0"}
+    respond = stream.run.respond_command
+
+    async def respond_and_pause_again(params):
+        reply = await respond(params)
+        threads.states[THREAD_ID].update(
+            interrupts=interrupts, metadata={"run_id": written_by}
+        )
+        return reply
+
+    stream.run.respond_command = respond_and_pause_again
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert [e["interrupt_id"] for e in events if e["type"] == "interrupt"] == prompts
+
+
+async def test_failed_pause_read_after_a_prompt_keeps_the_turn():
+    """The envelope already showed the prompt: a failed state read only logs."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[])
+    real_get_state = threads.get_state
+
+    async def fail_after_the_pre_run_read(thread_id: str):
+        if threads.state_gets:
+            raise ConnectionError("state store unavailable")
+        return await real_get_state(thread_id)
+
+    threads.get_state = fail_after_the_pre_run_read  # type: ignore[method-assign]
+
+    events = await _turn(gateway, "hi")
+
+    assert events == [_INTERRUPT_EVENT, {"type": "done", "content": "", "response": ""}]
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_pause_without_an_envelope_prompt_reads_it_from_state():
+    """A pause seen only as a root ``interrupted`` gives no prompt; it is read
+    from thread state, which lists it once the run has stopped."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
+
+    events = await _turn(gateway, "hi")
+
+    assert events == [_INTERRUPT_EVENT, {"type": "done", "content": "", "response": ""}]
+    assert threads.state_gets == [THREAD_ID, THREAD_ID]
 
 
 async def test_completed_run_does_not_read_state_interrupts():
@@ -411,47 +538,228 @@ async def test_events_stream_ending_early_raises():
         await _turn(gateway, "hi")
 
 
-# --- state: resume and retry use subscribe ---------------------------------
+@pytest.mark.parametrize("drop", ["raises", "ends"])
+async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
+    """A stream lost between the envelope's prompt and the root
+    ``interrupted`` fails the turn without cancelling or repairing the run
+    the prompt belongs to."""
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=[])
+
+    async def lost() -> AsyncIterator[dict[str, Any]]:
+        await stream.run.started.wait()
+        yield _lifecycle("run-1", "running")
+        yield _input_requested([])
+        if drop == "raises":
+            raise ConnectionError("provider connection lost")
+
+    gateway, threads = _gateway(stream)
+    events: list[dict] = []
+
+    async def collect() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id=THREAD_ID)
+        ):
+            events.append(event)
+
+    with (
+        patch.object(
+            FakeLangGraphThreadStream, "events", property(lambda self: lost())
+        ),
+        pytest.raises((ConnectionError, RuntimeError)),
+    ):
+        await collect()
+
+    assert [e["type"] for e in events] == ["interrupt", "error"]
+    assert gateway.thread_store.client.runs.cancelled == []
+    assert threads.state_updates == []
 
 
-async def test_resume_keeps_the_subscribe_path():
+# --- state: resume and retry read events like a new message ----------------
+
+
+async def test_resume_reads_its_run_from_the_thread_events():
     stream = FakeLangGraphThreadStream(
-        THREAD_ID,
-        events=[_text("resumed: ok"), _finish()],
-        interrupts=[{"interrupt_id": "interrupt-1"}],
+        THREAD_ID, events=[_text("resumed: ok"), _finish()]
     )
-    gateway, _ = _gateway(stream)
+    gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-1"}])
 
     events = await _turn(
         gateway, Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
     )
 
-    assert stream.event_streams_opened == 0
-    assert stream.run.starts == []
-    assert stream.run.responses == [
-        {
-            "response": {"decisions": [{"type": "approve"}]},
-            "interrupt_id": "interrupt-1",
-        }
+    assert stream.event_streams_opened == 1
+    assert [respond["input"] for respond in stream.run.responds] == [
+        {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     ]
     assert _texts(events) == ["resumed: ok"]
 
 
+_ANSWERED_PROMPT = {
+    "method": "input.requested",
+    "params": {
+        "namespace": [],
+        "data": {
+            "interrupt_id": "interrupt-0",
+            "payload": {
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "echo old"}, "id": "t0"}
+                ],
+                "review_configs": _REVIEW_CONFIGS,
+            },
+        },
+    },
+    "event_id": "0-2",
+}
+
+
+@pytest.mark.parametrize(
+    "replayed_prompt",
+    [False, True],
+    ids=["replay-without-prompt", "replay-with-prompt"],
+)
+async def test_resume_whose_run_pauses_again_ends_at_the_new_pause(replayed_prompt):
+    """#738: the replayed pause already set ``stream.interrupted``, so the turn
+    must end at the resumed run's own pause, not wait for a rising edge; its
+    prompt is the new pause's, and the replayed ``input.requested`` of the
+    interrupt just answered is not prompted again."""
+    replayed_pause = [_ANSWERED_PROMPT] if replayed_prompt else []
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("first call done"),
+            _finish(),
+            _input_requested([]),
+            _lifecycle("run-1", "interrupted"),
+        ],
+        interrupted=True,
+        replay=[
+            _lifecycle("run-0", "running"),
+            *replayed_pause,
+            _lifecycle("run-0", "interrupted"),
+        ],
+        stay_open=True,
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-0"}]
+    )
+    respond = stream.run.respond_command
+
+    async def respond_and_pause_again(params):
+        reply = await respond(params)
+        threads.states[THREAD_ID]["interrupts"] = [_STATE_INTERRUPT]
+        return reply
+
+    stream.run.respond_command = respond_and_pause_again
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert [respond["input"] for respond in stream.run.responds] == [
+        {"interrupt-0": {"decisions": [{"type": "approve"}]}}
+    ]
+    assert _texts(events) == ["first call done"]
+    assert [event for event in events if event["type"] == "interrupt"] == [
+        _INTERRUPT_EVENT
+    ]
+    assert events[-1]["type"] == "done"
+    assert not stream.lost_live_events
+
+
 async def test_retrying_the_same_resume_payload_resumes_again():
+    """Each resume turn is its own run: the retry reads the second run's events
+    and drops the first run's, which the thread stream sends again."""
     payload = {"interrupt-1": {"decisions": [{"type": "approve"}]}}
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_text("resumed: ok"), _finish()],
-        interrupts=[{"interrupt_id": "interrupt-1"}],
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("first run", "1-0"),
+            _lifecycle("run-1", "completed"),
+            _lifecycle("run-2", "running"),
+            _text("second run", "2-0"),
+            _lifecycle("run-2", "completed"),
+        ],
     )
-    gateway, _ = _gateway(stream)
+    gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-1"}])
 
     first = await _turn(gateway, Command(resume=payload))
     second = await _turn(gateway, Command(resume=payload))
 
-    assert _texts(first) == _texts(second) == ["resumed: ok"]
-    assert len(stream.run.responses) == 2
-    assert stream.event_streams_opened == 0
+    assert _texts(first) == ["first run"]
+    assert _texts(second) == ["second run"]
+    assert [respond["input"] for respond in stream.run.responds] == [payload, payload]
+    assert stream.event_streams_opened == 2
+
+
+class _BusyThreadStream(FakeLangGraphThreadStream):
+    """Another task of the paused run streams model tokens, which carry no run
+    id, so the SSE never goes quiet; the answer's run starts once that run
+    ends."""
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        while not self.run.started.is_set():
+            yield _text("sibling token", "0-1")
+            await asyncio.sleep(0.005)
+        # The answer is queued: the busy run streams on, then ends.
+        for _ in range(3):
+            yield _text("sibling token", "0-1")
+        yield _lifecycle("run-0", "interrupted")
+        async for event in self._iter_events():
+            yield event
+
+
+@pytest.mark.parametrize(
+    ("message", "busy", "answered"),
+    [
+        pytest.param(
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+            True,
+            True,
+            id="resume-busy",
+        ),
+        pytest.param(
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+            False,
+            False,
+            id="resume-idle",
+        ),
+        pytest.param("hi", True, False, id="new-message-busy"),
+    ],
+)
+async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
+    message, busy, answered, monkeypatch
+):
+    """A sibling task's envelopes keep the SSE from going quiet; a resume on a
+    busy thread is sent at the cap and queues behind that run. Anything else
+    still fails at the cap."""
+    # The sibling's gaps must stay under the quiet window on a ~15 ms timer
+    # (Windows).
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("resumed"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-1"}]
+    )
+    if busy:
+        threads.threads[0]["status"] = "busy"
+
+    if answered:
+        events = await _turn(gateway, message)
+        assert _texts(events) == ["resumed"]
+        assert len(stream.run.responds) == 1
+    else:
+        with pytest.raises(RuntimeError, match="replay did not finish"):
+            await _turn(gateway, message)
+        assert stream.run.responds == stream.run.starts == []
 
 
 # --- _ThreadEvents.skip_replay: controllable clock, no real waiting ---------
@@ -688,12 +996,12 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     """A transient get_state error must not cancel an already paused run.
 
     The turn emits the gateway ``error`` shape (and raises) so callers do not
-    treat an empty ``done`` as a normal finish / "No response".
+    treat an empty ``done`` as a normal finish / "No response". A pause seen
+    only as ``interrupted`` gives no prompt, so it is read from state.
     """
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), _input_requested([])],
-        interrupted=False,
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
         stay_open=True,
     )
     gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
@@ -719,8 +1027,6 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
             return await real_get_state(thread_id)
         raise ConnectionError("state store unavailable")
 
-    # Force the paused-state fallback: no stream.interrupts, interrupted False.
-    stream.interrupts = []
     threads.get_state = boom  # type: ignore[method-assign]
 
     events: list[dict] = []
@@ -746,49 +1052,35 @@ async def test_pause_state_read_failure_does_not_cancel_the_paused_run():
     }
 
 
-async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
-    """When the interrupted flag is already set, a failing state read must not cancel.
-
-    ``_pending_interrupt_events`` owns that read; ``_paused_interrupt_events``
-    converts the failure so the resume path on ``_pending`` is untouched.
-    """
+async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
+    """A resume whose run pauses again leaves that run paused when the state
+    read fails."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
-        events=[_lifecycle("run-1", "running"), _input_requested([])],
-        interrupted=True,
+        events=[_lifecycle("run-1", "running"), _lifecycle("run-1", "interrupted")],
         stay_open=True,
     )
-    gateway, threads = _gateway(stream, interrupts=[_STATE_INTERRUPT])
-    client = gateway.thread_store.client
-    cancelled: list[list[str]] = []
-
-    class _Runs:
-        async def list(self, thread_id: str, **kwargs):
-            return [{"run_id": "run-1", "status": "running", "metadata": {}}]
-
-        async def cancel_many(self, *, thread_id: str, run_ids):
-            cancelled.append(list(run_ids))
-
-    client.runs = _Runs()
+    gateway, threads = _gateway(stream, interrupts=[{"id": "interrupt-0"}])
 
     real_get_state = threads.get_state
     calls = {"n": 0}
 
     async def boom(thread_id: str):
         calls["n"] += 1
-        if calls["n"] == 1:
+        # The pre-run read and the resume's pending-id read succeed.
+        if calls["n"] <= 2:
             return await real_get_state(thread_id)
         raise ConnectionError("state store unavailable")
 
-    stream.interrupts = []
     threads.get_state = boom  # type: ignore[method-assign]
+    answer = {"interrupt-0": {"decisions": [{"type": "approve"}]}}
 
     events: list[dict] = []
 
     async def collect() -> None:
         async with asyncio.timeout(GUARD_SECONDS):
             async for event in gateway.stream_events(
-                RunRequest(message="hi", thread_id=THREAD_ID)
+                RunRequest(message=Command(resume=answer), thread_id=THREAD_ID)
             ):
                 events.append(event)
 
@@ -798,7 +1090,9 @@ async def test_pause_state_read_failure_with_interrupted_flag_does_not_cancel():
     ):
         await collect()
 
-    assert cancelled == []
+    assert [respond["input"] for respond in stream.run.responds] == [answer]
+    assert gateway.thread_store.client.runs.cancelled == []
+    assert threads.state_updates == []
     assert [event["type"] for event in events] == ["error"]
     assert events[-1] == {
         "type": "error",

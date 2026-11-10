@@ -4,10 +4,11 @@
 The server writes it when :mod:`.http` is imported, right after it took its
 data folder's lock, as ``starting``, and exits when it cannot; it marks it
 ``serving`` just before it serves, and removes it only as the process exits,
-just before the lock goes with it. So a record names the server that holds
-the lock, also while it stops. A stop by signal (SIGTERM, Ctrl+Break) ends
-the process before that removal runs, as uvicorn raises the signal again
-once it has shut down; the stop that ended it then deletes the record
+just before the lock goes with it. It adds the ccproxy it starts, if any, as
+soon as that runs. So a record names the server that holds the lock, also
+while it stops. A stop by signal (SIGTERM, Ctrl+Break) ends the process before
+that removal runs, as uvicorn raises the signal again once it has shut down;
+the stop that ended it then deletes the record
 (:func:`~EvoScientist.langgraph_dev.manager.stop_server`,
 :func:`~EvoScientist.langgraph_dev.manager.stop_langgraph_dev`). Clients read it
 (:func:`~EvoScientist.langgraph_dev.manager.read_record`) and never write it.
@@ -50,6 +51,10 @@ BREAK_GROUP_KEY = "break_group"
 PHASE_KEY = "phase"
 STARTING = "starting"
 SERVING = "serving"
+# The ccproxy the server started (Anthropic OAuth), for the next server to
+# end when this one is killed and leaves it running.
+CCPROXY_PID_KEY = "ccproxy_pid"
+CCPROXY_CREATE_TIME_KEY = "ccproxy_create_time"
 
 # How far up from itself the server looks for the process its starter
 # started: on Windows ``langgraph.exe`` is a launcher whose child runs Python,
@@ -128,6 +133,30 @@ def address_of(args: list[str]) -> tuple[int, str]:
     return port, option(args, "--host") or DEFAULT_HOST
 
 
+def recorded_pid() -> int:
+    """The PID this server recorded itself under, which its starter knows:
+    on Windows the launcher's, not this process's."""
+    pid = (_written or {}).get("pid")
+    return pid if isinstance(pid, int) else os.getpid()
+
+
+def restart_hint(lasting: bool | None) -> str:
+    """How to restart the server a record describes: the background server
+    with ``EvoSci server stop``, which leaves one ``EvoSci deploy`` or the
+    desktop app owns (*lasting* False) running."""
+    if lasting is False:
+        return "restart the EvoSci deploy or the desktop app that runs the server"
+    return (
+        "restart the server: EvoSci server stop; it starts again with your next session"
+    )
+
+
+def own_restart_hint() -> str:
+    """:func:`restart_hint` for the server this process is."""
+    lasting = (_written or {}).get("lasting")
+    return restart_hint(lasting if isinstance(lasting, bool) else None)
+
+
 def is_langgraph_dev(args: list[str]) -> bool:
     """Whether a command line is a langgraph dev's."""
     return any("langgraph" in arg for arg in args)
@@ -183,22 +212,52 @@ def _write(record: dict) -> None:
         raise
 
 
-def write_record() -> None:
+def load_json(path: Path) -> dict | None:
+    """The JSON object in *path*; None when it is missing, unreadable or
+    not an object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_record() -> dict | None:
     """Write this server's record as ``starting``, right after it took the
     lock (so it replaces a record a crashed server left at once); it is
     removed as the process exits (:func:`remove_record`), or after a signal
-    by the stop that ended it.
+    by the stop that ended it. Returns the record it replaced, which names
+    what a killed server left running.
 
     Raises when it cannot, after logging why: a server without its record
     would hold the lock unseen, so it must not start.
     """
     global _written
+    # What a server that held the lock before this one left, if any.
+    left = load_json(record_path())
     try:
         record = _build()
         _write(record)
     except Exception:
         logger.exception("Could not write the server's record; it does not start.")
         raise
+    _written = record
+    return left
+
+
+def record_ccproxy(pid: int, created: float | None) -> None:
+    """Add the ccproxy this server started to its record, as soon as it
+    runs: a server killed while ccproxy starts leaves it for the next one to
+    end. A failure is logged only."""
+    global _written
+    if _written is None:
+        return
+    record = {**_written, CCPROXY_PID_KEY: pid, CCPROXY_CREATE_TIME_KEY: created}
+    try:
+        _write(record)
+    except OSError:
+        logger.warning("Could not record the server's ccproxy.", exc_info=True)
+        return
     _written = record
 
 

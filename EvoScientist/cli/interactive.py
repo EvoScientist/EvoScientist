@@ -455,10 +455,8 @@ def cmd_interactive(
         return
 
     from ..config import GatewaySurface, resolve_gateway_backend
-    from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.INTERACTIVE)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="interactive CLI")
 
     from .. import paths
 

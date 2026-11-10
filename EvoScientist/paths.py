@@ -85,6 +85,19 @@ def host_file_tool_path(path: str) -> str:
     return path
 
 
+def git_bash_drive_path(path: str) -> str | None:
+    """On Windows, the drive path Git Bash means by ``/c/rest`` (``c:/rest``).
+
+    ``None`` on other platforms and for paths without a one-letter first part.
+    """
+    if os.name != "nt":
+        return None
+    match = re.match(r"^/([A-Za-z])(/|$)", path)
+    if match is None:
+        return None
+    return f"{match[1]}:/{path[3:]}"
+
+
 def command_arg(path: str | Path) -> str:
     """*path* as one argument of a command printed for the user to copy:
     quoted for a POSIX shell (``shlex.quote``), or on Windows in double quotes
@@ -115,6 +128,17 @@ class Workspace:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "root", normalize_path(self.root))
+
+    @classmethod
+    def as_stored(cls, key: str) -> Workspace:
+        """The project a stored key names, spelled as stored: what was made
+        from that key (assistant IDs, a registry row, a memory id) keeps
+        matching it, while :func:`normalize_path` would respell the part of
+        the path that exists as it is on disk now (macOS, after a rename
+        that changed case)."""
+        workspace = object.__new__(cls)
+        object.__setattr__(workspace, "root", Path(key))
+        return workspace
 
     @property
     def skills_dir(self) -> Path:

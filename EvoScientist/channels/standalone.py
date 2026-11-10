@@ -14,6 +14,7 @@ Usage from a channel's ``main()``::
 """
 
 import asyncio
+import copy
 import logging
 import signal
 import threading
@@ -29,11 +30,17 @@ from .debug import emit_debug_event
 logger = logging.getLogger(__name__)
 
 
-async def _create_standalone_agent(workspace: Workspace):
+async def _create_standalone_agent(
+    workspace: Workspace, config: Any = None, backend: str | None = None
+):
     """Construct the synchronous agent without blocking the channel loop."""
     from ..EvoScientist import create_cli_agent
 
-    return await asyncio.to_thread(create_cli_agent, workspace=workspace)
+    if config is None or backend == "langgraph_server":
+        return await asyncio.to_thread(create_cli_agent, workspace=workspace)
+    config = copy.copy(config)
+    config.enable_async_subagents = False
+    return await asyncio.to_thread(create_cli_agent, workspace=workspace, config=config)
 
 
 def _channel_trace_enabled(channel: Channel) -> bool:
@@ -137,7 +144,7 @@ async def _async_main(
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
-        agent = await _create_standalone_agent(workspace)
+        agent = await _create_standalone_agent(workspace, config, backend)
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         logger.info("Agent loaded")
 
@@ -275,21 +282,24 @@ def _ensure_standalone_dev_server(
     Spawns the same dev server serve uses so a headless channel running on the
     ``langgraph_server`` gateway backend has a live dev server for execution,
     async sub-agents, and memory workers — the one production surface that never
-    spawned it before. On the default ``local`` backend this is a no-op, keeping
-    headless channels byte-identical to prior behavior. Runs headless: no
+    spawned it before. On the default ``local`` backend this is a no-op, unless
+    Anthropic uses OAuth: its ccproxy runs in the server. Runs headless: no
     console/typer UI, progress goes to the log.
 
     Called synchronously before the asyncio loop starts (like serve), so the
     cold-start poll never blocks the channel event loop. A server this runner
-    cannot use (:class:`ServerUnusableError`) is logged as one error line and
-    stops startup with exit code 1; a generic start failure does not raise
-    here — ``ensure_server`` leaves the dev server unavailable, and
-    ``create_runtime_gateways_for_config`` then falls back to the in-process
-    gateway for the run. serve's config-drift hint is not mirrored here (no
-    console); the server reconciles the project's AutoSkills schedule as it
-    registers it.
+    cannot use (:class:`ServerUnusableError`, also when it could not start
+    its ccproxy) is logged as one error line and stops startup with exit code
+    1; any other start failure does not raise here — ``ensure_server`` leaves
+    the dev server unavailable, and ``create_runtime_gateways_for_config``
+    then falls back to the in-process gateway for the run. serve's config-drift
+    hint is not mirrored here (no console); the server reconciles the project's
+    AutoSkills schedule as it registers it.
     """
-    if backend != "langgraph_server":
+    from ..ccproxy_manager import uses_oauth
+
+    # With Anthropic's OAuth the runner's own agent needs the server's ccproxy.
+    if backend != "langgraph_server" and not uses_oauth(config):
         return
 
     from ..langgraph_dev import manager
@@ -301,31 +311,12 @@ def _ensure_standalone_dev_server(
     try:
         manager.ensure_server(config, workspace_dir=workspace_dir, backend=backend)
     except ServerUnusableError as exc:
-        logger.error("Cannot start server-backed standalone channel: %s", exc)
+        logger.error("Cannot start the standalone channel: %s", exc)
         raise SystemExit(1) from exc
     # The server serves every project: a public bind or tunnel exposes this
     # one too.
     for message in exposure_messages(manager.SERVER_EXPOSURE):
         logger.warning(message)
-
-
-def _ensure_ccproxy(config: Any) -> None:
-    """Start ccproxy, or reuse a running one, when Anthropic uses OAuth. It
-    outlives this runner, for every session and the background server to
-    share.
-
-    Must run before the dev server spawns: its env is copied from ``os.environ``.
-    """
-    from ..ccproxy_manager import maybe_start_ccproxy, uses_oauth
-
-    if not uses_oauth(config):
-        return
-
-    try:
-        maybe_start_ccproxy(config, lasting=True)
-    except RuntimeError as exc:
-        logger.error("ccproxy startup failed: %s", exc)
-        raise SystemExit(1) from exc
 
 
 def run_standalone(
@@ -394,8 +385,9 @@ def run_standalone(
                     logger.error("ChatGPT: %s", state.problem)
                 logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
                 raise SystemExit(1)
-        # ccproxy starts after the sign-in check, like the other entry points.
-        _ensure_ccproxy(config)
+        from ..ccproxy_manager import use_server_ccproxy
+
+        use_server_ccproxy(config)
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.
         ws_path = start_workspace_path(default_workdir=config.default_workdir)

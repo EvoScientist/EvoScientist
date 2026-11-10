@@ -119,8 +119,8 @@ def _shorten_path(path: str) -> str:
 
 
 def _agent_shell_notices(backend: str | None = None) -> list[str]:
-    """The agent shell's setup hint, the server's drift warnings, a server
-    unavailable for this project, one reachable from other machines and where
+    """The agent shell's setup hint, the server's ccproxy missing, the
+    server's drift warnings, a server unavailable for this project, one reachable from other machines and where
     a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
     They also go to the terminal or the log, which Textual hides while the
@@ -149,6 +149,7 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     older = lg_manager.OLDER_SERVER
     notices = [
         setup_hint(),
+        lg_manager.CCPROXY_MISSING,
         older,
         drift,
         lg_manager.AGENT_SHELL_DRIFT,
@@ -577,10 +578,8 @@ def run_textual_interactive(
     # display hook (its widget is mounted from the stream event).
     from ..config import GatewaySurface, resolve_gateway_backend
     from ..stream.sink import SessionEventSink
-    from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
 
     event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways_for_config(

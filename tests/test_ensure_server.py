@@ -8,6 +8,7 @@ asked whose server answers, else a start under the start lock).
 
 from __future__ import annotations
 
+import json
 import threading
 
 import httpx
@@ -232,10 +233,10 @@ def test_settle_wait_starts_over_once_record_was_seen(monkeypatch):
         answer="refused",
     )
 
-    assert manager._decide(held, look, clock) == "wait"
+    assert manager._decide(held, look, clock, manager._START_BUDGET) == "wait"
     now[0] += 10
-    assert manager._decide(starting, look, clock) == "wait"
-    assert manager._decide(held, look, clock) == "wait"
+    assert manager._decide(starting, look, clock, manager._START_BUDGET) == "wait"
+    assert manager._decide(held, look, clock, manager._START_BUDGET) == "wait"
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +657,10 @@ def test_ensure_reports_start_lock_it_cannot_use(server, monkeypatch, tmp_path):
     assert server.spawns == []
 
 
-def test_ensure_waits_for_another_start_and_reuses_its_server(server):
+def test_ensure_waits_for_another_start_and_reuses_its_server(server, monkeypatch):
+    # The other start finishes: the short fixture budget could run out first
+    # on a loaded machine.
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
     holder = LockHolder()
     waits: list = []
 
@@ -759,7 +763,9 @@ def test_node_install_stops_waiting_on_cancel(monkeypatch):
     )
     monkeypatch.setattr(manager, "_POLL_INTERVAL", 0.01)
     try:
-        manager._install_node_for_mcp(manager._Waits(lambda: True, None))
+        manager._install_node_for_mcp(
+            manager._Waits(lambda: True, None, manager._START_BUDGET)
+        )
     finally:
         release.set()
 
@@ -1468,6 +1474,9 @@ def test_ensure_started_result_carries_serving_record(server, monkeypatch):
 
     monkeypatch.setattr(manager, "_spawn_server", _starting)
     server.on_pause = _serving
+    # The start succeeds: a budget the fixture keeps short for failed starts
+    # would make a loaded machine fail it.
+    monkeypatch.setattr(manager, "_START_BUDGET", 10.0)
 
     result = manager.ensure_server(_config())
 
@@ -1529,3 +1538,199 @@ def test_ensure_server_reports_start_ended_by_other_signal_with_its_code(server)
     result = manager.ensure_server(_config())
 
     assert "exited immediately with code -11" in result.error
+
+
+def _ccproxy_reason(pid: int, reason: str) -> None:
+    """What a server whose ccproxy failed leaves for its starter."""
+    manager.RUNTIME.ccproxy_failure.parent.mkdir(parents=True, exist_ok=True)
+    manager.RUNTIME.ccproxy_failure.write_text(
+        json.dumps({"pid": pid, "reason": reason}), encoding="utf-8"
+    )
+
+
+def test_ensure_server_reports_start_that_could_not_start_ccproxy(server):
+    """The server leaves the reason as its start fails; a session gets what
+    to do on one line."""
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(
+        server.pid, "ccproxy is not signed in.\nRun: ccproxy auth login claude_api"
+    )
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "ccproxy_failed"
+    assert result.log_file == manager.RUNTIME.log_file
+    assert "\n" not in result.reason
+    assert "ccproxy auth login" in result.reason
+
+
+def test_ensure_server_reports_ccproxy_failure_of_start_gone_before_its_record_was_read(
+    server,
+):
+    server.exit_code = 3
+    _ccproxy_reason(server.pid, "ccproxy is required for OAuth mode but not found.")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem == "ccproxy_failed"
+    assert "not found" in result.reason
+
+
+def test_ensure_server_ignores_reason_another_server_left(server):
+    """A later start that fails for another reason is not a ccproxy failure."""
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(server.pid + 1, "Run: ccproxy auth login claude_api")
+
+    result = manager.ensure_server(_config())
+
+    assert result.problem != "ccproxy_failed"
+
+
+def test_ensure_for_project_stops_when_server_cannot_start_ccproxy(server, tmp_path):
+    """Anthropic is out of reach in the session too: no fallback helps."""
+    server.exit_code, server.records_then_exits = 3, True
+    _ccproxy_reason(server.pid, "Run: ccproxy auth login claude_api")
+
+    with pytest.raises(registration.ServerUnusableError, match="ccproxy auth login"):
+        manager.ensure_server(_config(), workspace_dir=tmp_path)
+
+
+def test_start_budget_covers_ccproxy_start_with_anthropic_oauth():
+    from EvoScientist import ccproxy_manager
+
+    config = _config()
+    without = manager.start_budget(config)
+    config.anthropic_auth_mode = "oauth"
+
+    # Its port may need a moment to come free first.
+    assert manager.start_budget(config) == (
+        without + manager._BIND_WAIT + ccproxy_manager.START_BUDGET_SECONDS
+    )
+
+
+def test_forget_record_ends_ccproxy_it_names(runtime_paths, monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    ended = []
+    monkeypatch.setattr(
+        ccproxy_manager,
+        "end_ccproxy",
+        lambda pid, created, port: ended.append((pid, created)) or True,
+    )
+    write_record(
+        9,
+        **{
+            server_record.CCPROXY_PID_KEY: 77,
+            server_record.CCPROXY_CREATE_TIME_KEY: 12.5,
+        },
+    )
+
+    # A run that started while the server stopped started this ccproxy.
+    manager._forget_record(9)
+
+    assert ended == [(77, 12.5)]
+    assert not manager.RUNTIME.record.exists()
+
+
+def _oauth_config(provider: str = "anthropic"):
+    config = _config()
+    config.provider = provider
+    config.anthropic_auth_mode = "oauth"
+    return config
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_ccproxy_missing_notice_when_nothing_answers(monkeypatch, available):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+    monkeypatch.setattr(registration, "ensure_ccproxy", lambda url: None)
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=available, url="http://s")
+    )
+
+    assert notice is not None
+    # A server that runs can be restarted; without one, its problem comes first.
+    assert ("EvoSci server stop" in notice) is available
+
+
+def test_ccproxy_missing_no_notice_when_server_starts_ccproxy(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    answers = iter([False, True])
+    monkeypatch.setattr(
+        ccproxy_manager, "is_ccproxy_running", lambda port: next(answers)
+    )
+    asked = []
+    monkeypatch.setattr(
+        registration, "ensure_ccproxy", lambda url: asked.append(url) or None
+    )
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True, url="http://s")
+    )
+
+    assert notice is None
+    assert asked == ["http://s"]
+
+
+def test_ccproxy_missing_notice_says_why_server_could_not_start_it(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+    monkeypatch.setattr(
+        registration, "ensure_ccproxy", lambda url: "Run: ccproxy auth login"
+    )
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True, url="http://s")
+    )
+
+    assert "ccproxy auth login" in notice
+
+
+def test_ccproxy_missing_no_notice_when_ccproxy_answers(monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: True)
+
+    notice = manager._ccproxy_missing(
+        _oauth_config(), manager.ServerResult(available=True)
+    )
+
+    assert notice is None
+
+
+@pytest.mark.parametrize(
+    ("config", "problem"),
+    [
+        (_oauth_config(provider="openai"), None),
+        (_oauth_config(), "ccproxy_failed"),
+        (_config(), None),
+    ],
+    ids=["no_anthropic_model", "server_said_why", "api_key"],
+)
+def test_ccproxy_missing_no_notice_when_not_needed_or_reported(
+    monkeypatch, config, problem
+):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "is_ccproxy_running", lambda port: False)
+
+    notice = manager._ccproxy_missing(config, manager.ServerResult(problem=problem))
+
+    assert notice is None
+
+
+def test_start_that_never_served_reports_its_ccproxy_reason(runtime_paths, monkeypatch):
+    """Its ccproxy start ran out the budget; the reason is still its own."""
+    import time
+
+    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *_a, **_k: None)
+    _ccproxy_reason(7, "ccproxy never answered its health check")
+
+    result = manager._not_ready(object(), time.monotonic(), server_pid=7)
+
+    assert result.problem == "ccproxy_failed"
+    assert "health check" in result.error

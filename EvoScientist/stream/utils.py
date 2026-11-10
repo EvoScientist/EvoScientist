@@ -5,6 +5,8 @@ Provides tool status indicators, display limits, and formatting helpers
 adapted for deepagents tool names.
 """
 
+import html
+import re
 import sys
 from enum import StrEnum
 from functools import lru_cache
@@ -57,6 +59,8 @@ class DisplayLimits:
     TOOL_RESULT_STREAM = 500
     TOOL_RESULT_FINAL = 800
     TOOL_RESULT_MAX = 2000
+    # What a shortened result keeps of its end, where a command reports how it ended.
+    TOOL_RESULT_TAIL = 500
 
 
 def has_args(args) -> bool:
@@ -86,6 +90,94 @@ def is_success(content: str) -> bool:
         "Failed ",
     ]
     return not any(pattern in head for pattern in error_patterns)
+
+
+def tool_result_succeeded(
+    name: str, content: str, *, status: str | None = None, artifact: object = None
+) -> bool:
+    """Judge a tool result, preferring its structured signals over the text."""
+    if status == "error":
+        return False
+    # Its result echoes the todos, so its text cannot tell; a failed call sets the status.
+    if name == "write_todos":
+        return True
+    # deepagents' ``execute`` reports ``status="success"`` whatever the command did.
+    exit_code = artifact.get("exit_code") if isinstance(artifact, dict) else None
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        return exit_code == 0
+    # The interpreter's result ends in ``<error ...>`` or ``<result ...>``, after any stdout.
+    if name == "code_interpreter":
+        return not content.rstrip().endswith("</error>")
+    return is_success(content)
+
+
+# deepagents' status line for a failed ``execute``, and the lines it and the sandbox
+# append after a command's output, last first; each appears at most once.
+EXECUTE_STATUS = "[Command failed with exit code "
+_EXECUTE_SUFFIXES = (
+    "[Output was truncated",
+    EXECUTE_STATUS,
+    "Exit code: ",
+    "... Output truncated at ",
+)
+_INTERPRETER_ERROR = re.compile(r'<error type="([^"]*)">([^\n<]*)')
+
+
+def failure_summary(name: str, content: str) -> str:
+    """The one line that says why a failed tool call failed, without guessing."""
+    lines = [line.strip() for line in content.strip().splitlines() if line.strip()]
+    if not lines:
+        return ""
+    # A raised tool's result opens with a fixed header; its exception is on the next line.
+    first = (
+        lines[1]
+        if lines[0].startswith(TOOL_ERROR_PREFIX) and len(lines) > 1
+        else lines[0]
+    )
+    if name == "code_interpreter":
+        errors = list(_INTERPRETER_ERROR.finditer(content))
+        if errors:
+            kind = errors[-1].group(1)
+            message = html.unescape(errors[-1].group(2)).strip()
+            return f"{kind}: {message.splitlines()[0]}" if message else kind
+        # The error's opening tag can fall in the part a long result loses.
+        return "error" if lines[-1].endswith("</error>") else first
+    # deepagents appends the real status line after the command's own output.
+    status = next(
+        (line for line in reversed(lines) if line.startswith(EXECUTE_STATUS)), None
+    )
+    if name != "execute" or status is None:
+        return first
+    body = list(lines)
+    for suffix in _EXECUTE_SUFFIXES:
+        if body and body[-1].startswith(suffix):
+            body.pop()
+    if body == ["<no output>"]:
+        body = []
+    # A one-line output, or the sandbox's timeout notice, says why; longer output is not
+    # guessed at, since its last line is often a footer or a warning.
+    first = body[0].removeprefix("[stderr] ") if body else ""
+    one_line = len(body) == 1 and not first.startswith(_EXECUTE_SUFFIXES)
+    if one_line or first.startswith("Error: Command timed out"):
+        return first
+    return status
+
+
+def cut_middle(text: str, limit: int, tail: int) -> str:
+    """Shorten ``text`` past ``limit`` chars by cutting its middle, keeping about ``tail`` of its end."""
+    if len(text) <= limit:
+        return text
+    head_end = limit - tail
+    start = len(text) - tail
+    # Keep the whole line the end starts in when it began close by; a long line is kept in part.
+    line_start = text.rfind("\n", max(head_end - 1, 0), start) + 1
+    if line_start and start - line_start <= tail // 4:
+        start = line_start
+    marker = "\n... (truncated) ...\n"
+    # A cut that would hide no more than its own marker is not worth making.
+    if start - head_end <= len(marker):
+        return text
+    return f"{text[:head_end]}{marker}{text[start:]}"
 
 
 def truncate(content: str, max_length: int, suffix: str = "\n... (truncated)") -> str:

@@ -10,7 +10,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from ...stream.diff_format import build_edit_diff
-from ...stream.utils import format_tool_compact_with_result
+from ...stream.utils import failure_summary, format_tool_compact_with_result
 from .timestamp_mixin import show_timestamp_toast
 
 _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
@@ -143,13 +143,16 @@ class ToolCallWidget(Vertical):
             status_w.update(Text(f"\u2717 {summary}", style="red dim"))
 
     def _result_summary(self) -> str:
-        """One-line summary of the result."""
+        """One-line summary of the result; a failure's names its reason."""
         if not self._result_content:
             return "done"
-        first_line = self._result_content.strip().split("\n")[0]
-        if len(first_line) > 60:
-            first_line = first_line[:57] + "\u2026"
-        return first_line
+        if self._status == "error":
+            line = failure_summary(self._tool_name, self._result_content)
+        else:
+            line = self._result_content.strip().split("\n")[0]
+        if len(line) > 60:
+            line = line[:57] + "\u2026"
+        return line
 
     def _should_collapse(self) -> bool:
         lines = self._result_content.strip().split("\n")
@@ -231,13 +234,12 @@ class ToolCallWidget(Vertical):
                         output_w.update(diff_markup)
                     output_w.add_class("--visible")
                     return
-        if self._status == "error" or not self._should_collapse():
-            # Show full output for errors or short output
+        if not self._should_collapse():
+            # Short output is shown in full; a long one collapses, failed or not.
             self._collapsed = False
             style = "red dim" if self._status == "error" else "dim"
+            # The stream already keeps a long result's start and end.
             content = self._result_content.strip()
-            if len(content) > 800:
-                content = content[:800] + "\n... (truncated)"
             output_w.update(Text(content, style=style))
             output_w.add_class("--visible")
         else:
@@ -276,8 +278,6 @@ class ToolCallWidget(Vertical):
             # Expand
             self._collapsed = False
             content = self._result_content.strip()
-            if len(content) > 2000:
-                content = content[:2000] + "\n... (truncated)"
             style = "red dim" if self._status == "error" else "dim"
             output_w.update(Text(content, style=style))
         else:
