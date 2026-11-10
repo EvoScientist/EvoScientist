@@ -3567,12 +3567,25 @@ class TestAnthropicThinkingBinding:
         "is bound to a different conversation. Remove the block, or set "
         '`thinking.block_binding.prefix_mismatch_behavior` to "drop_block".'
     )
+    SETTING_REFUSED = "thinking.block_binding: Extra inputs are not permitted"
+    BETA_REFUSED = (
+        "Unexpected value(s) `thinking-binding-controls-2026-08-01` for the "
+        "`anthropic-beta` header"
+    )
 
     @staticmethod
-    def _serve(model, error_message, *, setting_status=200):
+    def _serve(
+        model,
+        error_message,
+        *,
+        setting_status=200,
+        setting_error=SETTING_REFUSED,
+        stripped_status=200,
+    ):
         """Answer ``model`` like the API: a replayed thinking block is refused
         unless the request asks to drop stale blocks, which gets
-        ``setting_status``. Returns the requests."""
+        ``setting_status`` (with ``setting_error``). A later request that
+        replays none gets ``stripped_status``. Returns the requests."""
         import json
 
         import anthropic
@@ -3595,15 +3608,17 @@ class TestAnthropicThinkingBinding:
                     "beta": request.headers.get("anthropic-beta", ""),
                     "replayed": replayed,
                     "roles": [message["role"] for message in body["messages"]],
+                    "messages": body["messages"],
                 }
             )
             asks_to_drop = "block_binding" in (thinking or {})
             status, refusal = 200, None
             if asks_to_drop and setting_status != 200:
-                status = setting_status
-                refusal = "thinking.block_binding: Extra inputs are not permitted"
+                status, refusal = setting_status, setting_error
             elif replayed and not asks_to_drop:
                 status, refusal = 400, error_message
+            elif len(requests) > 1 and stripped_status != 200:
+                status, refusal = stripped_status, "overloaded"
             if refusal:
                 return httpx.Response(
                     status,
@@ -3643,11 +3658,21 @@ class TestAnthropicThinkingBinding:
     def _model(monkeypatch):
         from EvoScientist.llm import patches
 
-        monkeypatch.setattr(patches, "_thinking_binding_checked", set())
+        monkeypatch.setattr(patches, "_thinking_setting_accepted", set())
+        monkeypatch.setattr(patches, "_thinking_setting_refused", set())
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         return get_chat_model(
             "claude-sonnet-5-5", provider="anthropic", max_tokens=1024, max_retries=0
+        )
+
+    @staticmethod
+    def _notes(exc):
+        """Notes on ``exc`` and on the SDK error langchain re-raised as it."""
+        return "".join(
+            note
+            for error in (exc, exc.__cause__)
+            for note in getattr(error, "__notes__", ())
         )
 
     @staticmethod
@@ -3720,12 +3745,16 @@ class TestAnthropicThinkingBinding:
             assert "block_binding" not in requests[0]["thinking"]
             assert "thinking-binding-controls" not in requests[0]["beta"]
 
+    # The field or the beta is unknown, or the field was dropped on the way.
+    @pytest.mark.parametrize("refusal", [SETTING_REFUSED, BETA_REFUSED, MISMATCH])
     @pytest.mark.parametrize("use_async", [False, True])
     async def test_an_endpoint_refusing_the_setting_gets_no_thinking_blocks(
-        self, monkeypatch, use_async
+        self, monkeypatch, use_async, refusal
     ):
         model = self._model(monkeypatch)
-        requests = self._serve(model, self.MISMATCH, setting_status=400)
+        requests = self._serve(
+            model, self.MISMATCH, setting_status=400, setting_error=refusal
+        )
 
         async def ask(messages):
             if use_async:
@@ -3741,11 +3770,90 @@ class TestAnthropicThinkingBinding:
         assert "block_binding" not in without_blocks["thinking"]
         assert "thinking-binding-controls" not in without_blocks["beta"]
 
-        # The setting did not work there, so a new conversation never sends it.
+        # The setting did not work there, so a new conversation never sends it,
+        # and the next refused replay goes straight to the resend without blocks.
         del requests[:]
         assert (await ask("hi")).text == "ok"
         assert len(requests) == 1
         assert "block_binding" not in requests[0]["thinking"]
+
+        del requests[:]
+        assert (await ask(self._history())).text == "ok"
+        assert [request["replayed"] for request in requests] == [1, 0]
+        assert not any("block_binding" in request["thinking"] for request in requests)
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_another_400_on_that_resend_is_no_refusal_of_the_setting(
+        self, monkeypatch, use_async
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(
+            model,
+            self.MISMATCH,
+            setting_status=400,
+            setting_error="prompt is too long: 1200000 tokens > 1000000 maximum",
+        )
+
+        async def ask():
+            if use_async:
+                return await model.ainvoke(self._history())
+            return model.invoke(self._history())
+
+        assert (await ask()).text == "ok"
+        assert [request["replayed"] for request in requests] == [1, 1, 0]
+
+        # So the next refused replay asks for the setting again.
+        del requests[:]
+        assert (await ask()).text == "ok"
+        assert "block_binding" in requests[1]["thinking"]
+
+    def test_a_tool_turn_keeps_its_call_and_result(self, monkeypatch):
+        """The second model call of an agent turn: thinking, a tool call, its result."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH, setting_status=400)
+        tool_use = {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "add",
+            "input": {"a": 2, "b": 3},
+        }
+        call = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                tool_use,
+            ],
+            tool_calls=[
+                {
+                    "name": "add",
+                    "args": {"a": 2, "b": 3},
+                    "id": "toolu_1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        history = [
+            HumanMessage("add 2 and 3"),
+            call,
+            ToolMessage("5", tool_call_id="toolu_1"),
+        ]
+
+        assert model.invoke(history).text == "ok"
+
+        refused, with_setting, without_blocks = requests
+        assert with_setting["messages"] == refused["messages"]
+        user, assistant, result = refused["messages"]
+        assert [block["type"] for block in assistant["content"]] == [
+            "thinking",
+            "tool_use",
+        ]
+        assert result["content"][0]["tool_use_id"] == "toolu_1"
+        assert without_blocks["messages"] == [
+            user,
+            {"role": "assistant", "content": [assistant["content"][1]]},
+            result,
+        ]
 
     def test_a_copy_without_thinking_keeps_sending_none(self, monkeypatch):
         model = self._model(monkeypatch)
@@ -3756,9 +3864,9 @@ class TestAnthropicThinkingBinding:
         requests = self._serve(plain, self.MISMATCH)
         plain.invoke("hi")
 
-        assert requests == [
-            {"thinking": None, "beta": "", "replayed": 0, "roles": ["user"]}
-        ]
+        (request,) = requests
+        assert (request["thinking"], request["beta"]) == (None, "")
+        assert (request["replayed"], request["roles"]) == (0, ["user"])
 
     def test_without_adaptive_thinking_the_replayed_blocks_are_removed(
         self, monkeypatch
@@ -3781,12 +3889,8 @@ class TestAnthropicThinkingBinding:
         assert reply.text == "ok"
         first, retry = requests
         assert first["replayed"] == 2
-        assert retry == {
-            "thinking": None,
-            "beta": "",
-            "replayed": 0,
-            "roles": ["user", "assistant", "user"],
-        }
+        assert (retry["thinking"], retry["beta"]) == (None, "")
+        assert (retry["replayed"], retry["roles"]) == (0, ["user", "assistant", "user"])
 
     def test_a_turn_of_thinking_alone_is_left_out_of_that_resend(self, monkeypatch):
         from langchain_core.messages import AIMessage, HumanMessage
@@ -3819,10 +3923,32 @@ class TestAnthropicThinkingBinding:
                 return await model.ainvoke(self._history())
             return model.invoke(self._history())
 
-        with pytest.raises(anthropic.InternalServerError):
+        with pytest.raises(anthropic.InternalServerError) as raised:
             await ask()
 
         assert len(requests) == 2
+        assert "bound to a different conversation" in self._notes(raised.value)
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_a_failed_resend_without_blocks_names_the_refusal_it_followed(
+        self, monkeypatch, use_async
+    ):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH, stripped_status=500)
+
+        async def ask():
+            if use_async:
+                return await plain.ainvoke(self._history())
+            return plain.invoke(self._history())
+
+        with pytest.raises(anthropic.InternalServerError) as raised:
+            await ask()
+
+        assert [request["replayed"] for request in requests] == [1, 0]
+        assert "bound to a different conversation" in self._notes(raised.value)
 
     def test_other_bad_requests_are_not_sent_again(self, monkeypatch):
         import anthropic
