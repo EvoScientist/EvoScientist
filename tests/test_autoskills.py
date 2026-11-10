@@ -1120,6 +1120,124 @@ def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
     assert not installed.exists()
 
 
+class _WindowsOs:
+    """The module's ``os``, reading as Windows, with a replace that is denied
+    ``denials`` times, as while another handle holds the target open."""
+
+    name = "nt"
+
+    def __init__(self, denials: int = 0):
+        self.denials = denials
+        self.attempts = 0
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+    def replace(self, source, target):
+        self.attempts += 1
+        if self.attempts <= self.denials:
+            raise PermissionError(13, "Access is denied", str(target))
+        return os.replace(source, target)
+
+
+def test_a_manifest_write_outlasts_a_reader_on_windows(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    windows = _WindowsOs(denials=2)
+    pauses = []
+    monkeypatch.setattr(module, "os", windows)
+    monkeypatch.setattr(module.time, "sleep", pauses.append)
+
+    rejected = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert rejected["rejected"] is True
+    assert _manifest(memory_dir, "focused-validation")["status"] == "rejected"
+    assert len(pauses) == 2
+    assert sum(pauses) < 1
+
+
+def test_a_manifest_write_denied_for_good_still_fails(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    pauses = []
+    monkeypatch.setattr(module, "os", _WindowsOs(denials=1000))
+    monkeypatch.setattr(module.time, "sleep", pauses.append)
+
+    rejected = reject_skill_proposal(memory_dir, "focused-validation")
+
+    assert rejected["rejected"] is False
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+    assert 0 < sum(pauses) < 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX replaces an open file")
+def test_a_denied_replace_is_not_retried_off_windows(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    target = tmp_path / "manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    denied = _WindowsOs(denials=1)
+    denied.name = "posix"
+    pauses = []
+    monkeypatch.setattr(module, "os", denied)
+    monkeypatch.setattr(module.time, "sleep", pauses.append)
+
+    with pytest.raises(PermissionError):
+        module._write_text_atomic(target, "{}")
+
+    assert pauses == []
+    assert [p.name for p in tmp_path.iterdir()] == ["manifest.json"]
+
+
+def test_an_approval_copy_outlasts_a_reader_on_windows(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    windows = _WindowsOs(denials=2)
+    monkeypatch.setattr(module, "os", windows)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    _approve_quietly(memory_dir, "focused-validation", skills_dir)
+
+    assert (skills_dir / "focused-validation" / "SKILL.md").is_file()
+    assert windows.attempts > windows.denials
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows share modes")
+def test_a_decision_waits_for_a_reader_of_its_manifest(tmp_path):
+    import threading
+
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    manifest = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    manifest = manifest / "manifest.json"
+    copy = tmp_path / "copy.json"
+    shutil.copy2(manifest, copy)
+    # Held as the list holds it while it reads the manifest.
+    fd = os.open(manifest, module._OPEN_FLAGS)
+    release = threading.Timer(0.1, os.close, [fd])
+    try:
+        with pytest.raises(PermissionError):
+            os.replace(copy, manifest)
+        release.start()
+        rejected = reject_skill_proposal(memory_dir, "focused-validation")
+    finally:
+        release.join()
+
+    assert rejected["rejected"] is True, rejected
+
+
 def _open_descriptor_count() -> int:
     for folder in ("/proc/self/fd", "/dev/fd"):
         if os.path.isdir(folder):

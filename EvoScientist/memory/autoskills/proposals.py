@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -138,6 +139,23 @@ def _read_manifest(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+# Pauses while a reader holds the target open on Windows (under a second in all).
+_REPLACE_RETRY_DELAYS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)
+
+
+def _replace(source: Path, target: Path) -> None:
+    """``os.replace`` that outlasts a reader on Windows, where a file another
+    handle holds open cannot be replaced for that moment."""
+    for delay in (*_REPLACE_RETRY_DELAYS, None):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or delay is None:
+                raise
+            time.sleep(delay)
+
+
 def _write_text_atomic(path: Path, content: str) -> None:
     """Replace one file without following its final symlink or hardlink."""
     fd, temporary_name = tempfile.mkstemp(
@@ -149,7 +167,7 @@ def _write_text_atomic(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace(temporary, path)
     finally:
         try:
             temporary.unlink()
@@ -756,7 +774,7 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
     temporary = Path(temporary_name)
     try:
         shutil.copy2(source, temporary)
-        os.replace(temporary, target)
+        _replace(temporary, target)
     finally:
         try:
             temporary.unlink()
