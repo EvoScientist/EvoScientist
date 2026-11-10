@@ -3154,15 +3154,21 @@ def _main_callback(
             raise typer.BadParameter(
                 "Use either -p/--prompt or --prompt-file, not both."
             )
-        _pf = Path(prompt_file).expanduser()
-        if not _pf.is_file():
-            raise typer.BadParameter(f"--prompt-file not found: {prompt_file}")
         try:
+            # expanduser raises RuntimeError for an unknown "~user".
+            _pf = Path(prompt_file).expanduser()
+            if not _pf.is_file():
+                raise typer.BadParameter(f"--prompt-file not found: {prompt_file}")
             # utf-8-sig also drops the BOM that Windows Notepad writes.
             prompt = _pf.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError as exc:
             raise typer.BadParameter(
-                f"--prompt-file could not be read as UTF-8: {exc}"
+                f"--prompt-file is not valid UTF-8: {prompt_file}"
+            ) from exc
+        except (OSError, RuntimeError) as exc:
+            reason = getattr(exc, "strerror", None) or str(exc)
+            raise typer.BadParameter(
+                f"--prompt-file could not be read: {reason}"
             ) from exc
         if not prompt.strip():
             # An empty prompt would silently fall through to interactive mode.

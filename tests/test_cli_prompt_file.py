@@ -31,6 +31,26 @@ def _plain_help() -> str:
     return _ANSI_RE.sub("", result.stdout)
 
 
+def test_prompt_file_blank_errors(monkeypatch, tmp_path):
+    def _stop(_rubric, *, prompt):
+        raise typer.Exit()
+
+    monkeypatch.setattr(commands, "_resolve_rubric_option", _stop)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("  \n\n", encoding="utf-8")
+    result = runner.invoke(app, ["--prompt-file", str(prompt_file)])
+    assert result.exit_code != 0
+    assert "--prompt-file is empty" in _plain(result)
+
+
+def test_prompt_file_invalid_utf8_errors(tmp_path):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_bytes(b"\xff\xfe\x00bad")
+    result = runner.invoke(app, ["--prompt-file", str(prompt_file)])
+    assert result.exit_code != 0
+    assert "UTF-8" in _plain(result)
+
+
 def test_prompt_file_flag_listed_in_help():
     assert "--prompt-file" in _plain_help()
 
