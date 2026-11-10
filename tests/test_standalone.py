@@ -160,8 +160,31 @@ async def test_standalone_agent_runs_subagents_in_turn_on_local_backend(
 
     await standalone._create_standalone_agent(workspace, config, backend)
 
-    assert built.get("config", config).enable_async_subagents is async_subagents
+    # No config passed: the build uses the user's (async sub-agents on).
+    agent_config = built["config"] if built["config"] is not None else config
+    assert agent_config.enable_async_subagents is async_subagents
     assert config.enable_async_subagents is True
+
+
+@pytest.mark.parametrize("backend", ["local", "langgraph_server"])
+async def test_standalone_builds_no_agent_for_the_server_gateway(
+    monkeypatch, workspace, backend
+):
+    import EvoScientist.EvoScientist as agent_module
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    built = []
+    monkeypatch.setattr(agent_module, "create_cli_agent", built.append)
+    monkeypatch.setattr(agent_module, "_config", None)
+    monkeypatch.setattr(agent_module, "apply_config_to_env", lambda _cfg: None)
+    gateway = SimpleNamespace(execute_gateway=object.__new__(LangGraphServerGateway))
+
+    agent = await standalone._create_standalone_agent(
+        workspace, SimpleNamespace(enable_async_subagents=True), backend, gateway
+    )
+
+    assert agent is None
+    assert built == []
 
 
 def test_run_standalone_dev_server_falls_back_to_cwd(monkeypatch):
@@ -846,10 +869,12 @@ def test_channel_worker_exit_shuts_down_standalone(
             )
 
     monkeypatch.setattr(standalone, "InboundConsumer", _Consumer)
-    monkeypatch.setattr(standalone, "_create_standalone_agent", AsyncMock())
+    create_agent = AsyncMock()
+    monkeypatch.setattr(standalone, "_create_standalone_agent", create_agent)
+    graph_gateway = object()
     monkeypatch.setattr(
         "EvoScientist.gateway.create_runtime_gateways_for_config",
-        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+        lambda *a, **k: SimpleNamespace(graph_gateway=graph_gateway),
     )
     stop_health = AsyncMock()
     monkeypatch.setattr(ChannelManager, "stop_health", stop_health)
@@ -872,6 +897,8 @@ def test_channel_worker_exit_shuts_down_standalone(
     assert channel._stopped
     stop_health.assert_awaited_once()
     if use_agent:
+        # The agent is loaded for the gateway the consumer runs on.
+        assert create_agent.await_args.args[3] is graph_gateway
         assert consumer_stopped
         assert consumer_cancelled
         assert [message.content for message in channel._sent] == ["last reply"]
