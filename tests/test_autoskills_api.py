@@ -996,6 +996,7 @@ _APPROVED_KEYS = {
     "scope",
     "workspace_shadow",
     "upstream_source",
+    "updated_at",
 }
 
 
@@ -1049,6 +1050,7 @@ def test_approve_route_installs_into_the_drafts_project(
     draft = _only_draft(server)
     assert draft["status"] == "approved"
     assert draft["approved_by"] == "user"
+    assert body["updated_at"] == draft["updated_at"]
 
 
 def test_approve_route_global_scope(server, served, secret, quiet_skill_index):
@@ -1265,6 +1267,37 @@ def test_a_stale_undo_of_an_approval_removes_nothing(
     assert _only_draft(server)["status"] == "approved"
 
 
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_the_undo_a_decision_names_applies_once(
+    server, served, secret, quiet_skill_index, action
+):
+    _draft(served, "focused-validation")
+    decided = _decide(server, "focused-validation", action, secret).json()
+
+    first = _decide(
+        server,
+        "focused-validation",
+        "revert",
+        secret,
+        expected_updated_at=decided["updated_at"],
+    )
+    second = _decide(
+        server,
+        "focused-validation",
+        "revert",
+        secret,
+        expected_updated_at=decided["updated_at"],
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json() == {
+        "error": "draft_changed",
+        "updated_at": first.json()["updated_at"],
+    }
+    assert _only_draft(server)["status"] == "pending"
+
+
 @pytest.mark.parametrize(
     ("expected", "status", "error"),
     [("2000-01-01T00:00:00Z", 409, "draft_changed"), (5, 400, "invalid_body")],
@@ -1410,13 +1443,16 @@ def test_reject_then_revert_routes(server, served, secret):
         "rejected": True,
         "proposal_id": "focused-validation",
         "skill_name": "focused-validation",
+        "updated_at": rejected.json()["updated_at"],
     }
     assert reverted.status_code == 200
     assert reverted.json() == {
         "reverted": True,
         "proposal_id": "focused-validation",
         "status": "pending",
+        "updated_at": _only_draft(server)["updated_at"],
     }
+    assert rejected.json()["updated_at"] != reverted.json()["updated_at"]
     assert again.status_code == 409
     assert again.json() == {"error": "not_decided"}
     assert _only_draft(server)["status"] == "pending"
@@ -1449,12 +1485,14 @@ def test_revert_route_rejects_an_auto_approval(
     response = _decide(server, "focused-validation", "revert", secret)
 
     assert response.status_code == 200
+    draft = _only_draft(server)
     assert response.json() == {
         "reverted": True,
         "proposal_id": "focused-validation",
         "status": "rejected",
+        "updated_at": draft["updated_at"],
     }
-    assert _only_draft(server)["status"] == "rejected"
+    assert draft["status"] == "rejected"
 
 
 def test_revert_route_refusals(server, served, secret, quiet_skill_index):

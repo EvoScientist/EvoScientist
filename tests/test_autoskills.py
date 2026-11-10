@@ -852,16 +852,56 @@ def test_revert_rejected_returns_to_pending_and_unmarks_cluster(tmp_path):
 
     result = revert_skill_proposal(memory_dir, "focused-validation")
 
+    proposal = list_skill_proposals(memory_dir)[0]
     assert result == {
         "reverted": True,
         "proposal_id": "focused-validation",
         "status": "pending",
+        "updated_at": proposal.updated_at,
     }
     assert "cluster-1" not in processed_cluster_hashes(memory_dir)
-    proposal = list_skill_proposals(memory_dir)[0]
     assert proposal.status == "pending"
     assert proposal.rejected_at is None
     assert proposal.updated_at != "2000-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_a_decision_in_the_same_millisecond_gets_a_new_updated_at(
+    tmp_path, monkeypatch, decision
+):
+    from datetime import UTC, datetime, timedelta
+
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["updated_at"] = "2026-11-06T09:00:00.000Z"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    start = datetime(2026, 11, 6, 9, 0, 0, tzinfo=UTC)
+    ticks = iter([start, start + timedelta(milliseconds=1)])
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(ticks)
+
+    monkeypatch.setattr(module, "datetime", FrozenClock)
+    monkeypatch.setattr(module, "_now", lambda: "2026-11-06T09:00:00Z")
+
+    if decision == "approve":
+        result = _approve_quietly(memory_dir, "focused-validation", skills_dir)
+    else:
+        result = reject_skill_proposal(memory_dir, "focused-validation")
+
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert result["updated_at"] == "2026-11-06T09:00:00.001Z"
+    assert manifest["updated_at"] == "2026-11-06T09:00:00.001Z"
+    assert manifest["approved_at" if decision == "approve" else "rejected_at"] == (
+        "2026-11-06T09:00:00.001Z"
+    )
 
 
 def test_a_revert_gets_a_new_millisecond_updated_at(tmp_path, monkeypatch):
@@ -936,14 +976,15 @@ def test_revert_of_an_auto_approval_rejects_the_draft(tmp_path):
     with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
         result = revert_skill_proposal(memory_dir, "focused-validation")
 
+    manifest = _manifest(memory_dir, "focused-validation")
     assert result == {
         "reverted": True,
         "proposal_id": "focused-validation",
         "status": "rejected",
+        "updated_at": manifest["updated_at"],
     }
     assert not (skills_dir / "focused-validation").exists()
     assert "cluster-1" in processed_cluster_hashes(memory_dir)
-    manifest = _manifest(memory_dir, "focused-validation")
     assert manifest["status"] == "rejected"
     assert manifest["rejected_at"] == manifest["updated_at"]
     for key in ("approved_by", "approved_at", "approved_skill_path"):

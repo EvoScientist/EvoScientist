@@ -85,8 +85,8 @@ def _now() -> str:
 
 
 def _version_stamp(previous: object) -> str:
-    """Now to the millisecond, never ``previous``: each resubmit gets its own
-    ``updated_at``, which is the version a page's approval names."""
+    """Now to the millisecond, never ``previous``: each resubmit, decision and
+    revert gets its own ``updated_at``, the version a page's request names."""
     while True:
         now = datetime.now(UTC)
         stamp = f"{now:%Y-%m-%dT%H:%M:%S}.{now.microsecond // 1000:03d}Z"
@@ -1498,7 +1498,7 @@ def _record_approval(
         manifest.pop("upstream_source", None)
         manifest.pop("upstream_commit", None)
     manifest["status"] = "approved"
-    manifest["updated_at"] = _now()
+    manifest["updated_at"] = _version_stamp(manifest.get("updated_at"))
     manifest["approved_by"] = approved_by
     manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
@@ -1665,6 +1665,7 @@ def approve_skill_proposal(
         "upstream_commit": (
             upstream_provenance.get("commit") if upstream_provenance else None
         ),
+        "updated_at": manifest["updated_at"],
     }
 
 
@@ -1877,6 +1878,7 @@ def revert_skill_proposal(
         "reverted": True,
         "proposal_id": proposal.proposal_id,
         "status": manifest["status"],
+        "updated_at": manifest["updated_at"],
     }
 
 
@@ -1930,7 +1932,7 @@ def reject_skill_proposal(
         }
     cluster_hash = str(manifest["cluster_hash"])
     manifest["status"] = "rejected"
-    manifest["updated_at"] = _now()
+    manifest["updated_at"] = _version_stamp(manifest.get("updated_at"))
     manifest["rejected_at"] = manifest["updated_at"]
     mark_left = False
     try:
@@ -1959,4 +1961,5 @@ def reject_skill_proposal(
         "rejected": True,
         "proposal_id": manifest["proposal_id"],
         "skill_name": manifest["skill_name"],
+        "updated_at": manifest["updated_at"],
     }

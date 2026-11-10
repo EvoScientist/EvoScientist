@@ -57,6 +57,7 @@ _APPROVED_KEYS = (
     "scope",
     "workspace_shadow",
     "upstream_source",
+    "updated_at",
 )
 _REVERT_STATUS = {
     "not_found": 404,
@@ -363,6 +364,7 @@ def _apply(
                 "rejected": True,
                 "proposal_id": result.get("proposal_id"),
                 "skill_name": result.get("skill_name"),
+                "updated_at": result.get("updated_at"),
             }
         return _refused(action, result)
     result = revert_skill_proposal(
@@ -375,6 +377,7 @@ def _apply(
             "reverted": True,
             "proposal_id": result.get("proposal_id"),
             "status": result.get("status"),
+            "updated_at": result.get("updated_at"),
         }
     code = str(result.get("error"))
     payload: dict[str, Any] = {"error": code}
