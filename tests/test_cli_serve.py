@@ -31,6 +31,26 @@ def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):
     assert ("ensure_dirs", None) in order
 
 
+def test_serve_loads_the_agent_for_the_gateway_it_built(monkeypatch, tmp_path):
+    import EvoScientist.gateway as gateway_mod
+
+    built = []
+    create = gateway_mod.create_runtime_gateways_for_config
+
+    def _create(*args, **kwargs):
+        built.append(create(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(gateway_mod, "create_runtime_gateways_for_config", _create)
+
+    _, captured = run_serve_once(
+        monkeypatch, serve_config(default_workdir=str(tmp_path))
+    )
+
+    assert len(built) == 1
+    assert captured["load_graph_gateway"] is built[0].graph_gateway
+
+
 def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_path):
     cfg_ws = tmp_path / "cfg_ws"
     config = serve_config(default_workdir=str(cfg_ws), channel_send_thinking=True)

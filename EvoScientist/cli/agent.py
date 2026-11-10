@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..paths import RUN_NAME_FORMAT, Workspace
 
@@ -87,8 +87,15 @@ def _load_agent(
     on_mcp_progress=None,
     events=None,
     runtime: "AsyncRuntime | None" = None,
-) -> "CompiledStateGraph":
+    graph_gateway: Any = None,
+) -> "CompiledStateGraph | None":
     """Load the CLI agent with optional persistent checkpointer.
+
+    When *graph_gateway* does not run in-process, the langgraph server runs
+    the graph and builds its own agent, so none is built here: the build's
+    side effects the session still needs happen (*config* becomes the active
+    config the server gateway sends with each run, the work folder exists)
+    and ``None`` is returned.
 
     Args:
         work_dir: The folder the agent works in (defaults to the
@@ -104,7 +111,19 @@ def _load_agent(
         on_mcp_progress: Optional per-server MCP progress callback.
             Signature ``(event, server_name, detail) -> None``.
         runtime: Optional application-scoped runtime used for MCP discovery.
+        graph_gateway: The session's graph gateway; ``None`` always builds.
     """
+    from ..rubric_session import runs_in_process
+
+    if graph_gateway is not None and not runs_in_process(graph_gateway):
+        from ..EvoScientist import _ensure_config
+
+        _ensure_config(config)
+        Path(work_dir if work_dir is not None else workspace.root).mkdir(
+            parents=True, exist_ok=True
+        )
+        return None
+
     from ..EvoScientist import create_cli_agent
 
     return create_cli_agent(

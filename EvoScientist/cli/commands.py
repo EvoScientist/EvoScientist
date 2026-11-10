@@ -2273,13 +2273,17 @@ def serve(
             f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
-    console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(workspace=dirs.workspace, config=config, runtime=async_runtime)
-
     from ..gateway import create_runtime_gateways_for_config
 
     runtime_gateways = create_runtime_gateways_for_config(
         config, backend=gateway_backend
+    )
+    console.print("[dim]Loading agent...[/dim]")
+    agent = _load_agent(
+        workspace=dirs.workspace,
+        config=config,
+        runtime=async_runtime,
+        graph_gateway=runtime_gateways.graph_gateway,
     )
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
