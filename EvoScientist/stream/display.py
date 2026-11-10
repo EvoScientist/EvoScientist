@@ -64,6 +64,15 @@ _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
 
 
+def tool_call_file_path(args: dict[str, Any]) -> str:
+    """The path a file tool call names.
+
+    deepagents' ``read_file`` and ``write_file`` take ``file_path``; ``path``
+    is kept as a fallback for tools that still use it.
+    """
+    return args.get("file_path") or args.get("path") or ""
+
+
 class _ApprovalUnanswered(Exception):
     """The approval prompt could not be read (no terminal), so nobody declined."""
 
@@ -1870,7 +1879,7 @@ def _run_streaming(
                     wf_path = ""
                     for tc in reversed(state.tool_calls):
                         if tc.get("name") == "write_file":
-                            p = tc.get("args", {}).get("path", "")
+                            p = tool_call_file_path(tc.get("args", {}))
                             if p and p not in _media_sent:
                                 wf_path = p
                                 break
@@ -1896,9 +1905,7 @@ def _run_streaming(
                     rf_path = ""
                     for tc in reversed(state.tool_calls):
                         if tc.get("name") == "read_file":
-                            p = tc.get("args", {}).get("file_path", "") or tc.get(
-                                "args", {}
-                            ).get("path", "")
+                            p = tool_call_file_path(tc.get("args", {}))
                             if p and p not in _media_sent:
                                 rf_path = p
                                 break

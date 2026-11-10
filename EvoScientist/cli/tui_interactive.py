@@ -4528,13 +4528,11 @@ def run_textual_interactive(
         import os
 
         from ..paths import resolve_virtual_path
+        from ..stream.display import tool_call_file_path
 
-        arg_key = "path" if tool_name == "write_file" else "file_path"
         for tc in reversed(state.tool_calls):
             if tc.get("name") == tool_name:
-                p = tc.get("args", {}).get(arg_key, "")
-                if not p:
-                    p = tc.get("args", {}).get("path", "")
+                p = tool_call_file_path(tc.get("args", {}))
                 if p and p not in media_sent:
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _MEDIA_EXTENSIONS:
