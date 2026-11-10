@@ -1797,9 +1797,15 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
     )
 
 
-def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any]:
+def revert_skill_proposal(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
     """Put a rejected draft, or a new skill's approval, back to pending; an
     approval auto mode made becomes a rejection, so the agent cannot reinstall it.
+    With ``expected_updated_at``, a draft decided or reverted since is refused.
 
     An approved update, in place or as a project fork, is refused: nothing
     records the installed skill it started from. Each step can be retried: the
@@ -1810,6 +1816,16 @@ def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str,
     manifest = _read_manifest(manifest_path) if manifest_path else None
     if proposal is None or manifest_path is None or manifest is None:
         return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+    if (
+        expected_updated_at is not None
+        and manifest.get("updated_at") != expected_updated_at
+    ):
+        return {
+            "reverted": False,
+            "proposal_id": proposal.proposal_id,
+            "updated_at": manifest.get("updated_at"),
+            "error": "draft_changed",
+        }
 
     def refused(code: str) -> dict[str, Any]:
         return {"reverted": False, "proposal_id": proposal.proposal_id, "error": code}

@@ -966,6 +966,27 @@ def test_revert_of_an_auto_approval_rejects_the_draft(tmp_path):
     assert "cluster-1" not in processed_cluster_hashes(memory_dir)
 
 
+def test_a_repeated_revert_of_an_auto_approval_is_refused(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _approve_quietly(memory_dir, "focused-validation", skills_dir, approved_by="auto")
+    shown = _manifest(memory_dir, "focused-validation")["updated_at"]
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        first = revert_skill_proposal(
+            memory_dir, "focused-validation", expected_updated_at=shown
+        )
+        second = revert_skill_proposal(
+            memory_dir, "focused-validation", expected_updated_at=shown
+        )
+
+    assert first["status"] == "rejected"
+    assert second["error"] == "draft_changed"
+    assert _manifest(memory_dir, "focused-validation")["status"] == "rejected"
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
 def test_a_draft_under_a_symlinked_folder_is_approved_and_reverted(tmp_path):
     (tmp_path / "real" / "project").mkdir(parents=True)

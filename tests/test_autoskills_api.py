@@ -1242,8 +1242,36 @@ def test_reject_route_reports_a_decided_draft_before_a_changed_one(
     assert response.json() == {"error": "not_pending", "status": "approved"}
 
 
-@pytest.mark.parametrize("expected", ["2000-01-01T00:00:00Z", 5])
-def test_revert_ignores_expected_updated_at(server, served, secret, expected):
+def test_a_stale_undo_of_an_approval_removes_nothing(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "approve", secret)
+
+    stale = _decide(
+        server,
+        "focused-validation",
+        "revert",
+        secret,
+        expected_updated_at="2000-01-01T00:00:00Z",
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["error"] == "draft_changed"
+    assert (served.skills_dir / "focused-validation" / "SKILL.md").is_file()
+    assert processed_cluster_hashes(paths.MEMORIES_DIR) == {
+        "cluster-focused-validation"
+    }
+    assert _only_draft(server)["status"] == "approved"
+
+
+@pytest.mark.parametrize(
+    ("expected", "status", "error"),
+    [("2000-01-01T00:00:00Z", 409, "draft_changed"), (5, 400, "invalid_body")],
+)
+def test_revert_refuses_a_stale_expected_updated_at(
+    server, served, secret, expected, status, error
+):
     _draft(served, "focused-validation")
     _decide(server, "focused-validation", "reject", secret)
 
@@ -1251,7 +1279,8 @@ def test_revert_ignores_expected_updated_at(server, served, secret, expected):
         server, "focused-validation", "revert", secret, expected_updated_at=expected
     )
 
-    assert reverted.status_code == 200
+    assert reverted.status_code == status
+    assert reverted.json()["error"] == error
 
 
 def test_approve_route_picks_the_exact_id(server, served, secret, quiet_skill_index):
@@ -1454,7 +1483,7 @@ def test_revert_route_reports_a_failed_removal(server, served, secret, monkeypat
     monkeypatch.setattr(
         autoskills_api,
         "revert_skill_proposal",
-        lambda _memory_dir, proposal_id: {
+        lambda _memory_dir, proposal_id, **_: {
             "reverted": False,
             "proposal_id": proposal_id,
             "error": "revert_failed",

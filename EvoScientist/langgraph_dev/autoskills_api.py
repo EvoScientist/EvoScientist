@@ -365,7 +365,11 @@ def _apply(
                 "skill_name": result.get("skill_name"),
             }
         return _refused(action, result)
-    result = revert_skill_proposal(paths.MEMORIES_DIR, proposal.proposal_id)
+    result = revert_skill_proposal(
+        paths.MEMORIES_DIR,
+        proposal.proposal_id,
+        expected_updated_at=expected_updated_at,
+    )
     if result.get("reverted"):
         return 200, {
             "reverted": True,
@@ -376,6 +380,8 @@ def _apply(
     payload: dict[str, Any] = {"error": code}
     if code == "revert_failed":
         payload["detail"] = str(result.get("detail") or "")
+    if code == "draft_changed":
+        payload["updated_at"] = result.get("updated_at")
     return _REVERT_STATUS.get(code, 409), payload
 
 
@@ -419,12 +425,11 @@ def decide(
     scope: object = None,
     expected_updated_at: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Approve, reject or revert one draft of a served project; an approval or a
-    rejection with ``expected_updated_at`` refuses a draft resubmitted since."""
-    versioned = action in ("approve", "reject")
+    """Approve, reject or revert one draft of a served project; with
+    ``expected_updated_at``, a draft resubmitted or decided since is refused."""
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
-    if versioned and not isinstance(expected_updated_at, str | None):
+    if not isinstance(expected_updated_at, str | None):
         return 400, {"error": "invalid_body"}
     with _DECISIONS:
         try:
@@ -432,7 +437,7 @@ def decide(
                 proposal_id,
                 action,
                 scope if isinstance(scope, str) else None,
-                expected_updated_at if versioned else None,
+                expected_updated_at,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.
