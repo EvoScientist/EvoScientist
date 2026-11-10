@@ -510,6 +510,7 @@ EvoSci  # or EvoScientist — interactive mode (TUI by default)
 ```bash
 EvoSci                            # interactive mode (TUI by default)
 EvoSci -p "your question"        # single-shot mode
+EvoSci --prompt-file prompt.txt   # single-shot mode, query read from a file (for prompts too long for the command line)
 EvoSci --workdir /path/to/project # open in a specific directory
 EvoSci -m run                     # isolated per-session workspace
 EvoSci --ui cli                   # classic CLI (lightweight)
