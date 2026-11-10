@@ -54,6 +54,25 @@ def test_no_agent_is_built_for_a_gateway_the_server_runs(builds, tmp_path, gatew
     assert work_dir.is_dir()
 
 
+def test_cli_flags_reach_the_server_run_without_the_build(builds, tmp_path):
+    """``--auto-approve`` and ``--model`` reach the server run though no agent
+    was built: the run config is read from the active config."""
+    from EvoScientist.backends import HITL_SUPPRESSED_KEY
+    from EvoScientist.config import EvoScientistConfig
+
+    gateway = _server_gateway()
+    config = EvoScientistConfig(
+        auto_approve=True, model="flag-model", provider="anthropic"
+    )
+
+    _load_agent(config=config, workspace=Workspace(tmp_path), graph_gateway=gateway)
+    run = gateway._resolve_run_config("t1", None)["configurable"]
+
+    assert builds == []
+    assert run[HITL_SUPPRESSED_KEY] is True
+    assert run["model"] == "flag-model"
+
+
 @pytest.mark.parametrize(
     "gateway",
     [None, object(), SimpleNamespace(execute_gateway=object())],
