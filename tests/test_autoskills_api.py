@@ -216,6 +216,26 @@ def test_list_orders_files_by_path_text(server, served):
     ]
 
 
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_list_inlines_no_text_for_a_decided_draft(
+    server, served, secret, quiet_skill_index, action
+):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", action, secret)
+
+    draft = _only_draft(server)
+
+    for field in (
+        "skill_md",
+        "skill_md_truncated",
+        "rationale_md",
+        "rationale_md_truncated",
+    ):
+        assert draft[field] is None
+    assert draft["description"] == "Use when testing focused-validation."
+    assert [f["path"] for f in draft["files"]] == ["SKILL.md"]
+
+
 def test_list_truncates_large_skill_md(server, served):
     _draft(served, "focused-validation", body="x" * (MAX_INLINE_CHARS + 10))
 
@@ -780,13 +800,68 @@ def test_file_route_refuses_traversal(server, served, path):
     assert response.json() == {"error": "invalid_path"}
 
 
-def test_file_route_serves_only_files_an_approval_copies(server, served):
+def test_file_route_serves_only_copied_files_and_the_rationale(server, served):
     _draft(served, "focused-validation")
 
-    for path in ("manifest.json", "RATIONALE.md", "missing.md"):
+    for path in ("manifest.json", "missing.md", "docs/RATIONALE.md"):
         response = _file(server, "focused-validation", path)
         assert response.status_code == 404
         assert response.json() == {"error": "not_found"}
+
+    rationale = _file(server, "focused-validation", "RATIONALE.md")
+
+    assert rationale.status_code == 200
+    assert rationale.text == "Three observations describe focused-validation.\n"
+
+
+def test_file_route_has_no_installed_rationale(server, served):
+    _installed_skill(served.skills_dir, "paper-review")
+    (served.skills_dir / "paper-review" / "RATIONALE.md").write_text(
+        "Installed notes.\n", encoding="utf-8"
+    )
+    _draft(served, "paper-review", operation="update")
+
+    response = _file(server, "paper-review", "RATIONALE.md", installed=1)
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found"}
+
+
+def test_file_route_reads_a_decided_draft(server, served, secret):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "reject", secret)
+
+    skill_md = _file(server, "focused-validation", "SKILL.md")
+    rationale = _file(server, "focused-validation", "RATIONALE.md")
+
+    assert skill_md.status_code == 200
+    assert skill_md.text.startswith("---\nname: focused-validation")
+    assert rationale.status_code == 200
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_file_route_refuses_a_rationale_linked_outside(server, served, tmp_path):
+    _draft(served, "focused-validation")
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text("do not show\n", encoding="utf-8")
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    (folder / "RATIONALE.md").unlink()
+    (folder / "RATIONALE.md").symlink_to(secret_file)
+
+    response = _file(server, "focused-validation", "RATIONALE.md")
+
+    assert response.status_code == 400
+    assert "do not show" not in response.text
+
+
+def test_file_route_reports_a_missing_rationale(server, served):
+    _draft(served, "focused-validation")
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    (folder / "RATIONALE.md").unlink()
+
+    response = _file(server, "focused-validation", "RATIONALE.md")
+
+    assert response.status_code == 404
 
 
 def test_file_route_unknown_draft_or_project(server, served, projects):

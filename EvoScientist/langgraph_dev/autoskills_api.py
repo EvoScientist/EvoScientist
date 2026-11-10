@@ -162,11 +162,15 @@ def _installed(base: Path, relative: Path) -> bool:
 
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     folder = proposal.path.resolve()
-    skill_md, skill_md_truncated = _inline(folder / "SKILL.md", folder)
-    rationale_md, rationale_md_truncated = _inline(folder / "RATIONALE.md", folder)
+    # A decided draft's texts are read through the file route: the list is
+    # polled and decided drafts only grow in number.
+    skill_md: tuple[str | None, bool | None] = (None, None)
+    rationale_md = skill_md
     target: InstallTarget | None = None
     install_error = None
     if proposal.status == "pending":
+        skill_md = _inline(folder / "SKILL.md", folder)
+        rationale_md = _inline(folder / "RATIONALE.md", folder)
         computed = _install_target(proposal, key)
         if isinstance(computed, str):
             install_error = computed
@@ -201,10 +205,10 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "upstream_source": proposal.upstream_source,
         "workspace_shadow": proposal.workspace_shadow,
         "source_observation_ids": list(proposal.source_observation_ids),
-        "skill_md": skill_md,
-        "skill_md_truncated": skill_md_truncated,
-        "rationale_md": rationale_md,
-        "rationale_md_truncated": rationale_md_truncated,
+        "skill_md": skill_md[0],
+        "skill_md_truncated": skill_md[1],
+        "rationale_md": rationale_md[0],
+        "rationale_md_truncated": rationale_md[1],
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -280,8 +284,8 @@ def _read_text(path: Path) -> tuple[int, str | dict[str, Any]]:
 def read_draft_file(
     proposal_id: str, rel_path: str, *, installed: bool
 ) -> tuple[int, str | dict[str, Any]]:
-    """A file an approval copies, from the draft or (``installed``) from the
-    installed skill the approval starts from; a ``str`` body is its text."""
+    """A file an approval copies (the draft's, or with ``installed`` the installed
+    skill's) or the draft's own rationale; a ``str`` body is its text."""
     relative = _relative_path(rel_path)
     if relative is None:
         return 400, {"error": "invalid_path"}
@@ -295,7 +299,7 @@ def read_draft_file(
         names = {path.as_posix() for path in copied_files(folder)}
     except OSError:
         return 404, {"error": "not_found"}
-    if relative not in names:
+    if relative not in names and (installed or relative != "RATIONALE.md"):
         return 404, {"error": "not_found"}
     if installed:
         target = _install_target(proposal, key)
