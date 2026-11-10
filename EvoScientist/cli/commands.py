@@ -3042,8 +3042,7 @@ def _main_callback(
         "--prompt-file",
         help=(
             "Read the query from a UTF-8 file instead of the command line "
-            "(avoids the Windows 32767-character limit); overrides -p/--prompt "
-            "if both are given"
+            "(avoids the Windows 32767-character limit)"
         ),
     ),
     thread_id: str | None = typer.Option(
@@ -3151,6 +3150,10 @@ def _main_callback(
     # the prompt variable. This bypasses Windows CreateProcess 32767-char cmd
     # line limit when the query is very long (e.g. papers embedded in prompt).
     if prompt_file:
+        if prompt:
+            raise typer.BadParameter(
+                "Use either -p/--prompt or --prompt-file, not both."
+            )
         _pf = Path(prompt_file).expanduser()
         if not _pf.is_file():
             raise typer.BadParameter(f"--prompt-file not found: {prompt_file}")
