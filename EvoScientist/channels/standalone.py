@@ -18,7 +18,7 @@ import copy
 import logging
 import signal
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..paths import Workspace
 from .base import Channel
@@ -26,6 +26,9 @@ from .bus import MessageBus
 from .bus.events import OutboundMessage
 from .consumer import InboundConsumer
 from .debug import emit_debug_event
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ async def _create_standalone_agent(
     config: Any = None,
     backend: str | None = None,
     graph_gateway: Any = None,
-):
+) -> "CompiledStateGraph | None":
     """Construct the synchronous agent without blocking the channel loop.
 
     ``None`` when *graph_gateway* executes on the langgraph server.

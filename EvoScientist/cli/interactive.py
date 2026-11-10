@@ -1784,7 +1784,7 @@ def cmd_interactive(
 
 
 def cmd_run(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     prompt: str,
     thread_id: str,
     show_thinking: bool = True,
@@ -1799,7 +1799,7 @@ def cmd_run(
     """Single-shot execution with streaming display.
 
     Args:
-        agent: Compiled agent graph
+        agent: Compiled agent graph; None when the langgraph server runs it
         prompt: User prompt
         thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels

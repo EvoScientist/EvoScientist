@@ -1834,7 +1834,7 @@ def _make_serve_cmd_completed_hook(
 
     async def _hook(
         ctx: CommandContext,
-        original_agent: "CompiledStateGraph",
+        original_agent: "CompiledStateGraph | None",
         cmd: Command,
     ) -> None:
         if ctx.agent is not None and ctx.agent is not original_agent:
@@ -1980,7 +1980,7 @@ def _serve_process_message(
     # Headless equivalent of the Rich CLI / TUI slash branch so channel
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
-    # None because the agent is always loaded before the serve loop polls.
+    # None because the agent load has finished before the serve loop polls.
     # Slash commands run on the application-owned runtime. The main thread
     # remains the signal owner while command coroutines share one stable loop.
     try:
