@@ -2277,7 +2277,7 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     from ..gateway import create_runtime_gateways_for_config
-    from ..rubric_session import runs_in_process
+    from ..gateway.types import runs_in_process
 
     runtime_gateways = create_runtime_gateways_for_config(
         config, backend=gateway_backend
@@ -3357,7 +3357,7 @@ def _main_callback(
         import asyncio
 
         from ..gateway import create_runtime_gateways_for_config
-        from ..rubric_session import runs_in_process
+        from ..gateway.types import runs_in_process
         from ..sessions import _upgrade_stored_dirs_safely, get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import cmd_run

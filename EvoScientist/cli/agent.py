@@ -117,7 +117,7 @@ def _load_agent(
             becomes the active config even with *chat_model* (the pure path
             writes no globals).
     """
-    from ..rubric_session import runs_in_process
+    from ..gateway.types import runs_in_process
 
     if graph_gateway is not None and not runs_in_process(graph_gateway):
         from ..EvoScientist import _ensure_config

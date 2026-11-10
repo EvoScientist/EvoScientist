@@ -152,7 +152,7 @@ async def _async_main(
     consumer: InboundConsumer | None = None
     if use_agent:
         from ..gateway import create_runtime_gateways_for_config
-        from ..rubric_session import runs_in_process
+        from ..gateway.types import runs_in_process
 
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         builds = runs_in_process(runtime_gateways.graph_gateway)
