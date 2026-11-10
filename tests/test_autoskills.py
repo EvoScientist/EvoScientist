@@ -441,6 +441,32 @@ def test_reject_records_time(tmp_path):
     assert list_skill_proposals(memory_dir)[0].rejected_at == manifest["rejected_at"]
 
 
+def test_reject_refuses_a_draft_changed_since_it_was_read(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    current = _manifest(memory_dir, "focused-validation")["updated_at"]
+
+    stale = reject_skill_proposal(
+        memory_dir, "focused-validation", expected_updated_at="2000-01-01T00:00:00Z"
+    )
+
+    assert stale == {
+        "rejected": False,
+        "proposal_id": "focused-validation",
+        "updated_at": current,
+        "error": "Proposal changed since it was read",
+    }
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+    fresh = reject_skill_proposal(
+        memory_dir, "focused-validation", expected_updated_at=current
+    )
+
+    assert fresh["rejected"] is True
+
+
 def test_manifest_without_decision_fields_reads_as_none(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

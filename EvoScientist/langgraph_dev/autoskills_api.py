@@ -352,6 +352,7 @@ def _apply(
             proposal.proposal_id,
             workspace_dir=workspace.root,
             exact=True,
+            expected_updated_at=expected_updated_at,
         )
         if result.get("rejected"):
             return 200, {
@@ -414,11 +415,12 @@ def decide(
     scope: object = None,
     expected_updated_at: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Approve, reject or revert one draft of a served project; an approval
-    with ``expected_updated_at`` refuses a draft resubmitted since the page read it."""
+    """Approve, reject or revert one draft of a served project; an approval or a
+    rejection with ``expected_updated_at`` refuses a draft resubmitted since."""
+    versioned = action in ("approve", "reject")
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
-    if action == "approve" and not isinstance(expected_updated_at, str | None):
+    if versioned and not isinstance(expected_updated_at, str | None):
         return 400, {"error": "invalid_body"}
     with _DECISIONS:
         try:
@@ -426,7 +428,7 @@ def decide(
                 proposal_id,
                 action,
                 scope if isinstance(scope, str) else None,
-                expected_updated_at if action == "approve" else None,
+                expected_updated_at if versioned else None,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.

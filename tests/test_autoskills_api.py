@@ -15,6 +15,7 @@ from EvoScientist.langgraph_dev.autoskills_api import MAX_FILE_BYTES, MAX_INLINE
 from EvoScientist.memory.autoskills.proposals import (
     approve_skill_proposal,
     autoskill_proposals_dir,
+    processed_cluster_hashes,
     submit_autoskill_proposal,
 )
 from EvoScientist.paths import Workspace
@@ -1082,18 +1083,99 @@ def test_approve_route_refuses_a_resubmit_between_its_lookup_and_the_approval(
     assert not (served.skills_dir / "focused-validation").exists()
 
 
-@pytest.mark.parametrize("expected", ["2000-01-01T00:00:00Z", 5])
-def test_reject_and_revert_ignore_expected_updated_at(server, served, secret, expected):
+def test_reject_route_refuses_a_draft_changed_since_the_page_read_it(
+    server, served, secret
+):
+    _draft(served, "focused-validation")
+    current = _only_draft(server)["updated_at"]
+
+    stale = _decide(
+        server,
+        "focused-validation",
+        "reject",
+        secret,
+        expected_updated_at="2000-01-01T00:00:00Z",
+    )
+
+    assert stale.status_code == 409
+    assert stale.json() == {"error": "draft_changed", "updated_at": current}
+    assert _only_draft(server)["status"] == "pending"
+    assert processed_cluster_hashes(paths.MEMORIES_DIR) == set()
+
+    fresh = _decide(
+        server, "focused-validation", "reject", secret, expected_updated_at=current
+    )
+
+    assert fresh.status_code == 200
+    assert _only_draft(server)["status"] == "rejected"
+
+
+def test_reject_route_refuses_a_resubmit_between_its_lookup_and_the_rejection(
+    server, served, secret, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    read = _only_draft(server)["updated_at"]
+    real_apply = autoskills_api._apply
+
+    def resubmit_then_apply(*args, **kwargs):
+        _draft(served, "focused-validation", body="Rewritten.")
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(autoskills_api, "_apply", resubmit_then_apply)
+    response = _decide(
+        server, "focused-validation", "reject", secret, expected_updated_at=read
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "draft_changed"
+    assert response.json()["updated_at"] != read
+    assert processed_cluster_hashes(paths.MEMORIES_DIR) == set()
+
+
+@pytest.mark.parametrize("expected", [5, ["2026-11-06"], {"at": "now"}])
+def test_reject_route_refuses_an_expected_updated_at_that_is_not_text(
+    server, served, secret, expected
+):
     _draft(served, "focused-validation")
 
-    rejected = _decide(
+    response = _decide(
         server, "focused-validation", "reject", secret, expected_updated_at=expected
     )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_body"}
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_reject_route_reports_a_decided_draft_before_a_changed_one(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "approve", secret)
+
+    response = _decide(
+        server,
+        "focused-validation",
+        "reject",
+        secret,
+        expected_updated_at="2000-01-01T00:00:00Z",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "not_pending", "status": "approved"}
+
+
+@pytest.mark.parametrize("expected", ["2000-01-01T00:00:00Z", 5])
+def test_revert_ignores_expected_updated_at(server, served, secret, expected):
+    _draft(served, "focused-validation")
+    _decide(server, "focused-validation", "reject", secret)
+
     reverted = _decide(
         server, "focused-validation", "revert", secret, expected_updated_at=expected
     )
 
-    assert rejected.status_code == 200
     assert reverted.status_code == 200
 
 

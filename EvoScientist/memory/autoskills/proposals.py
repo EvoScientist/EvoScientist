@@ -1870,8 +1870,10 @@ def reject_skill_proposal(
     *,
     workspace_dir: str | Path | None = None,
     exact: bool = False,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
-    """Mark one pending proposal rejected."""
+    """Mark one pending proposal rejected; with ``expected_updated_at``, a
+    draft resubmitted since is refused, as an approval refuses it."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -1893,6 +1895,16 @@ def reject_skill_proposal(
             "proposal_id": manifest.get("proposal_id"),
             "status": manifest.get("status"),
             "error": "Only pending proposals can be rejected",
+        }
+    if (
+        expected_updated_at is not None
+        and manifest.get("updated_at") != expected_updated_at
+    ):
+        return {
+            "rejected": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "updated_at": manifest.get("updated_at"),
+            "error": "Proposal changed since it was read",
         }
     if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
         return {
