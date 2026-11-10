@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import contextlib
 import copy
 import json
 import logging
@@ -3352,6 +3353,7 @@ def _main_callback(
         import asyncio
 
         from ..gateway import create_runtime_gateways_for_config
+        from ..rubric_session import runs_in_process
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import cmd_run
@@ -3363,7 +3365,13 @@ def _main_callback(
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
-            async with get_checkpointer() as checkpointer:
+            # The langgraph server keeps its own checkpointer; the local one
+            # only backs an in-process agent.
+            async with (
+                get_checkpointer()
+                if runs_in_process(graph_gateway)
+                else contextlib.nullcontext()
+            ) as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
                 if thread_id:
@@ -3401,6 +3409,7 @@ def _main_callback(
                     checkpointer=checkpointer,
                     config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
+                    graph_gateway=graph_gateway,
                 )
                 rubric_result: str | None = None
                 try:

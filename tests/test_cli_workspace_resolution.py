@@ -180,6 +180,7 @@ def _run_prompt(
     thread_id: str | None,
     stored: dict | None,
     backend: str = "local",
+    executes_on_server: bool = False,
 ) -> dict:
     """Drive the main callback through a ``-p`` run and capture its folders."""
     import EvoScientist.cli.interactive as interactive_mod
@@ -192,6 +193,10 @@ def _run_prompt(
         generated_thread_ids=["new-thread"],
         thread_store=FakeThreadStore(resolved_thread_id=thread_id, metadata=stored),
     )
+    if executes_on_server:
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        gateway.execute_gateway = object.__new__(LangGraphServerGateway)
 
     def _fake_get_effective_config(cli_overrides=None):
         merged = vars(config).copy()
@@ -200,7 +205,8 @@ def _run_prompt(
 
     @asynccontextmanager
     async def _fake_checkpointer():
-        yield None
+        captured["checkpointer_opened"] = True
+        yield "CHECKPOINTER"
 
     async def _fake_sync(_config, *, dirs, backend=None, **_kwargs):
         captured["synced"].append(dirs)
@@ -208,6 +214,8 @@ def _run_prompt(
     def _fake_load_agent(**kwargs):
         captured["agent_workspace"] = kwargs["workspace"]
         captured["agent_work_dir"] = kwargs["work_dir"]
+        captured["agent_checkpointer"] = kwargs["checkpointer"]
+        captured["agent_graph_gateway"] = kwargs["graph_gateway"]
         return object()
 
     def _fake_cmd_run(_agent, _prompt, *, thread_id, dirs, **_kwargs):
@@ -280,6 +288,36 @@ def test_one_shot_resume_uses_thread_workspace(monkeypatch, tmp_path):
     assert got["synced"] == [restored]
     # The server is started once, for the thread's folders.
     assert got["prespawned"] == []
+
+
+def test_one_shot_in_process_opens_the_checkpointer_for_the_agent(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+
+    got = _run_prompt(monkeypatch, _config(), thread_id=None, stored=None)
+
+    assert got["checkpointer_opened"] is True
+    assert got["agent_checkpointer"] == "CHECKPOINTER"
+    assert got["agent_graph_gateway"] is not None
+
+
+def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_path):
+    """The server keeps its own checkpointer; the agent it would back is not built."""
+    monkeypatch.chdir(tmp_path)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id=None,
+        stored=None,
+        backend="langgraph_server",
+        executes_on_server=True,
+    )
+
+    assert "checkpointer_opened" not in got
+    assert got["agent_checkpointer"] is None
+    assert got["agent_graph_gateway"].execute_gateway is not None
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):
