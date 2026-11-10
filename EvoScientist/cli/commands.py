@@ -1529,7 +1529,7 @@ async def _apply_serve_resume_state(
     import asyncio
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
-    workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    workspace_update: tuple[SessionDirs, CompiledStateGraph | None] | None = None
     old_thread_id = runtime_state.thread_id
     thread_changed = thread_id != old_thread_id
     # Serve pauses the thread it leaves and ends the wait on a thread restored
@@ -1566,6 +1566,7 @@ async def _apply_serve_resume_state(
             workspace=new_dirs.workspace,
             config=effective_config,
             runtime=runtime_state.async_runtime,
+            graph_gateway=runtime_state.runtime_gateways.graph_gateway,
         )
         proactive = getattr(channel_runtime, "proactive", None)
         moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace

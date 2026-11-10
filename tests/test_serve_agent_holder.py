@@ -238,6 +238,7 @@ async def test_hook_updates_workspace_dir_on_resume():
         workspace=restored.workspace,
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.dirs == restored
     assert state.agent is reloaded_agent
@@ -443,6 +444,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert call_order == ["load", "sync"]
     assert state.thread_id == "new-tid"
@@ -556,6 +558,7 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
@@ -628,6 +631,7 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None
