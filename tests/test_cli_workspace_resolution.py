@@ -197,6 +197,7 @@ def _run_prompt(
         from EvoScientist.gateway.server import LangGraphServerGateway
 
         gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    captured["graph_gateway"] = gateway
 
     def _fake_get_effective_config(cli_overrides=None):
         merged = vars(config).copy()
@@ -299,7 +300,7 @@ def test_one_shot_in_process_opens_the_checkpointer_for_the_agent(
 
     assert got["checkpointer_opened"] is True
     assert got["agent_checkpointer"] == "CHECKPOINTER"
-    assert got["agent_graph_gateway"] is not None
+    assert got["agent_graph_gateway"] is got["graph_gateway"]
 
 
 def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_path):
@@ -317,7 +318,7 @@ def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_p
 
     assert "checkpointer_opened" not in got
     assert got["agent_checkpointer"] is None
-    assert got["agent_graph_gateway"].execute_gateway is not None
+    assert got["agent_graph_gateway"] is got["graph_gateway"]
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):
