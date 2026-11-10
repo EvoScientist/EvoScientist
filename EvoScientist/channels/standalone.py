@@ -148,17 +148,21 @@ async def _async_main(
 
     consumer: InboundConsumer | None = None
     if use_agent:
-        logger.info("Loading EvoScientist agent...")
         from ..gateway import create_runtime_gateways_for_config
+        from ..rubric_session import runs_in_process
 
+        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
+        builds = runs_in_process(runtime_gateways.graph_gateway)
+        if builds:
+            logger.info("Loading EvoScientist agent...")
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
-        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         agent = await _create_standalone_agent(
             workspace, config, backend, runtime_gateways.graph_gateway
         )
-        logger.info("Agent loaded")
+        if builds:
+            logger.info("Agent loaded")
 
         consumer = InboundConsumer(
             bus=bus,

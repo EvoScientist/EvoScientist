@@ -2276,11 +2276,13 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     from ..gateway import create_runtime_gateways_for_config
+    from ..rubric_session import runs_in_process
 
     runtime_gateways = create_runtime_gateways_for_config(
         config, backend=gateway_backend
     )
-    console.print("[dim]Loading agent...[/dim]")
+    if runs_in_process(runtime_gateways.graph_gateway):
+        console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(
         workspace=dirs.workspace,
         config=config,
@@ -3402,7 +3404,8 @@ def _main_callback(
                 else:
                     tid = await graph_gateway.create_thread()
                     session_dirs = dirs
-                console.print("[dim]Loading agent...[/dim]")
+                if runs_in_process(graph_gateway):
+                    console.print("[dim]Loading agent...[/dim]")
                 agent = await asyncio.to_thread(
                     _load_agent,
                     work_dir=str(session_dirs.work_dir),

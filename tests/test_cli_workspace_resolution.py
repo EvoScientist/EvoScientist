@@ -232,6 +232,12 @@ def _run_prompt(
         lambda _ctx: SimpleNamespace(run_sync=lambda fn: asyncio.run(fn())),
     )
     monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    captured["printed"] = []
+    monkeypatch.setattr(
+        commands.console,
+        "print",
+        lambda *a, **_k: captured["printed"].append(str(a[0]) if a else ""),
+    )
     monkeypatch.setattr(
         commands,
         "_ensure_async_subagent_server",
@@ -301,6 +307,7 @@ def test_one_shot_in_process_opens_the_checkpointer_for_the_agent(
     assert got["checkpointer_opened"] is True
     assert got["agent_checkpointer"] == "CHECKPOINTER"
     assert got["agent_graph_gateway"] is got["graph_gateway"]
+    assert "[dim]Loading agent...[/dim]" in got["printed"]
 
 
 def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_path):
@@ -319,6 +326,7 @@ def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_p
     assert "checkpointer_opened" not in got
     assert got["agent_checkpointer"] is None
     assert got["agent_graph_gateway"] is got["graph_gateway"]
+    assert "[dim]Loading agent...[/dim]" not in got["printed"]
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):

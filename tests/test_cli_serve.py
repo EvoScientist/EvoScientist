@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import signal
+from types import SimpleNamespace
+
+import pytest
 
 import EvoScientist.ccproxy_manager as ccproxy_mod
 from EvoScientist.cli import commands
@@ -49,6 +52,35 @@ def test_serve_loads_the_agent_for_the_gateway_it_built(monkeypatch, tmp_path):
 
     assert len(built) == 1
     assert captured["load_graph_gateway"] is built[0].graph_gateway
+
+
+@pytest.mark.parametrize("on_server", [False, True])
+def test_serve_says_it_loads_the_agent_only_when_it_builds_one(
+    monkeypatch, tmp_path, on_server
+):
+    import EvoScientist.gateway as gateway_mod
+    from EvoScientist.gateway.server import LangGraphServerGateway
+    from tests.fakes.common import FakeGraphGateway
+
+    gateway = FakeGraphGateway(generated_thread_ids=["t1"])
+    if on_server:
+        gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    monkeypatch.setattr(
+        gateway_mod,
+        "create_runtime_gateways_for_config",
+        lambda *_a, **_k: SimpleNamespace(graph_gateway=gateway),
+    )
+    printed: list[str] = []
+    print_ = commands.console.print
+    monkeypatch.setattr(
+        commands.console,
+        "print",
+        lambda *a, **k: (printed.append(str(a[0]) if a else ""), print_(*a, **k)),
+    )
+
+    run_serve_once(monkeypatch, serve_config(default_workdir=str(tmp_path)))
+
+    assert ("[dim]Loading agent...[/dim]" in printed) is not on_server
 
 
 def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_path):
