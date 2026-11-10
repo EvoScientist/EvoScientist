@@ -7,13 +7,18 @@ for very long prompts (e.g. full papers embedded in the query).
 
 from __future__ import annotations
 
+import io
 import re
+from types import SimpleNamespace
 
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
+import EvoScientist.cli.interactive as interactive
 from EvoScientist.cli import commands
 from EvoScientist.cli._app import app
+from EvoScientist.paths import SessionDirs, Workspace
 
 runner = CliRunner()
 
@@ -94,3 +99,27 @@ def test_prompt_file_text_becomes_the_prompt(monkeypatch, tmp_path):
     result = runner.invoke(app, ["--prompt-file", str(prompt_file)])
     assert result.exit_code == 0
     assert seen["prompt"] == "prompt from file\n"
+
+
+def test_single_shot_echo_cuts_a_long_prompt(monkeypatch, tmp_path):
+    out = io.StringIO()
+    sent = {}
+    monkeypatch.setattr(interactive, "console", Console(file=out, width=200))
+    monkeypatch.setattr(
+        interactive, "run_streaming", lambda **kw: sent.update(message=kw["message"])
+    )
+    monkeypatch.setattr(commands, "_wait_for_memory_workers", lambda: None)
+    prompt = "x" * 500 + "TAIL" * 250
+
+    interactive.cmd_run(
+        object(),
+        prompt,
+        "thread-1",
+        dirs=SessionDirs(Workspace(tmp_path)),
+        runtime_gateways=SimpleNamespace(graph_gateway=None),
+    )
+
+    shown = out.getvalue().replace("\n", "")
+    assert "x" * 500 + "\u2026 (1500 chars total)" in shown
+    assert "TAIL" not in shown
+    assert sent["message"] == prompt

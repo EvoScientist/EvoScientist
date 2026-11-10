@@ -1783,6 +1783,17 @@ def cmd_interactive(
             _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
 
+# A single-shot prompt longer than this is echoed cut, with its length.
+_PROMPT_ECHO_LIMIT = 500
+
+
+def _prompt_echo(prompt: str) -> str:
+    """The prompt as shown before a single-shot run."""
+    if len(prompt) <= _PROMPT_ECHO_LIMIT:
+        return prompt
+    return f"{prompt[:_PROMPT_ECHO_LIMIT]}\u2026 ({len(prompt)} chars total)"
+
+
 def cmd_run(
     agent: "CompiledStateGraph",
     prompt: str,
@@ -1814,7 +1825,7 @@ def cmd_run(
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
     console.print(sep)
-    console.print(Text(f"> {prompt}"))
+    console.print(Text(f"> {_prompt_echo(prompt)}"))
     console.print(sep)
     console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(str(dirs.work_dir))}[/dim]")
