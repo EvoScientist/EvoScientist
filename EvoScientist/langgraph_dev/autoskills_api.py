@@ -127,7 +127,8 @@ def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
 
 
 def _files(folder: Path, base: Path | None) -> list[dict[str, Any]]:
-    """Every file an approval copies; metadata never follows a link outside."""
+    """The draft's files an approval copies, without a fork's base skill;
+    metadata never follows a link outside."""
     try:
         relatives = copied_files(folder)
     except OSError:
@@ -325,8 +326,6 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return 409, {"error": "not_pending", "status": result.get("status")}
     if error.startswith("Proposal changed since it was read"):
         return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
-    if error.startswith("scope must be"):
-        return 400, {"error": "invalid_scope"}
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
 

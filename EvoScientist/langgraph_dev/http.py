@@ -437,8 +437,8 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
 
 
 async def list_autoskill_proposals(request: Request) -> Response:
-    """Every served project's AutoSkills drafts, with their texts and
-    files (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
+    """Every served project's AutoSkills drafts, with their files and a pending
+    draft's texts (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
     from EvoScientist.langgraph_dev import autoskills_api
 
     status, body = await asyncio.to_thread(

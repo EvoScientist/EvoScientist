@@ -1857,7 +1857,7 @@ def revert_skill_proposal(
     installed = manifest.get("approved_skill_path") if status == "approved" else None
     if installed is not None and not isinstance(installed, str):
         return refused("skill_changed")
-    # Submit never overwrites a rejected draft, so the agent cannot bring it back.
+    # Submit never overwrites a rejected draft, so a resubmit cannot bring it back.
     rejects = status == "approved" and manifest.get("approved_by") == "auto"
     try:
         if installed:
