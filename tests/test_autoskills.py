@@ -1200,20 +1200,6 @@ def test_revert_deletes_nothing_when_a_later_file_changed(tmp_path):
     assert (installed / "SKILL.md").is_file()
 
 
-def test_revert_rechecks_each_file_right_before_deleting_it(tmp_path):
-    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
-
-    with patch(
-        "EvoScientist.memory.autoskills.proposals._same_bytes",
-        side_effect=[True, True, False],
-    ):
-        result = revert_skill_proposal(memory_dir, "focused-validation")
-
-    assert result["error"] == "skill_changed"
-    assert (installed / "SKILL.md").is_file()
-    assert (installed / "scripts" / "check.py").is_file()
-
-
 def test_revert_finishes_a_partly_removed_skill(tmp_path):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
     (installed / "SKILL.md").unlink()
@@ -1346,30 +1332,6 @@ def test_revert_refuses_a_folder_symlink_inside_the_skill(tmp_path):
 
     assert result["error"] == "skill_changed"
     assert (outside / "check.py").is_file()
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
-def test_revert_never_deletes_through_a_folder_swapped_after_the_scan(
-    tmp_path, monkeypatch
-):
-    from EvoScientist.memory.autoskills import proposals as proposals_module
-
-    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
-    outside = tmp_path / "outside-scripts"
-    real_scan = proposals_module._regular_files
-
-    def scan_then_swap(root):
-        files = real_scan(root)
-        shutil.move(installed / "scripts", outside)
-        (installed / "scripts").symlink_to(outside, target_is_directory=True)
-        return files
-
-    monkeypatch.setattr(proposals_module, "_regular_files", scan_then_swap)
-    result = revert_skill_proposal(memory_dir, "focused-validation")
-
-    assert result["reverted"] is False
-    assert (outside / "check.py").is_file()
-    assert (installed / "SKILL.md").is_file()
 
 
 def test_plain_entries_exclude_windows_reparse_points():

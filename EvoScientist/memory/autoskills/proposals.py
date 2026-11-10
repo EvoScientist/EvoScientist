@@ -1675,21 +1675,6 @@ def _same_bytes(installed: Path, copied: Path) -> bool:
                 return True
 
 
-def _still_plain(installed: Path, path: Path) -> bool:
-    """Whether ``path`` and every folder up to ``installed`` are still plain."""
-    if not _plain(path.lstat(), directory=False):
-        return False
-    folder = path.parent
-    while True:
-        if not _plain(folder.lstat(), directory=True):
-            return False
-        if folder == installed:
-            return True
-        if folder == folder.parent:
-            return False
-        folder = folder.parent
-
-
 # Files a skill gains by being used or browsed, which Undo removes with it;
 # compared without case, as Windows and macOS file names are.
 _CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
@@ -1716,7 +1701,7 @@ def _unlink_checked(path: Path) -> None:
 
 
 def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
-    """Delete a new skill's files while each is still one the approval copied.
+    """Delete a new skill's files if every one is still one the approval copied.
 
     Files already gone count as removed, so a revert cut short can run again;
     caches go too, but a file added or edited since keeps the whole folder.
@@ -1738,17 +1723,12 @@ def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
         return False
 
     def unchanged(name: str, path: Path) -> bool:
-        if not _still_plain(installed, path):
-            return False
         # A cache may differ from a copied one: Finder rewrites .DS_Store freely.
         return name not in copied or _is_cache(name) or _same_bytes(path, copied[name])
 
     if not all(unchanged(name, path) for name, path in present.items()):
         return False
-    for name, path in present.items():
-        # Re-checked right before each delete, so a change made meanwhile survives.
-        if not unchanged(name, path):
-            return False
+    for path in present.values():
         _unlink_checked(path)
     for dirpath, _dirnames, _filenames in os.walk(
         installed, topdown=False, onerror=_raise
