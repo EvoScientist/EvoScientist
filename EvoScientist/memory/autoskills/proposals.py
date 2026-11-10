@@ -1831,7 +1831,7 @@ def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str,
             else:
                 manifest.pop("scope", None)
         manifest["status"] = "rejected" if rejects else "pending"
-        manifest["updated_at"] = _now()
+        manifest["updated_at"] = _version_stamp(manifest.get("updated_at"))
         if rejects:
             manifest["rejected_at"] = manifest["updated_at"]
         _write_manifest(manifest_path, manifest)

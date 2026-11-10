@@ -815,6 +815,37 @@ def test_revert_rejected_returns_to_pending_and_unmarks_cluster(tmp_path):
     assert proposal.updated_at != "2000-01-01T00:00:00Z"
 
 
+def test_a_revert_gets_a_new_millisecond_updated_at(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    reject_skill_proposal(memory_dir, "focused-validation")
+    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["updated_at"] = "2026-11-06T09:00:00.000Z"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    start = datetime(2026, 11, 6, 9, 0, 0, tzinfo=UTC)
+    ticks = iter([start, start + timedelta(milliseconds=1)])
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(ticks)
+
+    monkeypatch.setattr(module, "datetime", FrozenClock)
+
+    result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result["status"] == "pending"
+    assert _manifest(memory_dir, "focused-validation")["updated_at"] == (
+        "2026-11-06T09:00:00.001Z"
+    )
+
+
 def test_revert_without_a_processed_mark(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
