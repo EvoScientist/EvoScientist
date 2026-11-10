@@ -251,6 +251,12 @@ def _run_prompt(
         lambda *_a, **_k: SimpleNamespace(graph_gateway=gateway),
     )
     monkeypatch.setattr(sessions_mod, "get_checkpointer", _fake_checkpointer)
+    captured["upgrades"] = 0
+
+    async def _fake_upgrade():
+        captured["upgrades"] += 1
+
+    monkeypatch.setattr(sessions_mod, "_upgrade_stored_dirs_safely", _fake_upgrade)
     monkeypatch.setattr(interactive_mod, "cmd_run", _fake_cmd_run)
 
     commands._main_callback(
@@ -308,6 +314,8 @@ def test_one_shot_in_process_opens_the_checkpointer_for_the_agent(
     assert got["agent_checkpointer"] == "CHECKPOINTER"
     assert got["agent_graph_gateway"] is got["graph_gateway"]
     assert "[dim]Loading agent...[/dim]" in got["printed"]
+    # Opening the checkpointer upgrades the stored folders.
+    assert got["upgrades"] == 0
 
 
 def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_path):
@@ -327,6 +335,8 @@ def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_p
     assert got["agent_checkpointer"] is None
     assert got["agent_graph_gateway"] is got["graph_gateway"]
     assert "[dim]Loading agent...[/dim]" not in got["printed"]
+    # Without the checkpointer, the stored folders a resume reads are upgraded.
+    assert got["upgrades"] == 1
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):

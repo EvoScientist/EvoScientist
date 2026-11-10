@@ -3358,7 +3358,7 @@ def _main_callback(
 
         from ..gateway import create_runtime_gateways_for_config
         from ..rubric_session import runs_in_process
-        from ..sessions import get_checkpointer
+        from ..sessions import _upgrade_stored_dirs_safely, get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import cmd_run
         from .resume_hint import print_resume_hint
@@ -3369,6 +3369,11 @@ def _main_callback(
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
+            if not runs_in_process(graph_gateway):
+                # Opening the local checkpointer upgrades the stored folders a
+                # resume reads; without it, upgrade them here (a no-op once
+                # done), as a server that failed or predates it did not.
+                await _upgrade_stored_dirs_safely()
             # The langgraph server keeps its own checkpointer; the local one
             # only backs an in-process agent.
             async with (
