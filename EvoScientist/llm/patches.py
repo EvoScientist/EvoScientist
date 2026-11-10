@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import sys
 from collections.abc import (
     AsyncIterator,
@@ -802,6 +803,185 @@ def _patch_anthropic_structured_output() -> None:
 
         ChatAnthropic.with_structured_output = _patched
         _anthropic_structured_output_patched = True
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Patch (lazy, Anthropic protocol): replay thinking blocks the API no longer
+# accepts for this conversation.
+#
+# Claude models with preserved thinking sign each thinking block with the
+# conversation that produced it (system prompt, tools, every earlier message).
+# EvoScientist rewrites that prefix between calls (memory and runtime context
+# in the system prompt, context editing, summarization, tool selection), and
+# the API then answers 400 "bound to a different conversation": for every
+# account on Claude Fable 5.2, for newer accounts on earlier models. Such a
+# request is sent again. With adaptive thinking it first carries
+# ``prefix_mismatch_behavior: "drop_block"``, so the API drops only the stale
+# blocks; once that worked, later requests of that endpoint, key and model
+# carry the setting from the start. Any other thinking mode cannot take the
+# setting, and an endpoint may refuse it, so the last resort replays no thinking
+# block at all. Requests that never fail are untouched, so accounts the API does
+# not check keep their replayed thinking.
+# ---------------------------------------------------------------------------
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_THINKING_BINDING_SETTING = "prefix_mismatch_behavior"
+_THINKING_BLOCK_TYPES = ("thinking", "redacted_thinking")
+# (endpoint, key hash, model id) where asking to drop stale blocks worked.
+_thinking_binding_checked: set[tuple[Any, ...]] = set()
+_logger = logging.getLogger(__name__)
+_anthropic_thinking_binding_patched = False
+
+
+def _is_thinking_prefix_mismatch(exc: BaseException) -> bool:
+    # The API names the setting that lets the request through.
+    return getattr(exc, "status_code", None) == 400 and (
+        _THINKING_BINDING_SETTING in str(exc)
+    )
+
+
+def _has_adaptive_thinking(payload: dict) -> bool:
+    thinking = payload.get("thinking")
+    return isinstance(thinking, dict) and thinking.get("type") == "adaptive"
+
+
+def _with_thinking_drop_block(payload: dict) -> dict:
+    """``payload`` (adaptive thinking) asking the API to drop stale thinking blocks."""
+    betas = list(payload.get("betas") or [])
+    if _THINKING_BINDING_BETA not in betas:
+        betas.append(_THINKING_BINDING_BETA)
+    return {
+        **payload,
+        "thinking": {
+            **payload["thinking"],
+            "block_binding": {_THINKING_BINDING_SETTING: "drop_block"},
+        },
+        "betas": betas,
+    }
+
+
+def _without_thinking_blocks(payload: dict) -> dict:
+    """``payload`` replaying no thinking block; a turn that held nothing else goes."""
+    messages = []
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            kept = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in _THINKING_BLOCK_TYPES
+                )
+            ]
+            if len(kept) != len(content):
+                if not kept:
+                    continue
+                message = {**message, "content": kept}
+        messages.append(message)
+    return {**payload, "messages": messages}
+
+
+def _thinking_binding_key(model: Any, payload: dict) -> tuple[Any, ...]:
+    key = getattr(model, "anthropic_api_key", None)
+    secret = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+    return (
+        getattr(model, "anthropic_api_url", None),
+        hash(secret),
+        payload.get("model"),
+    )
+
+
+def _with_known_thinking_setting(model: Any, payload: dict) -> dict:
+    if (
+        _has_adaptive_thinking(payload)
+        and _thinking_binding_key(model, payload) in _thinking_binding_checked
+    ):
+        return _with_thinking_drop_block(payload)
+    return payload
+
+
+def _thinking_recoveries(payload: dict) -> tuple[dict | None, dict | None]:
+    """How to resend a refused replay: asking the API to drop stale blocks
+    (adaptive thinking only), then replaying no thinking block at all."""
+    setting = None
+    if _has_adaptive_thinking(payload) and "block_binding" not in payload["thinking"]:
+        setting = _with_thinking_drop_block(payload)
+    stripped = _without_thinking_blocks(payload)
+    return setting, None if stripped == payload else stripped
+
+
+def _remember_thinking_setting(model: Any, payload: dict) -> None:
+    key = _thinking_binding_key(model, payload)
+    if key not in _thinking_binding_checked:
+        _thinking_binding_checked.add(key)
+        _logger.info(
+            "anthropic: %s rejected replayed thinking blocks; "
+            "asking it to drop stale blocks from now on",
+            payload.get("model"),
+        )
+
+
+def _patch_anthropic_thinking_binding() -> None:
+    global _anthropic_thinking_binding_patched
+    if _anthropic_thinking_binding_patched:
+        return
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        _orig_create = ChatAnthropic._create
+        _orig_acreate = ChatAnthropic._acreate
+
+        def _create(self: Any, payload: dict) -> Any:
+            payload = _with_known_thinking_setting(self, payload)
+            try:
+                return _orig_create(self, payload)
+            except Exception as exc:
+                if not _is_thinking_prefix_mismatch(exc):
+                    raise
+                setting, stripped = _thinking_recoveries(payload)
+                if setting is None and stripped is None:
+                    raise
+            if setting is not None:
+                try:
+                    response = _orig_create(self, setting)
+                except Exception as exc:
+                    # An endpoint that does not take the setting.
+                    if stripped is None or getattr(exc, "status_code", None) != 400:
+                        raise
+                else:
+                    _remember_thinking_setting(self, payload)
+                    return response
+            _logger.info("anthropic: resending without replayed thinking blocks")
+            return _orig_create(self, stripped)
+
+        async def _acreate(self: Any, payload: dict) -> Any:
+            payload = _with_known_thinking_setting(self, payload)
+            try:
+                return await _orig_acreate(self, payload)
+            except Exception as exc:
+                if not _is_thinking_prefix_mismatch(exc):
+                    raise
+                setting, stripped = _thinking_recoveries(payload)
+                if setting is None and stripped is None:
+                    raise
+            if setting is not None:
+                try:
+                    response = await _orig_acreate(self, setting)
+                except Exception as exc:
+                    # An endpoint that does not take the setting.
+                    if stripped is None or getattr(exc, "status_code", None) != 400:
+                        raise
+                else:
+                    _remember_thinking_setting(self, payload)
+                    return response
+            _logger.info("anthropic: resending without replayed thinking blocks")
+            return await _orig_acreate(self, stripped)
+
+        ChatAnthropic._create = _create
+        ChatAnthropic._acreate = _acreate
+        _anthropic_thinking_binding_patched = True
     except Exception:
         pass
 

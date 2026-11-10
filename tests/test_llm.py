@@ -3557,6 +3557,286 @@ class TestAnthropicStructuredOutput:
 
 
 # =============================================================================
+# Test _patch_anthropic_thinking_binding
+# =============================================================================
+
+
+class TestAnthropicThinkingBinding:
+    MISMATCH = (
+        "messages.1.content.0: Invalid `signature` in `thinking` block. The block "
+        "is bound to a different conversation. Remove the block, or set "
+        '`thinking.block_binding.prefix_mismatch_behavior` to "drop_block".'
+    )
+
+    @staticmethod
+    def _serve(model, error_message, *, setting_status=200):
+        """Answer ``model`` like the API: a replayed thinking block is refused
+        unless the request asks to drop stale blocks, which gets
+        ``setting_status``. Returns the requests."""
+        import json
+
+        import anthropic
+
+        httpx = _anthropic_httpx()
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            thinking = body.get("thinking")
+            replayed = sum(
+                block.get("type") in ("thinking", "redacted_thinking")
+                for message in body["messages"]
+                if isinstance(message["content"], list)
+                for block in message["content"]
+            )
+            requests.append(
+                {
+                    "thinking": thinking,
+                    "beta": request.headers.get("anthropic-beta", ""),
+                    "replayed": replayed,
+                    "roles": [message["role"] for message in body["messages"]],
+                }
+            )
+            asks_to_drop = "block_binding" in (thinking or {})
+            status, refusal = 200, None
+            if asks_to_drop and setting_status != 200:
+                status = setting_status
+                refusal = "thinking.block_binding: Extra inputs are not permitted"
+            elif replayed and not asks_to_drop:
+                status, refusal = 400, error_message
+            if refusal:
+                return httpx.Response(
+                    status,
+                    json={
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": refusal},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "model": "test",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        model._client = anthropic.Anthropic(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.Client(transport=transport),
+        )
+        model._async_client = anthropic.AsyncAnthropic(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=transport),
+        )
+        return requests
+
+    @staticmethod
+    def _model(monkeypatch):
+        from EvoScientist.llm import patches
+
+        monkeypatch.setattr(patches, "_thinking_binding_checked", set())
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        return get_chat_model(
+            "claude-sonnet-5-5", provider="anthropic", max_tokens=1024, max_retries=0
+        )
+
+    @staticmethod
+    def _history():
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        earlier = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "first answer"},
+            ]
+        )
+        return [HumanMessage("hi"), earlier, HumanMessage("again")]
+
+    def test_refused_replay_is_sent_again_asking_to_drop_stale_blocks(
+        self, monkeypatch
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH)
+
+        assert model.invoke(self._history()).text == "ok"
+
+        first, retry = requests
+        assert "block_binding" not in first["thinking"]
+        assert "thinking-binding-controls" not in first["beta"]
+        assert retry["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+        }
+        assert "thinking-binding-controls-2026-08-01" in retry["beta"]
+        assert retry["replayed"] == 1
+
+    def test_later_requests_of_that_endpoint_and_key_carry_the_setting(
+        self, monkeypatch
+    ):
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        model.invoke(self._history())
+
+        copy = model.model_copy()
+        requests = self._serve(copy, self.MISMATCH)
+        assert copy.invoke(self._history()).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" in requests[0]["thinking"]
+
+    async def test_later_async_requests_carry_it_but_another_account_does_not(
+        self, monkeypatch
+    ):
+        from pydantic import SecretStr
+
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        await model.ainvoke(self._history())
+
+        copy = model.model_copy()
+        requests = self._serve(copy, self.MISMATCH)
+        assert (await copy.ainvoke(self._history())).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" in requests[0]["thinking"]
+
+        # The same model id on another account or endpoint was never refused.
+        for elsewhere in (
+            {"anthropic_api_key": SecretStr("other")},
+            {"anthropic_api_url": "https://gateway.example"},
+        ):
+            other = model.model_copy(update=elsewhere)
+            requests = self._serve(other, self.MISMATCH)
+            await other.ainvoke("hi")
+            assert "block_binding" not in requests[0]["thinking"]
+            assert "thinking-binding-controls" not in requests[0]["beta"]
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_an_endpoint_refusing_the_setting_gets_no_thinking_blocks(
+        self, monkeypatch, use_async
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH, setting_status=400)
+
+        async def ask(messages):
+            if use_async:
+                return await model.ainvoke(messages)
+            return model.invoke(messages)
+
+        assert (await ask(self._history())).text == "ok"
+
+        refused, with_setting, without_blocks = requests
+        assert refused["replayed"] == 1
+        assert "block_binding" in with_setting["thinking"]
+        assert without_blocks["replayed"] == 0
+        assert "block_binding" not in without_blocks["thinking"]
+        assert "thinking-binding-controls" not in without_blocks["beta"]
+
+        # The setting did not work there, so a new conversation never sends it.
+        del requests[:]
+        assert (await ask("hi")).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" not in requests[0]["thinking"]
+
+    def test_a_copy_without_thinking_keeps_sending_none(self, monkeypatch):
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        model.invoke(self._history())
+
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        plain.invoke("hi")
+
+        assert requests == [
+            {"thinking": None, "beta": "", "replayed": 0, "roles": ["user"]}
+        ]
+
+    def test_without_adaptive_thinking_the_replayed_blocks_are_removed(
+        self, monkeypatch
+    ):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        earlier = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "first answer"},
+            ]
+        )
+
+        reply = plain.invoke([HumanMessage("hi"), earlier, HumanMessage("again")])
+
+        assert reply.text == "ok"
+        first, retry = requests
+        assert first["replayed"] == 2
+        assert retry == {
+            "thinking": None,
+            "beta": "",
+            "replayed": 0,
+            "roles": ["user", "assistant", "user"],
+        }
+
+    def test_a_turn_of_thinking_alone_is_left_out_of_that_resend(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        thought = AIMessage(
+            content=[{"type": "thinking", "thinking": "plan", "signature": "sig"}]
+        )
+
+        reply = plain.invoke([HumanMessage("hi"), thought, HumanMessage("again")])
+
+        assert reply.text == "ok"
+        first, retry = requests
+        assert first["roles"] == ["user", "assistant", "user"]
+        assert (retry["replayed"], retry["roles"]) == (0, ["user", "user"])
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_a_failed_retry_that_is_no_refusal_is_raised(
+        self, monkeypatch, use_async
+    ):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH, setting_status=500)
+
+        async def ask():
+            if use_async:
+                return await model.ainvoke(self._history())
+            return model.invoke(self._history())
+
+        with pytest.raises(anthropic.InternalServerError):
+            await ask()
+
+        assert len(requests) == 2
+
+    def test_other_bad_requests_are_not_sent_again(self, monkeypatch):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, "messages.1.content.0: unexpected block")
+
+        with pytest.raises(anthropic.BadRequestError):
+            model.invoke(self._history())
+
+        assert len(requests) == 1
+
+
+# =============================================================================
 # Test _apply_auto_config
 # =============================================================================
 

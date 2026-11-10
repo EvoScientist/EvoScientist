@@ -28,6 +28,7 @@ from .deepseek import EvoChatDeepSeek
 from .patches import (
     _patch_anthropic_strip_foreign_reasoning,
     _patch_anthropic_structured_output,
+    _patch_anthropic_thinking_binding,
     _patch_openai_compat_content,
     _patch_openai_responses_whole_tool_args,
     _patch_openrouter_structured_output,
@@ -792,6 +793,7 @@ def get_chat_model(
     if provider == "anthropic":
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
+        _patch_anthropic_thinking_binding()
         _fill_claude_structured_output(chat_model, model_id)
         _fit_claude_effort(chat_model)
 
