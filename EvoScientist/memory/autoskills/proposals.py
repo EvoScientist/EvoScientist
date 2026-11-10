@@ -1716,15 +1716,15 @@ def _same_bytes(installed: Path, copied: Path) -> bool:
                 return True
 
 
-# Files a skill gains by being used or browsed, which Undo removes with it;
-# compared without case, as Windows and macOS file names are.
+# Files a skill gains by being used or browsed (Finder's ``._<name>`` too), which
+# Undo removes with it; compared without case, as Windows and macOS names are.
 _CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
 
 def _is_cache(name: str) -> bool:
     """Whether a relative path is Python bytecode or a file browser's cache."""
     parts = name.split("/")
-    if parts[-1].casefold() in _CACHE_NAMES:
+    if parts[-1].casefold() in _CACHE_NAMES or parts[-1].startswith("._"):
         return True
     return len(parts) > 1 and parts[-2] == "__pycache__" and name.endswith(".pyc")
 

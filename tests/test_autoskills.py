@@ -1104,6 +1104,8 @@ def test_revert_refuses_changed_skill(tmp_path, change):
         "desktop.ini",
         "scripts/thumbs.db",
         "Desktop.ini",
+        "._SKILL.md",
+        "scripts/._check.py",
     ],
 )
 def test_revert_removes_caches_a_used_skill_leaves_behind(tmp_path, cache):
@@ -1287,7 +1289,14 @@ def test_revert_removes_a_copied_cache_the_browser_rewrote(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "added", ["scripts/check.pyc", "__pycache__/notes.md", "docs/.DS_Store.txt"]
+    "added",
+    [
+        "scripts/check.pyc",
+        "__pycache__/notes.md",
+        "docs/.DS_Store.txt",
+        "._docs/notes.md",
+        "docs/.notes.md",
+    ],
 )
 def test_revert_refuses_a_file_that_only_looks_like_a_cache(tmp_path, added):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
