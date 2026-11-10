@@ -95,6 +95,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
+    ("claude-fable-5-2", "claude-fable-5-2", "anthropic"),
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
     ("claude-sonnet-5-5", "claude-sonnet-5-5", "anthropic"),
@@ -165,6 +166,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
+    ("claude-fable-5.2", "anthropic/claude-fable-5.2", "openrouter"),
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),

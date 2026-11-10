@@ -85,7 +85,7 @@ def _update_final_live_frame(
 
 
 def _graph_target_for_local_agent(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     metadata: dict[str, object] | None = None,
 ) -> GraphTarget:
     folders: dict[str, str] = {}
@@ -1699,7 +1699,7 @@ def _resolve_ask_user_prompt(
 
 
 def _run_streaming(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     message: GraphRunInput,
     thread_id: str,
     show_thinking: bool,
@@ -1731,7 +1731,7 @@ def _run_streaming(
     Bridges the async stream_agent_events() into synchronous Rich Live rendering.
 
     Args:
-        agent: Compiled agent graph
+        agent: Compiled agent graph; None when the langgraph server runs it
         message: User message
         thread_id: Thread ID
         show_thinking: Whether to show thinking panel

@@ -2360,12 +2360,24 @@ class CustomSandboxBackend(LocalShellBackend):
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
+        On Windows a Git Bash path (``/c/...``) is read as the drive path it
+        names when that lies in the working folder or the media folder;
+        otherwise it stays a workspace path, so a workspace folder named with
+        one letter is still reached. A drive path that reaches the working
+        folder under another name (a junction, a ``subst`` drive, an 8.3 short
+        name) is mapped into it once resolved; one anywhere else is refused.
+
         In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
-        alias and let the parent resolve real absolute paths as-is.
+        alias or Git Bash path and let the parent resolve real absolute paths
+        as-is.
         """
         key = paths.host_file_tool_path(key)
+        drive_path = paths.git_bash_drive_path(key)
         if self._dangerous:
-            return super()._resolve_path(key)
+            return super()._resolve_path(drive_path or key)
+
+        if drive_path is not None and self._working_relative(drive_path) is not None:
+            key = drive_path
 
         media_path = self._media_path(key)
         if media_path is not None:
@@ -2386,6 +2398,20 @@ class CustomSandboxBackend(LocalShellBackend):
             else:
                 virtual = relative.as_posix()
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
+        if _is_windows() and _DRIVE_PATH_RE.match(key):
+            relative = self._working_relative(key)
+            if relative is None:
+                # An OSError, so the file tools report it as an error message
+                # rather than raising.
+                raise PermissionError(
+                    errno.EACCES,
+                    "Path is outside the workspace; file tools reach only paths "
+                    "inside it, and '/' is its root",
+                    key,
+                )
+            virtual = relative.as_posix()
+            return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -2412,17 +2438,39 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
+    def _working_relative(self, drive_path: str) -> Path | None:
+        """A Windows *drive_path* relative to the working folder, or None.
+
+        Compared as written, then resolved: the working folder is the resolved
+        one, so a junction, a ``subst`` drive or an 8.3 short name of it only
+        matches once resolved.
+        """
+        path = Path(drive_path)
+        try:
+            return path.relative_to(self.cwd)
+        except ValueError:
+            pass
+        try:
+            return path.resolve().relative_to(self.cwd)
+        except (ValueError, OSError, RuntimeError):
+            return None
+
     # Windows attachment references use a /C:/... file-tool alias so they
     # pass deepagents' validation before reaching this backend.
     def _media_relative(self, key: str) -> Path | None:
         """*key* relative to the media folder, if it names a path inside it.
 
         Compared as paths, not strings, so Windows keys with backslashes or
-        another drive-letter case match too.
+        another drive-letter case match too, and a Git Bash key (``/c/...``)
+        is read as the drive path it names, as ``_resolve_path`` reads it. A
+        Windows drive path that names the folder under another name (a
+        junction, a ``subst`` drive, an 8.3 short name) matches once resolved,
+        as the working folder does.
         """
         if self._media_dir is None:
             return None
-        path = Path(paths.host_file_tool_path(key))
+        key = paths.host_file_tool_path(key)
+        path = Path(paths.git_bash_drive_path(key) or key)
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):
@@ -2430,6 +2478,11 @@ class CustomSandboxBackend(LocalShellBackend):
                 return path.relative_to(base)
             except ValueError:
                 continue
+        if _is_windows() and _DRIVE_PATH_RE.match(str(path)):
+            try:
+                return path.resolve().relative_to(self._media_real)
+            except (ValueError, OSError, RuntimeError):
+                return None
         return None
 
     def _media_path(self, key: str) -> Path | None:

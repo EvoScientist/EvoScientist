@@ -80,10 +80,12 @@ def run_serve_once(
         *,
         workspace,
         runtime=None,
+        graph_gateway=None,
     ):
         captured["work_dir"] = work_dir
         captured["workspace"] = workspace
         captured["async_runtime"] = runtime
+        captured["load_graph_gateway"] = graph_gateway
         return object()
 
     def _fake_start_channels_bus_mode(

@@ -303,6 +303,11 @@ def _bootstrap_view(meta: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _intro_settled(view: dict[str, object]) -> bool:
+    """The user gave a name or declined: first contact is over for good."""
+    return bool(view["name"]) or view["intro"] == "skipped"
+
+
 def _bootstrap_decision(
     view: dict[str, object],
     *,
@@ -310,7 +315,7 @@ def _bootstrap_decision(
     human_messages: int,
 ) -> BootstrapVariant | None:
     """Which first-contact block (if any) this model call should carry."""
-    if view["name"] or view["intro"] == "skipped":
+    if _intro_settled(view):
         return None
     if human_messages != 1:
         return None
@@ -695,6 +700,12 @@ class EvoMemoryMiddleware(AgentMiddleware):
         path = self._file_path(_USER_PROFILE_PATH)
         try:
             content = self._read_text(path)
+            if content is None:
+                # A brand-new memory folder: this runs before the profile read.
+                template = dict(self._profile_specs).get(_USER_PROFILE_PATH)
+                if template is None or not self._write_text(path, template):
+                    return ""
+                content = self._read_text(path)
         except Exception as e:
             logger.debug("Skipping profile bootstrap: %s", e)
             return ""
@@ -707,6 +718,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
             logger.warning("Unparsable frontmatter in %s; skipping bootstrap", path)
             return ""
         view = _bootstrap_view(meta)
+        if _intro_settled(view):
+            # Nothing left to schedule, so the counters stay as they are.
+            return ""
         dirty = False
         if thread_id is not None and view["last_thread"] != thread_id:
             view["sessions"] += 1
@@ -858,17 +872,18 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for synchronous model calls."""
-        profile_content = self._profile_context_for_request()
+        # Before the profile read: its bookkeeping write rewrites the frontmatter.
+        bootstrap_context = self._bootstrap_context(
+            thread_id=_current_thread_id(),
+            human_messages=_count_human_messages(request.state),
+        )
         return self._inject_memory_context(
             request,
             observation_index_context=self._refresh_observation_index_context(
                 include_search_hints=_request_has_tools(request)
             ),
-            profile_content=profile_content,
-            bootstrap_context=self._bootstrap_context(
-                thread_id=_current_thread_id(),
-                human_messages=_count_human_messages(request.state),
-            ),
+            profile_content=self._profile_context_for_request(),
+            bootstrap_context=bootstrap_context,
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
@@ -884,6 +899,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
             include_search_hints=_request_has_tools(request),
         )
 
+        # Before the profile read: its bookkeeping write rewrites the frontmatter.
+        if self._enable_profile_memory and self._enable_profile_bootstrap:
+            bootstrap_context = await asyncio.to_thread(
+                self._bootstrap_context,
+                thread_id=thread_id,
+                human_messages=human_messages,
+            )
+
         if self._enable_observation_memory and self._enable_profile_memory:
             observation_index_context, profile_context = await asyncio.gather(
                 asyncio.to_thread(refresh_index),
@@ -893,14 +916,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             observation_index_context = await asyncio.to_thread(refresh_index)
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
-
-        # After the profile read so the file exists on a brand-new memory dir.
-        if self._enable_profile_memory and self._enable_profile_bootstrap:
-            bootstrap_context = await asyncio.to_thread(
-                self._bootstrap_context,
-                thread_id=thread_id,
-                human_messages=human_messages,
-            )
 
         return self._inject_memory_context(
             request,

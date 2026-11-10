@@ -252,7 +252,7 @@ def stop_ccproxy_tree(proc: subprocess.Popen | None) -> None:
     try:
         end_tree(psutil.Process(proc.pid))
     except psutil.Error:
-        # Cannot be found or inspected: stop it as a plain child.
+        # Cannot be found, inspected or killed: stop it as a plain child.
         stop_ccproxy(proc)
         return
     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -384,17 +384,34 @@ def recorded_ccproxy_running() -> int | None:
 
 def stop_recorded_ccproxy() -> int | None:
     """Stop the ccproxy an older release started for every session (every
-    server start, ``EvoSci update``); its pid, or None when none runs. A pid
-    whose process is not ccproxy (reused) is left alone."""
+    server start, ``EvoSci update``); its pid, or None when none runs or it
+    could not be stopped (its record then kept). A pid whose process is not
+    ccproxy (reused) is left alone."""
     record = _lasting_record()
     proc = _recorded_process()
     if proc is ...:
         # Kept: it may still be ours, and a later stop can try again.
         return None
-    record.unlink(missing_ok=True)
     if proc is None:
+        record.unlink(missing_ok=True)
         return None
-    return proc.pid if end_tree(proc) else None
+    import psutil
+
+    try:
+        ended = end_tree(proc)
+    except psutil.AccessDenied as exc:
+        # Kept, so a later start or update tries again.
+        pid = _refused_pid(exc, proc)
+        logger.warning(
+            "Could not stop the older release's ccproxy (pid %d): access denied. "
+            "End it as an administrator or as the user who started it (on "
+            "Windows, from an elevated prompt: taskkill /PID %d /T /F).",
+            pid,
+            pid,
+        )
+        return None
+    record.unlink(missing_ok=True)
+    return proc.pid if ended else None
 
 
 def end_ccproxy(pid: int, created: float | None, port: int) -> bool:
@@ -410,7 +427,15 @@ def end_ccproxy(pid: int, created: float | None, port: int) -> bool:
     same = created is not None and _same_process(pid, created)
     if not same and not _serves_on(proc, port):
         return False
-    return end_tree(proc)
+    import psutil
+
+    try:
+        return end_tree(proc)
+    except psutil.AccessDenied as exc:
+        logger.warning(
+            "Could not stop ccproxy (pid %d): access denied.", _refused_pid(exc, proc)
+        )
+        return False
 
 
 def _serves_on(proc, port: int) -> bool:
@@ -427,9 +452,17 @@ def _serves_on(proc, port: int) -> bool:
     )
 
 
+def _refused_pid(exc, proc) -> int:
+    """The pid of the tree member whose kill ``end_tree`` raised *exc* for."""
+    return proc.pid if exc.pid is None else exc.pid
+
+
 def end_tree(proc) -> bool:
     """Terminate the psutil process *proc* and its descendants, killing what
-    is left after 5 seconds; False when it was already gone."""
+    is left after 5 seconds (at once when the wait is refused, and without
+    waiting for what refused the terminate); False when it was already gone.
+    Raises ``psutil.AccessDenied`` when a kill was refused: that process may
+    run on."""
     import psutil
 
     try:
@@ -438,11 +471,32 @@ def end_tree(proc) -> bool:
         return False
     except psutil.AccessDenied:
         tree = [proc]
+    signalled, unsignalled = [], []
     for member in tree:
-        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+        try:
             member.terminate()
-    _gone, alive = psutil.wait_procs(tree, timeout=5)
-    for member in alive:
-        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied:
+            # Another user's (Linux): waiting for it would only take the
+            # 5 seconds, on every start that tries again.
+            unsignalled.append(member)
+        else:
+            signalled.append(member)
+    try:
+        _gone, alive = psutil.wait_procs(signalled, timeout=5)
+    except psutil.AccessDenied:
+        # A process this user may signal but not wait for (Windows): the
+        # kill below is the last try, and a refused one leaves it as it is.
+        alive = signalled
+    refused: psutil.AccessDenied | None = None
+    for member in [*alive, *unsignalled]:
+        try:
             member.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied as exc:
+            refused = exc
+    if refused is not None:
+        raise refused
     return True
