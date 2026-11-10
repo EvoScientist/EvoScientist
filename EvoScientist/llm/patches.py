@@ -818,12 +818,13 @@ def _patch_anthropic_structured_output() -> None:
 # the API then answers 400 "bound to a different conversation": for every
 # account on Claude Fable 5.2, for newer accounts on earlier models. Such a
 # request is sent again. With adaptive thinking it first carries
-# ``prefix_mismatch_behavior: "drop_block"``, so the API drops only the stale
-# blocks; once that worked, later requests of that endpoint, key and model
-# carry the setting from the start. Any other thinking mode cannot take the
-# setting, and an endpoint may refuse it (it is then not asked again), so the
-# last resort replays no thinking block at all. Requests that never fail are
-# untouched, so accounts the API does not check keep their replayed thinking.
+# ``prefix_mismatch_behavior: "drop_block"``, so the API drops the mismatched
+# blocks, along with the thinking blocks after them in that turn; once that
+# worked, later requests of that endpoint, key and model carry the setting from
+# the start. Any other thinking mode cannot take the setting, and an endpoint
+# may refuse it (it is then not asked again), so the last resort replays no
+# thinking block at all. Requests that never fail are untouched, so accounts
+# the API does not check keep their replayed thinking.
 # ---------------------------------------------------------------------------
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _THINKING_BINDING_SETTING = "prefix_mismatch_behavior"
@@ -942,9 +943,10 @@ def _remember_thinking_setting(model: Any, payload: dict, *, accepted: bool) -> 
             payload.get("model"),
         )
     else:
-        _logger.info(
+        _logger.warning(
             "anthropic: the endpoint of %s does not take the setting that drops "
-            "stale thinking blocks; not asking again",
+            "stale thinking blocks; from now on a request it refuses for them is "
+            "sent again without any replayed thinking",
             payload.get("model"),
         )
 

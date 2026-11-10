@@ -3749,7 +3749,7 @@ class TestAnthropicThinkingBinding:
     @pytest.mark.parametrize("refusal", [SETTING_REFUSED, BETA_REFUSED, MISMATCH])
     @pytest.mark.parametrize("use_async", [False, True])
     async def test_an_endpoint_refusing_the_setting_gets_no_thinking_blocks(
-        self, monkeypatch, use_async, refusal
+        self, monkeypatch, caplog, use_async, refusal
     ):
         model = self._model(monkeypatch)
         requests = self._serve(
@@ -3781,6 +3781,15 @@ class TestAnthropicThinkingBinding:
         assert (await ask(self._history())).text == "ok"
         assert [request["replayed"] for request in requests] == [1, 0]
         assert not any("block_binding" in request["thinking"] for request in requests)
+
+        # Said once, at a level the default logging shows.
+        (warning,) = [
+            record
+            for record in caplog.records
+            if record.name == "EvoScientist.llm.patches"
+            and record.levelname == "WARNING"
+        ]
+        assert "without any replayed thinking" in warning.getMessage()
 
     @pytest.mark.parametrize("use_async", [False, True])
     async def test_another_400_on_that_resend_is_no_refusal_of_the_setting(
