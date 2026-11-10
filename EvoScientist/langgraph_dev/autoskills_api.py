@@ -458,7 +458,8 @@ async def _run_lock(key: str) -> AsyncIterator[None]:
 
 
 async def run_now(workspace_dir: object) -> tuple[int, dict[str, Any]]:
-    """Start one manual AutoSkills run for a served project, unless one runs."""
+    """Start one manual AutoSkills run for a served project, unless a manual one
+    is in flight; a run the cron fired is not counted, so the two can overlap."""
     from EvoScientist.config import get_effective_config
     from EvoScientist.memory.autoskills import schedule
 
