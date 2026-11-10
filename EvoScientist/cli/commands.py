@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import contextlib
 import copy
 import json
 import logging
@@ -1435,7 +1436,8 @@ _serve_logger = logging.getLogger(__name__)
 class ServeRuntimeState:
     """Mutable serve-mode runtime shared by the poll loop and slash callbacks."""
 
-    agent: "CompiledStateGraph"
+    # None when the langgraph server runs the graph (no in-process agent).
+    agent: "CompiledStateGraph | None"
     thread_id: str
     # The session's workspace and, after resuming a run-mode thread, its run folder.
     dirs: SessionDirs
@@ -1447,7 +1449,7 @@ class ServeRuntimeState:
 
     def set_agent(
         self,
-        agent: "CompiledStateGraph",
+        agent: "CompiledStateGraph | None",
         channel_runtime: ChannelRuntime | None,
     ) -> None:
         self.agent = agent
@@ -1528,7 +1530,7 @@ async def _apply_serve_resume_state(
     import asyncio
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
-    workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    workspace_update: tuple[SessionDirs, CompiledStateGraph | None] | None = None
     old_thread_id = runtime_state.thread_id
     thread_changed = thread_id != old_thread_id
     # Serve pauses the thread it leaves and ends the wait on a thread restored
@@ -1565,6 +1567,7 @@ async def _apply_serve_resume_state(
             workspace=new_dirs.workspace,
             config=effective_config,
             runtime=runtime_state.async_runtime,
+            graph_gateway=runtime_state.runtime_gateways.graph_gateway,
         )
         proactive = getattr(channel_runtime, "proactive", None)
         moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
@@ -1831,7 +1834,7 @@ def _make_serve_cmd_completed_hook(
 
     async def _hook(
         ctx: CommandContext,
-        original_agent: "CompiledStateGraph",
+        original_agent: "CompiledStateGraph | None",
         cmd: Command,
     ) -> None:
         if ctx.agent is not None and ctx.agent is not original_agent:
@@ -1977,7 +1980,7 @@ def _serve_process_message(
     # Headless equivalent of the Rich CLI / TUI slash branch so channel
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
-    # None because the agent is always loaded before the serve loop polls.
+    # None because the agent load has finished before the serve loop polls.
     # Slash commands run on the application-owned runtime. The main thread
     # remains the signal owner while command coroutines share one stable loop.
     try:
@@ -2273,13 +2276,19 @@ def serve(
             f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
-    console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(workspace=dirs.workspace, config=config, runtime=async_runtime)
-
     from ..gateway import create_runtime_gateways_for_config
+    from ..gateway.types import runs_in_process
 
     runtime_gateways = create_runtime_gateways_for_config(
         config, backend=gateway_backend
+    )
+    if runs_in_process(runtime_gateways.graph_gateway):
+        console.print("[dim]Loading agent...[/dim]")
+    agent = _load_agent(
+        workspace=dirs.workspace,
+        config=config,
+        runtime=async_runtime,
+        graph_gateway=runtime_gateways.graph_gateway,
     )
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
@@ -3385,7 +3394,8 @@ def _main_callback(
         import asyncio
 
         from ..gateway import create_runtime_gateways_for_config
-        from ..sessions import get_checkpointer
+        from ..gateway.types import runs_in_process
+        from ..sessions import _upgrade_stored_dirs_safely, get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import cmd_run
         from .resume_hint import print_resume_hint
@@ -3396,7 +3406,17 @@ def _main_callback(
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
-            async with get_checkpointer() as checkpointer:
+            in_process = runs_in_process(graph_gateway)
+            if not in_process:
+                # Opening the local checkpointer upgrades the stored folders a
+                # resume reads; without it, upgrade them here (a no-op once
+                # done), as a server that failed or predates it did not.
+                await _upgrade_stored_dirs_safely()
+            # The langgraph server keeps its own checkpointer; the local one
+            # only backs an in-process agent.
+            async with (
+                get_checkpointer() if in_process else contextlib.nullcontext()
+            ) as checkpointer:
                 # Resolve resume target first so a bad --resume/--thread-id
                 # exits before the slow _load_agent() provider setup.
                 if thread_id:
@@ -3426,7 +3446,8 @@ def _main_callback(
                 else:
                     tid = await graph_gateway.create_thread()
                     session_dirs = dirs
-                console.print("[dim]Loading agent...[/dim]")
+                if in_process:
+                    console.print("[dim]Loading agent...[/dim]")
                 agent = await asyncio.to_thread(
                     _load_agent,
                     work_dir=str(session_dirs.work_dir),
@@ -3434,6 +3455,7 @@ def _main_callback(
                     checkpointer=checkpointer,
                     config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
+                    graph_gateway=graph_gateway,
                 )
                 rubric_result: str | None = None
                 try:

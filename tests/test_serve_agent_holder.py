@@ -87,6 +87,45 @@ def _runtime_state(
     )
 
 
+async def test_serve_resume_on_the_server_gateway_holds_no_agent(monkeypatch, tmp_path):
+    """On the server gateway serve starts without an agent, and a resume into
+    another workspace builds none either: it still adopts the folders and the
+    thread."""
+    import EvoScientist.EvoScientist as evo_mod
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    monkeypatch.setattr(evo_mod, "_config", None)
+    monkeypatch.setattr(evo_mod, "apply_config_to_env", lambda _cfg: None)
+    monkeypatch.setattr(
+        evo_mod, "create_cli_agent", MagicMock(side_effect=AssertionError("built"))
+    )
+    cfg = _config()
+    store = _thread_store()
+    gateways = _runtime_gateways(store)
+    gateways.graph_gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    old_ws, new_ws = tmp_path / "old-ws", tmp_path / "new-ws"
+    old_ws.mkdir()
+    new_ws.mkdir()
+    state = _runtime_state(
+        thread_id="old-tid",
+        dirs=SessionDirs(Workspace(old_ws)),
+        config=cfg,
+        runtime_gateways=gateways,
+    )
+    state.agent = None
+    runtime = ChannelRuntime(agent=None, thread_id="old-tid")
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=cfg)
+
+    with patch("EvoScientist.cli.commands._register_project", new=AsyncMock()):
+        await cb("new-tid", SessionDirs(Workspace(new_ws)))
+
+    assert state.agent is None
+    assert state.dirs == SessionDirs(Workspace(new_ws))
+    assert state.thread_id == "new-tid"
+    assert runtime.agent is None
+    assert runtime.thread_id == "new-tid"
+
+
 def test_serve_runtime_state_requires_owned_runtime():
     """Message processing cannot be constructed without its runtime owner."""
     with pytest.raises(TypeError, match="async_runtime"):
@@ -238,6 +277,7 @@ async def test_hook_updates_workspace_dir_on_resume():
         workspace=restored.workspace,
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.dirs == restored
     assert state.agent is reloaded_agent
@@ -443,6 +483,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert call_order == ["load", "sync"]
     assert state.thread_id == "new-tid"
@@ -556,6 +597,7 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
@@ -628,6 +670,7 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None
