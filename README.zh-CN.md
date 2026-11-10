@@ -529,6 +529,7 @@ EvoSci  # 或 EvoScientist — 交互模式（默认 TUI）
 ```bash
 EvoSci                            # 交互模式（默认 TUI）
 EvoSci -p "你的问题"              # 单次查询模式
+EvoSci --prompt-file prompt.txt   # 单次查询模式，从文件读取问题（适合命令行放不下的长 prompt）
 EvoSci --workdir /path/to/project # 在指定目录下启动
 EvoSci -m run                     # 隔离的会话级工作区
 EvoSci --ui cli                   # 经典 CLI（轻量）
