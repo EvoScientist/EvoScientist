@@ -3149,8 +3149,8 @@ def _main_callback(
     # Resolve --prompt-file before any prompt validation: read file content into
     # the prompt variable. This bypasses Windows CreateProcess 32767-char cmd
     # line limit when the query is very long (e.g. papers embedded in prompt).
-    if prompt_file:
-        if prompt:
+    if prompt_file is not None:
+        if prompt is not None:
             raise typer.BadParameter(
                 "Use either -p/--prompt or --prompt-file, not both."
             )

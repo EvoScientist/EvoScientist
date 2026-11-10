@@ -43,6 +43,16 @@ def test_prompt_file_missing_path_errors(tmp_path):
     assert "--prompt-file not found" in _plain(result)
 
 
+def test_empty_prompt_file_path_errors(monkeypatch):
+    def _stop(_rubric, *, prompt):
+        raise typer.Exit()
+
+    monkeypatch.setattr(commands, "_resolve_rubric_option", _stop)
+    result = runner.invoke(app, ["--prompt-file", ""])
+    assert result.exit_code != 0
+    assert "--prompt-file not found" in _plain(result)
+
+
 def test_prompt_file_and_prompt_together_error(tmp_path):
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("prompt from file", encoding="utf-8")
