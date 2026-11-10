@@ -1436,7 +1436,8 @@ _serve_logger = logging.getLogger(__name__)
 class ServeRuntimeState:
     """Mutable serve-mode runtime shared by the poll loop and slash callbacks."""
 
-    agent: "CompiledStateGraph"
+    # None when the langgraph server runs the graph (no in-process agent).
+    agent: "CompiledStateGraph | None"
     thread_id: str
     # The session's workspace and, after resuming a run-mode thread, its run folder.
     dirs: SessionDirs
@@ -1448,7 +1449,7 @@ class ServeRuntimeState:
 
     def set_agent(
         self,
-        agent: "CompiledStateGraph",
+        agent: "CompiledStateGraph | None",
         channel_runtime: ChannelRuntime | None,
     ) -> None:
         self.agent = agent

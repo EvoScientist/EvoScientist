@@ -112,6 +112,10 @@ def _load_agent(
             Signature ``(event, server_name, detail) -> None``.
         runtime: Optional application-scoped runtime used for MCP discovery.
         graph_gateway: The session's graph gateway; ``None`` always builds.
+            When no agent is built, *checkpointer*, *chat_model*,
+            *on_mcp_progress*, *events* and *runtime* are unused, and *config*
+            becomes the active config even with *chat_model* (the pure path
+            writes no globals).
     """
     from ..rubric_session import runs_in_process
 
