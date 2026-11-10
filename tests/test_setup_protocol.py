@@ -45,6 +45,7 @@ def test_manifest_shape(monkeypatch, plat):
             {"id": "node", "title": "Node.js"},
             {"id": "research-env", "title": "Python research environment"},
             {"id": "webui", "title": "WebUI"},
+            {"id": "server", "title": "Background agent server"},
         ],
     }
 
@@ -56,6 +57,7 @@ def test_manifest_lists_git_on_windows_only(monkeypatch):
         {"id": "git", "title": "Git for Windows"},
         {"id": "research-env", "title": "Python research environment"},
         {"id": "webui", "title": "WebUI"},
+        {"id": "server", "title": "Background agent server"},
     ]
 
 
@@ -176,16 +178,27 @@ def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
     )
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
-    assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env", "webui"]
+    assert [s["id"] for s in manifest()["stages"]] == [
+        "node",
+        "research-env",
+        "webui",
+        "server",
+    ]
 
 
 def test_json_emitter_writes_one_line_per_event(tmp_path):
-    out = (tmp_path / "out.txt").open("w+", encoding="utf-8")
-    emit = JsonEmitter(out)
-    emit(make_event("node", "running", progress=0.4, message="Downloading Node 24.x"))
-    emit(make_event("node", "done", detail={"source": "system", "version": "22.11.0"}))
-    out.seek(0)
-    lines = [json.loads(line) for line in out.read().splitlines()]
+    with (tmp_path / "out.txt").open("w+", encoding="utf-8") as out:
+        emit = JsonEmitter(out)
+        emit(
+            make_event("node", "running", progress=0.4, message="Downloading Node 24.x")
+        )
+        emit(
+            make_event(
+                "node", "done", detail={"source": "system", "version": "22.11.0"}
+            )
+        )
+        out.seek(0)
+        lines = [json.loads(line) for line in out.read().splitlines()]
     assert [e["status"] for e in lines] == ["running", "done"]
     assert all(set(e) <= _ALLOWED_FIELDS for e in lines)
 
@@ -528,3 +541,29 @@ def test_cli_skip_with_stage_exits_2(cli):
     result = cli("--stage", "node", "--skip", "webui")
     assert result.exit_code == 2
     assert result.stdout == ""
+
+
+def test_heartbeat_repeats_the_last_line():
+    from EvoScientist.setup.protocol import Heartbeat
+
+    lines: list[tuple[float, str]] = []
+    report = Heartbeat(lambda f, m: lines.append((f, m)))
+    report.beat()  # nothing reported yet: nothing to repeat
+    report(0.5, "Unpacking")
+    report.beat()
+    assert lines == [(0.5, "Unpacking"), (0.5, "Unpacking")]
+
+
+def test_heartbeat_tick_waits_for_the_interval():
+    from EvoScientist.setup.protocol import HEARTBEAT_INTERVAL, Heartbeat
+
+    now = {"t": 0.0}
+    lines: list[str] = []
+    report = Heartbeat(lambda _f, m: lines.append(m), clock=lambda: now["t"])
+    report(0.9, "Unpacking")
+    now["t"] = HEARTBEAT_INTERVAL - 0.1
+    report.tick()
+    assert lines == ["Unpacking"]
+    now["t"] = HEARTBEAT_INTERVAL
+    report.tick()
+    assert lines == ["Unpacking", "Unpacking"]

@@ -96,7 +96,8 @@ _auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
 _MCP_TOOLS_CACHE_KEY: str | None = None
 _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
 
-# Default agent (no checkpointer) — used by langgraph dev / LangSmith / notebooks.
+# Default agent (no checkpointer) — used by LangSmith / notebooks; the server
+# builds its graphs per project (``build_main_graph``).
 # Lazily constructed on first access so MCP tools are included without
 # spawning subprocesses at import time.
 _EvoScientist_agent = None
@@ -354,6 +355,7 @@ def _inject_subagent_middleware(
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
@@ -407,6 +409,7 @@ def _inject_subagent_middleware(
             create_context_editing_middleware(chat_model),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
+            WindowsFilePathMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
             # Inside the retry layer: marks each provider call for the
@@ -505,8 +508,8 @@ def _maybe_swap_async_subagents(
     swapped from synchronous in-process dicts to ``AsyncSubAgent`` references
     pointing at the langgraph dev graph of the same name.
 
-    The deployed graphs live in ``EvoScientist.langgraph_dev.graphs`` and
-    are registered in ``EvoScientist/langgraph_dev/langgraph.json``.
+    The deployed graphs are built in ``EvoScientist.langgraph_dev.factories``
+    and registered in ``EvoScientist/langgraph_dev/langgraph.json``.
 
     Adding a new async sub-agent requires no change here — flip
     ``async: true`` in its yaml and create the matching deployment graph.
@@ -558,12 +561,13 @@ def _maybe_swap_async_subagents(
 
     from deepagents import AsyncSubAgent
 
-    from .langgraph_dev.sdk import langgraph_dev_url
+    from .langgraph_dev.sdk import configured_langgraph_dev_url
 
-    # Self-dispatch target. Resolved through ``langgraph_dev_url`` so it tracks
-    # both ``langgraph_dev_port`` and ``langgraph_dev_host`` — a wildcard bind
-    # maps back to loopback, a pinned interface is honored verbatim.
-    dev_url = langgraph_dev_url(cfg)
+    # Self-dispatch target: the server this process's session uses, else (in
+    # the server itself) the one ``langgraph_dev_port`` and
+    # ``langgraph_dev_host`` name — a wildcard bind maps back to loopback, a
+    # pinned interface is honored verbatim.
+    dev_url = configured_langgraph_dev_url(cfg)
     out = []
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory
@@ -857,7 +861,7 @@ def _get_default_backend(
         MemoryFilesystemBackend,
         MergedSkillsBackend,
     )
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     cfg = _ensure_config()
     if guard_dangerous is None:
@@ -878,7 +882,7 @@ def _get_default_backend(
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
         refuse_delete=refuse_delete,
-        env=research_env_overrides(),
+        env=agent_shell_overrides(),
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )
@@ -901,13 +905,19 @@ def _get_default_backend(
 
 
 def _model_retry_middleware(
-    cfg=None, *, unattended: bool = False, honor_run_key: bool = True
+    cfg=None,
+    *,
+    unattended: bool = False,
+    honor_run_key: bool = True,
+    follow_auto_mode: bool = True,
 ):
     """The retry layer for one middleware list; always mounted, the budget may be 0."""
     from .middleware.model_retry import ModelRetryMiddleware
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tier_unattended = unattended or bool(getattr(cfg, "auto_mode", False))
+    tier_unattended = unattended or (
+        follow_auto_mode and bool(getattr(cfg, "auto_mode", False))
+    )
     budget = (
         cfg.auto_mode_retry_wait_seconds
         if tier_unattended
@@ -983,6 +993,7 @@ def _get_default_middleware(
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
@@ -1082,6 +1093,7 @@ def _get_default_middleware(
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        WindowsFilePathMiddleware(),
         # deepagents 0.7.0 dropped TodoListMiddleware from its defaults;
         # EXPERIMENT_WORKFLOW planning and the todo UI pipeline require it.
         TodoListMiddleware(),
@@ -1283,7 +1295,7 @@ def _build_hitl_interrupt_on(
     the session grant, :func:`_hitl_when_served` (a served graph) only under
     ``hitl_suppressed``. Otherwise a graph built once for an unattended session
     would silently disable HITL for a later attended session on the same
-    keepalive server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    shared server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
     lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
     so async agents can't hang on an approval nobody can deliver.
     """
@@ -1301,31 +1313,34 @@ def _build_hitl_interrupt_on(
 def _get_default_agent():
     """Build the default agent (no checkpointer) on first access.
 
-    This is the main graph the langgraph dev server serves, and the agent a
-    plain ``from EvoScientist import EvoScientist_agent`` gets. It always
-    loads MCP. Inside the server (``EVOSCIENTIST_SERVER_PROCESS``, set by
-    ``start_langgraph_dev``) async sub-agents dispatch back to that server;
-    elsewhere they stay disabled, since there is no server to dispatch to.
+    The agent a plain ``from EvoScientist import EvoScientist_agent`` gets
+    (notebooks, LangSmith), built for this process's folders. The server
+    builds its main graphs per project with :func:`build_main_graph`.
     """
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
-        from deepagents import create_deep_agent
-
-        cfg = _ensure_config()
         dirs = process_session_dirs()
-        workspace, work_dir = dirs.workspace, dirs.work_dir
-        be = _get_default_backend(workspace, work_dir=work_dir)
-        mw = _get_default_middleware(workspace=workspace, work_dir=work_dir, backend=be)
-
-        kwargs = load_mcp_and_build_kwargs(
-            be, mw, workspace=workspace, work_dir=work_dir
-        )
-
-        _EvoScientist_agent = create_deep_agent(
-            **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
-        ).with_config({"recursion_limit": cfg.recursion_limit})
+        _EvoScientist_agent = build_main_graph(dirs.workspace, work_dir=dirs.work_dir)
     return _EvoScientist_agent
+
+
+def build_main_graph(workspace: Workspace, *, work_dir: str | Path):
+    """Build the main graph for *workspace*, working in *work_dir*.
+
+    What the server serves for a project, and the default agent's builder.
+    It always loads MCP; async sub-agents dispatch back to the server inside
+    the server process only.
+    """
+    from deepagents import create_deep_agent
+
+    cfg = _ensure_config()
+    be = _get_default_backend(workspace, work_dir=work_dir)
+    mw = _get_default_middleware(workspace=workspace, work_dir=work_dir, backend=be)
+    kwargs = load_mcp_and_build_kwargs(be, mw, workspace=workspace, work_dir=work_dir)
+    return create_deep_agent(
+        **kwargs,
+        interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
+    ).with_config({"recursion_limit": cfg.recursion_limit})
 
 
 def __getattr__(name: str):
@@ -1392,7 +1407,7 @@ def create_cli_agent(
         MemoryFilesystemBackend,
         MergedSkillsBackend,
     )
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
@@ -1430,7 +1445,7 @@ def create_cli_agent(
         # Guard derived per call from the run's HITL-suppression state (see
         # CustomSandboxBackend._effective_guard_dangerous), not baked here.
         guard_dangerous=False,
-        env=research_env_overrides(),
+        env=agent_shell_overrides(),
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )

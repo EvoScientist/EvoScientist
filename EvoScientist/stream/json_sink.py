@@ -56,13 +56,16 @@ def redirect_console_to_stderr() -> None:
 
     In stream-json mode stdout must carry only JSONL event lines, but the shared
     ``console`` singleton (used everywhere for status lines, separators, resume
-    hints, error panels) writes to stdout by default. Reassigning its ``file``
-    once moves every existing ``console.print`` call to stderr without touching
-    individual call sites.
+    hints, error panels) writes to stdout by default. Switching it to stderr
+    once moves every existing ``console.print`` call there without touching
+    individual call sites. It follows ``sys.stderr`` as it is at each print,
+    so a later replacement (a test's capture) is not left pointing at a closed
+    stream.
     """
     from .console import console
 
-    console.file = sys.stderr
+    console.file = None
+    console.stderr = True
 
 
 async def stream_json(

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from EvoScientist import paths
 from EvoScientist.mcp.client import (
     _build_connections,
     _filter_tools,
@@ -27,6 +28,11 @@ from EvoScientist.mcp.client import (
     remove_mcp_server,
 )
 from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
+
+
+def _lower_keys(env: dict[str, str]) -> dict[str, str]:
+    return {k.lower(): v for k, v in env.items()}
+
 
 # ---- _interpolate_env ----
 
@@ -125,6 +131,28 @@ class TestResolveCommand:
         assert Path(result).stem.lower() in ("python", "python3")
         assert result != "python"  # resolved, not the bare name
 
+    @pytest.mark.skipif(os.name == "nt", reason="finds commands by PATHEXT")
+    def test_relative_command_made_absolute(self, tmp_path, monkeypatch):
+        """The stdio transport looks up a relative command again, on the
+        event loop, where ``langgraph dev`` refuses the disk access."""
+        tool = tmp_path / "srv.sh"
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+
+        assert Path(_resolve_command("./srv.sh")) == tool
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows executable lookup")
+    def test_windows_venv_exe_found_next_to_python(self, tmp_path, monkeypatch):
+        """A venv console script on Windows is ``<name>.exe``."""
+        (tmp_path / "my-mcp-tool.exe").write_text("")
+        monkeypatch.setattr("shutil.which", lambda _: None)
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client.sys.executable", str(tmp_path / "python.exe")
+        )
+
+        assert _resolve_command("my-mcp-tool") == str(tmp_path / "my-mcp-tool.exe")
+
     def test_found_in_python_bin(self, tmp_path, monkeypatch):
         """Falls back to sys.executable's directory when not in PATH."""
 
@@ -142,6 +170,31 @@ class TestResolveCommand:
 
         assert _resolve_command("my-mcp-tool") == str(fake_exe)
 
+    def test_node_command_is_never_taken_from_the_current_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """The launch agrees with the Node check: an ``npx`` in the current
+        directory is not the one on PATH."""
+        cwd = _fake_npx(tmp_path / "project")
+        on_path = _fake_npx(tmp_path / "bin")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(on_path)]))
+        assert Path(_resolve_command("npx")).parent == on_path
+
+    def test_node_command_with_a_folder_part_is_not_looked_up_on_path(
+        self, tmp_path, monkeypatch
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        on_path = tmp_path / "bin"
+        _fake_npx(on_path / "node_modules" / ".bin")
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", str(on_path))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        command = f"node_modules/.bin/{name}"
+        # The file mcp.yaml names, read against the current directory.
+        assert Path(_resolve_command(command)) == tmp_path / command
+
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
         monkeypatch.setattr("shutil.which", lambda _: None)
@@ -153,7 +206,8 @@ class TestResolveCommand:
     def test_build_connections_resolves_command(self, monkeypatch):
         """_build_connections uses _resolve_command so the full path appears in output."""
         monkeypatch.setattr(
-            "EvoScientist.mcp.client._resolve_command", lambda cmd: f"/resolved/{cmd}"
+            "EvoScientist.mcp.client._resolve_command",
+            lambda cmd, _path=None: f"/resolved/{cmd}",
         )
         config = {"srv": {"transport": "stdio", "command": "mytool", "args": []}}
         conns = _build_connections(config)
@@ -192,8 +246,16 @@ class TestBuildConnections:
             "REQUESTS_CA_BUNDLE",
             "CURL_CA_BUNDLE",
             "NODE_EXTRA_CA_CERTS",
+            "NODE_USE_SYSTEM_CA",
+            "NODE_USE_ENV_PROXY",
         ):
             monkeypatch.delenv(var, raising=False)
+        # An npx server also gets the host's npm network settings.
+        from EvoScientist.setup.node import NPM_NETWORK_VARS
+
+        for var in NPM_NETWORK_VARS:
+            monkeypatch.delenv(var, raising=False)
+            monkeypatch.delenv(var.upper(), raising=False)
         config = {
             "fs": {
                 "transport": "stdio",
@@ -227,6 +289,205 @@ class TestBuildConnections:
         }
         conns = _build_connections(config)
         assert conns["fs"]["env"]["https_proxy"] == "http://user-proxy:9000"
+
+    @pytest.fixture
+    def node_rules(self, monkeypatch, tmp_path):
+        """The Node rules' inputs: mirror, configured registry, private Node;
+        ``npx`` resolves to an absolute path whether or not this host has one."""
+        from EvoScientist.setup import node as setup_node
+
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client._resolve_command",
+            lambda command, _path=None: str(tmp_path / "bin" / command),
+        )
+
+        state = {"mirror": "default", "registry": None, "private": False}
+        monkeypatch.setattr(setup_node, "configured_mirror", lambda: state["mirror"])
+        monkeypatch.setattr(
+            setup_node, "configured_npm_registry", lambda _e, _x: state["registry"]
+        )
+        monkeypatch.setattr(setup_node, "is_private", lambda _c: state["private"])
+        for name in (
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "node_use_system_ca",
+            "node_use_env_proxy",
+        ):
+            monkeypatch.delenv(name, raising=False)
+            monkeypatch.delenv(name.upper(), raising=False)
+        return state
+
+    def test_npx_server_gets_the_npm_network_settings(self, monkeypatch, node_rules):
+        monkeypatch.setenv("npm_config_cafile", "/ca.pem")
+        monkeypatch.setenv("npm_config_prefix", "/somewhere")
+        monkeypatch.setenv("NODE_OPTIONS", "--x")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        # Windows stores environment names in upper case; npm reads them
+        # without case, so compare names that way.
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        assert env["npm_config_cafile"] == "/ca.pem"
+        assert "npm_config_prefix" not in env
+        assert "node_options" not in env
+
+    def test_npx_server_gets_npmmirror_under_cn(self, node_rules):
+        node_rules["mirror"] = "cn"
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_registry"] == "https://registry.npmmirror.com/"
+
+    def test_npx_server_keeps_the_users_registry_under_cn(
+        self, monkeypatch, node_rules
+    ):
+        node_rules["mirror"] = "cn"
+        node_rules["registry"] = "https://registry.yarnpkg.com/"
+        monkeypatch.setenv("npm_config_registry", "https://registry.yarnpkg.com/")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        assert env["npm_config_registry"] == "https://registry.yarnpkg.com/"
+
+    def test_private_npx_server_gets_the_proxy_switch(self, monkeypatch, node_rules):
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_ENV_PROXY"] == "1"
+        assert env["NODE_USE_SYSTEM_CA"] == "1"
+        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1,[::1]"
+
+    def test_an_unresolved_npx_asks_no_npm_for_a_registry(
+        self, monkeypatch, node_rules, tmp_path
+    ):
+        """With no npx found there is no folder to read npm from; a bare name
+        would make the lookup try the current directory."""
+        from EvoScientist.setup import node as setup_node
+
+        node_rules["mirror"] = "cn"
+        asked: list = []
+        monkeypatch.setattr(
+            setup_node, "configured_npm_registry", lambda e, x: asked.append(x)
+        )
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client._resolve_command",
+            lambda command, _path=None: command,
+        )
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        # No env at all when nothing is forwarded (as on a bare Windows host).
+        env = _lower_keys(_build_connections(config)["fs"].get("env", {}))
+        assert asked == []
+        assert "npm_config_registry" not in env
+
+    def test_private_npx_server_keeps_the_users_system_ca_choice(
+        self, monkeypatch, node_rules
+    ):
+        """The MCP SDK passes a fixed set of variables, so the user's opt-out
+        has to be forwarded for the rule to see it."""
+        node_rules["private"] = True
+        monkeypatch.setenv("NODE_USE_SYSTEM_CA", "0")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_SYSTEM_CA"] == "0"
+
+    def test_private_npx_server_keeps_the_users_proxy_switch(
+        self, monkeypatch, node_rules
+    ):
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        monkeypatch.setenv("NODE_USE_ENV_PROXY", "0")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_ENV_PROXY"] == "0"
+
+    def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
+        node_rules.update(mirror="cn", private=True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {
+                    "npm_config_registry": "https://own.example/",
+                    "NODE_USE_ENV_PROXY": "0",
+                },
+            }
+        }
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_registry"] == "https://own.example/"
+        assert env["NODE_USE_ENV_PROXY"] == "0"
+
+    def test_server_env_socks_proxy_leaves_the_switch_off(
+        self, monkeypatch, node_rules
+    ):
+        """The switch is decided on what the server gets, its own env included."""
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"https_proxy": "socks4://127.0.0.1:1080"},
+            }
+        }
+        assert "NODE_USE_ENV_PROXY" not in _build_connections(config)["fs"]["env"]
+
+    def test_registry_is_asked_with_the_servers_own_env(self, monkeypatch, node_rules):
+        """A server's own ``.npmrc`` (``npm_config_userconfig`` or ``HOME`` in
+        mcp.yaml) decides its registry, so no npmmirror is forced over it."""
+        from EvoScientist.setup import node as setup_node
+
+        node_rules["mirror"] = "cn"
+        asked: list[dict] = []
+
+        def configured(env, _exe):
+            asked.append(dict(env))
+            if env.get("npm_config_userconfig") == "/srv/.npmrc":
+                return "https://private.example/"
+            return None
+
+        monkeypatch.setattr(setup_node, "configured_npm_registry", configured)
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"npm_config_userconfig": "/srv/.npmrc"},
+            }
+        }
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        assert asked[0]["npm_config_userconfig"] == "/srv/.npmrc"
+        assert "npm_config_registry" not in env
+
+    @pytest.mark.parametrize(
+        "user_env", [{"HTTPS_PROXY": None}, {"NO_PROXY": None}, {True: "x"}]
+    )
+    def test_server_env_that_is_not_text_still_builds_every_server(
+        self, monkeypatch, node_rules, user_env
+    ):
+        """A key with no value in ``mcp.yaml`` loads as None, ``ON:`` as True."""
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": user_env,
+            },
+            "py": {"transport": "stdio", "command": "uvx", "args": ["x"]},
+        }
+        conns = _build_connections(config)
+        assert sorted(conns) == ["fs", "py"]
+        assert user_env.items() <= conns["fs"]["env"].items()
+
+    def test_other_servers_get_no_node_rules(self, monkeypatch, node_rules):
+        node_rules.update(mirror="cn", private=True)
+        monkeypatch.setenv("npm_config_cafile", "/ca.pem")
+        config = {"py": {"transport": "stdio", "command": "uvx", "args": ["x"]}}
+        env = _build_connections(config)["py"].get("env", {})
+        assert "npm_config_registry" not in env
+        assert "npm_config_cafile" not in env
 
     def test_http_connection(self):
         config = {
@@ -2281,6 +2542,113 @@ class TestLoadToolsProgressCallback:
             ("error", "srv", "boom"),
         ]
 
+    async def test_unresolved_node_server_is_reported_and_not_started(
+        self, monkeypatch, tmp_path
+    ):
+        """An ``npx`` not on PATH would be taken from the current directory."""
+        from EvoScientist.mcp import client as mcp_client
+
+        seen: dict[str, dict] = {}
+        self._patch_client(monkeypatch, {"srv": ["tool1"]})
+        import langchain_mcp_adapters.client as lc_client
+
+        fake = lc_client.MultiServerMCPClient
+
+        def client(connections):
+            seen.update(connections)
+            return fake(connections)
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", client)
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        cwd = _fake_npx(tmp_path / "project")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(tmp_path / "empty")]))
+        config = {
+            "fs": {"transport": "stdio", "command": "npx", "args": []},
+            "srv": {"transport": "stdio", "command": "demo"},
+        }
+        events: list[tuple[str, str, str]] = []
+
+        result = await mcp_client._load_tools(
+            config, on_progress=lambda *e: events.append(e)
+        )
+
+        assert list(seen) == ["srv"]
+        assert result == {"fs": [], "srv": ["tool1"]}
+        assert events[:2] == [
+            ("start", "fs", ""),
+            (
+                "error",
+                "fs",
+                "npx was not found on PATH. Run 'EvoSci setup' to install Node.js",
+            ),
+        ]
+
+    async def test_unresolved_node_server_in_langgraph_dev_names_server_stop(
+        self, monkeypatch, tmp_path
+    ):
+        """The server keeps a failed load until it restarts, so EvoSci setup
+        alone does not bring the server's tools back."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        events: list[tuple[str, str, str]] = []
+
+        await mcp_client._load_tools(
+            {"fs": {"transport": "stdio", "command": "npx", "args": []}},
+            on_progress=lambda *e: events.append(e),
+        )
+
+        (failure,) = [e for e in events if e[0] == "error"]
+        assert "EvoSci server stop" in failure[2]
+
+    async def test_unresolved_node_server_alone_returns_its_failure(
+        self, monkeypatch, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        config = {"fs": {"transport": "stdio", "command": "npx"}}
+        assert await mcp_client._load_tools(config) == {"fs": []}
+
+    def test_node_server_with_its_own_path_is_resolved_there(
+        self, monkeypatch, tmp_path
+    ):
+        """On POSIX the server's command is searched on the PATH its mcp.yaml
+        env sets; it starts from there, never from the current directory."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        own = _fake_npx(tmp_path / "opt" / "node22" / "bin")
+        monkeypatch.chdir(_fake_npx(tmp_path / "project"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        server_path = os.pathsep.join([".", str(own)])
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "env": {"PATH": server_path},
+            },
+            "cwd": {"transport": "stdio", "command": "npx", "env": {"PATH": "."}},
+        }
+        assert mcp_client._unresolved_node_servers(config) == ["cwd"]
+        command = mcp_client._build_connections(config)["fs"]["command"]
+        assert Path(command).parent == own
+
     async def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
@@ -2432,14 +2800,28 @@ class TestLoadToolsProgressCallback:
             ("error", "srv", "opening handshake timed out"),
         ]
 
-    def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
+    @pytest.mark.parametrize("server_process", [False, True])
+    @pytest.mark.parametrize(
+        "transport", ["stdio", "http", "streamable_http", "sse", "websocket"]
+    )
+    def test_default_timeout_by_transport_and_process(
+        self, monkeypatch, server_process, transport
+    ):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        assert mcp_client._get_tools_timeout() is None
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
+        if server_process:
+            monkeypatch.setattr(paths, "SERVER_PROCESS", True)
+        if transport != "stdio":
+            expected = mcp_client._NETWORK_GET_TOOLS_TIMEOUT_SECONDS
+        elif server_process:
+            expected = mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS
+        else:
+            expected = None
+        assert mcp_client._get_tools_timeout(transport) == expected
 
-    async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
-        """Inside ``langgraph dev`` the loaders pass the server limit through."""
+    async def test_loaders_delegate_default_deadlines_per_connection(self, monkeypatch):
+        """The per-server loader determines defaults for each connection."""
         from EvoScientist.mcp import client as mcp_client
 
         seen: list[float | None] = []
@@ -2449,12 +2831,12 @@ class TestLoadToolsProgressCallback:
             return {}
 
         monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
 
         config = {"srv": {"transport": "stdio", "command": "demo"}}
         await mcp_client.aload_mcp_tools(config)
 
-        assert seen == [mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS]
+        assert seen == [None]
 
     @pytest.mark.parametrize(
         ("server_process", "expected_tools"),
@@ -2483,9 +2865,9 @@ class TestLoadToolsProgressCallback:
         monkeypatch.setattr(lc_client, "MultiServerMCPClient", _SlowClient)
         monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
         if server_process is None:
-            monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+            monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         else:
-            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", server_process)
+            monkeypatch.setattr(paths, "SERVER_PROCESS", server_process == "1")
 
         config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
         result = mcp_client.load_mcp_tools(config)
@@ -2515,7 +2897,7 @@ class TestLoadToolsProgressCallback:
 
         monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
         monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
 
         config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
         with caplog.at_level(logging.WARNING, logger=mcp_client.logger.name):
@@ -2530,7 +2912,144 @@ class TestLoadToolsProgressCallback:
         ), warnings
 
 
+class TestNetworkDiscoveryDeadline:
+    @pytest.mark.parametrize(
+        "transport", ["http", "streamable_http", "sse", "websocket"]
+    )
+    async def test_cli_skips_hung_network_server_and_loads_healthy_tools(
+        self, monkeypatch, transport
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        cancelled = asyncio.Event()
+        tool = SimpleNamespace(name="healthy_tool")
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                if server_name == "hung":
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                return [tool]
+
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+        events = []
+        config = {
+            "hung": {"transport": transport, "url": "http://localhost:1/mcp"},
+            "healthy": {"transport": "http", "url": "http://localhost:2/mcp"},
+        }
+
+        result = await asyncio.wait_for(
+            mcp_client.aload_mcp_tools(
+                config, on_progress=lambda *event: events.append(event)
+            ),
+            timeout=1,
+        )
+
+        assert result == {"main": [tool]}
+        assert cancelled.is_set()
+        assert ("error", "hung", "timed out after 0.02s") in events
+        assert ("success", "healthy", "1") in events
+
+    async def test_server_that_hangs_while_closing_is_given_up_on(self, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.Event().wait()
+
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+        events = []
+
+        result = await asyncio.wait_for(
+            mcp_client._load_tools(
+                {"hung": {"transport": "streamable_http", "url": "http://x/mcp"}},
+                on_progress=lambda *event: events.append(event),
+            ),
+            timeout=1,
+        )
+
+        assert result == {"hung": []}
+        assert ("error", "hung", "timed out after 0.02s") in events
+
+    async def test_cli_stdio_startup_is_not_cut_off_by_network_budget(
+        self, monkeypatch
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.03)
+                return ["stdio_tool"]
+
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001)
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+
+        result = await mcp_client._load_tools(
+            {"stdio": {"transport": "stdio", "command": "demo"}}
+        )
+
+        assert result == {"stdio": ["stdio_tool"]}
+
+    async def test_explicit_deadline_takes_precedence_over_network_budget(
+        self, monkeypatch
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.03)
+                return ["network_tool"]
+
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001)
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+
+        result = await mcp_client._load_tools(
+            {"remote": {"transport": "http", "url": "http://localhost:1/mcp"}},
+            timeout=1,
+        )
+
+        assert result == {"remote": ["network_tool"]}
+
+
 # ---- _ensure_node_for_stdio ----
+
+
+def _fake_npx(directory: Path) -> Path:
+    """A folder holding an ``npx`` the PATH lookup accepts on this OS."""
+    directory.mkdir(parents=True)
+    exe = directory / ("npx.cmd" if os.name == "nt" else "npx")
+    exe.write_text("")
+    exe.chmod(0o755)
+    return directory
 
 
 class TestEnsureNodeForStdio:
@@ -2539,7 +3058,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -2551,14 +3070,75 @@ class TestEnsureNodeForStdio:
         monkeypatch.setattr(setup_node, "activate_runtime", activate)
         return calls
 
-    def test_installs_when_npx_missing(self, monkeypatch, calls):
+    def test_installs_when_npx_missing(self, monkeypatch, calls, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         )
         assert calls == {"ensure": 1, "activate": 1}
+
+    def test_npx_on_the_servers_own_path_needs_no_install(
+        self, monkeypatch, calls, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        own = _fake_npx(tmp_path / "opt" / "node22" / "bin")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx", "env": {"PATH": str(own)}}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+
+    def test_npx_in_the_current_directory_does_not_count(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """On Windows ``shutil.which`` looks in the current directory first; an
+        ``npx.cmd`` there must not stand in for a Node on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(_fake_npx(tmp_path / "project"))
+        # "." is how PATH reaches the current directory on POSIX.
+        monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "empty"), "."]))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx"}}
+        )
+        assert calls == {"ensure": 1, "activate": 1}
+
+    def test_a_command_with_a_folder_part_is_not_looked_up(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(tmp_path)
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": f"node_modules/.bin/{name}"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+
+    def test_a_command_with_its_windows_extension_is_found(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``command: npx.cmd`` names the ``npx.cmd`` on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+        from EvoScientist.setup import _install
+
+        monkeypatch.setattr(_install, "_WINDOWS", True)
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        nodejs = tmp_path / "nodejs"
+        nodejs.mkdir()
+        (nodejs / "npx.cmd").write_text("")
+        monkeypatch.setenv("PATH", str(nodejs))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx.cmd"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+        assert mcp_client._resolve_command("npx.cmd") == str(nodejs / "npx.cmd")
 
     @pytest.mark.parametrize(
         "server",
@@ -2568,18 +3148,14 @@ class TestEnsureNodeForStdio:
             {"transport": "http", "url": "http://x"},
         ],
     )
-    def test_skips_when_not_needed(self, monkeypatch, calls, server):
+    def test_skips_when_not_needed(self, monkeypatch, calls, server, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(
-            mcp_client.shutil,
-            "which",
-            lambda c: "/usr/bin/npx" if c == "npx" else None,
-        )
+        monkeypatch.setenv("PATH", str(_fake_npx(tmp_path / "bin")))
         mcp_client._ensure_node_for_stdio({"s": server})
         assert calls == {"ensure": 0, "activate": 0}
 
-    def test_failure_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_failure_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         from EvoScientist.mcp import client as mcp_client
         from EvoScientist.setup import node as setup_node
         from EvoScientist.setup.protocol import StageError
@@ -2587,8 +3163,8 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2597,7 +3173,7 @@ class TestEnsureNodeForStdio:
         assert "offline" in caplog.text
         assert "EvoSci setup" in caplog.text
 
-    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         """A non-StageError from the install must not abort the MCP load for
         every server."""
         from EvoScientist.mcp import client as mcp_client
@@ -2606,8 +3182,8 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2615,15 +3191,19 @@ class TestEnsureNodeForStdio:
             )
         assert "compression type 99" in caplog.text
 
-    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
+    def test_langgraph_dev_uses_node_installed_since_start_without_installing(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """The server lasts across sessions: a session or EvoSci setup may
+        have installed the private Node after it started."""
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
         )
-        assert calls == {"ensure": 0, "activate": 0}
+        assert calls == {"ensure": 0, "activate": 1}
 
     async def test_load_tools_checks_node_before_building_connections(
         self, monkeypatch
@@ -2635,7 +3215,48 @@ class TestEnsureNodeForStdio:
             mcp_client, "_ensure_node_for_stdio", lambda _c: order.append("node")
         )
         monkeypatch.setattr(
+            mcp_client,
+            "_unresolved_node_servers",
+            lambda _c: order.append("lookup") or [],
+        )
+        monkeypatch.setattr(
             mcp_client, "_build_connections", lambda _c: order.append("connect") or {}
         )
         await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
-        assert order == ["node", "connect"]
+        assert order == ["node", "lookup", "connect"]
+
+    async def test_load_tools_builds_connections_off_the_event_loop(self, monkeypatch):
+        """Under mirror: cn building them may run ``npm config get registry``."""
+        import threading
+
+        from EvoScientist.mcp import client as mcp_client
+
+        threads: list[threading.Thread] = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client,
+            "_build_connections",
+            lambda _c: threads.append(threading.current_thread()) or {},
+        )
+        await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
+        (thread,) = threads
+        assert thread is not threading.current_thread()
+
+    async def test_load_tools_looks_node_up_off_event_loop(self, monkeypatch):
+        """Looking ``npx`` up on PATH calls ``os.access``, which blockbuster
+        refuses on an event loop inside ``langgraph dev``."""
+        import threading
+
+        from EvoScientist.mcp import client as mcp_client
+
+        threads: list[threading.Thread] = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client,
+            "_unresolved_node_servers",
+            lambda _c: threads.append(threading.current_thread()) or [],
+        )
+        monkeypatch.setattr(mcp_client, "_build_connections", lambda _c: {})
+        await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
+        (thread,) = threads
+        assert thread is not threading.current_thread()

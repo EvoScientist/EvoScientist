@@ -9,7 +9,7 @@ import EvoScientist.commands.implementation  # noqa: F401  (registers the comman
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.manager import manager
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 _LOADED_AGENT = object()
 

@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, Interrupt
 
+from EvoScientist.backends import CustomSandboxBackend
 from EvoScientist.middleware.ask_user import AskUserMiddleware
 from EvoScientist.stream.events import stream_agent_events
 from EvoScientist.stream.summarization import (
@@ -21,7 +22,7 @@ from EvoScientist.stream.tool_results import (
     _extract_command_tool_content,
     _extract_tool_content,
 )
-from tests.stream_v3_fakes import (
+from tests.fakes.stream_v3 import (
     ErroringV3Agent,
     FakeSubagent,
     FakeV3Agent,
@@ -652,6 +653,184 @@ class TestV3ProtocolStreaming:
         assert tool_result["success"] is True
         assert tool_result["id"] == "tc1"
 
+    async def test_a_tool_result_with_error_status_is_a_failure(self):
+        """An MCP server's error result reaches the stream as a handled
+        ToolMessage whose text carries no error marker."""
+        output = ToolMessage(
+            name="lookup_dataset",
+            content="Error executing tool lookup_dataset: dataset not found: iris",
+            tool_call_id="tc1",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(output),
+            ]
+        )
+        events = await collect_events(agent)
+        tool_result = next(e for e in events if e.get("type") == "tool_result")
+        assert tool_result["success"] is False
+
+    async def test_a_serialized_tool_message_is_read_like_the_message(self):
+        """The server gateway delivers tool results in their JSON form."""
+        failed = {
+            "type": "tool",
+            "content": [{"type": "text", "text": "dataset not found: iris"}],
+            "name": "lookup_dataset",
+            "tool_call_id": "tc1",
+            "status": "error",
+        }
+        done = {
+            "type": "tool",
+            "content": "File content",
+            "name": "read_file",
+            "tool_call_id": "tc2",
+            "status": "success",
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(failed),
+                tool_started("read_file", {"path": "notes.txt"}, tool_call_id="tc2"),
+                tool_finished(done, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [(r["content"], r["success"]) for r in results] == [
+            ("dataset not found: iris", False),
+            ("File content", True),
+        ]
+
+    async def test_an_execute_result_is_judged_by_its_exit_code(self):
+        """``execute`` reports ``status="success"`` and puts the exit code in
+        ``artifact``; the text can say anything in its first lines."""
+        failed = ToolMessage(
+            name="execute",
+            content="l1\nl2\nl3\nl4\n[Command failed with exit code 3]",
+            tool_call_id="tc1",
+            artifact={"exit_code": 3, "truncated": False},
+        )
+        passed = {
+            "type": "tool",
+            "content": "Error: a line the command printed\n"
+            "[Command succeeded with exit code 0]",
+            "name": "execute",
+            "tool_call_id": "tc2",
+            "status": "success",
+            "artifact": {"exit_code": 0, "truncated": False},
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("execute", {"command": "build"}),
+                tool_finished(failed),
+                tool_started("execute", {"command": "check"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
+
+    async def test_a_long_result_keeps_its_end(self):
+        """A long command output is cut in the middle, so its exit status stays."""
+        content = (
+            "\n".join(f"collected line {i}" for i in range(400))
+            + "\n[Command failed with exit code 1]"
+        )
+        output = ToolMessage(
+            name="execute",
+            content=content,
+            tool_call_id="tc1",
+            artifact={"exit_code": 1, "truncated": False},
+        )
+        agent = FakeV3Agent(
+            [tool_started("execute", {"command": "pytest"}), tool_finished(output)]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["content"].startswith("collected line 0\n")
+        assert "... (truncated) ..." in result["content"]
+        assert result["content"].endswith("[Command failed with exit code 1]")
+
+    async def test_a_long_tool_error_keeps_its_end(self):
+        message = "boom " * 1000 + "the last words"
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup", {}),
+                protocol_event(
+                    "tools",
+                    {
+                        "event": "tool-error",
+                        "message": message,
+                        "tool_call_id": "tc1",
+                    },
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["success"] is False
+        assert len(result["content"]) < 2100
+        assert result["content"].endswith("the last words")
+
+    async def test_a_write_todos_result_is_judged_by_its_status(self):
+        """Its result echoes the todos, which may name an error."""
+        todos = (
+            "[{'content': 'Fix RuntimeError: CUDA out of memory', 'status': 'pending'}]"
+        )
+        updated = Command(
+            update={
+                "messages": [
+                    ToolMessage(f"Updated todo list to {todos}", tool_call_id="tc1")
+                ]
+            }
+        )
+        rejected = ToolMessage(
+            "Error invoking tool 'write_todos': todos.0.status: Input should be ...",
+            name="write_todos",
+            tool_call_id="tc2",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("write_todos", {}),
+                tool_finished(updated),
+                tool_started("write_todos", {}, tool_call_id="tc2"),
+                tool_finished(rejected, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [True, False]
+
+    async def test_an_interpreter_result_is_judged_by_its_closing_tag(self):
+        """The interpreter's error or result follows any stdout it printed."""
+        failed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nstarting\n</stdout>\n"
+            '<error type="TypeError">x is not a function</error>',
+            tool_call_id="tc1",
+        )
+        passed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nError: logged by the script\n</stdout>\n"
+            '<result kind="number">1</result>',
+            tool_call_id="tc2",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("code_interpreter", {"code": "x()"}),
+                tool_finished(failed),
+                tool_started("code_interpreter", {"code": "1"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
+
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
     )
@@ -710,6 +889,47 @@ class TestV3ProtocolStreaming:
             "id": "call_probe_1",
         }
         assert done["content"] == "final answer"
+
+    @pytest.mark.filterwarnings(
+        "ignore:The v3 streaming protocol on Pregel is experimental"
+    )
+    async def test_live_execute_exit_code_reaches_the_tool_result(self, tmp_path):
+        """A real ``execute`` that exits non-zero is a failed tool result."""
+        model = _ToolCallingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "exit 3"},
+                            "id": "call_fail",
+                        },
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo ok"},
+                            "id": "call_ok",
+                        },
+                    ],
+                ),
+                AIMessage(content="final answer"),
+            ]
+        )
+        agent = create_deep_agent(
+            model=model,
+            backend=CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True),
+            system_prompt="Use tools when requested.",
+        )
+
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent, "run commands", "live-execute-exit-code"
+            )
+        ]
+
+        results = {e["id"]: e["success"] for e in events if e["type"] == "tool_result"}
+        assert results == {"call_fail": False, "call_ok": True}
 
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
@@ -1169,6 +1389,85 @@ class TestV3ProtocolStreaming:
         assert text["subagent"] == "research-agent"
         assert text["content"] == "Sub-agent finding."
         assert text["instance_id"] == "task:early"
+
+    async def test_whitespace_deltas_between_text_are_kept(self):
+        """Spaces and blank lines that arrive as their own deltas stay in the answer."""
+        chunks = ["F", " ", "10.6667", "\n\n", "Next", " ", "para", "."]
+        agent = FakeV3Agent([*(message_delta(c) for c in chunks), message_finish()])
+        events = await collect_events(agent)
+
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert "".join(texts) == "F 10.6667\n\nNext para."
+        assert not any(t.isspace() for t in texts)
+        done = next(e for e in events if e.get("type") == "done")
+        assert done["content"] == "F 10.6667\n\nNext para."
+
+    async def test_whitespace_at_a_message_edge_is_dropped(self):
+        """A message that opens with whitespace before its reasoning (OpenRouter)
+        shows no text until the answer, and trailing whitespace is dropped."""
+        reasoning = protocol_event(
+            "messages",
+            (
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "reasoning-delta", "reasoning": "thinking"},
+                },
+                {},
+            ),
+        )
+        agent = FakeV3Agent(
+            [
+                message_delta("\n\n"),
+                reasoning,
+                message_delta("Answer"),
+                message_delta("\n"),
+                message_finish(),
+                message_delta("\n"),
+                message_delta("Next"),
+                message_delta(" "),
+                protocol_event("messages", ({"event": "message-start"}, {})),
+                message_delta("Last"),
+                message_finish(),
+            ]
+        )
+        events = await collect_events(agent)
+
+        kinds = [e["type"] for e in events if e["type"] in ("thinking", "text")]
+        assert kinds == ["thinking", "text", "text", "text"]
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert texts == ["Answer", "Next", "Last"]
+
+    async def test_each_subagent_holds_its_own_whitespace(self):
+        """A held space belongs to the stream it arrived in."""
+        ns1 = ("task", "one")
+        ns2 = ("task", "two")
+        agent = FakeV3Agent(
+            [
+                message_delta("One", namespace=ns1),
+                message_delta("Two", namespace=ns2),
+                message_delta(" ", namespace=ns1),
+                message_delta("\n\n", namespace=ns2),
+                message_delta("Root"),
+                message_delta("more", namespace=ns2),
+                message_delta("more", namespace=ns1),
+            ],
+            subagents=[
+                FakeSubagent(ns1, "research-agent"),
+                FakeSubagent(ns2, "research-agent"),
+            ],
+        )
+        events = await collect_events(agent)
+
+        by_instance: dict[str, list[str]] = {}
+        for e in events:
+            if e.get("type") == "subagent_text":
+                by_instance.setdefault(e["instance_id"], []).append(e["content"])
+        assert by_instance == {
+            "task:one": ["One", " more"],
+            "task:two": ["Two", "\n\nmore"],
+        }
+        assert [e["content"] for e in events if e.get("type") == "text"] == ["Root"]
 
     async def test_parallel_same_name_subagent_events_carry_instance_ids(self):
         """Lifecycle and tool events distinguish same-name parallel subagents."""
@@ -1695,7 +1994,7 @@ class TestModelRetryRollback:
 
     @staticmethod
     async def _run(events, *, subagents=None):
-        from tests.stream_v3_fakes import FakeV3Agent, collect_events
+        from tests.fakes.stream_v3 import FakeV3Agent, collect_events
 
         return await collect_events(FakeV3Agent(events, subagents=subagents), "hi")
 
@@ -1716,7 +2015,7 @@ class TestModelRetryRollback:
         return {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
 
     async def test_retry_after_partial_text_discards_it_and_reports_counts(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             local_text_delta,
             message_finish,
             model_call_end,
@@ -1749,10 +2048,35 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Full answer."
         assert [e["type"] for e in out if e["type"] == "model_call"] == []
 
+    async def test_a_new_call_does_not_inherit_held_whitespace(self):
+        """Whitespace a failed call held back is not put in front of the retry's answer."""
+        from tests.fakes.stream_v3 import (
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Half a sen"),
+                local_text_delta("\n\n"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                local_text_delta("Full answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._done(out)["response"] == "Full answer."
+
     async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
         """A graded run's last pass starts after the verdict; a failed call of
         the revision pass is cut back to its own start, not past that point."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             custom_subagent_event,
             local_text_delta,
             message_finish,
@@ -1796,7 +2120,7 @@ class TestModelRetryRollback:
 
     async def test_server_transport_shape_without_message_metadata(self):
         """langgraph-api strips run metadata before SSE: the boundary events alone must do."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1820,7 +2144,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Full answer."
 
     async def test_connect_time_failure_after_tool_step_discards_nothing(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             message_tool_call_block,
             model_call_end,
@@ -1857,7 +2181,7 @@ class TestModelRetryRollback:
         ] == ["tool_call", "tool_result"]
 
     async def test_error_finished_call_is_discarded_on_retry(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1882,7 +2206,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Whole."
 
     async def test_error_finished_primary_then_fallback_discards_the_primary(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1908,7 +2232,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Fallback answer."
 
     async def test_open_primary_then_fallback_discards_the_primary(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1932,7 +2256,7 @@ class TestModelRetryRollback:
     async def test_error_finished_primary_then_fallback_dying_at_connect_then_retry(
         self,
     ):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1960,7 +2284,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Whole."
 
     async def test_clean_call_is_never_discarded(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1988,7 +2312,7 @@ class TestModelRetryRollback:
     async def test_whole_message_fallback_after_partial_primary(self):
         from langchain_core.messages import AIMessage
 
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             model_call_end,
             model_call_start,
             text_delta,
@@ -2009,7 +2333,7 @@ class TestModelRetryRollback:
         assert len(self._discards(out)) == 1
 
     async def test_tool_calls_of_the_failed_attempt_are_discarded(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             message_tool_call_block,
             model_call_end,
@@ -2036,7 +2360,7 @@ class TestModelRetryRollback:
 
     async def test_text_outside_a_call_is_not_tracked(self):
         """Model streams that bypass the boundary (a tool's own model) are never discarded."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2062,7 +2386,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "ABY"
 
     async def test_summarization_messages_are_skipped(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_delta,
             message_finish,
             model_call_end,
@@ -2084,7 +2408,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Answer."
 
     async def test_grader_namespace_retry_leaves_the_main_answer_alone(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             message_finish,
             model_call_end,
@@ -2120,7 +2444,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Main answer."
 
     async def test_subagent_retry_is_keyed_by_raw_namespace(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             message_finish,
             model_call_end,
@@ -2155,7 +2479,7 @@ class TestModelRetryRollback:
         assert self._discards(out) == []  # the sibling's open call survived
 
     async def test_empty_discards_emit_no_event(self):
-        from tests.stream_v3_fakes import model_call_end, model_call_start
+        from tests.fakes.stream_v3 import model_call_end, model_call_start
 
         out = await self._run(
             [
@@ -2168,7 +2492,7 @@ class TestModelRetryRollback:
         assert self._discards(out) == []
 
     async def test_end_of_another_call_leaves_the_open_record_alone(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             model_call_end,
             model_call_start,
             retry_event,
@@ -2187,7 +2511,7 @@ class TestModelRetryRollback:
 
     async def test_call_without_an_end_mark_is_left_alone_by_the_next_start(self):
         """A lost end mark must not cost a good answer: only a call known to have ended badly is dropped."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2210,7 +2534,7 @@ class TestModelRetryRollback:
 
     async def test_retry_names_the_agent_from_the_event_not_the_namespace(self):
         """The server tracker names a namespace after its graph node; the event knows the agent."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             model_call_end,
             model_call_start,
@@ -2229,7 +2553,7 @@ class TestModelRetryRollback:
         assert self._retries(out)[0]["subagent"] == "research-agent"
 
     async def test_retry_without_an_agent_name_falls_back_to_the_namespace_name(self):
-        from tests.stream_v3_fakes import FakeSubagent, retry_event
+        from tests.fakes.stream_v3 import FakeSubagent, retry_event
 
         ns = ("tools:t1",)
         out = await self._run(
@@ -2238,7 +2562,7 @@ class TestModelRetryRollback:
         assert self._retries(out)[0]["subagent"] == "research"
 
     async def test_main_agent_retry_carries_no_name(self):
-        from tests.stream_v3_fakes import retry_event
+        from tests.fakes.stream_v3 import retry_event
 
         out = await self._run([retry_event(agent="EvoScientist")])
         assert self._retries(out)[0]["subagent"] == ""
@@ -2255,7 +2579,7 @@ class TestModelRetryRollback:
 
     async def test_root_text_after_a_failed_call_is_trimmed_on_both_sides(self):
         """What the decoder cuts from the answer is exactly what it tells clients to trim."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2278,7 +2602,7 @@ class TestModelRetryRollback:
         assert self._screen(out) == "Answer."
 
     async def test_stray_root_text_before_a_retry_is_trimmed_on_both_sides(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,

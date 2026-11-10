@@ -9,8 +9,9 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
+from EvoScientist.paths import Workspace
 from EvoScientist.stream import display as display_mod
-from tests.fakes import (
+from tests.fakes.common import (
     FakeCheckpointAgent,
     FakeGraphGateway,
     attended_config,
@@ -306,7 +307,7 @@ class TestConsumerClosesAtADecline:
         from EvoScientist.channels.bus.message_bus import MessageBus
         from EvoScientist.channels.channel_manager import ChannelManager
         from EvoScientist.channels.consumer import InboundConsumer
-        from tests.fakes import StubChannel
+        from tests.fakes.common import StubChannel
 
         bus = MessageBus()
         manager = ChannelManager(bus, media_dir=media_dir)
@@ -317,11 +318,12 @@ class TestConsumerClosesAtADecline:
             manager=manager,
             agent=agent,
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=gateway,
             max_concurrent=2,
             max_pending=10,
             inference_timeout=5.0,
-            drain_timeout=1.0,
+            drain_timeout=10.0,
         )
         return consumer, bus, gateway
 
@@ -334,6 +336,13 @@ class TestConsumerClosesAtADecline:
                 channel="stub", sender_id="u1", chat_id="c1", content=content
             )
         )
+
+    @staticmethod
+    async def _stop(consumer, task):
+        await consumer.stop()
+        # The run loop only checks for a stop once a second.
+        task.cancel()
+        await task
 
     @pytest.fixture(autouse=True)
     def _no_config_rule(self, monkeypatch):
@@ -356,17 +365,14 @@ class TestConsumerClosesAtADecline:
         assert "Approval Required" in sent[0]
         if reply is not None:
             await self._send(bus, content=reply)
-        while True:
-            try:
-                sent.append(
-                    (
-                        await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                    ).content
-                )
-            except TimeoutError:
-                break
-        await consumer.stop()
-        await task
+            # A worker must hold the reply before stop() ends the run loop.
+            async with asyncio.timeout(10.0):
+                while consumer.metrics["total_processed"] < 2:
+                    await asyncio.sleep(0.01)
+        # Each worker finishes its turn before it takes stop()'s sentinel.
+        await self._stop(consumer, task)
+        while bus.outbound_size:
+            sent.append((await bus.consume_outbound()).content)
         return sent, gateway
 
     async def test_a_reject_reply_closes_as_rejected(self, tmp_path):
@@ -396,8 +402,7 @@ class TestConsumerClosesAtADecline:
             (await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)).content
             for _ in range(2)
         ]
-        await consumer.stop()
-        await task
+        await self._stop(consumer, task)
         assert sent == ["partial", "Approval round limit reached; stopping this turn."]
         assert len(gateway.requests) == 1
         assert _closed(agent) == [ROUND_LIMIT]

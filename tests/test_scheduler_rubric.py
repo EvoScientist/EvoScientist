@@ -206,6 +206,24 @@ def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
 
 
+def test_grader_strategy_for_muse_spark_and_qwen_on_openrouter():
+    """Muse Spark answers only through JSON mode, Qwen only through a tool call.
+
+    ``muse-wonder`` stays unmapped: its JSON mode runs away, so it fails fast instead.
+    """
+    from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+
+    from EvoScientist.middleware.rubric import _grader_strategy
+
+    assert isinstance(
+        _grader_strategy(_openrouter("meta/muse-spark-open")), ProviderStrategy
+    )
+    assert isinstance(
+        _grader_strategy(_openrouter("qwen/qwen3.8-max-0902")), ToolStrategy
+    )
+    assert _grader_strategy(_openrouter("meta/muse-wonder")) is None
+
+
 def test_grader_strategy_defers_to_langchain_elsewhere():
     from langchain_anthropic import ChatAnthropic
 
@@ -214,7 +232,7 @@ def test_grader_strategy_defers_to_langchain_elsewhere():
     assert (
         _grader_strategy(ChatAnthropic(model="claude-haiku-4-5", api_key="k")) is None
     )
-    assert _grader_strategy(_openrouter("qwen/qwen3.8-flash")) is None
+    assert _grader_strategy(_openrouter("z-ai/glm-5.3")) is None
 
 
 def test_scheduler_grader_is_built_with_the_explicit_strategy(tmp_path):
@@ -245,7 +263,7 @@ def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
     import httpx
 
     from EvoScientist.llm import get_chat_model
-    from tests.fakes import deepseek_tool_call_response
+    from tests.fakes.common import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     bodies = []
@@ -418,12 +436,13 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     assert [type(m).__name__ for m in grader_mw] == [
         "ModelRetryMiddleware",
         "FilesystemMiddleware",
+        "WindowsFilePathMiddleware",
         "_GraderCallBudget",
         "UnsupportedContentMiddleware",
         "ModelCallBoundaryMiddleware",
     ]
-    assert isinstance(grader_mw[2], _GraderCallBudget)
-    assert grader_mw[2].max_calls == 12
+    assert isinstance(grader_mw[3], _GraderCallBudget)
+    assert grader_mw[3].max_calls == 12
 
 
 class _RecordingGrader(BaseChatModel):
@@ -520,4 +539,7 @@ def test_scheduler_build_is_quiet_for_an_unsupported_grader(tmp_path, caplog):
         _build(
             "scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-fable-5.1")
         )
-    assert caplog.text == ""
+    # Only the rubric's own: a dependency's first probe in this process may
+    # warn too.
+    rubric = "EvoScientist.middleware.rubric"
+    assert [r for r in caplog.records if r.name.startswith(rubric)] == []

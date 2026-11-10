@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from EvoScientist import paths
 from EvoScientist.middleware.events import (
     MIDDLEWARE_EVENT_TAG,
     NO_OP_SINK,
@@ -52,29 +53,29 @@ class _RecordingSink:
 
 class TestResolveMiddlewareEventSink:
     def test_subagent_stacks_always_get_noop(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
         sink = resolve_middleware_event_sink(_RecordingSink(), for_async_subagent=True)
         assert sink is NO_OP_SINK
 
     def test_local_main_stack_keeps_caller_sink_unwrapped(self, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         caller = _RecordingSink()
         sink = resolve_middleware_event_sink(caller, for_async_subagent=False)
         assert sink is caller
 
     def test_local_main_stack_defaults_to_run_scoped(self, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(paths, "SERVER_PROCESS", False)
         sink = resolve_middleware_event_sink(None, for_async_subagent=False)
         assert isinstance(sink, RunScopedEventSink)
 
     def test_server_subprocess_wraps_in_broadcast(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
         sink = resolve_middleware_event_sink(None, for_async_subagent=False)
         assert isinstance(sink, StreamBroadcastSink)
         assert isinstance(sink._sink, RunScopedEventSink)
 
     def test_server_subprocess_wraps_caller_sink(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        monkeypatch.setattr(paths, "SERVER_PROCESS", True)
         caller = _RecordingSink()
         sink = resolve_middleware_event_sink(caller, for_async_subagent=False)
         assert isinstance(sink, StreamBroadcastSink)

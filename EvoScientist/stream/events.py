@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
+from pydantic import ValidationError
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
 from ..middleware.tool_history_repair import (
@@ -30,7 +31,7 @@ from .summarization import (
 )
 from .tool_results import _extract_command_tool_content, _extract_tool_content
 from .tool_selection import _ToolSelectionSuppressor
-from .utils import DisplayLimits, is_success
+from .utils import DisplayLimits, cut_middle, tool_result_succeeded
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
@@ -54,6 +55,8 @@ UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
 LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
+_INTERRUPT_CHECKPOINT_WAIT_SECONDS = 5.0
+_INTERRUPT_CHECKPOINT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,46 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_interrupt_ids(snapshot: Any) -> set[str]:
+    """Return interrupt IDs currently persisted at the root or task level."""
+    if snapshot is None:
+        return set()
+    interrupts = list(getattr(snapshot, "interrupts", None) or ())
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts.extend(getattr(task, "interrupts", None) or ())
+    return {
+        str(interrupt_id)
+        for interrupt in interrupts
+        if (interrupt_id := getattr(interrupt, "id", None)) is not None
+    }
+
+
+async def _wait_for_checkpointed_interrupt(
+    agent: Any, config: dict[str, Any], interrupt_id: str
+) -> None:
+    """Wait for an emitted interrupt to become visible in its checkpoint."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _INTERRUPT_CHECKPOINT_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            snapshot = await asyncio.wait_for(
+                agent.aget_state(config), timeout=remaining
+            )
+        except Exception:
+            return
+        if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
+            return
+        if snapshot is None:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(_INTERRUPT_CHECKPOINT_POLL_SECONDS, remaining))
 
 
 def _snapshot_needs_recovery(snapshot: Any) -> bool:
@@ -495,6 +538,9 @@ class _V3EventProcessor:
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
+        # Whitespace each message holds back until its next text (key: sub-agent
+        # instance, None for the main agent); no key yet = the message has no text.
+        self._held_space: dict[str | None, str] = {}
         self._records: dict[tuple[str, ...], _CallRecord] = {}
         self._namespace: tuple[str, ...] = ()
 
@@ -573,6 +619,7 @@ class _V3EventProcessor:
                         discarded=discarded,
                     ).data
                 )
+        self._end_text_message(subagent)
         self._records[self._namespace] = _CallRecord(
             call=call,
             full_response_len=len(self.full_response),
@@ -858,6 +905,7 @@ class _V3EventProcessor:
             if text:
                 self._seen_value_message_keys.add(parsed.key)
                 events.extend(self._emit_text(text, subagent=None))
+                self._end_text_message(None)
         return events
 
     def _process_message_event(
@@ -918,7 +966,12 @@ class _V3EventProcessor:
                 return self._process_message_tool_block(content, subagent, namespace)
             return []
 
+        if event_type == "message-start":
+            self._end_text_message(subagent)
+            return []
+
         if event_type == "message-finish":
+            self._end_text_message(subagent)
             events: list[dict[str, Any]] = []
             pending = self._selector.flush_pending_text()
             if pending and not pending.isspace():
@@ -1037,6 +1090,8 @@ class _V3EventProcessor:
                 self._emit_thinking(_reasoning_from_content(content), subagent)
             )
         events.extend(self._emit_text(_text_from_content(content), subagent))
+        if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
+            self._end_text_message(subagent)
 
         for raw_tool_call_block in msg.tool_calls:
             tool_call_block = _as_raw_map(raw_tool_call_block)
@@ -1111,13 +1166,28 @@ class _V3EventProcessor:
             if event_type == "tool-error" and _is_interrupt_error_message(message):
                 return events
             if event_type == "tool-error":
-                content = str(message or "")
+                content = cut_middle(
+                    str(message or ""),
+                    DisplayLimits.TOOL_RESULT_MAX,
+                    DisplayLimits.TOOL_RESULT_TAIL,
+                )
                 success = False
             else:
                 output = data_map.get("output")
+                # The server gateway hands the message over in its serialized form.
+                output_map = _as_raw_map(output)
+                if output_map is not None and output_map.get("type") == "tool":
+                    try:
+                        output = ToolMessage.model_validate(output_map)
+                    except ValidationError:
+                        pass
+                status: str | None = None
+                artifact: object = None
                 if isinstance(output, ToolMessage):
                     name = output.name or name
                     raw_content, _ = _extract_tool_content(output)
+                    status = output.status
+                    artifact = output.artifact
                 elif isinstance(output, Command):
                     command_content = _extract_command_tool_content(
                         output, tool_call_id
@@ -1127,10 +1197,14 @@ class _V3EventProcessor:
                     )
                 else:
                     raw_content = "" if output is None else str(output)
-                content = raw_content[: DisplayLimits.TOOL_RESULT_MAX]
-                if len(raw_content) > DisplayLimits.TOOL_RESULT_MAX:
-                    content += "\n... (truncated)"
-                success = is_success(content)
+                content = cut_middle(
+                    raw_content,
+                    DisplayLimits.TOOL_RESULT_MAX,
+                    DisplayLimits.TOOL_RESULT_TAIL,
+                )
+                success = tool_result_succeeded(
+                    name, raw_content, status=status, artifact=artifact
+                )
 
             if subagent is not None:
                 events.append(
@@ -1196,7 +1270,9 @@ class _V3EventProcessor:
         if data is None:
             return []
         interrupt_id = str(data.get("interrupt_id") or "default")
-        return self._process_interrupt_value(interrupt_id, data.get("value"))
+        # ``langchain_protocol.InputRequestedData`` carries the interrupt
+        # value as ``payload``.
+        return self._process_interrupt_value(interrupt_id, data.get("payload"))
 
     def _process_interrupt_value(
         self,
@@ -1241,14 +1317,26 @@ class _V3EventProcessor:
         self._emitted_interrupts.add(signature)
         return [event]
 
+    def _end_text_message(self, subagent: _SubagentInfo | None) -> None:
+        self._held_space.pop(subagent.instance_id if subagent else None, None)
+
     def _emit_text(
         self, text: str, subagent: _SubagentInfo | None
     ) -> list[dict[str, Any]]:
         if not text:
             return []
         cleaned = _strip_legacy_thinking_tags(text)
-        if not cleaned or cleaned.isspace():
+        if not cleaned:
             return []
+        # A whitespace-only delta waits for the text it separates, so a message
+        # that opens with "\n\n" before reasoning does not start the answer early.
+        key = subagent.instance_id if subagent else None
+        if cleaned.isspace():
+            if key in self._held_space:
+                self._held_space[key] += cleaned
+            return []
+        cleaned = self._held_space.get(key, "") + cleaned
+        self._held_space[key] = ""
         suppressed, events, emit_text = self._selector.process_text(cleaned)
         if suppressed:
             return events
@@ -1609,6 +1697,13 @@ async def stream_agent_events(
                     task.cancel()
                 await asyncio.gather(*producers, return_exceptions=True)
                 raise item
+            if item.get("type") == "interrupt":
+                # The client may close this generator as soon as it sees the
+                # pause. Let LangGraph persist the interrupt before aborting
+                # the underlying stream in our ``finally`` block.
+                await _wait_for_checkpointed_interrupt(
+                    agent, config, item["interrupt_id"]
+                )
             yield item
     except Exception as e:
         _run_raised = True

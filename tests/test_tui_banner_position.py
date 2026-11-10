@@ -20,7 +20,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tests.tui_fakes import capture_app as _capture_app
+from tests.fakes.tui import capture_app
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -41,7 +41,7 @@ async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -72,7 +72,7 @@ async def test_clear_chat_with_anchor_released_also_resets(monkeypatch, workspac
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -100,7 +100,7 @@ async def test_clear_chat_short_conversation_anchored(monkeypatch, workspace):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -139,7 +139,7 @@ async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     # Tall-ish terminal: welcome + a few messages must fit in the
     # viewport, mirroring the user's manual-test setup.
     async with app.run_test(size=(80, 40)) as pilot:
@@ -215,7 +215,7 @@ async def test_short_turn_keeps_banner_at_top_after_layout_refresh(
     from EvoScientist.cli.widgets.assistant_message import AssistantMessage
     from EvoScientist.cli.widgets.user_message import UserMessage
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     # Tall terminal: welcome + a short exchange fits with room to spare,
     # which is exactly the bug condition (content < viewport).
     async with app.run_test(size=(80, 40)) as pilot:
@@ -253,7 +253,7 @@ async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch, workspace)
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -307,8 +307,11 @@ async def test_agent_shell_notices_are_shown_in_the_app(monkeypatch, workspace):
     from EvoScientist.cli import tui_interactive as tui_mod
 
     notice = "Run `EvoSci setup` [/x]"
-    monkeypatch.setattr(tui_mod, "_agent_shell_notices", lambda: [notice])
-    app = await _capture_app(monkeypatch, workspace)
+    asked: list = []
+    monkeypatch.setattr(
+        tui_mod, "_agent_shell_notices", lambda *a: asked.append(a) or [notice]
+    )
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -316,3 +319,5 @@ async def test_agent_shell_notices_are_shown_in_the_app(monkeypatch, workspace):
         (shown,) = [n for n in app._notifications if n.message == notice]
         assert shown.severity == "warning"
         assert shown.markup is False
+    # For the turns' own backend: the --dangerous note depends on it.
+    assert asked == [("local",)]

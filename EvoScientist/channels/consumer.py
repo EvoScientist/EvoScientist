@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
+from ..paths import SessionDirs, Workspace
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
@@ -224,6 +225,8 @@ class InboundConsumer:
         The local agent object used by local graph gateway targets.
     thread_id:
         Default thread ID for agent conversations.
+    workspace:
+        The channel's project: every turn's target names it.
     graph_gateway:
         Gateway used for thread creation and graph streaming.
     send_thinking:
@@ -256,6 +259,7 @@ class InboundConsumer:
         agent: Any,
         thread_id: str,
         *,
+        workspace: Workspace,
         graph_gateway: GraphGateway,
         send_thinking: bool = False,
         on_message_received: Callable[[InboundMessage], None] | None = None,
@@ -269,6 +273,7 @@ class InboundConsumer:
         self.bus = bus
         self.manager = manager
         self.agent = agent
+        self._folders = SessionDirs(workspace).metadata()
         self.thread_id = thread_id
         self.graph_gateway = graph_gateway
         self.send_thinking = send_thinking
@@ -321,9 +326,14 @@ class InboundConsumer:
             self._sessions[sender_id] = f"{self.thread_id}:{sender_id}"
         else:
             self._sessions[sender_id] = await self.graph_gateway.create_thread(
-                GraphTarget(local_graph=self.agent)
+                self._target
             )
         return self._sessions[sender_id]
+
+    @property
+    def _target(self) -> GraphTarget:
+        """The target of every turn: the agent, in the channel's project."""
+        return GraphTarget(local_graph=self.agent, **self._folders)
 
     def _get_channel(self, channel_name: str) -> Channel | None:
         """Look up the channel by name from the manager."""
@@ -466,7 +476,7 @@ class InboundConsumer:
         try:
             await close_parked_checkpoint(
                 self.graph_gateway,
-                GraphTarget(local_graph=self.agent),
+                self._target,
                 thread_id,
                 reason=reason,
             )
@@ -554,7 +564,7 @@ class InboundConsumer:
                                 media=msg.media or None
                                 if isinstance(stream_input, str)
                                 else None,
-                                target=GraphTarget(local_graph=self.agent),
+                                target=self._target,
                                 configurable_extra=approve_all_configurable_extra(
                                     approve_all_carry
                                 ),

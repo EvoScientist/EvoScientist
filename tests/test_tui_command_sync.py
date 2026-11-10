@@ -6,7 +6,7 @@ import pytest
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 pytest.importorskip("textual")
 
@@ -27,8 +27,13 @@ class _StubApp:
         self._conversation_tid = "thread-1"
         self._channel_runtime = ChannelRuntime()
         self._exiting = False
+        self.channel_starts = 0
         self.model_updates: list[tuple[str, str | None]] = []
         self.refresh_calls: list[bool] = []
+
+    def _schedule_channel_start(self) -> None:
+        """Record channel startup requested by an adopted agent."""
+        self.channel_starts += 1
 
     def update_status_after_model_change(
         self,
@@ -69,6 +74,7 @@ async def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
     await tui_mod._sync_tui_command_completion(app, ctx, "old-agent", cmd)
 
     assert app._agent_loader.adopt_calls == ["new-agent"]
+    assert app.channel_starts == 1
     assert app.model_updates == [("gpt-5.5", "openai")]
     assert app.refresh_calls == [True]
     assert app._channel_runtime.agent == "new-agent"

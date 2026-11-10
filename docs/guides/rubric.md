@@ -55,7 +55,7 @@ The text can span lines; quotes inside it are kept as typed. `@file` is relative
 ## Limits
 
 - In a single-shot run, a process started with `run_in_background` may still be running when the agent stops. The grader then reports what is missing and the agent can wait for it, but each early stop uses one of the 3 passes. Interactive sessions defer instead (above).
-- A deferred grading waits for a notification; when none comes (the agent observed the exit itself in a turn cut short before grading, the CLI restarted, or the notification could not be delivered), it runs at your next message.
+- A deferred grading waits for a notification; when none comes (the agent observed the exit itself in a turn cut short before grading, or the notification could not be delivered), it runs at your next message. After a CLI restart a process it waits for is usually reported as no longer tracked, and the turn that notice starts runs the grading, though the process may still be running.
 - The live status of a sub-agent task is read before grading; a status that cannot be read never holds a grading back, so a grading can run while the task is in fact still running when the dev server is unreachable.
 - One grader attempt may make at most 12 model calls; an attempt that needs more ends as a grader failure. A pass makes a second attempt when its verdict leaves criteria out, so a pass can use up to 24.
 - `--rubric` is refused when single-shot runs are configured to use the `langgraph_server` gateway.

@@ -1,14 +1,15 @@
 """Configuration management for EvoScientist.
 
 Handles loading, saving, and merging configuration from multiple sources.
-See :func:`get_effective_config` for the authoritative priority chain —
-``EVOSCIENTIST_*`` shell values and third-party keys are treated
-asymmetrically with respect to workspace ``.env`` handling.
+See :func:`get_effective_config` for the authoritative priority chain; a
+project ``.env`` sets only a few settings of the EvoSci command itself.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
@@ -20,6 +21,9 @@ import yaml
 from dotenv import dotenv_values, find_dotenv
 
 from .. import paths
+from . import store
+
+logger = logging.getLogger(__name__)
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
@@ -241,12 +245,12 @@ class EvoScientistConfig:
 
     # LLM Settings
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-sonnet-5-5"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
     # Transient model-call failures (5xx, 429, connection drops): how long one
     # model call keeps retrying after it first fails, in seconds; 0 = no retry.
-    model_retry_wait_seconds: int = 60
-    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
+    model_retry_wait_seconds: int = 60  # interactive sessions; memory workers, linker
+    auto_mode_retry_wait_seconds: int = 1800  # auto_mode, scheduler, AutoSkills
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider
@@ -299,12 +303,11 @@ class EvoScientistConfig:
     # back to UTC if it can't be determined; set e.g. "Europe/London" to pin one.
     scheduler_default_timezone: str = ""
 
-    # Whether langgraph dev persists its runtime state to .langgraph_api/ next
-    # to the subprocess cwd. True (default) keeps async-task, scheduler, and
-    # Store API state across subprocess restarts — useful for future
-    # cross-session async, cron, and Store features. Set False to suppress
-    # writes (workspace stays cleaner; state is in-memory only and lost on
-    # CLI exit). EvoScientist's main thread persistence uses sessions.db
+    # Whether langgraph dev persists its runtime state to .langgraph_api/ in
+    # the server home (~/.evoscientist/server). True (default) keeps
+    # async-task, scheduler, and Store API state across subprocess restarts.
+    # Set False to suppress writes (state is in-memory only and lost when the
+    # server stops). EvoScientist's main thread persistence uses sessions.db
     # regardless of this setting.
     langgraph_dev_file_persistence: bool = True
 
@@ -314,15 +317,6 @@ class EvoScientistConfig:
     # machines if multiple async sub-agents in flight cause noticeable
     # slowdown.
     langgraph_dev_jobs_per_worker: int = 10
-
-    # Keep the auto-started langgraph dev subprocess running after the CLI
-    # exits. The next `EvoSci` start in the same workspace reuses it instantly
-    # instead of paying the cold boot (~15s). Starting in a DIFFERENT workspace
-    # raises WorkspaceMismatchError with the leftover server's pid — stop it
-    # manually (the server is pinned to one workspace per process). Known
-    # limitation: changing langgraph_dev_port/host while a keepalive server
-    # runs orphans its records — run `EvoSci server stop` before switching.
-    langgraph_dev_keepalive: bool = False
 
     # Which backend serves the CLI/TUI's graph runs: the in-process local
     # gateway (default) or the langgraph dev server via LangGraphServerGateway.
@@ -337,11 +331,9 @@ class EvoScientistConfig:
     # pick its own backend; ``"inherit"`` defers to the global ``gateway_backend``
     # above. The fixed-workspace surfaces (serve, single-shot, standalone) default
     # to ``inherit``, so the global flag moves them. The interactive CLI and TUI
-    # default to ``local`` instead: the server path is still lossy there (the
-    # per-session workspace is not applied server-side, #413, and per-run config
-    # is dropped on resume, #454), so a global ``langgraph_server`` must not move
-    # them - reaching the server backend on those surfaces takes an explicit
-    # ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
+    # default to ``local`` instead, so a global ``langgraph_server`` does not
+    # move them - reaching the server backend on those surfaces takes an
+    # explicit ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
     # never read these fields directly for a routing decision.
     gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
     gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (
@@ -431,8 +423,8 @@ class EvoScientistConfig:
     # "cn" uses mainland China mirrors; set by `EvoSci setup --cn`.
     mirror: Literal["default", "cn"] = "default"
     log_level: str = "warning"
-    # Empty means use the provider/model default. A non-empty value is an
-    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    # Empty means each route's default (DEFAULT_REASONING_EFFORT on the main
+    # providers). A non-empty value is exported as EVOSCIENTIST_REASONING_EFFORT.
     reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
@@ -458,7 +450,6 @@ class EvoScientistConfig:
     allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
 
     # iMessage Settings
-    imessage_enabled: bool = False  # legacy compat
     imessage_allowed_senders: str = ""
 
     # Telegram Settings
@@ -589,8 +580,7 @@ class EvoScientistConfig:
     # Safety net for runaway conversations. Under DeltaChannel (deepagents 0.6+)
     # normal usage produces linear growth, so this default is set well above
     # any realistic conversation length (~180-450 turns of dialogue) while
-    # still capping legacy bloat at upgrade time. 0 disables ongoing pruning
-    # entirely; the one-time legacy migration sweep still runs.
+    # still capping runaway growth. 0 disables pruning entirely.
     checkpoint_keep_per_thread: int = 1000
 
     # DM access control policy
@@ -789,55 +779,47 @@ def load_config() -> EvoScientistConfig:
     try:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-
-        # Filter to only valid fields; a blank ``key:`` loads as None, which no
-        # field accepts, so it falls back to the default.
-        valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {
-            k: v for k, v in data.items() if k in valid_fields and v is not None
-        }
-
-        return EvoScientistConfig(**filtered_data)
+        return config_from_mapping(data)
     except Exception:
         # On any error, return defaults
         return EvoScientistConfig()
 
 
+def config_from_mapping(data: dict[str, Any]) -> EvoScientistConfig:
+    """Build a config from the file's mapping, defaults for what it lacks."""
+    # Filter to only valid fields; a blank ``key:`` loads as None, which no
+    # field accepts, so it falls back to the default.
+    valid_fields = {f.name for f in fields(EvoScientistConfig)}
+    filtered_data = {
+        k: v for k, v in data.items() if k in valid_fields and v is not None
+    }
+    return EvoScientistConfig(**filtered_data)
+
+
 def save_config(config: EvoScientistConfig) -> None:
-    """Save configuration to file.
+    """Save the whole configuration to file, atomically and under the lock.
+
+    Raises :class:`~EvoScientist.config.store.ConfigParseError` when the
+    existing file does not parse: ``config`` then most likely holds the
+    defaults :func:`load_config` fell back to, and writing it would replace
+    the user's configuration. Raises
+    :class:`~EvoScientist.config.store.ConfigLockedError` while another
+    process (``EvoSci onboard``) holds the lock.
 
     Args:
         config: EvoScientistConfig instance to save.
     """
-    config_path = get_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        config_path.parent.chmod(0o700)
-    except OSError:
-        pass
-
-    data = _config_to_dict(config)
-
     # Save all fields including empty API keys (users can set them via env vars instead)
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(
-            data,
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-    try:
-        config_path.chmod(0o600)
-    except OSError:
-        pass
+    data = store.dump_config_mapping(_config_to_dict(config))
+    with store.config_lock():
+        store.read_config_mapping()
+        store.write_config_bytes(data)
 
 
 def reset_config() -> None:
     """Reset configuration to defaults by deleting the config file."""
-    config_path = get_config_path()
-    if config_path.exists():
-        config_path.unlink()
+    with store.config_lock():
+        store.remove_config_file()
 
 
 def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
@@ -845,23 +827,88 @@ def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
     return {key: _plain_config_value(value) for key, value in asdict(config).items()}
 
 
+# Secret fields, listed by name rather than matched on it: a name rule would
+# miss ``feishu_encrypt_key`` and catch ``mimo_token_plan_base_url``.
+API_KEY_FIELDS: frozenset[str] = frozenset(
+    {
+        "anthropic_api_key",
+        "openai_api_key",
+        "nvidia_api_key",
+        "google_api_key",
+        "minimax_api_key",
+        "siliconflow_api_key",
+        "openrouter_api_key",
+        "atlascloud_api_key",
+        "requesty_api_key",
+        "novita_api_key",
+        "mimo_api_key",
+        "mimo_token_plan_api_key",
+        "opper_api_key",
+        "deepseek_api_key",
+        "zhipu_api_key",
+        "volcengine_api_key",
+        "dashscope_api_key",
+        "moonshot_api_key",
+        "kimi_api_key",
+        "custom_openai_api_key",
+        "custom_anthropic_api_key",
+        "tavily_api_key",
+    }
+)
+CHANNEL_SECRET_FIELDS: frozenset[str] = frozenset(
+    {
+        "telegram_bot_token",
+        "discord_bot_token",
+        "slack_bot_token",
+        "slack_app_token",
+        "feishu_app_secret",
+        "feishu_verification_token",
+        "feishu_encrypt_key",
+        "wechat_wecom_secret",
+        "wechat_wecom_token",
+        "wechat_wecom_encoding_aes_key",
+        "wechat_mp_app_secret",
+        "wechat_mp_token",
+        "wechat_mp_encoding_aes_key",
+        "wechat_personal_token",
+        "dingtalk_client_secret",
+        "email_imap_password",
+        "email_smtp_password",
+        "qq_app_secret",
+    }
+)
+SECRET_FIELDS: frozenset[str] = API_KEY_FIELDS | CHANNEL_SECRET_FIELDS
+
+
+def secret_hint(key: str, value: str) -> str | None:
+    """The last four characters of an API key longer than eight, else ``None``.
+
+    Passwords, tokens and channel secrets get no hint: it would show a large
+    part of a short password.
+    """
+    if key in API_KEY_FIELDS and len(value) > 8:
+        return "…" + value[-4:]
+    return None
+
+
+def display_config_value(key: str, value: Any) -> str:
+    """A value for printing: secrets masked, an empty value as ``(not set)``."""
+    if value == "" or value is None:
+        return "(not set)"
+    if key in SECRET_FIELDS:
+        hint = secret_hint(key, str(value))
+        return "***" + hint[1:] if hint else "***"
+    return str(value)
+
+
 # =============================================================================
 # Config value operations
 # =============================================================================
 
-_LITERAL_ALIASES = {"rich": "cli", "textual": "tui"}
-"""Legacy ``ui_backend`` spellings written by earlier onboarding versions.
-
-Kept in step with ``_LEGACY_BACKEND_MAP`` in ``cli/tui_runtime.py``; config is a
-foundational module, so the map is duplicated here rather than importing across
-the config -> cli boundary.
-"""
-
 
 def _match_literal(value: Any, allowed: tuple[Any, ...]) -> str | None:
-    """Case-insensitive Literal match that also accepts legacy aliases."""
+    """Case-insensitive Literal match."""
     text = str(value).strip().lower()
-    text = _LITERAL_ALIASES.get(text, text)
     return text if text in allowed else None
 
 
@@ -1007,6 +1054,126 @@ def get_config_value(key: str) -> Any:
     return _plain_config_value(value)
 
 
+class SettingsError(ValueError):
+    """One or more settings failed validation; ``errors`` maps field to reason."""
+
+    def __init__(self, errors: dict[str, str]) -> None:
+        self.errors = errors
+        super().__init__(
+            "; ".join(f"{key}: {reason}" for key, reason in errors.items())
+        )
+
+
+def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
+    """Validate and coerce one setting; return ``(value, warning)``.
+
+    The one rule set for ``EvoSci config set``, the TUI's writers and the
+    settings API. Raises ``ValueError`` with the reason when the value is not
+    accepted. The returned value is the plain form written to the file.
+    """
+    field_info = next((f for f in fields(EvoScientistConfig) if f.name == key), None)
+    if field_info is None:
+        raise ValueError("unknown setting")
+    field_type = _config_field_type(key, field_info.type)
+
+    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
+    # (_coerce_value(True, int) would turn it into 1 and slip past).
+    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
+        value, bool
+    ):
+        raise ValueError("expected a number")
+
+    try:
+        value = _coerce_value(value, field_type)
+    except (ValueError, TypeError) as e:
+        if get_origin(field_type) is Literal or _is_str_enum_type(field_type):
+            raise ValueError(str(e)) from None
+        raise ValueError(
+            f"expected {getattr(field_type, '__name__', field_type)}"
+        ) from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("must be a finite number")
+
+    warning = None
+    if key == "sandbox_execute_timeout" and value <= 0:
+        raise ValueError("must be greater than 0")
+    if key == "memory_skill_synthesis_time":
+        value = _normalize_hhmm(value)
+        if value is None:
+            raise ValueError("expected a time as HH:MM")
+    if key == "proactive_idle_minutes" and value < 0:
+        raise ValueError("must be 0 or more")
+    if key == "proactive_quiet_hours":
+        value = _normalize_quiet_hours(value)
+        if value is None:
+            raise ValueError("expected a time range as HH:MM-HH:MM")
+    if key == "proactive_timezone":
+        value = _valid_timezone(value)
+        if value is None:
+            raise ValueError("unknown time zone")
+    # Empty: the system's time zone.
+    if key == "scheduler_default_timezone" and value:
+        value = _valid_timezone(value)
+        if value is None:
+            raise ValueError("unknown time zone")
+    if key in ("provider", "auxiliary_provider") and (value or key == "provider"):
+        from .provider_keys import PROVIDERS
+
+        if value not in PROVIDERS:
+            raise ValueError("unknown provider")
+    if key == "default_workdir" and value:
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute():
+            raise ValueError("must be an absolute path")
+        if path.exists() and not path.is_dir():
+            raise ValueError("is a file, not a folder")
+        if not path.exists():
+            warning = "the folder does not exist yet; it is created at start"
+    if key == "reasoning_effort":
+        from ..llm.registry import REASONING_LEVELS
+
+        value = value.strip().lower()
+        if value and value not in REASONING_LEVELS:
+            raise ValueError(f"expected one of {', '.join(REASONING_LEVELS)}, or empty")
+    return _plain_config_value(value), warning
+
+
+def set_config_values(
+    changes: dict[str, Any], *, expected_revision: Any = store.UNSET
+) -> tuple[str | None, dict[str, str]]:
+    """Validate ``changes`` and write them to the file in one locked step.
+
+    A ``None`` value removes the setting from the file, so its default
+    applies. Nothing is written when any value fails: :class:`SettingsError`
+    names every failing field. Returns ``(new_revision, warnings)``.
+
+    Raises :class:`~EvoScientist.config.store.ConfigError` subclasses when
+    the file does not parse, is locked, or changed since
+    ``expected_revision`` (``None`` = "no file expected"; omitted = no check).
+    """
+    coerced: dict[str, Any] = {}
+    warnings: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    for key, value in changes.items():
+        if value is None:
+            if key in {f.name for f in fields(EvoScientistConfig)}:
+                coerced[key] = None
+            else:
+                errors[key] = "unknown setting"
+            continue
+        try:
+            coerced[key], warning = validate_setting(key, value)
+        except ValueError as e:
+            errors[key] = str(e)
+            continue
+        if warning:
+            warnings[key] = warning
+    if errors:
+        raise SettingsError(errors)
+    revision = store.update_config_mapping(coerced, expected_revision=expected_revision)
+    return revision, warnings
+
+
 def set_config_value(key: str, value: Any) -> bool:
     """Set a single configuration value.
 
@@ -1015,49 +1182,16 @@ def set_config_value(key: str, value: Any) -> bool:
         value: New value.
 
     Returns:
-        True if successful, False if key is invalid.
+        True if successful, False if the key or value is invalid.
+
+    Raises:
+        ConfigError: the file does not parse or another process holds the
+            lock (see :mod:`EvoScientist.config.store`).
     """
-    valid_fields = {f.name for f in fields(EvoScientistConfig)}
-    if key not in valid_fields:
-        return False
-
-    config = load_config()
-
-    # Type coercion based on field type
-    field_info = next(f for f in fields(EvoScientistConfig) if f.name == key)
-    field_type = _config_field_type(key, field_info.type)
-
-    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
-    # (_coerce_value(True, int) would turn it into 1 and slip past).
-    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
-        value, bool
-    ):
-        return False
-
     try:
-        value = _coerce_value(value, field_type)
-    except (ValueError, TypeError):
+        set_config_values({key: value})
+    except SettingsError:
         return False
-
-    if key == "sandbox_execute_timeout" and value <= 0:
-        return False
-    if key == "memory_skill_synthesis_time":
-        value = _normalize_hhmm(value)
-        if value is None:
-            return False
-    if key == "proactive_idle_minutes" and value < 0:
-        return False
-    if key == "proactive_quiet_hours":
-        value = _normalize_quiet_hours(value)
-        if value is None:
-            return False
-    if key == "proactive_timezone":
-        value = _valid_timezone(value)
-        if value is None:
-            return False
-
-    setattr(config, key, value)
-    save_config(config)
     return True
 
 
@@ -1148,7 +1282,6 @@ _ENV_MAPPINGS = {
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
-    "langgraph_dev_keepalive": "EVOSCIENTIST_LANGGRAPH_DEV_KEEPALIVE",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
     "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
@@ -1162,19 +1295,175 @@ _ENV_MAPPINGS = {
 }
 
 
-# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
-# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
-_OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
+_ENV_FIELDS: dict[str, str] = {env: field for field, env in _ENV_MAPPINGS.items()}
 
 
-def _oauth_routed(env_key: str) -> bool:
-    """Return True when ``env_key`` currently carries ccproxy OAuth routing."""
-    env_key = env_key.upper()  # Windows env keys are case-insensitive
-    if env_key.endswith("_BASE_URL"):
-        env_key = env_key[: -len("_BASE_URL")] + "_API_KEY"
-    elif not env_key.endswith("_API_KEY"):
-        return False
-    return os.environ.get(env_key) == _OAUTH_PLACEHOLDER_KEY
+# =============================================================================
+# Where environment values came from
+# =============================================================================
+
+# The process environment cannot tell the user's own exports from values our
+# code put there: apply_config_to_env() copies saved keys, get_effective_config()
+# merges a ``.env``, flags and ccproxy write variables too. Each such write is
+# recorded here, by variable name: ``{"source": "file" | "default" | "cli" |
+# "ccproxy" | "dotenv", "path"?: <.env path>}``. A variable with no record is
+# the user's (``env``). The settings API reports it as ``sources``.
+#
+# The launcher passes its record to the langgraph dev server in
+# ENV_ORIGINS_VAR (server environment only); this module reads and removes it
+# at import, so nothing the server starts inherits it.
+ENV_ORIGINS_VAR = "EVOSCIENTIST_CONFIG_ORIGINS"
+_ENV_ORIGINS: dict[str, dict[str, str]] = {}
+
+
+def _load_env_origins() -> None:
+    raw = os.environ.pop(ENV_ORIGINS_VAR, None)
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return
+    if isinstance(data, dict):
+        _ENV_ORIGINS.update(
+            {
+                str(k): {str(a): str(b) for a, b in v.items()}
+                for k, v in data.items()
+                if isinstance(v, dict)
+            }
+        )
+
+
+_load_env_origins()
+
+
+def record_env_origin(env_key: str, source: str, path: str | None = None) -> None:
+    """Record that our code set ``env_key``, and from where."""
+    origin = {"source": source}
+    if path:
+        origin["path"] = path
+    _ENV_ORIGINS[env_key] = origin
+
+
+def env_origin(env_key: str) -> dict[str, str] | None:
+    """Where ``env_key`` came from, or ``None`` when our code did not set it."""
+    return _ENV_ORIGINS.get(env_key)
+
+
+def env_origins() -> dict[str, dict[str, str]]:
+    return {key: dict(value) for key, value in _ENV_ORIGINS.items()}
+
+
+# Config fields that provably never reach the langgraph dev server: the
+# channel stack + STT run in the CLI process, display/workspace/frontend knobs
+# shape the CLI itself. Everything else counts as server config (the drift
+# fingerprint, the settings API's restart hint), so a newly added field
+# defaults to "affects the server".
+CLIENT_ONLY_PREFIXES = (
+    "channel_",
+    "imessage_",
+    "telegram_",
+    "discord_",
+    "slack_",
+    "feishu_",
+    "wechat_",
+    "dingtalk_",
+    "email_",
+    "qq_",
+    "signal_",
+    "stt_",
+    "gateway_backend",
+)
+CLIENT_ONLY_FIELDS = frozenset(
+    {
+        "require_mention",
+        "text_chunk_limit",
+        "allowed_channels",
+        "dm_policy",
+        "shared_webhook_port",
+        "show_thinking",
+        "ui_backend",
+        "log_level",
+        "default_mode",
+        "default_workdir",
+        "webui_port",
+        "webui_host",
+        "shell_allow_list",
+        "mirror",
+    }
+)
+
+
+def is_client_only(field: str) -> bool:
+    """Whether config field *field* never reaches the langgraph dev server."""
+    return field in CLIENT_ONLY_FIELDS or field.startswith(CLIENT_ONLY_PREFIXES)
+
+
+# What a project ``.env`` may set: settings that change only how the EvoSci
+# command itself runs and looks. An explicit list, so a new setting is not
+# settable from a cloned repo's ``.env`` unless added here; bind addresses and
+# the workspace are not. Every agent takes its keys and settings from
+# config.yaml and the environment (the credentials are process-wide; one
+# server serves every project), so any other key in a ``.env`` is ignored, and
+# ``manager._spawn_server`` passes the server none of what a ``.env`` set.
+DOTENV_FIELDS = frozenset(
+    {
+        "default_mode",
+        "ui_backend",
+        "log_level",
+        "gateway_backend",
+        "gateway_backend_serve",
+        "gateway_backend_single_shot",
+        "gateway_backend_interactive",
+        "gateway_backend_tui",
+        "gateway_backend_standalone",
+        "channel_debug_tracing",
+    }
+)
+_DOTENV_KEYS = frozenset(_ENV_MAPPINGS[field] for field in DOTENV_FIELDS)
+# (.env path, key) pairs already warned about, so a merge (run many times)
+# warns once per file and key.
+_DOTENV_IGNORED: set[tuple[str, str]] = set()
+# Keys EvoScientist reads: a .env setting them is told where they go instead.
+# Other keys in a .env (a project's own DATABASE_URL, say) are not its business.
+_KNOWN_KEYS = frozenset(_ENV_MAPPINGS.values())
+
+
+def _same_value(field: str, a: Any, b: Any) -> bool:
+    if field == "default_workdir":
+        a, b = (
+            os.path.realpath(os.path.expanduser(str(v))) if v else "" for v in (a, b)
+        )
+    return str(_plain_config_value(a)) == str(_plain_config_value(b))
+
+
+def _saved_mapping() -> dict[str, Any]:
+    """The file's mapping, or ``{}`` when it does not parse or cannot be read."""
+    try:
+        return store.read_config_mapping()
+    except (store.ConfigError, OSError):
+        return {}
+
+
+def config_value_origin(
+    field: str, value: Any, mapping: dict[str, Any] | None = None
+) -> str:
+    """``file`` when the file holds ``value`` for ``field``, ``default`` when
+    the file lacks the field and ``value`` is its default, else ``cli``: the
+    value can then only have come from a command-line flag.
+
+    ``mapping`` is the file's mapping when the caller has already read it.
+    """
+    if mapping is None:
+        mapping = _saved_mapping()
+    saved = mapping.get(field)
+    if saved is not None and saved != "":
+        return "file" if _same_value(field, saved, value) else "cli"
+    default = next(f.default for f in fields(EvoScientistConfig) if f.name == field)
+    if field == "default_workdir":
+        # An empty default_workdir means "the current folder".
+        return "default" if _same_value(field, os.getcwd(), value) else "cli"
+    return "default" if _same_value(field, default, value) else "cli"
 
 
 def get_effective_config(
@@ -1184,32 +1473,19 @@ def get_effective_config(
 
     Priority (highest to lowest):
         1. CLI arguments (``cli_overrides``)
-        2. Parent-process environment variables for any ``EVOSCIENTIST_*`` key
-        3. ``.env`` file at (or above) the current working directory
-        4. Parent-process environment variables for everything else
-           (third-party API keys / base URLs, plus arbitrary unmapped keys)
-        5. Config file (``~/.config/evoscientist/config.yaml``)
-        6. Dataclass defaults
+        2. Environment variables (``_ENV_MAPPINGS``)
+        3. ``.env`` file at (or above) the current working directory, for
+           a few settings of the EvoSci command itself only
+           (:data:`DOTENV_FIELDS`); any other key in it is ignored, one
+           EvoScientist reads with a warning, and the langgraph dev server
+           reads none
+        4. Config file (``~/.config/evoscientist/config.yaml``)
+        5. Dataclass defaults
 
-    Rows 2 and 4 differ because ``.env`` values need different treatment
-    for our own namespaced config knobs vs third-party credentials.
-    Third-party keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ...)
-    follow the industry convention that ``.env`` is the per-project
-    credential store; extending shell-wins to them would silently flip
-    a workspace key back to a global ``.bashrc`` key. Our own
-    ``EVOSCIENTIST_*`` keys are the opposite: an explicit CLI/parent-
-    process value (e.g. the bind port that ``EvoSci deploy --port X``
-    hands to the langgraph dev subprocess) must not be shadowed by a
-    workspace ``.env``. We implement this by reading ``.env`` into a
-    dict via ``dotenv_values`` (no ``os.environ`` mutation), then
-    writing third-party keys unconditionally and ``EVOSCIENTIST_*`` keys
-    only when the shell doesn't already have a non-empty value.
-
-    Tradeoff: ``OPENAI_API_KEY=xxx evoscientist ...`` inline overrides
-    still lose to a workspace ``.env`` containing ``OPENAI_API_KEY``,
-    because the merge writes third-party keys from ``.env``
-    unconditionally. Users who need to override a ``.env``-defined
-    credential inline must edit or unset the ``.env`` entry.
+    Every agent, the main one included, takes its keys and settings from the
+    config file and the environment: the credentials are process-wide, and
+    one server serves every project. Per-project keys belong with the
+    per-workspace settings of a later phase.
 
     Args:
         cli_overrides: Dictionary of CLI argument overrides.
@@ -1217,36 +1493,38 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    # Merge workspace ``.env`` into ``os.environ`` without going through
-    # ``load_dotenv``. The previous snapshot → ``load_dotenv`` → restore
-    # sequence was a read-modify-write on ``os.environ`` that could race with
-    # concurrent ``get_effective_config`` calls in the langgraph dev subprocess
-    # (per-request threads in ``langgraph_dev/http.py``, ``sessions.py``
-    # checkpoint writes, memory workers): one thread's mid-flight ``.env``
-    # value could be re-captured by another as "parent env" and then restored
-    # last, promoting the ``.env`` value into the snapshot permanently.
+    # Merge the project ``.env`` into ``os.environ``: only the EvoSci
+    # command's own settings (``_DOTENV_KEYS``), and only where the shell has
+    # no non-empty value (the CLI/parent process stays authoritative; an empty
+    # export counts as unset, as in the ``_ENV_MAPPINGS`` loop below).
+    # ``dotenv_values`` reads the file without touching ``os.environ``, so the
+    # merge is a pure, idempotent write sequence under concurrent calls.
     #
-    # ``dotenv_values`` returns a dict without touching ``os.environ``, so the
-    # merge below is a pure write sequence and idempotent under interleaving.
-    # Third-party keys keep ``.env``-wins (industry convention).
-    # ``EVOSCIENTIST_*`` keys are our own namespaced config knobs where
-    # CLI/parent-process intent should stay authoritative — write from ``.env``
-    # only when the shell doesn't already have a non-empty value. Treating an
-    # empty shell value as "unset" matches the ``if env_value:`` truthy check
-    # in the ``_ENV_MAPPINGS`` loop below; without this, an empty parent export
-    # would silently regress vs main by falling through to file/defaults.
-    dotenv_path = find_dotenv(usecwd=True)
+    # The langgraph dev server reads no ``.env``: it serves every registered
+    # project, and works in the server home, from where the search would find
+    # one in a parent folder such as ``~/.env``.
+    dotenv_path = None if paths.SERVER_PROCESS else find_dotenv(usecwd=True)
     dotenv_map = dotenv_values(dotenv_path) if dotenv_path else {}
+    ignored: list[str] = []
     for env_key, env_value in dotenv_map.items():
         if env_value is None:
             continue  # bare ``FOO`` without ``=`` — nothing to write
-        if env_key.startswith("EVOSCIENTIST_"):
-            if not os.environ.get(env_key):
-                os.environ[env_key] = env_value
-        elif _oauth_routed(env_key):
-            continue  # ccproxy OAuth routing must survive later re-merges
-        else:
+        if env_key not in _DOTENV_KEYS:
+            if env_key in _KNOWN_KEYS or env_key.upper().startswith("EVOSCIENTIST_"):
+                ignored.append(env_key)
+        elif not os.environ.get(env_key):
             os.environ[env_key] = env_value
+            record_env_origin(env_key, "dotenv", dotenv_path)
+    if new := sorted({k for k in ignored if (dotenv_path, k) not in _DOTENV_IGNORED}):
+        _DOTENV_IGNORED.update((dotenv_path, k) for k in new)
+        logger.warning(
+            "%s sets %s, which a project .env cannot set: it sets only %s. Set "
+            "keys and other settings in config.yaml (EvoSci config set) or the "
+            "environment.",
+            dotenv_path,
+            ", ".join(new),
+            ", ".join(sorted(_DOTENV_KEYS)),
+        )
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
@@ -1276,15 +1554,46 @@ def get_effective_config(
     return EvoScientistConfig(**data)
 
 
+def providers_in_use(config: Any) -> set[str]:
+    """Providers of the main, auxiliary and fallback models."""
+    providers = {config.provider}
+    if config.auxiliary_provider:
+        providers.add(config.auxiliary_provider)
+    providers |= {
+        entry.rsplit(":", 1)[1].strip()
+        for entry in (config.model_fallbacks or "").split(",")
+        if ":" in entry
+    }
+    return providers
+
+
 def apply_config_to_env(config: EvoScientistConfig) -> None:
     """Apply config API keys to environment variables if not already set.
 
     This allows the config file to provide API keys that downstream
-    libraries (like langchain-anthropic) can pick up.
+    libraries (like langchain-anthropic) can pick up. Every variable it
+    sets is recorded as coming from the file, the defaults or a flag (see
+    :func:`record_env_origin`).
 
     Args:
         config: Configuration to apply.
     """
+    before = dict(os.environ)
+    _apply_config_to_env(config)
+    mapping = None  # read once, when the first variable needs it
+    for env_key, field in _ENV_FIELDS.items():
+        value = os.environ.get(env_key)
+        if value is None:
+            _ENV_ORIGINS.pop(env_key, None)
+        elif value != before.get(env_key):
+            if mapping is None:
+                mapping = _saved_mapping()
+            record_env_origin(
+                env_key, config_value_origin(field, getattr(config, field), mapping)
+            )
+
+
+def _apply_config_to_env(config: EvoScientistConfig) -> None:
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key
     if config.anthropic_base_url and not os.environ.get("ANTHROPIC_BASE_URL"):
@@ -1372,6 +1681,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     # Written for both values: get_chat_model reads it, and the langgraph dev
     # subprocess re-resolves config without the CLI's --auth-mode override.
     os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = config.openai_auth_mode
+    # The server decides from it whether it starts ccproxy.
+    os.environ["EVOSCIENTIST_ANTHROPIC_AUTH_MODE"] = config.anthropic_auth_mode
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)
@@ -1379,7 +1690,10 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     # Bidirectional: clear it when off so a re-apply with a lower config (or a
     # stale value) can't leave the process stuck in dangerous mode.
     if config.dangerous_mode:
-        os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = "true"
+        # The user's own true export (``1``, ``yes``) stays as it is, so it is
+        # not recorded as a flag's.
+        if not _coerce_value(os.environ.get("EVOSCIENTIST_DANGEROUS_MODE", ""), bool):
+            os.environ["EVOSCIENTIST_DANGEROUS_MODE"] = "true"
     else:
         os.environ.pop("EVOSCIENTIST_DANGEROUS_MODE", None)
     if config.use_responses_api and not os.environ.get(

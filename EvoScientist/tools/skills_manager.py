@@ -122,28 +122,10 @@ class SkillInfo:
     path: Path
     source: str  # "workspace", "global", or "builtin"
     tags: list[str] = field(default_factory=list)
-    # Expert-skill fields for the v1 agent-teams feature. All default
-    # to utility-skill values so existing skills stay unchanged and their
-    # SKILL.md files need no edits.
-    type: str = "utility"  # "utility" (default) or "expert"
-    role: str = ""  # one-line role summary shown to the orchestrator LLM
-    byline: str = ""  # WebUI gallery byline
-    capability_tags: list[str] = field(default_factory=list)  # WebUI chips
-    avatar_hint: str = ""  # WebUI icon hint
-    # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
-    # the expert-container factory doesn't have to re-read the file on every
-    # main-agent construction. Empty for skills built by hand or when the
-    # source SKILL.md has no body content.
-    body: str = ""
-    # How this skill came to be classified as an expert:
-    #   "expert_md"   — a sibling EXPERT.md is present (current contract)
-    #   "frontmatter" — legacy ``type: expert`` in SKILL.md (deprecated)
-    #   ""            — not an expert
-    expert_source: str = ""
+    # "expert" when a sibling EXPERT.md declares the skill an actor.
+    type: str = "utility"
     # EXPERT.md body — the actor definition (persona + result envelope) that
-    # becomes the expert's runtime prompt. Empty for non-experts and for
-    # experts still on the legacy frontmatter path, whose runtime prompt is
-    # still sourced from ``body``.
+    # becomes the expert's runtime prompt. Empty for non-experts.
     expert_body: str = ""
 
 
@@ -151,9 +133,8 @@ class SkillInfo:
 #   1. leading fence (``^---\s*\n``)
 #   2. frontmatter YAML (``.*?``)
 #   3. trailing fence + optional newline (``\n---\s*\n?``)
-# Used by both ``_parse_skill_md`` (needs the YAML) and the expert-container
-# factory (needs the body); a single source of truth for "what is the
-# frontmatter block" so schema extensions don't drift across call sites.
+# Used by ``_parse_skill_md`` (needs the YAML) and ``_read_expert_md`` (needs
+# the body), so both agree on what the frontmatter block is.
 _FRONTMATTER_SPLIT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
@@ -163,9 +144,7 @@ def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
     ``frontmatter_yaml`` is the raw YAML block between the ``---`` fences
     (still a string, not parsed). ``body`` is the post-fence content with
     leading whitespace stripped. When there is no valid frontmatter block,
-    ``frontmatter_yaml`` is ``""`` and the whole content becomes the body —
-    matches the legacy expert-container behaviour of passing plain-body
-    files through unchanged.
+    ``frontmatter_yaml`` is ``""`` and the whole content becomes the body.
     """
     match = _FRONTMATTER_SPLIT_RE.match(content)
     if not match:
@@ -194,18 +173,16 @@ def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
 # reading it would create a second classifier that can drift from the file.
 _EXPERT_FILENAME = "EXPERT.md"
 
-# Legacy ``type: expert`` frontmatter is a deprecated fallback, so the warning
-# is one-shot per skill name — ``_parse_skill_md`` runs on every ``list_skills``
-# call (main-agent construction, /expert completion, GET /api/teams), and a
-# per-parse warning would bury real diagnostics under repeats.
-_legacy_expert_warned: set[str] = set()
+# Skills are listed on every main-agent build, /expert completion and
+# GET /api/teams, so a per-listing warning would bury real diagnostics.
+_warned_keys: set[str] = set()
 
 
 def _warn_once(key: str, message: str, *args: object) -> None:
     """Emit *message* at WARNING the first time *key* is seen this process."""
-    if key in _legacy_expert_warned:
+    if key in _warned_keys:
         return
-    _legacy_expert_warned.add(key)
+    _warned_keys.add(key)
     _logger.warning(message, *args)
 
 
@@ -292,6 +269,19 @@ def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
             entry["commit"] = commit
         out[str(k)] = entry
     return out
+
+
+def installed_skill_provenance(skill_dir: str | Path) -> dict[str, str] | None:
+    """Return install provenance recorded for an installed skill directory.
+
+    The sidecar manifest is keyed by the physical directory name, so this
+    helper is useful to callers that already resolved the skill path. A
+    missing entry means the skill was created locally or predates provenance
+    tracking.
+    """
+    path = Path(skill_dir)
+    entry = _load_manifest(path.parent).get(path.name)
+    return dict(entry) if entry is not None else None
 
 
 def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
@@ -397,21 +387,8 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
           scripts/
           references/
 
-    Skills predating that convention declare ``type: expert`` in SKILL.md
-    frontmatter, alongside actor fields (``role`` / ``byline`` /
-    ``capability_tags`` / ``avatar_hint`` / ``default_dispatch``). That path
-    still resolves, with a deprecation warning, and is still the source of
-    the WebUI gallery's decoration fields. New experts declare via EXPERT.md
-    and set none of those fields; their gallery cards carry name and
-    description only.
-
-    ``default_dispatch`` is read from neither contract. Every expert is
-    reachable both in-turn and in the background, and the orchestrator picks
-    per task — a skill does not declare one dispatch shape for all time.
-
-    When both are present, EXPERT.md wins on every axis (prompt source,
-    dispatch) and the frontmatter actor fields are reported as ignored — a
-    skill mid-migration must not behave as a blend of the two contracts.
+    Every expert is reachable both in-turn and in the background; the
+    orchestrator picks per task.
 
     SKILL.md format::
 
@@ -444,9 +421,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         # ``_fold_expert_subagents`` → ``list_skills``), so an unreadable
         # SKILL.md in any tier must not abort the whole main-agent build or
         # ``GET /api/teams``. Degrade to an "(unreadable)" placeholder so
-        # the entry stays visible in ``skill_manager list`` for debugging
-        # but never advances into expert registration (empty body →
-        # ``build_expert_subagent_specs`` skips it).
+        # the entry stays visible in ``skill_manager list`` for debugging.
         _logger.warning(
             "Skill %r: could not read %s (%s); skipping.",
             parent.name,
@@ -462,141 +437,50 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             path=parent,
             source=source,
             type="expert" if declares_actor else "utility",
-            expert_source="expert_md" if declares_actor else "",
             expert_body=expert_body or "",
         )
 
-    def _info(
-        name: str,
-        description: str,
-        tags: list[str] | None = None,
-        *,
-        type_: str = "utility",
-        role: str = "",
-        byline: str = "",
-        capability_tags: list[str] | None = None,
-        avatar_hint: str = "",
-        legacy_dispatch: str = "",
-        body: str = "",
-    ) -> SkillInfo:
-        # EXPERT.md presence overrides whatever the frontmatter says about
-        # actor-hood: the declaration is the file, and a skill mid-migration
-        # (both present) must resolve to exactly one contract.
-        if declares_actor:
-            if (
-                type_ == "expert"
-                or role
-                or byline
-                or capability_tags
-                or avatar_hint
-                or legacy_dispatch
-            ):
-                _warn_once(
-                    f"{parent}:mixed",
-                    "Skill %r: %s is present, so the skill is an expert and its "
-                    "actor definition comes from that file; legacy actor "
-                    "frontmatter in SKILL.md (type / role / byline / "
-                    "capability_tags / avatar_hint / default_dispatch) is "
-                    "ignored and should be removed.",
-                    name,
-                    _EXPERT_FILENAME,
-                )
-            type_ = "expert"
-            expert_source = "expert_md"
-            # EXPERT.md is authoritative on every axis: the actor definition is
-            # that file, so legacy decoration from SKILL.md frontmatter must not
-            # leak onto SkillInfo. ``role`` would otherwise be prepended to the
-            # EXPERT.md prompt (``_compose_system_prompt`` / the async head), and
-            # a mismatched frontmatter ``name`` would desync the registry
-            # identity from the skill directory.
-            name = parent.name
-            role = ""
-            byline = ""
-            capability_tags = []
-            avatar_hint = ""
-        elif type_ == "expert":
-            _warn_once(
-                f"{parent}:legacy",
-                "Skill %r declares `type: expert` in SKILL.md frontmatter. That "
-                "is deprecated: add a sibling %s carrying the persona and "
-                "result envelope instead, and drop the actor fields from "
-                "frontmatter. The frontmatter path still works for now.",
-                name,
-                _EXPERT_FILENAME,
-            )
-            expert_source = "frontmatter"
-        else:
-            expert_source = ""
-
+    def _info(name: str, description: str, tags: list[str] | None = None) -> SkillInfo:
+        # An expert's identity is its directory, so a mismatched frontmatter
+        # ``name`` cannot desync the registry from the skill folder.
         return SkillInfo(
-            name=name,
+            name=parent.name if declares_actor else name,
             description=description,
             path=parent,
             source=source,
             tags=tags or [],
-            type=type_,
-            role=role,
-            byline=byline,
-            capability_tags=capability_tags or [],
-            avatar_hint=avatar_hint,
-            body=body,
-            expert_source=expert_source,
+            type="expert" if declares_actor else "utility",
             expert_body=expert_body or "",
         )
 
-    frontmatter_yaml, body = _split_frontmatter_and_body(content)
+    frontmatter_yaml, _ = _split_frontmatter_and_body(content)
     if not frontmatter_yaml:
-        # No frontmatter, use directory name; still cache the body so
-        # the expert-container factory doesn't have to re-read.
-        return _info(parent.name, "(no description)", body=body)
+        return _info(parent.name, "(no description)")
 
     try:
         frontmatter = yaml.safe_load(frontmatter_yaml)
         if not isinstance(frontmatter, dict):
-            return _info(parent.name, "(empty frontmatter)", body=body)
+            return _info(parent.name, "(empty frontmatter)")
+        if frontmatter.get("type") == "expert" and not declares_actor:
+            _warn_once(
+                f"{parent}:type-expert",
+                "Skill %r declares `type: expert` in SKILL.md, which no longer "
+                "makes a skill an expert; add a sibling EXPERT.md instead.",
+                parent.name,
+            )
         # Tags: check top-level first, fall back to metadata.tags
         tags = _normalize_tags(frontmatter.get("tags"))
         if not tags:
             metadata = frontmatter.get("metadata")
             if isinstance(metadata, dict):
                 tags = _normalize_tags(metadata.get("tags"))
-        # Expert-skill fields. Only trusted when explicit; unknown
-        # ``type`` values fall back to "utility" so a typo doesn't
-        # accidentally register a skill as an expert. Log the fallback
-        # so authors can debug a "why isn't my expert appearing" case.
-        raw_type = frontmatter.get("type")
-        type_ = raw_type if raw_type in ("expert", "utility") else "utility"
-        if raw_type is not None and raw_type != type_:
-            _logger.warning(
-                "Skill %r: unrecognized type %r in frontmatter; treating as utility.",
-                frontmatter.get("name") or parent.name,
-                raw_type,
-            )
-        role = frontmatter.get("role") or ""
-        byline = frontmatter.get("byline") or ""
-        capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
-        avatar_hint = frontmatter.get("avatar_hint") or ""
-        # ``default_dispatch`` is no longer read: an expert is reachable both
-        # in-turn and in the background, and the orchestrator picks per task
-        # rather than the skill declaring one shape for all time. Still
-        # detected here so the mixed-contract warning can name it among the
-        # legacy actor fields an EXPERT.md skill should drop.
-        legacy_dispatch = str(frontmatter.get("default_dispatch") or "")
         # ``.get("name", parent.name)`` only defaults on missing key; a
-        # present-but-empty ``name:`` yields None, which would flow into
-        # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
-        # collision guard. Coerce to the parent dir name in both cases.
+        # present-but-empty ``name:`` yields None. Coerce to the parent dir
+        # name in both cases.
         return _info(
             frontmatter.get("name") or parent.name,
             frontmatter.get("description") or "(no description)",
             tags,
-            type_=type_,
-            role=str(role),
-            byline=str(byline),
-            capability_tags=capability_tags,
-            avatar_hint=str(avatar_hint),
-            legacy_dispatch=legacy_dispatch,
-            body=body,
         )
     except yaml.YAMLError as exc:
         _logger.warning(
@@ -605,7 +489,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             skill_md_path,
             exc,
         )
-        return _info(parent.name, "(invalid frontmatter)", body=body)
+        return _info(parent.name, "(invalid frontmatter)")
 
 
 def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
@@ -1243,13 +1127,8 @@ def list_expert_skills(
 ) -> list[SkillInfo]:
     """List installed expert skills.
 
-    Filters ``list_skills()`` output to entries classified as experts by
-    ``_parse_skill_md`` — a sibling ``EXPERT.md`` (current contract), or
-    legacy ``type: expert`` SKILL.md frontmatter. Read ``expert_source`` on
-    the returned entries to tell the two apart; use
-    ``expert_container.expert_prompt_body`` rather than ``.body`` to get an
-    expert's runtime prompt, since the two contracts source it from
-    different files.
+    Filters ``list_skills()`` output to entries with a sibling ``EXPERT.md``;
+    ``expert_container.expert_prompt_body`` gives an expert's runtime prompt.
 
     Defaults ``include_system=True`` because first-party experts ship under
     the builtin skills tier; user-installed experts still surface from the

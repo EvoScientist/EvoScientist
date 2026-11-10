@@ -16,10 +16,11 @@ from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer, _join_subagent_text
+from EvoScientist.paths import Workspace
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
-from tests.fakes import FakeGraphGateway
-from tests.fakes import StubChannel as _StubChannel
-from tests.stream_v3_fakes import (
+from tests.fakes.common import FakeGraphGateway
+from tests.fakes.common import StubChannel as _StubChannel
+from tests.fakes.stream_v3 import (
     FakeSubagent,
     FakeV3Agent,
     collect_events,
@@ -197,6 +198,7 @@ def _make_consumer(stream_events: list[dict], *, media_dir, **kw):
         manager=mgr,
         agent=agent,
         thread_id="",
+        workspace=Workspace("/tmp/channel-project"),
         graph_gateway=FakeGraphGateway(events=stream_events),
         max_concurrent=2,
         max_pending=10,
@@ -311,6 +313,7 @@ class TestConsumerSubagentTextFallback:
             manager=mgr,
             agent=MagicMock(),
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=FakeGraphGateway(stream=_fake_stream),
             max_concurrent=2,
             max_pending=10,
@@ -378,6 +381,7 @@ class TestConsumerSubagentTextFallback:
             manager=mgr,
             agent=MagicMock(),
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=FakeGraphGateway(stream=_fake_stream),
             max_concurrent=2,
             max_pending=10,

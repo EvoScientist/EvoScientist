@@ -39,7 +39,7 @@ import click
 
 from . import uv_tool
 from .setup.download import _NETWORK_ERRORS
-from .setup.protocol import Emitter, StageError, make_event
+from .setup.protocol import Emitter, StageError, make_event, stdin_is_pipe
 
 logger = logging.getLogger(__name__)
 
@@ -250,42 +250,84 @@ def download_constraints(target: str, mirror: str, dest: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Running server
 # --------------------------------------------------------------------------- #
-def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
-    """Stop the langgraph dev server this EvoSci started, after asking; a
-    server it has no ownership record for is never touched. Raises
-    ``server_running`` when the update must not go on."""
+def check_server(
+    opts: UpdateOptions,
+    emit: Emitter,
+    confirm: Confirm,
+    before_stop: Callable[[], None] | None = None,
+) -> None:
+    """Stop this data folder's recorded langgraph dev server, on whatever
+    port it runs, after asking; a server without a record is never touched.
+    Raises ``server_running`` when the update must not go on. *before_stop*
+    runs once the update goes on, before anything is stopped."""
     from .cli.server_cmd import manual_stop_command
     from .config import get_effective_config
     from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        _DEFAULT_PORT,
-        _base_url,
-        _pid_serves_port,
-        _read_workspace_sidecar,
+        ServerStopFailedError,
+        _is_port_occupied,
+        configured_address,
         is_langgraph_dev_running,
-        stop_recorded_server,
+        is_lasting,
+        lock_unreadable_message,
+        read_record_and_lock,
+        reread_record,
+        starting_without_record,
+        stop_server,
+        unrecorded_lock_message,
     )
+    from .langgraph_dev.server_home import HELD, UNKNOWN
 
     config = get_effective_config()
-    port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
-    host = (
-        str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
-    ).strip() or _DEFAULT_HOST
-    # A stale record whose server does not answer is ignored.
-    if not is_langgraph_dev_running(port=port, host=host):
+    port, host = configured_address(config)
+    go_on = before_stop or (lambda: None)
+
+    record, lock = read_record_and_lock()
+    # Without a record: a start in progress, a lock held, or one that cannot
+    # be opened (but with --yes) leaves the update undone.
+    if record is None and starting_without_record():
+        raise UpdateError(
+            "server_running",
+            "Another EvoScientist process is starting the server; nothing was "
+            "changed. Run EvoSci update again once it is up.",
+        )
+    if record is None:
+        if lock == HELD:
+            raise UpdateError(
+                "server_running",
+                f"{unrecorded_lock_message(then='run EvoSci update again')} "
+                "Nothing was changed.",
+            )
+        if lock == UNKNOWN and not opts.yes:
+            # Whether a server runs cannot be told: --yes updates anyway.
+            raise UpdateError(
+                "server_running",
+                f"{lock_unreadable_message()} Nothing was changed. Pass --yes to "
+                "update anyway.",
+            )
+    if record is None and not is_langgraph_dev_running(port=port, host=host):
+        go_on()
+        _stop_left_ccproxy(emit)
+        _stop_older_ccproxy(emit)
         return
-    sidecar = _read_workspace_sidecar()
-    if sidecar is not None and _pid_serves_port(sidecar.get("pid"), port):
-        url = _base_url(port, host)
+    if record is not None:
+        port, url = record.port, record.url
         busy = []
-        jobs = running_bg_process_names(url)
-        if jobs:
-            busy.append(f"background jobs still running: {', '.join(jobs)}")
-        if has_busy_thread(url):
-            busy.append("a task is running")
+        # Asked while it listens, also when /ok missed its second: a busy
+        # server answers late.
+        if _is_port_occupied(record.port, record.host):
+            jobs = running_bg_process_names(url)
+            if jobs:
+                busy.append(f"background jobs still running: {', '.join(jobs)}")
+            if has_busy_thread(url):
+                busy.append("a task is running")
+        version = (
+            "was started by an older EvoScientist release"
+            if record.older
+            else "runs the old version"
+        )
         question = (
-            f"The EvoScientist server on port {port} runs the old version"
+            f"The EvoScientist server on port {port} {version}"
             + (f" ({'; '.join(busy)})" if busy else "")
             + ". Stop it and update?"
         )
@@ -300,15 +342,47 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
                 raise UpdateError(
                     "server_running", "Update cancelled; the server keeps running."
                 )
-        pid = stop_recorded_server()
-        if pid is None:
-            raise UpdateError(
-                "server_running",
+            # The answer may have taken a while: stop only the server asked
+            # about.
+            current, _, same = reread_record(record)
+            if not same:
+                raise UpdateError(
+                    "server_running",
+                    f"Another server (pid {current.pid}) took the place of the "
+                    "one you were asked about; nothing was changed. Run EvoSci "
+                    "update again.",
+                )
+            if current is None:
+                # The server asked about is gone: look again from the start.
+                return check_server(opts, emit, confirm, before_stop)
+        go_on()
+        # A lasting server (not one ``EvoSci deploy`` or the desktop app owns)
+        # is started again by the setup after the update, and serves every
+        # registered project again.
+        restart = is_lasting(record)
+        if restart:
+            from .setup.server import remember_for_restart
+
+            remember_for_restart()
+        try:
+            pid = stop_server(record=record)
+        except ServerStopFailedError as exc:
+            # Its message says what keeps the server running.
+            pid, failed = None, f"{exc} Nothing was changed."
+        else:
+            failed = (
                 f"Could not stop the EvoScientist server on port {port}; nothing "
                 f"was changed. Stop it with EvoSci server stop, then run EvoSci "
-                f"update again.",
+                f"update again."
             )
+        if pid is None:
+            if restart:
+                from .setup.server import forget_restart
+
+                forget_restart()
+            raise UpdateError("server_running", failed)
         emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
+        _stop_older_ccproxy(emit)
         return
     manual = manual_stop_command(port)
     message = (
@@ -318,9 +392,37 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     )
     if confirm is not None and not opts.yes:
         if confirm(f"{message}\nUpdate anyway?"):
+            go_on()
+            _stop_older_ccproxy(emit)
             return
         raise UpdateError("server_running", "Update cancelled.")
     raise UpdateError("server_running", f"{message} Nothing was changed.")
+
+
+def _stop_older_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy an older release left running for its sessions: it
+    runs from the install the update replaces. The server starts its own."""
+    from .ccproxy_manager import stop_recorded_ccproxy
+
+    pid = stop_recorded_ccproxy()
+    if pid is not None:
+        emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
+
+
+def _stop_left_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy a killed server left running (``kill -9``, out of
+    memory): its record still names it, and it would keep the update
+    waiting on a busy environment."""
+    from .config import get_effective_config
+    from .langgraph_dev import server_ccproxy, server_record
+    from .langgraph_dev.manager import RUNTIME
+
+    left = server_record.load_json(RUNTIME.record)
+    if not left:
+        return
+    pid = server_ccproxy.end_recorded(left, get_effective_config().ccproxy_port)
+    if pid is not None:
+        emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
 
 
 # --------------------------------------------------------------------------- #
@@ -371,6 +473,54 @@ def uv_install_command(
         f"EvoScientist{extras}=={target}",
         *receipt.with_args(),
     ]
+
+
+def check_install(
+    cmd: list[str],
+    tmp: Path,
+    target: str,
+    mirror: str,
+    opts: UpdateOptions,
+    emit: Emitter,
+) -> None:
+    """Run the install into a scratch tool dir under *tmp* first: uv removes
+    the installed tool before it builds or downloads, so a failure there must
+    not reach the real one."""
+    scratch = tmp / "check"
+    try:
+        env = uv_tool.uv_environment(cmd[0], mirror)
+        env["UV_TOOL_DIR"] = str(scratch / "tools")
+        env["UV_TOOL_BIN_DIR"] = str(scratch / "bin")
+        # On PATH, so uv does not warn that the scratch bin dir is not.
+        env["PATH"] = os.pathsep.join(
+            filter(None, (env["UV_TOOL_BIN_DIR"], env.get("PATH")))
+        )
+        emit(
+            make_event(
+                STAGE,
+                "running",
+                progress=0.25,
+                message=f"Checking that EvoScientist {target} installs",
+            )
+        )
+        try:
+            result = subprocess.run(
+                cmd, cwd=tmp, env=env, stdout=sys.stderr if opts.json else None
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    except KeyboardInterrupt:  # only the scratch dir was touched
+        raise UpdateError(
+            "environment_busy",
+            "Update cancelled. Nothing was changed.",
+            detail={"waiting_for": []},
+        ) from None
+    if result.returncode != 0:
+        raise UpdateError(
+            "install_failed",
+            f"uv could not install EvoScientist {target} (see uv's output); "
+            f"the installed version is unchanged.{exclude_newer_hint()}",
+        )
 
 
 def exclude_newer_hint() -> str:
@@ -620,12 +770,19 @@ def _update(
                 )
             )
             download_constraints(target, mirror, constraints)
+            cmd = uv_install_command(uv, receipt, target, constraints)
             if sys.platform != "win32":
                 lock = _hold_update_lock()
                 # Before the server is stopped: a run that cannot wait then ends
-                # with nothing changed. The server itself is stopped next.
+                # with nothing changed. The server question, the install check
+                # and the stop come next.
                 wait_until_free(opts, emit, tmp, skip_server=True)
-            check_server(opts, emit, confirm)
+            check_server(
+                opts,
+                emit,
+                confirm,
+                before_stop=lambda: check_install(cmd, tmp, target, mirror, opts, emit),
+            )
             if _version(target) < _version(installed):
                 backup = backup_config(installed)
                 if backup is not None:
@@ -637,7 +794,6 @@ def _update(
                             message=f"Copied the config to {backup} before the rollback",
                         )
                     )
-            cmd = uv_install_command(uv, receipt, target, constraints)
             evosci = tool_bin_dir(uv) / (
                 "EvoSci.exe" if sys.platform == "win32" else "EvoSci"
             )
@@ -662,10 +818,13 @@ def _update(
                 stdout=sys.stderr if opts.json else None,
             )
             if result.returncode != 0:
+                # uv may already have removed the installed tool. The check
+                # passed with the same settings, so exclude-newer is no cause.
                 raise UpdateError(
                     "install_failed",
-                    f"uv could not install EvoScientist {target} (see uv's output); "
-                    f"the installed version is unchanged.{exclude_newer_hint()}",
+                    f"uv could not install EvoScientist {target} (see uv's "
+                    f"output). If EvoSci no longer starts, run the install "
+                    f"script again: {install_command()}",
                 )
         finally:
             if not handed_over:  # the helper deletes it when it ends
@@ -721,14 +880,6 @@ def running_from_env() -> list[dict[str, Any]]:
     return found
 
 
-def _stdin_is_pipe() -> bool:
-    try:
-        mode = os.fstat(sys.stdin.fileno()).st_mode
-    except (OSError, ValueError, AttributeError):
-        return False
-    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
-
-
 def _reader_gone() -> bool:
     """True once the program reading stdout (a pipe or a socket) has closed
     it."""
@@ -746,16 +897,24 @@ def _reader_gone() -> bool:
 
 
 def _server_tree() -> set[int]:
-    """The recorded langgraph server and its children."""
+    """The background agent server the update stops itself: the recorded
+    langgraph server (with the ccproxy it started) and the ccproxy an older
+    release recorded, with their children."""
     import psutil
 
-    from .langgraph_dev.manager import _read_workspace_sidecar
+    from .ccproxy_manager import recorded_ccproxy_running
+    from .langgraph_dev.manager import read_record
 
-    try:
-        server = psutil.Process(int((_read_workspace_sidecar() or {})["pid"]))
-        return {server.pid, *(c.pid for c in server.children(recursive=True))}
-    except (KeyError, TypeError, ValueError, OverflowError, psutil.Error):
-        return set()
+    record = read_record(older=True)
+    pids = [record.pid if record else None, recorded_ccproxy_running()]
+    tree: set[int] = set()
+    for pid in pids:
+        try:
+            root = psutil.Process(int(pid))
+            tree |= {root.pid, *(c.pid for c in root.children(recursive=True))}
+        except (TypeError, ValueError, OverflowError, psutil.Error):
+            continue
+    return tree
 
 
 def _hold_update_lock():
@@ -800,7 +959,7 @@ def wait_until_free(
     stdin that is not a pipe), and changes nothing. With *skip_server*, the
     recorded server and its children are not waited for."""
     cancel = tmp / "cancel"
-    unattended = not _stdin_is_pipe() if opts.json else not sys.stdin.isatty()
+    unattended = not stdin_is_pipe() if opts.json else not sys.stdin.isatty()
     last: list[int] | None = None
     blockers: list[dict[str, Any]] = []
 
@@ -928,7 +1087,6 @@ def _hand_over(
             "installed": installed,
             "target": target,
             "install_command": install_command(),
-            "install_hint": exclude_newer_hint(),
             # One helper at a time, whichever window started it.
             "lock": str(tools_dir() / "update.lock"),
             "unattended": not opts.json and not own_window,

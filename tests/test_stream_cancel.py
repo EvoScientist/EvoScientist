@@ -15,7 +15,7 @@ from EvoScientist.backends import CustomSandboxBackend
 from EvoScientist.cancellation import current_cancel_event
 from EvoScientist.runtime import AsyncRuntime
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 
 @pytest.fixture(autouse=True)

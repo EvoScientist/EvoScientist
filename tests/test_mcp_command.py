@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 
 def _ctx():

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.implementation.experts import (
@@ -15,7 +17,7 @@ from EvoScientist.commands.implementation.experts import (
     invalidate_experts_cache,
 )
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 
 @pytest.fixture(autouse=True)
@@ -51,19 +53,12 @@ class _FakeSkillInfo:
 
     name: str
     description: str = ""
-    role: str = ""
     type: str = "expert"
     tags: list[str] = field(default_factory=list)
     source: str = "builtin"
     # Non-empty by default so the fake passes the empty-body filter in
-    # ``list_dispatchable_experts``. Tests that specifically want to
-    # exercise the empty-body reject path pass ``body=""``.
-    body: str = "persona"
-    # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
-    # ``body`` for these. Set ``expert_source="expert_md"`` plus
-    # ``expert_body`` to fake an expert on the current contract.
-    expert_source: str = "frontmatter"
-    expert_body: str = ""
+    # ``list_dispatchable_experts``.
+    expert_body: str = "persona"
 
 
 def _make_ctx(
@@ -91,13 +86,18 @@ class TestExpertsList:
             return_value=[
                 _FakeSkillInfo(
                     name="idea-brainstorm",
-                    role="Research idea brainstormer",
+                    description="Research idea brainstormer",
                 ),
             ],
         ):
             await ExpertsCommand().execute(ctx, args=[])
         # A Rich Table was mounted, and the no-experts-invited hint appeared.
         assert len(ui.mounted) == 1
+        console = Console(file=io.StringIO(), width=120, record=True)
+        console.print(ui.mounted[0])
+        rendered = console.export_text()
+        assert "Description" in rendered
+        assert "Research idea brainstormer" in rendered
         assert any("No experts invited" in text for text, _ in ui.lines)
 
     async def test_empty_list_prints_help_hint(self, workspace):
@@ -117,7 +117,7 @@ class TestExpertsList:
             return_value=[
                 _FakeSkillInfo(
                     name="idea-brainstorm",
-                    role="Research idea brainstormer",
+                    description="Research idea brainstormer",
                 ),
             ],
         ):

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", thread_store=None):

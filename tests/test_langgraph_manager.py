@@ -7,7 +7,6 @@ to be available.
 
 from __future__ import annotations
 
-import dataclasses
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -17,18 +16,18 @@ import pytest
 
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.langgraph_dev import manager
+from EvoScientist.langgraph_dev.boundary import is_loopback_host
+from tests.fakes.langgraph_dev import Server
 
 
 @pytest.fixture(autouse=True)
 def reset_module_state():
     """Reset manager module globals before each test for isolation."""
     manager._PROCESS = None
-    manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
     yield
     manager._PROCESS = None
-    manager._PROCESS_WORKSPACE = None
     manager._ASYNC_SUBAGENTS_AVAILABLE = False
     manager._LOG_OFFSET_AT_START = 0
 
@@ -43,9 +42,12 @@ class TestProbeHost:
     uses the configured interface, every client falls back to something
     actually reachable."""
 
-    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", ""])
-    def test_wildcards_map_to_loopback(self, wildcard):
-        assert manager._probe_host(wildcard) == "127.0.0.1"
+    @pytest.mark.parametrize(
+        ("wildcard", "loopback"),
+        [("0.0.0.0", "127.0.0.1"), ("", "127.0.0.1"), ("::", "::1"), ("[::]", "::1")],
+    )
+    def test_wildcards_map_to_loopback(self, wildcard, loopback):
+        assert manager._probe_host(wildcard) == loopback
 
     @pytest.mark.parametrize(
         "host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"]
@@ -61,13 +63,17 @@ class TestIsLoopbackHost:
     """Drives the public-bind warning, so it must be conservative: only
     provable loopback suppresses the banner."""
 
-    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "  LOCALHOST  "])
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "::1", "[::1]", "localhost", "  LOCALHOST  "]
+    )
     def test_loopback_recognized(self, host):
-        assert manager._is_loopback_host(host) is True
+        assert is_loopback_host(host) is True
 
-    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "example.test"])
+    @pytest.mark.parametrize(
+        "host", ["0.0.0.0", "::", "192.168.1.5", "example.test", "[::1", "::1]"]
+    )
     def test_exposed_hosts_rejected(self, host):
-        assert manager._is_loopback_host(host) is False
+        assert is_loopback_host(host) is False
 
 
 class TestBaseUrl:
@@ -83,133 +89,6 @@ class TestBaseUrl:
     def test_ipv6_literal_is_bracketed(self):
         """Unbracketed ``::1:6174`` is not a parseable authority (RFC 3986)."""
         assert manager._base_url(6174, "::1") == "http://[::1]:6174"
-
-
-class TestCanBindPort:
-    def test_binds_literal_host_not_probe_host(self, monkeypatch):
-        """``_can_bind_port`` must replicate the server's own bind. Probing
-        loopback while the server claims 0.0.0.0 would give false confidence
-        when another process holds a single non-loopback interface."""
-        import socket as _socket
-
-        bound: list[tuple] = []
-
-        class _FakeSocket:
-            def __init__(self, family, type_):
-                self.family = family
-
-            def setsockopt(self, *args):
-                pass
-
-            def bind(self, addr):
-                bound.append((self.family, addr))
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(_socket, "socket", _FakeSocket)
-
-        assert manager._can_bind_port(6174, "0.0.0.0") is True
-        assert bound == [(_socket.AF_INET, ("0.0.0.0", 6174))]
-
-    def test_ipv6_host_uses_ipv6_family(self, monkeypatch):
-        import socket as _socket
-
-        bound: list[tuple] = []
-
-        class _FakeSocket:
-            def __init__(self, family, type_):
-                self.family = family
-
-            def setsockopt(self, *args):
-                pass
-
-            def bind(self, addr):
-                bound.append((self.family, addr))
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(_socket, "socket", _FakeSocket)
-
-        assert manager._can_bind_port(6174, "::1") is True
-        assert bound == [(_socket.AF_INET6, ("::1", 6174))]
-
-    @pytest.mark.parametrize(("os_name", "reuses"), [("posix", True), ("nt", False)])
-    def test_reuseaddr_only_on_posix(self, monkeypatch, os_name, reuses):
-        """uvicorn binds with ``SO_REUSEADDR``, so the probe must too, or
-        TIME_WAIT connections block a bind the server could make (#589). On
-        Windows the option also allows binding over a live listener."""
-        import socket as _socket
-
-        calls: list[tuple] = []
-
-        class _FakeSocket:
-            def __init__(self, family, type_):
-                pass
-
-            def setsockopt(self, level, option, value):
-                calls.append(("setsockopt", level, option, value))
-
-            def bind(self, addr):
-                calls.append(("bind", addr))
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(_socket, "socket", _FakeSocket)
-        monkeypatch.setattr(manager.os, "name", os_name)
-
-        assert manager._can_bind_port(6174) is True
-        reuse = ("setsockopt", _socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        bind = ("bind", ("127.0.0.1", 6174))
-        assert calls == ([reuse, bind] if reuses else [bind])
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX TIME_WAIT rules")
-    def test_time_wait_connections_do_not_block_the_probe(self):
-        """End to end: the old server closed an accepted connection first, so
-        that connection sits in TIME_WAIT on the port after the server is
-        gone. A plain bind fails then, but the server's own bind would not."""
-        import socket as _socket
-
-        listener = _socket.socket()
-        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        port = listener.getsockname()[1]
-        client = _socket.create_connection(("127.0.0.1", port))
-        accepted, _ = listener.accept()
-        accepted.close()  # The server side closes first and keeps TIME_WAIT.
-        client.close()
-        listener.close()
-
-        plain = _socket.socket()
-        try:
-            plain.bind(("127.0.0.1", port))
-        except OSError:
-            pass
-        else:
-            pytest.skip("this kernel left no TIME_WAIT entry to test against")
-        finally:
-            plain.close()
-
-        assert manager._can_bind_port(port) is True
-
-    def test_live_listener_still_blocks_the_probe(self):
-        import socket as _socket
-
-        listener = _socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        try:
-            assert manager._can_bind_port(listener.getsockname()[1]) is False
-        finally:
-            listener.close()
-
-
-# =============================================================================
-# langgraph CLI resolution
-# =============================================================================
 
 
 class TestLanggraphCliResolution:
@@ -346,187 +225,28 @@ class TestIsLanggraphDevRunning:
 
 
 # =============================================================================
-# _list_pids_on_port
+# ensure_server — whether a server is needed
 # =============================================================================
 
 
-class TestListPidsOnPort:
-    @patch("EvoScientist.langgraph_dev.manager.psutil.net_connections")
-    def test_empty_when_no_connections(self, mock_net):
-        mock_net.return_value = []
-        assert manager._list_pids_on_port(6174) == []
-
-    @patch("EvoScientist.langgraph_dev.manager.psutil.net_connections")
-    def test_returns_pid_for_matching_port(self, mock_net):
-        mock_net.return_value = [
-            SimpleNamespace(laddr=SimpleNamespace(port=6174), pid=12345),
-            SimpleNamespace(laddr=SimpleNamespace(port=8080), pid=99999),
-        ]
-        result = manager._list_pids_on_port(6174)
-        assert result == [12345]
-
-    @patch("EvoScientist.langgraph_dev.manager.psutil.net_connections")
-    def test_filters_none_pid(self, mock_net):
-        mock_net.return_value = [
-            SimpleNamespace(laddr=SimpleNamespace(port=6174), pid=None),
-            SimpleNamespace(laddr=SimpleNamespace(port=6174), pid=12345),
-        ]
-        result = manager._list_pids_on_port(6174)
-        assert result == [12345]
-
-    def test_returns_empty_on_access_denied(self):
-        with patch.object(
-            manager.psutil,
-            "net_connections",
-            side_effect=manager.psutil.AccessDenied(),
-        ):
-            assert manager._list_pids_on_port(6174) == []
-
-
-# =============================================================================
-# _kill_owned_stale_process
-# =============================================================================
-
-
-class TestKillOwnedStaleProcess:
-    def test_returns_false_if_no_pid_file(self, tmp_path, runtime_paths):
-        with patch.object(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(runtime_paths, pid_file=tmp_path / "missing.pid"),
-        ):
-            assert manager._kill_owned_stale_process(6174) is False
-
-    def test_returns_false_if_pid_file_unreadable(self, tmp_path, runtime_paths):
-        pid_file = tmp_path / "bad.pid"
-        pid_file.write_text("not-a-number")
-        with patch.object(
-            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
-        ):
-            assert manager._kill_owned_stale_process(6174) is False
-
-    def test_returns_false_if_pid_not_in_occupiers(self, tmp_path, runtime_paths):
-        pid_file = tmp_path / "lg.pid"
-        pid_file.write_text("12345")
-        with (
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(runtime_paths, pid_file=pid_file),
-            ),
-            patch.object(manager, "_list_pids_on_port", return_value=[99999]),
-        ):
-            assert manager._kill_owned_stale_process(6174) is False
-            # PID file should be left intact — the port is held by someone
-            # else, not a stale ours.
-            assert pid_file.exists()
-
-    def test_refuses_to_kill_recycled_pid(self, tmp_path, runtime_paths):
-        """PID matches but cmdline doesn't contain 'langgraph' → don't kill."""
-        pid_file = tmp_path / "lg.pid"
-        pid_file.write_text("12345")
-        fake_proc = MagicMock()
-        fake_proc.cmdline.return_value = ["bash", "-c", "echo hi"]
-        with (
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(runtime_paths, pid_file=pid_file),
-            ),
-            patch.object(manager, "_list_pids_on_port", return_value=[12345]),
-            patch.object(manager.psutil, "Process", return_value=fake_proc),
-        ):
-            assert manager._kill_owned_stale_process(6174) is False
-            fake_proc.kill.assert_not_called()
-            # PID file should be removed — the entry is stale (our process is
-            # gone, PID was recycled by an unrelated process).
-            assert not pid_file.exists()
-
-    def test_kills_when_cmdline_matches_langgraph(self, tmp_path, runtime_paths):
-        """Owned PID + cmdline contains 'langgraph' → kill + cleanup PID file."""
-        pid_file = tmp_path / "lg.pid"
-        pid_file.write_text("12345")
-        fake_proc = MagicMock()
-        fake_proc.cmdline.return_value = [
-            "/usr/bin/python",
-            "/usr/bin/langgraph",
-            "dev",
-        ]
-        with (
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(runtime_paths, pid_file=pid_file),
-            ),
-            patch.object(manager, "_list_pids_on_port", return_value=[12345]),
-            patch.object(manager.psutil, "Process", return_value=fake_proc),
-        ):
-            assert manager._kill_owned_stale_process(6174) is True
-            fake_proc.kill.assert_called_once()
-            assert not pid_file.exists()
-
-    def test_handles_dead_pid(self, tmp_path, runtime_paths):
-        """PID file claims a PID but the process is gone → cleanup PID file, no error."""
-        pid_file = tmp_path / "lg.pid"
-        pid_file.write_text("12345")
-        with (
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(runtime_paths, pid_file=pid_file),
-            ),
-            patch.object(manager, "_list_pids_on_port", return_value=[12345]),
-            patch.object(
-                manager.psutil,
-                "Process",
-                side_effect=manager.psutil.NoSuchProcess(12345),
-            ),
-        ):
-            assert manager._kill_owned_stale_process(6174) is False
-            assert not pid_file.exists()
-
-
-# =============================================================================
-# ensure_langgraph_dev — high-level orchestration
-# =============================================================================
-
-
-class TestEnsureLanggraphDev:
+class TestEnsureServer:
     def test_starts_when_async_disabled_but_memory_workers_enabled(
-        self, tmp_path, runtime_paths
+        self, tmp_path, monkeypatch, runtime_paths
     ):
         """EvoMemory workers can require langgraph dev even without async subagents."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = True
-        cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
-        proc = MagicMock()
-        with (
-            patch.object(manager, "is_langgraph_dev_running", return_value=False),
-            patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
-            # Intercept the real atexit hook: letting it register means the
-            # callback fires at interpreter exit AFTER patches are restored,
-            # deleting the REAL ~/.config/evoscientist pid/sidecar files.
-            patch.object(manager.atexit, "register") as atexit_register,
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
-                    lock_file=tmp_path / "lg.lock",
-                ),
-            ),
-        ):
-            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+        server = Server(monkeypatch)
 
-        assert result is proc
-        start.assert_called_once()
-        atexit_register.assert_called_once_with(manager.stop_langgraph_dev, proc)
+        result = manager.ensure_server(cfg)
+
+        assert result.served is True
+        assert len(server.spawns) == 1
         assert manager.is_async_subagents_available() is True
 
     def test_skips_when_async_and_memory_workers_disabled(
-        self, tmp_path, runtime_paths
+        self, tmp_path, monkeypatch, runtime_paths
     ):
         """No background server is needed without async subagents, workers, or scheduler."""
         cfg = EvoScientistConfig()
@@ -534,25 +254,14 @@ class TestEnsureLanggraphDev:
         cfg.memory_workers_enabled = False
         cfg.enable_scheduler = False  # scheduler crons also require the backend
         cfg.memory_skill_synthesis_enabled = False
-        cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
-        with (
-            patch.object(manager, "is_langgraph_dev_running") as mock_running,
-            patch.object(manager, "start_langgraph_dev") as start,
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
-                    lock_file=tmp_path / "lg.lock",
-                ),
-            ),
-        ):
-            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
+        server = Server(monkeypatch)
 
-        assert result is None
-        mock_running.assert_not_called()
-        start.assert_not_called()
+        result = manager.ensure_server(cfg, workspace_dir=tmp_path)
+
+        # No server is needed, so the session has what it needs.
+        assert result.served is True
+        assert result.available is False
+        assert server.spawns == []
         assert manager.is_async_subagents_available() is False
 
     def test_needs_langgraph_dev_for_scheduler_only(self):
@@ -578,6 +287,18 @@ class TestEnsureLanggraphDev:
         cfg.gateway_backend = "langgraph_server"
         assert manager.needs_langgraph_dev(cfg) is True
 
+    def test_needs_langgraph_dev_for_anthropic_oauth(self):
+        """Anthropic's OAuth goes through the server's ccproxy."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        cfg.anthropic_auth_mode = "oauth"
+        # Whatever is configured: /model may pick an Anthropic model.
+        cfg.provider = "openai"
+        assert manager.needs_langgraph_dev(cfg) is True
+
     def test_needs_langgraph_dev_explicit_backend_overrides_global(self):
         """The explicit ``backend`` param wins over ``config.gateway_backend``.
 
@@ -596,35 +317,18 @@ class TestEnsureLanggraphDev:
         cfg.gateway_backend = "langgraph_server"
         assert manager.needs_langgraph_dev(cfg, backend="local") is False
 
-    def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
-        """When the subprocess is already running, no new Popen call."""
+    def test_reuses_the_recorded_server(self, monkeypatch, runtime_paths):
+        """When the server is already running, nothing is spawned."""
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = True
-        cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
-        with (
-            patch.object(
-                manager, "is_langgraph_dev_running", return_value=True
-            ) as mock_running,
-            patch.object(manager, "start_langgraph_dev") as mock_start,
-            patch.object(
-                manager,
-                "RUNTIME",
-                dataclasses.replace(
-                    manager.LanggraphRuntimePaths.for_directory(tmp_path / "pids"),
-                    lock_file=tmp_path / "lg.lock",
-                ),
-            ),
-        ):
-            result = manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
-            # We didn't spawn anything — there's already a healthy server.
-            mock_start.assert_not_called()
-            # Reuse path returns None (we don't own the existing process).
-            assert result is None
-            # is_async_subagents_available was flipped True.
-            assert manager.is_async_subagents_available() is True
-            # Health check was called at least once.
-            assert mock_running.called
+        server = Server(monkeypatch)
+        server.run()
+
+        result = manager.ensure_server(cfg)
+
+        assert server.spawns == []
+        assert result.served is True
+        assert manager.is_async_subagents_available() is True
 
 
 # =============================================================================
@@ -723,7 +427,7 @@ class TestRotateLogIfNeeded:
         when another process holds the backup open), the helper logs a
         warning and returns — the caller can still open the un-rotated
         log and proceed. Failing rotation is non-fatal: the next
-        ``start_langgraph_dev`` invocation will try again.
+        ``_spawn_server`` invocation will try again.
         """
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 0)  # always rotate
         log = tmp_path / "langgraph_dev.log"
@@ -739,91 +443,29 @@ class TestRotateLogIfNeeded:
         assert log.stat().st_size == 10
 
 
-class TestStartLanggraphDevRotatesLog:
-    """``start_langgraph_dev`` must call ``_rotate_log_if_needed`` before
+class TestSpawnRotatesLog:
+    """``_spawn_server`` must call ``_rotate_log_if_needed`` before
     opening the log handle, so each session starts with either an
-    existing-but-fresh log or a brand-new file. Verifying the call site
-    directly (vs. mocking the entire subprocess spawn) keeps the test
-    cheap while still guarding the integration point.
-    """
+    existing-but-fresh log or a brand-new file."""
 
-    def test_rotate_called_before_open(self, tmp_path, monkeypatch):
-        log = tmp_path / "langgraph_dev.log"
-        log.write_bytes(b"x" * 2048)  # contents don't matter for the check
-        # Build a fully temp-rooted runtime bundle via
-        # ``for_directory`` so *every* path (pid_dir, pid_file,
-        # workspace_sidecar, lock_file) is rooted under ``tmp_path``.
-        # ``dataclasses.replace(runtime_paths, …)`` would still carry
-        # ``pid_file`` / ``workspace_sidecar`` / ``lock_file`` from the
-        # production object pointing at ``~/.config/evoscientist/``.
-        pid_dir = tmp_path / "pids"
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(
-                manager.LanggraphRuntimePaths.for_directory(pid_dir),
-                log_file=log,
-            ),
-        )
+    def test_rotate_called_before_open(self, spawn_capture, monkeypatch):
+        spawn_capture.log.write_bytes(b"x" * 2048)
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
-        # This test only verifies log rotation — we must not touch real
-        # sockets.  Patch ``_can_bind_port`` so the bind-poll loop in
-        # ``_wait_for_port_bindable`` passes immediately regardless of
-        # whether port 6174 is in use on the dev machine.
-        monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
-        # Make ``_packaged_langgraph_config`` point at a real file so
-        # ``start_langgraph_dev`` doesn't bail at the existence check
-        # before reaching the rotation call.
-        fake_config = tmp_path / "langgraph.json"
-        fake_config.write_text("{}")
-        # Don't actually start a subprocess — just verify the rotation
-        # call happens. We mock the spawn to raise immediately so the
-        # rest of start_langgraph_dev aborts before doing anything else.
-        with (
-            patch.object(manager, "_langgraph_exe", return_value="/fake/langgraph"),
-            patch.object(
-                manager, "_packaged_langgraph_config", return_value=fake_config
-            ),
-            patch(
-                "EvoScientist.langgraph_dev.manager.subprocess.Popen",
-                side_effect=FileNotFoundError("subprocess not available"),
-            ),
-        ):
-            try:
-                manager.start_langgraph_dev(workspace_dir=tmp_path)
-            except FileNotFoundError:
-                pass  # expected — we just need rotation to have happened
-        # After start attempt, the oversize log must have been rotated.
-        assert (tmp_path / "langgraph_dev.log.1").exists()
-        # And the redirect held — nothing leaked into the real
-        # ``~/.config/evoscientist/`` (we'd have observed a
-        # ``langgraph_dev.log.1`` *next* to the user's real log, not
-        # under ``tmp_path``). The ``pid_dir`` we redirected to must
-        # exist, proving the function reached past the mkdir prelude.
-        assert pid_dir.is_dir()
+
+        with pytest.raises(FileNotFoundError):
+            manager._spawn_server()
+
+        assert spawn_capture.log.with_name("langgraph_dev.log.1").exists()
 
 
 @pytest.fixture
-def start_langgraph_dev_capture(tmp_path, monkeypatch):
-    """Prereq patches + capturing ``_fake_popen`` for ``start_langgraph_dev``
-    tests. Mocks everything up to (but not including) ``Popen``, redirecting
-    all runtime paths under ``tmp_path``, then installs a ``_fake_popen``
-    that records the argv, env, and ``_LOG_OFFSET_AT_START`` at the instant
+def spawn_capture(tmp_path, monkeypatch, runtime_paths):
+    """Prereq patches + capturing ``_fake_popen`` for ``_spawn_server``
+    tests: records the argv, env, and ``_LOG_OFFSET_AT_START`` at the instant
     ``Popen`` is invoked and raises ``FileNotFoundError`` to stop before the
-    real spawn. Callers may seed the log file (available as ``env.log``)
-    before invoking ``start_langgraph_dev``.
+    real spawn. Callers may seed the log file (``env.log``, in the server
+    home) before invoking ``_spawn_server``.
     """
-    pid_dir = tmp_path / "pids"
-    log = tmp_path / "langgraph_dev.log"
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(
-            manager.LanggraphRuntimePaths.for_directory(pid_dir),
-            log_file=log,
-        ),
-    )
-    monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
     fake_config = tmp_path / "langgraph.json"
     fake_config.write_text("{}")
     monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
@@ -832,8 +474,6 @@ def start_langgraph_dev_capture(tmp_path, monkeypatch):
     captured: dict = {}
 
     def _fake_popen(args, **kwargs):
-        # Read the offset global at the instant Popen is invoked — this is
-        # strictly after the capture line in start_langgraph_dev.
         captured["args"] = args
         captured["env"] = kwargs["env"]
         captured["kwargs"] = kwargs
@@ -843,11 +483,13 @@ def start_langgraph_dev_capture(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
     )
-    return SimpleNamespace(tmp_path=tmp_path, log=log, captured=captured)
+    return SimpleNamespace(
+        tmp_path=tmp_path, log=runtime_paths.log_file, captured=captured
+    )
 
 
 class TestStartLanggraphDevCapturesLogOffset:
-    """``start_langgraph_dev`` must capture ``_LOG_OFFSET_AT_START`` at the
+    """``_spawn_server`` must capture ``_LOG_OFFSET_AT_START`` at the
     right moment — after ``_rotate_log_if_needed`` + ``open('ab')`` but
     before ``subprocess.Popen`` — so ``read_tunnel_url`` scans only this
     session's bytes. The existing ``TestReadTunnelUrl`` tests monkeypatch
@@ -855,41 +497,37 @@ class TestStartLanggraphDevCapturesLogOffset:
     a regression moving the capture line would actually be caught.
     """
 
-    def test_offset_equals_existing_log_size(
-        self, start_langgraph_dev_capture, monkeypatch
-    ):
+    def test_offset_equals_existing_log_size(self, spawn_capture, monkeypatch):
         """No rotation → offset is the pre-existing (appended-to) log size,
         so a stale URL above that offset is never re-read."""
-        env = start_langgraph_dev_capture
+        env = spawn_capture
         env.log.write_bytes(b"x" * 512)
         # Keep the log well under the rotation threshold so it is NOT rotated.
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 10**9)
 
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager._spawn_server()
         except FileNotFoundError:
             pass
         assert env.captured["offset"] == 512
 
-    def test_offset_zero_after_forced_rotation(
-        self, start_langgraph_dev_capture, monkeypatch
-    ):
+    def test_offset_zero_after_forced_rotation(self, spawn_capture, monkeypatch):
         """Forced rotation moves the old log away; the fresh ``open('ab')``
         starts empty → offset 0 (scan the whole new file)."""
-        env = start_langgraph_dev_capture
+        env = spawn_capture
         env.log.write_bytes(b"x" * 4096)
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
 
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager._spawn_server()
         except FileNotFoundError:
             pass
-        assert (env.tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
+        assert env.log.with_name("langgraph_dev.log.1").exists()  # rotation happened
         assert env.captured["offset"] == 0
 
 
 class TestStartLanggraphDevPropagatesPort:
-    """``start_langgraph_dev`` must export the effective bind port into the
+    """``_spawn_server`` must export the effective bind port into the
     subprocess env as ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` so the deployed
     main agent's ``cfg.langgraph_dev_port`` matches what langgraph dev
     actually bound to. Without this, ``EvoSci deploy --port X`` binds to X
@@ -899,16 +537,16 @@ class TestStartLanggraphDevPropagatesPort:
     because the self-loop URL points at an unbound port.
     """
 
-    def test_env_carries_explicit_bind_port(self, start_langgraph_dev_capture):
+    def test_env_carries_explicit_bind_port(self, spawn_capture):
         """The ``env`` passed to Popen must set the env var to ``str(port)``
         matching whatever the caller resolved, AND that value must match the
         ``--port`` argv the subprocess is spawned with. Comparing both closes
         the exact desync class this PR fixes — a future refactor that changed
         how argv gets its port (or introduced a second port variable) would
         slip past a pure env-only assertion."""
-        env = start_langgraph_dev_capture
+        env = spawn_capture
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6617)
+            manager._spawn_server(port=6617)
         except FileNotFoundError:
             pass
         assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6617"
@@ -918,18 +556,16 @@ class TestStartLanggraphDevPropagatesPort:
             == env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"]
         )
 
-    def test_env_value_replaces_inherited(
-        self, start_langgraph_dev_capture, monkeypatch
-    ):
+    def test_env_value_replaces_inherited(self, spawn_capture, monkeypatch):
         """A stray parent-shell export of ``EVOSCIENTIST_LANGGRAPH_DEV_PORT``
         must NOT shadow the caller-resolved bind port in the subprocess env.
         Dict assignment on ``sub_env`` already guarantees this, but the
         argv-vs-env cross-check pins the invariant against a future refactor
         that decoupled the two."""
         monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "9999")
-        env = start_langgraph_dev_capture
+        env = spawn_capture
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6606)
+            manager._spawn_server(port=6606)
         except FileNotFoundError:
             pass
         # Parent's 9999 replaced; caller's 6606 wins in both env and argv.
@@ -951,14 +587,11 @@ class TestReadTunnelUrl:
     scanning only bytes written after the current subprocess started."""
 
     def test_returns_url_when_present(self, tmp_path, runtime_paths, monkeypatch):
-        log = tmp_path / "langgraph_dev.log"
+        log = runtime_paths.log_file
         log.write_text(
             "INFO server up\n"
             "[cloudflared] Your quick Tunnel has been created! Visit it at:\n"
             "[cloudflared] https://happy-tiger-demo.trycloudflare.com\n"
-        )
-        monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
         )
         monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
 
@@ -967,12 +600,97 @@ class TestReadTunnelUrl:
             == "https://happy-tiger-demo.trycloudflare.com"
         )
 
-    def test_returns_none_on_timeout(self, tmp_path, runtime_paths, monkeypatch):
-        log = tmp_path / "langgraph_dev.log"
-        log.write_text("INFO server up — but no tunnel line ever printed\n")
-        monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+    @pytest.mark.parametrize("api_host", ["api", "API"])
+    def test_ignores_api_url(self, tmp_path, runtime_paths, monkeypatch, api_host):
+        """langgraph-api names cloudflared's API endpoint when no tunnel came up."""
+        log = runtime_paths.log_file
+        log.write_text(f"- API: https://{api_host}.trycloudflare.com\n")
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "failed to build quick tunnel request: net/http: invalid method",
+            "failed to request quick Tunnel: Post "
+            '"https://API.trycloudflare.com/tunnel": i/o timeout',
+            "failed to read quick-tunnel response: unexpected EOF",
+            # HTTP 429 (rate limited): the body is "error code: 1015".
+            "failed to unmarshal quick Tunnel: invalid character 'e' looking "
+            "for beginning of value",
+            "failed to parse quick Tunnel ID: invalid UUID length: 0",
+        ],
+    )
+    def test_raises_at_once_on_tunnel_failure(
+        self, tmp_path, runtime_paths, monkeypatch, failure
+    ):
+        prefix = "INFO:langgraph_api.tunneling.cloudflare:[cloudflared]"
+        log = runtime_paths.log_file
+        log.write_text(
+            f"{prefix} 2026-10-07T15:39:12Z INF Requesting new quick Tunnel "
+            "on trycloudflare.com...\n"
+            f"{prefix} 2026-10-07T15:39:12Z ERR Error unmarshaling "
+            'QuickTunnel response: error code: 1015 status_code="429"\n'
+            f"{prefix} {failure}\n"
+            "- API: https://api.trycloudflare.com\n"
         )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        def _no_wait(_seconds):
+            pytest.fail("read_tunnel_url waited after cloudflared reported a failure")
+
+        monkeypatch.setattr(
+            manager,
+            "time",
+            SimpleNamespace(monotonic=manager.time.monotonic, sleep=_no_wait),
+        )
+        with pytest.raises(manager.TunnelFailedError) as info:
+            manager.read_tunnel_url(timeout=5.0)
+        assert str(info.value) == failure
+
+    def test_connection_errors_are_not_tunnel_failures(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        log = runtime_paths.log_file
+        log.write_text(
+            "[cloudflared] ERR Failed to serve tunnel connection "
+            'error="Application error 0x0 (remote)" connIndex=0\n'
+            '[cloudflared] ERR Serve tunnel error error="Application error 0x0 '
+            '(remote)" connIndex=0\n'
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    def test_ignores_a_failure_before_offset(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        stale = "[cloudflared] failed to request quick Tunnel: i/o timeout\n"
+        log = runtime_paths.log_file
+        log.write_text(stale)
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", len(stale.encode()))
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    @pytest.mark.parametrize("tunnel_host", ["happy-tiger-demo", "api-friendly-demo"])
+    def test_returns_tunnel_url_after_api_url(
+        self, tmp_path, runtime_paths, monkeypatch, tunnel_host
+    ):
+        log = runtime_paths.log_file
+        public_url = f"https://{tunnel_host}.trycloudflare.com"
+        log.write_text(
+            "[cloudflared] failed to request quick Tunnel: Post "
+            '"https://api.trycloudflare.com/tunnel": i/o timeout\n'
+            f"[cloudflared] {public_url}\n"
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=1.0) == public_url
+
+    def test_returns_none_on_timeout(self, tmp_path, runtime_paths, monkeypatch):
+        log = runtime_paths.log_file
+        log.write_text("INFO server up — but no tunnel line ever printed\n")
         monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
 
         assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
@@ -983,11 +701,8 @@ class TestReadTunnelUrl:
         """A URL from a previous session (before the offset) must be skipped;
         only this session's bytes count."""
         stale = "[cloudflared] https://old-stale-url.trycloudflare.com\n"
-        log = tmp_path / "langgraph_dev.log"
+        log = runtime_paths.log_file
         log.write_text(stale)
-        monkeypatch.setattr(
-            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
-        )
         # Offset points past the stale line — nothing fresh yet → None.
         monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", len(stale.encode()))
         assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
@@ -1003,34 +718,64 @@ class TestReadTunnelUrl:
 
 class TestStartLanggraphDevSpawnFlags:
     """On Windows the langgraph dev child gets its own process group (Ctrl+C
-    does not reach it) but keeps the parent's console, so closing the console
-    ends it. On POSIX it gets its own session."""
+    does not reach it); a lasting one also gets a console of its own, so
+    closing the terminal does not end it, while one a session owns keeps the
+    terminal's console. On POSIX it gets its own session."""
 
+    @pytest.mark.parametrize(
+        ("lasting", "flags"), [(True, 0x08000200), (False, 0x00000200)]
+    )
     def test_windows_uses_new_process_group(
-        self, start_langgraph_dev_capture, monkeypatch
+        self, spawn_capture, monkeypatch, lasting, flags
     ):
-        env = start_langgraph_dev_capture
+        env = spawn_capture
         monkeypatch.setattr(manager.os, "name", "nt", raising=False)
         monkeypatch.setattr(
             manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
         )
+        monkeypatch.setattr(
+            manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+        )
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager._spawn_server(lasting=lasting)
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
-        # Exactly the process-group flag: no CREATE_NO_WINDOW, which would
-        # detach the server from the console and let it outlive a closed one.
-        assert kw.get("creationflags") == 0x00000200
+        assert kw.get("creationflags") == flags
         assert "start_new_session" not in kw
 
-    def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):
-        env = start_langgraph_dev_capture
+    def test_posix_uses_new_session(self, spawn_capture, monkeypatch):
+        env = spawn_capture
         monkeypatch.setattr(manager.os, "name", "posix", raising=False)
         try:
-            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+            manager._spawn_server()
         except FileNotFoundError:
             pass
         kw = env.captured["kwargs"]
         assert kw.get("start_new_session") is True
         assert "creationflags" not in kw
+
+
+class TestWaitForPortBindable:
+    def test_free_port_is_bindable(self):
+        import socket
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        assert manager._wait_for_port_bindable(port, "127.0.0.1") is True
+
+    def test_live_listener_is_waited_out_then_reported(self, monkeypatch):
+        import socket
+
+        monkeypatch.setattr(manager, "_BIND_WAIT", 0.05)
+        monkeypatch.setattr(manager, "_POLL_INTERVAL", 0.01)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        try:
+            port = listener.getsockname()[1]
+            assert manager._wait_for_port_bindable(port, "127.0.0.1") is False
+        finally:
+            listener.close()

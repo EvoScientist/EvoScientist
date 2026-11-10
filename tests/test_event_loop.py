@@ -8,7 +8,7 @@ import pytest
 
 from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 from EvoScientist.stream.display import _run_streaming
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 
 def _text_stream(loops, response="test response"):

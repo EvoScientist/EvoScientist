@@ -207,10 +207,7 @@ detect_platform() {
       UV_WHEEL_SHA256=99197c022afbd1edd0a295e9fdac5078c61eddf2e77657a77294cfe8ea0d94b9
       ;;
     macos/x86_64)
-      UV_TARGET=x86_64-apple-darwin
-      UV_SHA256=960da44cb4b73685206ddd250b19e0a117fa41095710c1038f081f5cb613efb4
-      UV_WHEEL_PATH=packages/01/15/a2514d061b92d4b7c0ebefc3da51f3ff5a528e9f4c067ea2cf48c5573e5a/uv-0.12.23-py3-none-macosx_10_12_x86_64.whl
-      UV_WHEEL_SHA256=4951286e68f116fa41897ecf8e248cc2836cb013be6d4f37afae4049f9ef4df7
+      die "This Mac has an Intel processor. EvoScientist supports Macs with Apple silicon."
       ;;
     linux/x86_64 | linux/amd64)
       UV_TARGET=x86_64-unknown-linux-gnu
@@ -228,9 +225,6 @@ detect_platform() {
       die "Unsupported processor: $arch on $os."
       ;;
   esac
-  if [ "$UV_TARGET" = x86_64-apple-darwin ]; then
-    info "Note: Intel Macs are supported on a best-effort basis; the stt extra cannot be installed there."
-  fi
 }
 
 # The data dir rule of EvoScientist's paths module: $EVOSCIENTIST_DATA_DIR when

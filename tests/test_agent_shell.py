@@ -143,7 +143,7 @@ def test_setup_hint_names_what_is_missing(monkeypatch, python, bash_missing, exp
         ({agent_shell.SIDECAR_KEY: None}, True, True),
         ({agent_shell.SIDECAR_KEY: None}, False, False),
         # No record (older server) or no reuse: our own state.
-        ({"workspace": "/w"}, True, True),
+        ({"pid": 1}, True, True),
         (None, True, True),
         (None, False, False),
     ],
@@ -186,7 +186,7 @@ def test_shell_drift_message_joins_python_and_bash(monkeypatch):
     message = agent_shell.shell_drift_message(sidecar)
     assert "/conda/bin/python" in message
     assert "C:/b" in message
-    assert agent_shell.shell_drift_message({"workspace": "/w"}) is None
+    assert agent_shell.shell_drift_message({"pid": 1}) is None
 
 
 def test_setup_hint_is_logged_once(monkeypatch, caplog):
@@ -208,7 +208,7 @@ def test_without_bash_the_command_goes_to_the_default_shell(scripts):
     assert launch.env is env
     assert launch.script is None
     assert launch.creationflags == 0
-    assert launch.text_options == {}
+    assert launch.text_options == {"errors": "replace"}
     launch.cleanup()
     assert not scripts.exists()
 

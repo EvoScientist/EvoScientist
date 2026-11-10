@@ -64,6 +64,7 @@ from .async_notifier import (
     enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
     enqueue_completions_from_state_throttled,
+    enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -117,17 +118,46 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _agent_shell_notices() -> list[str]:
-    """The agent shell's setup hint and the server drift warning, when they apply.
+def _agent_shell_notices(backend: str | None = None) -> list[str]:
+    """The agent shell's setup hint, the server's ccproxy missing, the
+    server's drift warnings, a server unavailable for this project, one reachable from other machines and where
+    a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
-    Both also go to the terminal or the log, which Textual hides while the
+    They also go to the terminal or the log, which Textual hides while the
     app runs, so the TUI shows them as notifications.
     """
     from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
+    from ..langgraph_dev.registration import exposure_messages
+    from .commands import dangerous_flag_note
 
-    notices = [setup_hint(), lg_manager.AGENT_SHELL_DRIFT]
-    return [n for n in notices if n is not None]
+    unavailable = None
+    if lg_manager.SERVER_UNAVAILABLE:
+        unavailable = " ".join(
+            m
+            for m in (
+                lg_manager.SERVER_UNAVAILABLE_MESSAGE,
+                lg_manager.SERVER_UNAVAILABLE_REASON,
+            )
+            if m
+        )
+    drift = (
+        lg_manager.CONFIG_DRIFT_MESSAGE
+        if lg_manager.CONFIG_DRIFT_SINCE_LAUNCH
+        else None
+    )
+    older = lg_manager.OLDER_SERVER
+    notices = [
+        setup_hint(),
+        lg_manager.CCPROXY_MISSING,
+        older,
+        drift,
+        lg_manager.AGENT_SHELL_DRIFT,
+        unavailable,
+        dangerous_flag_note(backend),
+    ]
+    exposure = exposure_messages(lg_manager.SERVER_EXPOSURE)
+    return [n for n in notices if n is not None] + exposure
 
 
 async def _auto_start_channel_in_worker(
@@ -311,6 +341,7 @@ async def _sync_tui_command_completion(
         update_model = getattr(app, "update_status_after_model_change", None)
         if callable(update_model):
             update_model(cfg.model, cfg.provider)
+        app._schedule_channel_start()
 
     # Rebind the runtime whenever the agent OR thread_id may have moved
     # — ``/new`` and ``/resume`` rotate ``app._conversation_tid``
@@ -547,10 +578,8 @@ def run_textual_interactive(
     # display hook (its widget is mounted from the stream event).
     from ..config import GatewaySurface, resolve_gateway_backend
     from ..stream.sink import SessionEventSink
-    from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
 
     event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways_for_config(
@@ -698,8 +727,10 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
+            self._channel_start_task: asyncio.Task[None] | None = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
+            self._channel_autostart_done = False
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -707,6 +738,11 @@ def run_textual_interactive(
             self._idle_reader_inflight: bool = (
                 False  # prevent overlapping throttled idle state reads
             )
+            # At most one channel message is off the queue and not yet started:
+            # scheduled by the poll, or held because the app was taken before
+            # its turn began. A held message goes before the queue.
+            self._channel_turn_scheduled = False
+            self._held_channel_msg: ChannelMessage | None = None
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -785,6 +821,7 @@ def run_textual_interactive(
             task = asyncio.ensure_future(self._refresh_rubric_badge())
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+            self._schedule_channel_start()
 
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
@@ -948,37 +985,36 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        async def _sync_server_to(
-            self, dirs: SessionDirs, *, message: str, new_run_dir: bool = False
-        ) -> bool:
-            """Move the background agent server to *dirs* before switching.
+        async def _sync_server_to(self, dirs: SessionDirs, *, message: str) -> bool:
+            """Register *dirs*' project with the background agent server
+            before switching.
 
-            Runs ``_move_server_or_keep_session`` behind a live timer widget
+            Runs ``_register_or_keep_session`` behind a live timer widget
             (like /compact) showing *message*, so the Textual event loop keeps
-            refreshing the UI during the up-to-60s wait.
+            refreshing the UI during the wait (a start, then the project's
+            registration).
 
-            Raises ``WorkspaceMismatchError`` when another EvoSci process owns
-            the server for other folders, so the caller leaves the session as
+            Raises ``ServerUnusableError`` when the server cannot be used for
+            *dirs*, so the caller leaves the session as
             it is and command UIs (including channels) report the failure.
-            Returns False when the sync failed otherwise: the session can
+            Returns False when the server does not serve the project: the session can
             continue locally, but background work may be unavailable.
             """
-            from .commands import _move_server_or_keep_session
+            from .commands import _register_or_keep_session
             from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
-            if dirs == self._dirs:
+            if dirs.workspace == self._dirs.workspace:
                 return True
             sync_widget = WorkspaceSyncWidget(message)
             container = self.query_one("#chat", VerticalScroll)
             await container.mount(sync_widget)
             container.scroll_end(animate=False)
             try:
-                return await _move_server_or_keep_session(
+                return await _register_or_keep_session(
                     config,
                     target=dirs,
                     current=self._dirs,
                     backend=gateway_backend,
-                    new_run_dir=new_run_dir,
                 )
             finally:
                 await sync_widget.cleanup()
@@ -990,21 +1026,9 @@ def run_textual_interactive(
             new_dirs = SessionDirs(
                 ws, create_run_dir(ws, run_name) if mode == "run" else None
             )
-            synced = await self._sync_server_to(
-                new_dirs,
-                message="Moving background agent server to the new session",
-                new_run_dir=True,
-            )
 
             # Clear all widgets except #welcome
             self.clear_chat()
-            if not synced:
-                self.append_system(
-                    "Background agent server sync failed; started the new "
-                    "session, but async subagents and EvoMemory workers may "
-                    "be unavailable.",
-                    style="yellow",
-                )
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
             self._dirs = new_dirs
@@ -1035,11 +1059,12 @@ def run_textual_interactive(
                 # ``self._dirs`` changes only after the sync succeeds, so a
                 # refused sync leaves the session in its current folders.
                 if not await self._sync_server_to(
-                    dirs, message="Syncing background agent server to resumed workspace"
+                    dirs,
+                    message="Registering the resumed project with the background agent server",
                 ):
                     self.append_system(
-                        "Background agent server sync failed; resumed local "
-                        "session, but async subagents and EvoMemory workers "
+                        "The background agent server is unavailable for this "
+                        "project; resumed the session, but async subagents and EvoMemory workers "
                         "may be unavailable.",
                         style="yellow",
                     )
@@ -1142,8 +1167,9 @@ def run_textual_interactive(
                 self._check_agent_shell, exclusive=True, group="agent-shell"
             )
 
-            # Auto-start channels — needs the agent, so defer to after load
+            # Poll queues once the initial agent load has settled.
             async def _deferred_start_channels():
+                """Start queue polling when the initial load settles."""
                 try:
                     await self._await_agent_ready()
                 except Exception:
@@ -1151,8 +1177,16 @@ def run_textual_interactive(
                         "Skipping channel auto-start because agent load failed",
                         exc_info=True,
                     )
-                    return
-                await self._start_channels()
+                finally:
+                    if (
+                        not self._exiting
+                        and not self._channel_start_stop.is_set()
+                        and self._channel_timer is None
+                    ):
+                        self._channel_timer = self.set_interval(
+                            0.1,
+                            self._poll_channel_queue,
+                        )
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
@@ -1191,7 +1225,7 @@ def run_textual_interactive(
         async def _check_agent_shell(self) -> None:
             """Notify the notices from :func:`_agent_shell_notices`."""
             try:
-                notices = await asyncio.to_thread(_agent_shell_notices)
+                notices = await asyncio.to_thread(_agent_shell_notices, gateway_backend)
                 for message in notices:
                     # Paths may contain "[", which markup would eat.
                     self.notify(message, severity="warning", timeout=20, markup=False)
@@ -1200,9 +1234,31 @@ def run_textual_interactive(
 
         # ── Channel integration ────────────────────────────────
 
+        def _schedule_channel_start(self) -> None:
+            """Start channels in the background for a newly available agent."""
+            if self._exiting or self._channel_start_stop.is_set():
+                return
+            if (
+                self._channel_start_task is not None
+                and not self._channel_start_task.done()
+            ):
+                return
+            task = asyncio.create_task(self._start_channels())
+            self._channel_start_task = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
         async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
+            # Once per session, and only after an agent exists. The flag
+            # flips before the attempt, so a failed start is not retried
+            # and /channel stop is not undone by /new, /resume, or /model.
+            if self._channel_autostart_done:
+                return
             try:
+                if self._exiting or self._agent_loader.agent is None:
+                    return
+                self._channel_autostart_done = True
                 from ..config import load_config
 
                 cfg = await asyncio.to_thread(load_config)
@@ -1231,27 +1287,25 @@ def run_textual_interactive(
                 raise
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
-            finally:
-                if (
-                    not self._exiting
-                    and not self._channel_start_stop.is_set()
-                    and self._channel_timer is None
-                ):
-                    self._channel_timer = self.set_interval(
-                        0.1,
-                        self._poll_channel_queue,
-                    )
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            try:
-                msg = _message_queue.get_nowait()
-            except queue.Empty:
-                msg = None
+            if self._channel_turn_scheduled:
+                # That turn has not started yet: nothing goes before it.
+                return
+            # A held message goes first. While the app is taken nothing comes
+            # off the queue, so the messages on it keep their order.
+            msg = self._held_channel_msg
+            if msg is None and not self._busy:
+                try:
+                    msg = _message_queue.get_nowait()
+                except queue.Empty:
+                    msg = None
             if msg is not None:
                 if self._busy:
-                    _message_queue.put(msg)
                     return
+                self._held_channel_msg = None
+                self._channel_turn_scheduled = True
                 self.call_later(
                     lambda m=msg: asyncio.ensure_future(
                         self._process_channel_message(m)
@@ -1268,7 +1322,8 @@ def run_textual_interactive(
                     lambda: asyncio.ensure_future(self._idle_reader_tick_tui())
                 )
 
-            # Notification path (only when idle and NOT already consuming).
+            # Notification path (only when idle, NOT already consuming, and with
+            # the agent loaded, so a notifier turn does not restart a cancelled load).
             # _notification_consuming is set synchronously at the schedule point
             # so that the next poll tick cannot schedule a second consumer before
             # the first one has a chance to run (fixes overlapping-turn bug).
@@ -1276,6 +1331,7 @@ def run_textual_interactive(
                 has_pending_notifications(self._conversation_tid)
                 and not self._busy
                 and not self._notification_consuming
+                and self._agent_loader.agent is not None
             ):
                 self._notification_consuming = True
                 self.call_later(
@@ -1292,6 +1348,10 @@ def run_textual_interactive(
             """
             target_tid = self._conversation_tid
             try:
+                if self._busy:
+                    # The poll found the app free, but input handled since then
+                    # took it. The notifications stay queued for a later poll.
+                    return
                 try:
                     await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
@@ -1373,8 +1433,17 @@ def run_textual_interactive(
             # `await _run_turn` from inside a nested call_later chain don't
             # get viewport-follow during streaming (only after completion).
             effective_tid = target_thread_id or self._conversation_tid
+            from ..stream.display import is_stream_cancel_requested
+
+            sent = False
+            stopped = False
+
+            def mark_sent() -> None:
+                nonlocal sent
+                sent = True
 
             async def _run_and_publish() -> None:
+                nonlocal stopped
                 response = await self._run_turn(
                     text,
                     skip_user_message=True,
@@ -1382,7 +1451,11 @@ def run_textual_interactive(
                     thread_id_override=target_thread_id,
                     # A notifier turn only finishes a grading the thread deferred.
                     rubric_mode="followup",
+                    on_request_sent=mark_sent,
                 )
+                # Read here, not in the done-callback: a turn started from the
+                # queue clears the stop flag before that callback runs.
+                stopped = is_stream_cancel_requested()
                 if _ch_mod.publish_to_channel_origin(effective_tid, response or ""):
                     # Mirror a normal channel turn's closing "Replied to" line
                     # so the forwarded notification reads as terminated.
@@ -1396,6 +1469,13 @@ def run_textual_interactive(
 
             # Taken in this step, so the next poll tick does not re-enter.
             self._own_app(_run_and_publish())
+
+            def requeue_if_unsent(task: asyncio.Future) -> None:
+                if not sent and (task.cancelled() or stopped):
+                    for notification in notifs:
+                        enqueue_task_notification(notification)
+
+            self._run_task.add_done_callback(requeue_if_unsent)
 
         async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
@@ -1687,6 +1767,7 @@ def run_textual_interactive(
             rubric_mode: str | None = "thread",
             approve_all_at_start: bool = False,
             goal_request: dict[str, Any] | None = None,
+            on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -2064,6 +2145,8 @@ def run_textual_interactive(
                         ),
                         cancel_scope,
                     )
+                    if on_request_sent is not None:
+                        on_request_sent()
                     async for event in events:
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
@@ -3127,6 +3210,7 @@ def run_textual_interactive(
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
             goal_request: dict[str, Any] | None = None,
+            on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Handle a user turn: stream agent response with widgets.
 
@@ -3151,6 +3235,8 @@ def run_textual_interactive(
                     to the live tid when ``None``.
                 goal_request: A ``/goal`` request; the run then carries it
                     and no message (*user_text* is empty).
+                on_request_sent: Called immediately before gateway iteration,
+                    so a notifier can distinguish an unsent interrupted turn.
             """
             response = ""
             load_failed = False
@@ -3194,6 +3280,7 @@ def run_textual_interactive(
                     thread_id_override=thread_id_override,
                     rubric_mode=rubric_mode,
                     goal_request=goal_request,
+                    on_request_sent=on_request_sent,
                 )
             except asyncio.CancelledError:
                 try:
@@ -3235,11 +3322,20 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
+            # This message is dealt with below, so the poll may take the next.
+            self._channel_turn_scheduled = False
+            if self._busy:
+                # The poll found the app free, but input handled since then
+                # took it. Held for a poll that finds it free, ahead of any
+                # message that arrived since.
+                self._held_channel_msg = msg
+                return
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
+                # Taken in the step that checked it: nothing ran in between.
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
@@ -4470,48 +4566,41 @@ def run_textual_interactive(
                     stored = SessionDirs.from_stored(
                         meta.get("workspace_dir"), meta.get("run_dir")
                     )
-                    mismatch_aborted = False
+                    refusal: str | None = None
                     if stored is not None:
                         effective_dirs = stored
-                        # Move the background agent server to the resumed
-                        # folders BEFORE the Textual app takes over the
+                        # Register the resumed project with the background
+                        # agent server BEFORE the Textual app takes over the
                         # terminal, so background workers and deployed
-                        # sub-agents don't work in the launch folders.
-                        from ..langgraph_dev.manager import WorkspaceMismatchError
-                        from ..stream.console import console as _resume_console
-                        from .commands import _move_server_or_keep_session
+                        # sub-agents work there.
+                        from ..langgraph_dev.registration import (
+                            ServerUnusableError,
+                        )
+                        from .commands import _register_or_keep_session
 
                         try:
-                            if not await _move_server_or_keep_session(
+                            if not await _register_or_keep_session(
                                 config,
                                 target=stored,
                                 current=dirs,
                                 backend=gateway_backend,
                             ):
                                 resume_warning = (
-                                    "Background agent server sync failed; "
-                                    "resumed the session, but async subagents "
+                                    "The background agent server is unavailable "
+                                    "for this project; resumed the session, but async subagents "
                                     "and EvoMemory workers may be unavailable."
                                 )
-                        except WorkspaceMismatchError as _ws_mismatch_exc:
-                            # Surface the user-actionable message via the
-                            # Rich console (TUI hasn't taken over the terminal
-                            # yet) and abort the resume so the TUI doesn't
-                            # start up pointing at the conflicting workspace
-                            # with background work routed at a server pinned to
-                            # a different workspace.
-                            _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
-                            mismatch_aborted = True
-                    if mismatch_aborted:
-                        # Revert the workspace mutation and fall through to the
-                        # ``effective_thread_id is None`` branch below, which
-                        # generates a fresh thread in the original launch
-                        # workspace. User keeps the TUI session; the requested
+                        except (ServerUnusableError, OSError) as exc:
+                            refusal = str(exc)
+                    if refusal is not None:
+                        # Fall through to the ``effective_thread_id is None``
+                        # branch below, which generates a fresh thread in the
+                        # original launch workspace: the requested
                         # ``--thread-id`` resume is what we refuse.
                         effective_dirs = dirs
                         resume_warning = (
-                            f"Resume of thread '{thread_id}' aborted due to "
-                            "workspace conflict. Starting new session."
+                            f"Resume of thread '{thread_id}' refused: {refusal} "
+                            "Starting a new session."
                         )
                     else:
                         effective_thread_id = resolution.thread_id

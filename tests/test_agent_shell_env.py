@@ -1,4 +1,4 @@
-"""The agent's ``execute`` backends get the research environment overrides."""
+"""The agent's ``execute`` backends get the agent shell's env overrides."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import EvoScientist.EvoScientist as es_mod
-from EvoScientist.setup import research_env
+from EvoScientist.setup import agent_env
 
 _PROBE = {"EVOSCI_SHELL_PROBE": "venv"}
 
 
 @pytest.fixture
 def overrides(monkeypatch):
-    monkeypatch.setattr(research_env, "research_env_overrides", lambda: dict(_PROBE))
+    monkeypatch.setattr(agent_env, "agent_shell_overrides", lambda: dict(_PROBE))
 
 
 def test_default_backend_gets_the_overrides(overrides, workspace):

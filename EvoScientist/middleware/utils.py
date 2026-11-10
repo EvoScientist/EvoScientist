@@ -6,6 +6,7 @@ and should not depend on any specific middleware class.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseChatModel
@@ -24,11 +25,11 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
     OpenAI reasoning can conflict.  Strip these settings so structured
     output calls work reliably.
 
-    DeepSeek enables thinking server-side by default (no client field to
-    clear), and its thinking mode rejects the forced ``tool_choice`` that
-    ``with_structured_output`` sends ("Thinking mode does not support this
-    tool_choice"). For DeepSeek models the copy gets an explicit
-    ``extra_body["thinking"] = {"type": "disabled"}`` request field instead.
+    DeepSeek enables thinking server-side by default, and its thinking mode
+    rejects the forced ``tool_choice`` that ``with_structured_output`` sends
+    ("Thinking mode does not support this tool_choice"). For DeepSeek models
+    the copy gets an explicit ``extra_body["thinking"] = {"type": "disabled"}``
+    request field and no ``reasoning_effort``.
 
     Uses ``model_copy()`` to produce a real new instance — ``bind()`` only
     wraps the model in a ``RunnableBinding`` whose kwargs do NOT override
@@ -54,6 +55,9 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         if not is_deepseek_thinking_disabled(extra_body):
             extra_body["thinking"] = dict(DEEPSEEK_THINKING_DISABLED)
             updates["extra_body"] = extra_body
+        # Thinking is off on this copy, so it sends no level either.
+        if getattr(model, "reasoning_effort", None):
+            updates["reasoning_effort"] = None
 
     if not updates:
         return model
@@ -158,3 +162,28 @@ def replace_block_by_sentinel(
             ]
             return system_message.model_copy(update={"content": new_blocks})
     return None
+
+
+def request_without_tool(request: Any, name: str) -> Any:
+    """*request* without the tool called *name*; *request* itself when absent."""
+    tools = [tool for tool in request.tools if _tool_name(tool) != name]
+    if len(tools) == len(request.tools):
+        return request
+    return request.override(tools=tools)
+
+
+def request_with_only_tool(request: Any, name: str) -> Any:
+    """*request* offering only the tool called *name*; *request* itself when absent."""
+    tools = [tool for tool in request.tools if _tool_name(tool) == name]
+    if not tools:
+        return request
+    return request.override(tools=tools)
+
+
+def _tool_name(candidate: Any) -> Any:
+    if isinstance(candidate, Mapping):
+        # A provider schema names its tool at the top or under "function".
+        nested = candidate.get("function")
+        inner = nested.get("name") if isinstance(nested, Mapping) else None
+        return candidate.get("name") or inner
+    return getattr(candidate, "name", None)

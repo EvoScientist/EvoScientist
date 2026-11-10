@@ -34,7 +34,6 @@ def _make_config(
     langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
     webui_host: str = "127.0.0.1",
-    langgraph_dev_keepalive: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -44,7 +43,6 @@ def _make_config(
         webui_host=webui_host,
         langgraph_dev_jobs_per_worker=10,
         langgraph_dev_file_persistence=True,
-        langgraph_dev_keepalive=langgraph_dev_keepalive,
     )
 
 
@@ -183,18 +181,19 @@ def _run_webui_once(
         launcher_mod.WebUILauncher, "wait_ready", lambda self, *a, **k: self._result()
     )
 
-    monkeypatch.setattr(
-        lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied
-    )
-    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: None)
+    from EvoScientist.langgraph_dev import registration
+    from tests.fakes.langgraph_dev import Server
 
-    def _fake_start_langgraph_dev(workspace_dir=None, *, port=None, host=None, **_kw):
-        captured["backend_port"] = port
-        captured["backend_host"] = host
-        return SimpleNamespace(pid=99999)
-
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
+    server = Server(monkeypatch, pid=99999)
+    if backend_port_occupied:
+        server.occupied.add(int(config.langgraph_dev_port))
+    if registration.register_folder.__module__ == registration.__name__:
+        # Unless the test says how the backend answers the registration.
+        monkeypatch.setattr(
+            registration,
+            "register_folder",
+            lambda workspace, *, url: registration.ServerExposure(),
+        )
 
     captured["stop_calls"] = 0
 
@@ -234,11 +233,19 @@ def _run_webui_once(
     monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
-    if interrupt_on:
-        with pytest.raises(KeyboardInterrupt):
+    try:
+        if interrupt_on:
+            with pytest.raises(KeyboardInterrupt):
+                webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+        else:
             webui_mod.run_webui(config, workspace_dir="/tmp/ws")
-    else:
-        webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    finally:
+        # The registered teardown closes it at exit; the tests never run it.
+        if captured.get("node_stdout") is not None:
+            captured["node_stdout"].close()
+        if server.spawns:
+            captured["backend_port"] = server.spawns[0]["port"]
+            captured["backend_host"] = server.spawns[0]["host"]
     return captured
 
 
@@ -291,7 +298,7 @@ def test_node_output_goes_to_webui_log_next_to_the_backend_log(
     monkeypatch, runtime_paths
 ):
     captured = _run_webui_once(monkeypatch, _make_config())
-    log = runtime_paths.log_file.parent / "webui.log"
+    log = runtime_paths.webui_log
     assert captured["node_stdout"].name == str(log)
     assert any("webui.log" in line for line in captured["printed"])
 
@@ -320,6 +327,52 @@ def test_a_crashed_webui_points_at_webui_log(monkeypatch):
     assert "webui.log" in panel
 
 
+def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
+    import typer
+
+    from tests.fakes.langgraph_dev import break_start_lock
+
+    break_start_lock(monkeypatch, tmp_path, "mkdir")
+    with pytest.raises(typer.Exit):
+        _run_webui_once(monkeypatch, _make_config())
+    panel = webui_mod.console._sink[-1]
+    assert "WebUI failed" in panel
+    assert "langgraph dev startup failed" in panel
+
+
+def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
+    """While another process starts the server the spinner says so, as
+    EvoSci deploy does, then goes back to starting langgraph dev."""
+    from tests.fakes.langgraph_dev import LockHolder
+
+    holder = LockHolder()
+
+    class _ReleasingLauncher(webui_mod.WebUILauncher):
+        """Frees the other start's lock once the wait has been reported."""
+
+        def __init__(self, *a, on_lock_wait, **k):
+            def _wait(waiting: bool) -> None:
+                on_lock_wait(waiting)
+                if waiting:
+                    holder.release.set()
+
+            super().__init__(*a, on_lock_wait=_wait, **k)
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _ReleasingLauncher)
+    try:
+        captured = _run_webui_once(monkeypatch, _make_config())
+    finally:
+        holder.done()
+    statuses = [p for p in captured["printed"] if p.startswith("status: ")]
+    waiting = (
+        "status: [dim]Waiting for another EvoSci process to start or stop "
+        "langgraph dev...[/dim]"
+    )
+    assert waiting in statuses
+    after = statuses[statuses.index(waiting) + 1 :]
+    assert after[:1] == ["status: [dim]Starting langgraph dev...[/dim]"]
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
     config = _make_config(webui_host=blank)
@@ -333,7 +386,7 @@ def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
 # =============================================================================
 
 
-def test_backend_host_reaches_start_langgraph_dev(monkeypatch):
+def test_backend_host_reaches_start(monkeypatch):
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
@@ -353,6 +406,13 @@ def test_public_bind_warning_when_backend_exposed(monkeypatch):
     """Users who widen the backend get told every time it is reachable
     off-box — an unauthenticated, shell-capable API deserves a standing
     reminder, not a one-time opt-in prompt."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
@@ -376,7 +436,6 @@ def test_public_bind_warning_when_frontend_exposed(monkeypatch):
 
     banner = "\n".join(captured["printed"])
     assert "WebUI listening on 0.0.0.0" in banner
-    assert "Backend listening" not in banner
 
 
 def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):
@@ -391,8 +450,17 @@ def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatc
     assert "langgraph_dev_host" in banner
 
 
-def test_no_remote_hint_when_both_exposed(monkeypatch):
-    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="0.0.0.0")
+def test_no_remote_hint_when_backend_answers_public(monkeypatch):
+    """A reused backend another session bound to the network: the session's
+    own host setting says nothing about it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     banner = "\n".join(captured["printed"])
@@ -400,26 +468,16 @@ def test_no_remote_hint_when_both_exposed(monkeypatch):
 
 
 # =============================================================================
-# Backend keepalive
+# The backend outlives the WebUI
 # =============================================================================
 
 
-def test_backend_default_stops_backend_on_exit(monkeypatch):
-    """Without keepalive the WebUI-started backend dies with the session.
-
-    Teardown moved into ``launcher.stop`` (registered via atexit and also run in
-    the finally block): the contract is now "stop_langgraph_dev is called", not
-    "which callable was handed to atexit"."""
+def test_backend_outlives_webui(monkeypatch):
+    """The backend the WebUI started is shared by every session: closing the
+    WebUI stops only its front-end."""
     captured = _run_webui_once(monkeypatch, _make_config())
-    assert captured["stop_calls"] >= 1
-    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
-
-
-def test_backend_keepalive_leaves_backend_running(monkeypatch):
-    """With keepalive the backend outlives the WebUI session, so the next
-    same-workspace launch reuses it instead of paying the cold boot."""
-    captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
     assert captured["stop_calls"] == 0
+    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
 
 
 def test_teardown_registered_before_output_is_rendered(monkeypatch):

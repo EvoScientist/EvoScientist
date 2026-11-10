@@ -229,7 +229,7 @@ def test_only_the_sessions_own_thread_on_the_local_gateway_is_marked():
 async def test_acknowledge_applied_drops_operations_and_sets_the_badge(tmp_path):
     from EvoScientist.paths import SessionDirs, Workspace
     from EvoScientist.rubric_session import RubricSession, acknowledge_applied
-    from tests.fakes import FakeGraphGateway
+    from tests.fakes.common import FakeGraphGateway
 
     session = RubricSession()
     session.record("t", sticky="- a")

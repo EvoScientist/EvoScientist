@@ -145,46 +145,31 @@ class TestSharedConstantsAlignment:
 
         assert VALID_WORKSPACE_MODES == frozenset({"daemon", "run"})
 
-    def test_valid_providers_aligns_with_provider_key_attr(self):
-        """Every provider in ``VALID_PROVIDERS`` (except ``openai`` and
-        ``ollama``, which the wizard handles via fallbacks) must appear in
-        ``_PROVIDER_KEY_ATTR`` — otherwise the auth-mode flow won't know
-        which config attribute to write the validated key to."""
+    def test_valid_providers_aligns_with_provider_table(self):
+        """The provider table in ``provider_keys`` has exactly one row per
+        provider in ``VALID_PROVIDERS``: an unknown provider is an error, not
+        an OpenAI fallback, so a missing row would break that provider."""
         from EvoScientist.config.onboard.constants import VALID_PROVIDERS
-        from EvoScientist.config.onboard.wizard import _PROVIDER_KEY_ATTR
+        from EvoScientist.config.provider_keys import PROVIDERS
 
-        expected = set(VALID_PROVIDERS) - {"openai", "ollama"}
-        missing = expected - set(_PROVIDER_KEY_ATTR.keys())
-        assert not missing, (
-            "VALID_PROVIDERS has providers missing from _PROVIDER_KEY_ATTR "
-            f"in wizard.py: {missing}"
-        )
-        extra = set(_PROVIDER_KEY_ATTR.keys()) - expected
-        assert not extra, (
-            f"_PROVIDER_KEY_ATTR in wizard.py has keys not in VALID_PROVIDERS: {extra}"
-        )
+        assert set(PROVIDERS) == set(VALID_PROVIDERS)
 
-    def test_valid_providers_aligns_with_provider_key_info(self):
-        """``_provider_key_info`` uses ``mapping.get(provider, <openai
-        fallback>)``, so an unknown provider silently behaves like OpenAI.
-        Verify every non-``openai`` provider in ``VALID_PROVIDERS`` has an
-        explicit entry — detected by checking the returned display name is
-        not the OpenAI fallback string."""
-        from EvoScientist.config.onboard.constants import VALID_PROVIDERS
+    def test_provider_key_fields_exist_on_config(self):
+        """Every key and base URL field in the table is a config field."""
+        from dataclasses import fields
+
+        from EvoScientist.config.provider_keys import KEY_SPECS
+
+        names = {f.name for f in fields(EvoScientistConfig)}
+        for provider, spec in KEY_SPECS.items():
+            for attr in (spec.key_field, spec.base_url_field):
+                assert attr is None or attr in names, (provider, attr)
+
+    def test_provider_key_info_rejects_unknown_provider(self):
         from EvoScientist.config.onboard.helpers import _provider_key_info
 
-        cfg = EvoScientistConfig()
-        for provider in VALID_PROVIDERS:
-            display_name, _, _ = _provider_key_info(cfg, provider)
-            if provider == "openai":
-                assert display_name == "OpenAI"
-            else:
-                assert display_name != "OpenAI", (
-                    f"Provider {provider!r} is missing from _provider_key_info "
-                    "in helpers.py — it falls through to the OpenAI default, "
-                    "which would silently send the wrong validator and "
-                    "current-key lookup."
-                )
+        with pytest.raises(KeyError):
+            _provider_key_info(EvoScientistConfig(), "no-such-provider")
 
 
 class TestOAuthModeReconcile:
@@ -217,6 +202,19 @@ class TestOAuthModeReconcile:
         _reconcile_oauth_modes(config)
 
         assert config.openai_auth_mode == "oauth"
+
+    def test_reconcile_preserves_fallback_anthropic_oauth(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            model_fallbacks="claude-sonnet-4-5:anthropic",
+            anthropic_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.anthropic_auth_mode == "oauth"
 
 
 # =============================================================================
@@ -496,11 +494,12 @@ class TestValidateXiaomiKey:
             "openai.OpenAI",
             side_effect=lambda **kw: real(
                 **kw,
-                max_retries=0,
                 http_client=httpx.Client(transport=httpx.MockTransport(handler)),
             ),
-        ):
+        ) as client_cls:
             result = validate_xiaomi_key("sk-mimo", **kwargs)
+        assert client_cls.call_args.kwargs["timeout"] == 10
+        assert client_cls.call_args.kwargs["max_retries"] == 0
         return result, seen
 
     def test_empty_key_skipped(self):
@@ -850,8 +849,61 @@ class TestStepReasoningEffort:
         result, values, default = self._run("openai", "", picked="max")
 
         assert result == "max"
-        assert values == ["", "low", "medium", "high", "xhigh", "max"]
-        assert default == ""
+        assert values == ["max", "xhigh", "high", "medium", "low"]
+        assert default == "high"
+
+    def test_anthropic_offers_the_levels_current_claude_accepts(self):
+        _, values, default = self._run("anthropic", "")
+
+        assert values == ["max", "xhigh", "high", "medium", "low"]
+        assert default == "high"
+
+    def test_deepseek_offers_its_documented_levels(self):
+        _, values, default = self._run("deepseek", "")
+
+        assert values == ["max", "high", "low", "none"]
+        assert default == "high"
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_picking_the_default_level_stores_no_level(self, provider):
+        """Routes outside these providers then keep their own default."""
+        assert self._run(provider, "", picked="high")[0] == ""
+        assert self._run(provider, "", picked="low")[0] == "low"
+        assert self._run(provider, "low", picked="high")[0] == ""
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_a_stored_default_level_stays_when_accepted(self, provider):
+        """Enter on a stored high keeps it for routes that only send a set level."""
+        assert self._run(provider, "high", picked="high")[0] == "high"
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_every_list_runs_from_the_deepest_level(self, provider):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm.models import _REASONING_SCALE
+
+        levels = [v for v, _ in onboard_steps._REASONING_EFFORT_CHOICES[provider]]
+        ranks = [_REASONING_SCALE.index(level) for level in levels]
+
+        assert ranks == sorted(ranks, reverse=True)
+
+    @pytest.mark.parametrize(
+        "provider", ["openai", "openrouter", "anthropic", "deepseek"]
+    )
+    def test_the_shared_default_is_offered_and_recommended(self, provider):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm import DEFAULT_REASONING_EFFORT
+
+        levels = dict(onboard_steps._REASONING_EFFORT_CHOICES[provider])
+        recommended = [v for v, title in levels.items() if "(recommended)" in title]
+
+        assert recommended == [DEFAULT_REASONING_EFFORT]
+        assert self._run(provider, "")[2] == DEFAULT_REASONING_EFFORT
 
     def test_openrouter_list_is_unchanged(self):
         _, values, default = self._run("openrouter", "")
@@ -863,10 +915,14 @@ class TestStepReasoningEffort:
         ("provider", "stored", "default"),
         [
             ("openai", "max", "max"),
-            ("openai", "", ""),
-            ("openai", "minimal", ""),  # carried over from another provider
+            ("openai", "", "high"),
+            ("openai", "minimal", "high"),  # carried over from another provider
             ("openrouter", "minimal", "minimal"),
             ("openrouter", "max", "high"),
+            ("anthropic", "minimal", "high"),
+            ("anthropic", "low", "low"),
+            ("deepseek", "xhigh", "high"),
+            ("deepseek", "none", "none"),
         ],
     )
     def test_highlights_the_stored_level_only_when_it_is_offered(
@@ -876,7 +932,12 @@ class TestStepReasoningEffort:
 
     @pytest.mark.parametrize(
         ("provider", "route"),
-        [("openai", "openai"), ("openai", "chatgpt"), ("openrouter", "openrouter")],
+        [
+            ("openai", "openai"),
+            ("openai", "chatgpt"),
+            ("openrouter", "openrouter"),
+            ("anthropic", "anthropic"),
+        ],
     )
     def test_every_offered_level_is_sent_unchanged(self, provider, route):
         from EvoScientist.llm.models import _resolve_reasoning_effort
@@ -884,18 +945,29 @@ class TestStepReasoningEffort:
         _, values, _ = self._run(provider, "")
 
         with patch.dict("os.environ"):
-            for value in filter(None, values):
+            for value in values:
                 os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
                 assert _resolve_reasoning_effort("high", route) == value
 
     @pytest.mark.parametrize(
-        ("provider", "asked"),
-        [("openai", True), ("openrouter", True), ("anthropic", False), ("", False)],
+        ("provider", "anthropic_auth_mode", "asked"),
+        [
+            ("openai", "api_key", True),
+            ("openrouter", "api_key", True),
+            ("anthropic", "api_key", True),
+            ("anthropic", "oauth", False),
+            ("deepseek", "api_key", True),
+            ("siliconflow", "api_key", False),
+            ("", "api_key", False),
+        ],
     )
-    def test_only_providers_with_a_level_list_are_asked(self, provider, asked):
+    def test_only_providers_with_a_level_list_are_asked(
+        self, provider, anthropic_auth_mode, asked
+    ):
         from EvoScientist.config.onboard import steps as onboard_steps
 
-        assert onboard_steps._asks_reasoning_effort(provider) is asked
+        config = EvoScientistConfig(anthropic_auth_mode=anthropic_auth_mode)
+        assert onboard_steps._asks_reasoning_effort(config, provider) is asked
 
     def test_model_section_asks_openai_users_for_a_level(self):
         from EvoScientist.config.onboard.wizard import run_onboard
@@ -1062,6 +1134,19 @@ class TestStepModel:
         default = mock_q.select.call_args.kwargs["default"]
         assert default == entries[0][0]
         assert default != "__custom__"
+
+    def test_removed_model_defaults_to_the_default_model(self):
+        """A saved model the provider no longer lists preselects the default
+        model, not the provider's first (most expensive) entry."""
+        from EvoScientist.config.onboard.steps import _step_model
+        from EvoScientist.llm import DEFAULT_MODEL
+
+        config = EvoScientistConfig(model="claude-sonnet-4-6")
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = DEFAULT_MODEL
+            _step_model(config, "anthropic")
+
+        assert mock_q.select.call_args.kwargs["default"] == DEFAULT_MODEL
 
     def test_custom_default_value_preselects_and_prefills(self):
         """Co-pilot re-run: a saved custom (non-registry) model preselects and
@@ -1574,7 +1659,7 @@ class TestStepChannels:
             mock_q.checkbox.return_value.ask.return_value = []
             result = _step_channels(config)
 
-        assert result == {"channel_enabled": "", "imessage_enabled": False}
+        assert result == {"channel_enabled": ""}
 
     def test_returns_enabled_when_setup_passes(self):
         """Test channels step returns enabled when iMessage setup succeeds."""
@@ -1594,7 +1679,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
 
     def test_returns_enabled_with_senders(self):
         """Test channels step returns enabled with specific senders."""
@@ -1614,7 +1698,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
         assert result["imessage_allowed_senders"] == "+1234567890,+0987654321"
 
     def test_setup_fails_user_declines(self):
@@ -1635,7 +1718,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == ""
-        assert result["imessage_enabled"] is False
 
     def test_setup_fails_user_enables_anyway(self):
         """Test channels step enables iMessage when setup fails but user confirms."""
@@ -1656,7 +1738,6 @@ class TestStepChannels:
             result = _step_channels(config)
 
         assert result["channel_enabled"] == "imessage"
-        assert result["imessage_enabled"] is True
 
     def test_raises_keyboard_interrupt_on_cancel(self):
         """Test channels step raises KeyboardInterrupt on cancel."""
@@ -1881,6 +1962,14 @@ class TestStepThinking:
 
 
 class TestRunOnboard:
+    @pytest.fixture(autouse=True)
+    def _no_mcp_marketplace(self, monkeypatch):
+        """The MCP step clones the marketplace from GitHub; its own tests
+        above cover it with the clone stubbed."""
+        monkeypatch.setattr(
+            "EvoScientist.config.onboard.wizard._step_mcp_servers", lambda: None
+        )
+
     def test_returns_true_on_save(self):
         """Test that run_onboard returns True when config is saved."""
         from EvoScientist.config.onboard.wizard import run_onboard
@@ -1907,6 +1996,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode (API key, not OAuth)
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -1961,6 +2051,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
                 "api_key",  # Auxiliary OpenAI auth mode
@@ -2247,6 +2338,7 @@ class TestRunOnboard:
                 "anthropic",  # Provider
                 "api_key",  # Anthropic auth mode
                 "claude-sonnet-4-6",  # Model
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",  # Workspace mode
                 True,  # Show thinking
@@ -2318,6 +2410,7 @@ class TestRunOnboard:
                     "anthropic",
                     "api_key",
                     "claude-sonnet-4-6",
+                    "max",  # Reasoning effort
                     "skip",  # Auxiliary: Skip (single driver)
                     "daemon",
                     True,
@@ -2368,6 +2461,7 @@ class TestRunOnboard:
                 "anthropic",
                 "api_key",
                 "claude-sonnet-4-6",
+                "max",  # Reasoning effort
                 "skip",  # Auxiliary: Skip (single driver)
                 "daemon",
                 True,
@@ -3001,7 +3095,7 @@ class TestXiaomiTokenPlanRegion:
         config = EvoScientistConfig()
         _configure_provider_base_url(config, "xiaomi-token-plan", strict=True)
         with patch(
-            "EvoScientist.config.onboard.helpers.validate_xiaomi_key"
+            "EvoScientist.config.provider_keys.check_xiaomi_key"
         ) as mock_validate:
             _provider_key_info(config, "xiaomi-token-plan")[2]("tp-key")
 
@@ -3028,14 +3122,14 @@ class TestXiaomiTokenPlanRegion:
     [
         (
             "minimax",
-            "validate_minimax_key",
+            "check_minimax_key",
             "minimax_base_url",
             "MINIMAX_BASE_URL",
             "https://api.minimaxi.com/anthropic",
         ),
         (
             "xiaomi-token-plan",
-            "validate_xiaomi_key",
+            "check_xiaomi_key",
             "mimo_token_plan_base_url",
             "MIMO_TOKEN_PLAN_BASE_URL",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
@@ -3050,7 +3144,7 @@ def test_key_validator_ignores_blank_base_url(
 
     monkeypatch.setenv(env, "  ")
     config = EvoScientistConfig(**{field: "  "})
-    with patch(f"EvoScientist.config.onboard.helpers.{validator}") as mock_validate:
+    with patch(f"EvoScientist.config.provider_keys.{validator}") as mock_validate:
         _provider_key_info(config, provider)[2]("key")
 
     assert mock_validate.call_args.kwargs["base_url"] == default

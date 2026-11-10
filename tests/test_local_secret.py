@@ -187,7 +187,7 @@ def test_open_new_retries_a_briefly_locked_file_on_windows(tmp_path, monkeypatch
 
 
 @pytest.fixture
-def server(monkeypatch, caplog):
+def server(monkeypatch, caplog, no_workspace_setup):
     """The custom app with its lifespan run, as langgraph-api runs it."""
     monkeypatch.setattr(local_secret, "_value", None)
     caplog.set_level(logging.DEBUG)
@@ -205,6 +205,15 @@ def test_verify_route_accepts_the_secret_from_the_file(server):
     assert response.status_code == 204
 
 
+def test_instance_route_names_the_secret_without_it(server):
+    value = _secret_file().read_text()
+
+    response = server.get("/api/instance")
+
+    assert response.json() == {"instance": local_secret.instance_of(value)}
+    assert value not in response.text
+
+
 @pytest.mark.parametrize("headers", [{}, {local_secret.HEADER: "wrong"}])
 def test_verify_route_refuses_without_the_secret(server, headers):
     """Also from 127.0.0.1: the address is no shortcut."""
@@ -214,6 +223,7 @@ def test_verify_route_refuses_without_the_secret(server, headers):
 
 
 @pytest.mark.parametrize("content", [b"", "café".encode()])
+@pytest.mark.usefixtures("no_workspace_setup")
 def test_verify_route_refuses_when_the_file_is_unusable(content, monkeypatch, caplog):
     """The server still starts; only routes that need the secret refuse."""
     _write_secret_file(content)

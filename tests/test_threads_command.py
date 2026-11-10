@@ -7,7 +7,7 @@ import pytest
 from rich.table import Table
 
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(**overrides):

@@ -1,0 +1,591 @@
+"""``EvoSci deploy --json``: start or attach to the backend for a program.
+
+stdout carries one JSON object per line and nothing else (Rich output goes to
+stderr). Every line has ``"protocol": 1``, the number ``EvoSci setup --json``
+uses, and an ``event``. Later versions may add fields and events, never rename
+or remove them.
+
+Events:
+
+- ``starting``: ``workspace``, ``host``, ``port``.
+- ``ready``: ``url``, ``owned``, ``workspace``, ``assistant_id``, ``data_dir``,
+  ``config_dir``, ``log_file``, ``warnings`` (a list of strings), and with
+  ``--tunnel`` also ``public_url`` (null when no URL was reported in time,
+  or when cloudflared could not create the tunnel, which adds a warning).
+  ``owned`` is true when this command started the backend and stops it on
+  exit, false when it attached to a running one and leaves it running.
+  ``url`` is where the backend answers: this data folder's backend is
+  attached to on whatever port it runs, which may differ from ``starting``'s
+  ``port`` (``warnings`` then says so). ``workspace`` is the project this
+  command registered, and ``assistant_id`` its chat assistant.
+  ``data_dir`` and ``config_dir`` are the backend's, from the record it
+  keeps of itself (this command's own for a backend without one).
+  ``data_dir`` and ``config_dir`` are paths to open files at, never to
+  compare as strings: one folder can have more than one spelling (an 8.3
+  short name on Windows, a symlink).
+- ``error``: ``code``, ``message``, ``detail`` (an object, possibly empty).
+  ``detail`` by code (see :data:`ERROR_CODES`):
+
+  - ``invalid_port``: ``port``.
+  - ``port_conflict``: ``reason``, always: ``foreign`` (another program holds
+    the port), ``other_data_folder`` (an EvoScientist backend of another data
+    folder answers on it) or ``older_server`` (a backend too old to say whose
+    it is answers on it).
+  - ``ccproxy_failed``: ``log_file`` (and ``exit_code`` when it exited):
+    the started backend could not start the ccproxy Anthropic's OAuth goes
+    through, so it did not serve.
+  - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
+    ``lock_file``: the start lock another EvoScientist process held too
+    long or that could not be used, or the data folder's server lock, held
+    without a record or unreadable. ``log_file`` (and ``exit_code`` when the
+    started backend exited): the started backend failed or never answered,
+    or the recorded backend is stopping, does not answer at its address, or
+    another program or EvoScientist server answers there. Neither when no
+    log was written: the server home could not be created, or the start
+    failed before the backend was launched.
+  - ``sign_in_required``: ``provider``, and ``problem`` when there is one.
+  - ``backend_exited``: ``log_file``; ``exit_code`` when the owned process
+    ended; ``url`` when an owned backend stopped listening or an attached one
+    stopped answering.
+  - ``folder_missing``: ``workspace``, a folder EvoScientist knows as a
+    project whose folder is gone (it is not recreated).
+  - ``server_outdated``: empty; the running backend predates the project
+    registry, so it has to be stopped first.
+  - ``registration_failed``: empty; the backend did not register the
+    workspace.
+  - ``internal_error``: ``type``, the exception's class; or ``launcher_code``
+    for a backend-decision error this mode has no code for.
+
+  ``port_conflict`` also carries ``hint``, the line the human mode prints.
+  ``workspace_conflict`` is not sent any more; older releases send it, with
+  ``workspace`` and ``hint``, when the backend was started from another
+  project.
+- ``stopped``: a clean exit. An owned backend has been stopped; an attached
+  one is left running.
+
+``backend_exited`` for an owned backend means its process ended, or nothing
+listens on its port any more. An owned backend that keeps its port but stops
+answering is left running: the app decides when to stop it. An attached
+backend is reported as exited when ``/ok`` fails three times in a row, and is
+never stopped.
+
+Every run that reaches the command ends with exactly one ``stopped`` or
+``error`` line, then exits (0 after ``stopped``, 1 after ``error``). Option
+errors reported before the command runs print no event, and a killed process
+prints nothing. When the reader closes stdout, the command stops as on a stop
+request and writes nothing more.
+
+How a program runs the command:
+
+- Start ``EvoSci`` itself, not through a shell (in Node, no
+  ``shell: true``): Node destroys a child's stdin when that child exits, so
+  an intermediate shell would end the stdin of a command that still runs.
+- Give it a stdin pipe. To stop, close stdin or write a
+  ``{"command": "stop"}`` line, then wait for ``stopped`` or the exit before
+  quitting. A terminal, ``/dev/null``, ``NUL`` or a file as stdin is ignored;
+  the command then stops on Ctrl+C or SIGTERM.
+- When the program exits without closing stdin, the command still stops: on
+  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend
+  (and the ccproxy it starts) runs in a job object that ends it together with
+  this command.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import os
+import signal
+import sys
+import threading
+import time
+import traceback
+from collections.abc import Iterator
+from typing import Any
+
+from ..langgraph_dev.assistants import chat_assistant_id
+from ..langgraph_dev.registration import ServerExposure, exposure_messages
+from ..paths import Workspace
+from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe
+
+logger = logging.getLogger(__name__)
+
+# The ``detail`` of each is in the module docstring. ``internal_error``:
+# anything else, with the traceback on stderr.
+ERROR_CODES = frozenset(
+    {
+        "invalid_port",
+        "port_conflict",
+        "ccproxy_failed",
+        "backend_start_failed",
+        "sign_in_required",
+        "backend_exited",
+        "folder_missing",
+        "server_outdated",
+        "registration_failed",
+        "internal_error",
+    }
+)
+
+_LAUNCHER_CODES = {
+    "port_conflict": "port_conflict",
+    "ccproxy_failed": "ccproxy_failed",
+    "backend_start_failed": "backend_start_failed",
+    "folder_missing": "folder_missing",
+    "server_outdated": "server_outdated",
+    "registration_failed": "registration_failed",
+}
+
+# The health check runs this often; this many failures in a row mean the
+# backend is gone (one slow answer is not).
+HEALTH_INTERVAL = 2.0
+HEALTH_FAILURES = 3
+# How often the wait loop looks at the stop request and the owned process.
+_TICK = 0.5
+# A stdin line longer than this is not a command and is dropped.
+_MAX_LINE = 65536
+_STDIN_THREAD = "deploy-json-stdin"
+# How long ``--tunnel`` waits for cloudflared's URL, as ``read_tunnel_url``.
+_TUNNEL_WAIT = 35.0
+
+
+class _Failure(Exception):
+    """Ends the run with an ``error`` event."""
+
+    def __init__(
+        self, code: str, message: str, detail: dict[str, Any] | None = None
+    ) -> None:
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown deploy error code {code!r}")
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.detail = dict(detail or {})
+
+    def event(self) -> dict[str, Any]:
+        return {
+            "event": "error",
+            "code": self.code,
+            "message": self.message,
+            "detail": self.detail,
+        }
+
+
+@contextlib.contextmanager
+def _launcher_failures() -> Iterator[None]:
+    """Raise a :class:`~EvoScientist.deploy.launcher.LauncherError` as the
+    matching :class:`_Failure`; a code without one is ``internal_error``."""
+    from .launcher import LauncherError
+
+    try:
+        yield
+    except LauncherError as exc:
+        detail = dict(exc.fields)
+        if exc.detail:
+            detail["hint"] = exc.detail
+        code = _LAUNCHER_CODES.get(exc.code)
+        if code is None:
+            detail["launcher_code"] = exc.code
+            code = "internal_error"
+        raise _Failure(code, exc.message, detail) from exc
+
+
+class _Events:
+    """Writes the event lines. Once stdout is gone (the reader closed it),
+    asks the run to stop and drops later lines."""
+
+    def __init__(self, on_broken: threading.Event) -> None:
+        self._emit = JsonEmitter()
+        self._on_broken = on_broken
+        self._broken = False
+
+    def __call__(self, event: str, **fields: Any) -> None:
+        if self._broken:
+            return
+        try:
+            self._emit({"protocol": PROTOCOL, "event": event, **fields})
+        except (OSError, ValueError):
+            self._broken = True
+            self._on_broken.set()
+            # The failed line stays in sys.stdout's buffer; the flush at
+            # interpreter shutdown would fail again and exit 120. Later
+            # writes go nowhere instead.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                os.close(devnull)
+            except (OSError, ValueError, AttributeError):
+                pass
+
+
+def _take_stdin() -> int:
+    """Move the stdin pipe to a private descriptor and give stdin the null
+    device; returns the private descriptor.
+
+    On Windows a read pending on a pipe stalls every other process that holds
+    the same pipe: a child that inherits it (the backend, ccproxy, and the MCP
+    servers and shell commands the backend starts) hangs in its start-up. The
+    copy is not inheritable (PEP 446), so children inherit the null device
+    instead. The end of input still arrives: it depends on the writer only.
+    """
+    stdin_fd = sys.stdin.fileno()
+    private = os.dup(stdin_fd)
+    null = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(null, stdin_fd)
+    finally:
+        os.close(null)
+    if sys.platform == "win32" and stdin_fd == 0:
+        # What ``Popen`` hands a child as its stdin.
+        import ctypes
+        import msvcrt
+
+        ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))
+    return private
+
+
+def _watch_stdin(fd: int, stop: threading.Event) -> None:
+    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
+
+    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
+    buffer lock, which interpreter shutdown may need.
+    """
+    pending = b""
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            if any(_is_stop(line) for line in lines):
+                break
+            if len(pending) > _MAX_LINE:
+                pending = b""  # not a command line; drop it
+    except OSError as exc:
+        logger.debug(f"stdin read failed: {exc}")
+    finally:
+        os.close(fd)
+    stop.set()
+
+
+def _is_stop(line: bytes) -> bool:
+    try:
+        message = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(message, dict) and message.get("command") == "stop"
+
+
+class _Run:
+    def __init__(self, events: _Events, stop: threading.Event) -> None:
+        self.events = events
+        self.stop = stop
+        self.host = ""
+        self.port = 0
+        self.starting = False  # an owned backend may exist from here on
+        self.proc: Any = None
+        # The log of the backend this command uses (an attached older
+        # release's writes its own).
+        self.log_file: Any = None
+        self.job: Any = None
+
+    def start(
+        self,
+        *,
+        workdir: str | None,
+        port: int | None,
+        host: str | None,
+        tunnel: bool,
+        debug: bool,
+    ) -> None:
+        from .. import paths
+        from ..agent_shell import server_setup_hint, setup_hint
+        from ..langgraph_dev import manager as lgm
+        from . import server
+        from .launcher import prepare_launch_folder, reuse_warnings
+
+        config = server._load_config(debug, host, port)
+        _check_sign_in(config)
+
+        ws = str(paths.start_workspace_path(workdir, config.default_workdir))
+        with _launcher_failures():
+            prepare_launch_folder(ws)
+        self.port = server._resolve_port(port, config)
+        if not server._port_in_range(self.port):
+            raise _Failure(
+                "invalid_port",
+                server._invalid_port_message(self.port),
+                {"port": self.port},
+            )
+        self.host = server._resolve_host(host, config)
+        self.events("starting", workspace=ws, host=self.host, port=self.port)
+
+        result = self._ensure(config, tunnel)
+        # A stop asked for while waiting or during the start: stop now,
+        # without the tunnel wait or ready.
+        if result is None or self.stop.is_set():
+            return
+        warnings = reuse_warnings(result, self.port)
+        self.port = result.port or self.port
+        self.host = result.host or self.host
+        exposure = self._register(ws)
+        # The backend's bind and tunnel, as it answered the registration: for
+        # a reused one, --host and --tunnel here say nothing about it.
+        warnings.extend(exposure_messages(exposure))
+        record = result.record
+        data_dir = record.data_dir if record is not None else str(paths.DATA_DIR)
+        config_dir = record.config_dir if record is not None else str(paths.CONFIG_DIR)
+        public_url: str | None = None
+        if not result.started:
+            hint = server_setup_hint(record.fields if record is not None else None)
+            if tunnel:
+                warnings.append(
+                    "--tunnel applies only to a backend this command starts; "
+                    "the running backend is used as it is."
+                )
+        else:
+            # The human mode's banners, for the app to show.
+            if getattr(config, "dangerous_mode", False):
+                from ..cli._constants import (
+                    DANGEROUS_BANNER_LABEL,
+                    DANGEROUS_BANNER_MESSAGE,
+                )
+
+                warnings.append(f"{DANGEROUS_BANNER_LABEL}: {DANGEROUS_BANNER_MESSAGE}")
+            if self.job is not None and self.job.warning:
+                warnings.append(self.job.warning)
+            hint = setup_hint()
+            if tunnel:
+                try:
+                    public_url = self._wait_for_tunnel_url()
+                except lgm.TunnelFailedError as exc:
+                    warnings.append(f"Cloudflare quick tunnel failed: {exc}")
+                if self.stop.is_set():
+                    return
+        if hint is not None:
+            warnings.append(hint)
+
+        fields: dict[str, Any] = {
+            "url": lgm._base_url(self.port, self.host),
+            "owned": result.started,
+            "workspace": ws,
+            "assistant_id": chat_assistant_id(Workspace(ws)),
+            "data_dir": data_dir,
+            "config_dir": config_dir,
+            "log_file": str(self.log_file),
+            "warnings": warnings,
+        }
+        if tunnel:
+            fields["public_url"] = public_url
+        self.events("ready", **fields)
+
+    def _register(self, ws: str) -> ServerExposure:
+        """Register the workspace with the backend this command uses; how
+        that backend can be reached from other machines."""
+        from ..langgraph_dev import manager as lgm
+        from .launcher import register_launch_folder
+
+        with _launcher_failures():
+            return register_launch_folder(ws, url=lgm._base_url(self.port, self.host))
+
+    def _ensure(self, config: Any, tunnel: bool) -> Any:
+        """This data folder's backend, attached to on whatever port it runs,
+        or one this command starts and owns (``ensure_server``). None when a
+        stop came first."""
+        from ..langgraph_dev import manager as lgm
+        from .launcher import server_error
+
+        # An interrupted start returns no handle: cleanup() finds it in the
+        # manager, which holds it right after spawning.
+        self.starting = True
+        result = lgm.ensure_server(
+            config,
+            backend="langgraph_server",
+            port=self.port,
+            host=self.host,
+            # The app owns the backend it started: it stops it.
+            lasting=False,
+            tunnel=tunnel,
+            job=lambda: self.job,
+            any_port=True,
+            before_start=self._before_start,
+            cancelled=self.stop.is_set,
+        )
+        if result.started:
+            self.proc = result.proc
+        if result.problem == "cancelled":
+            return None
+        if not result.available:
+            with _launcher_failures():
+                raise server_error(result)
+        self.log_file = lgm.log_file_of(result.record)
+        return result
+
+    def _before_start(self) -> None:
+        """Right before this command starts a backend: the job it joins."""
+        from .backend_job import backend_job
+
+        self.job = backend_job()
+
+    def _wait_for_tunnel_url(self) -> str | None:
+        """The tunnel URL, in short waits that check for a stop between them;
+        each read scans the log from this server's start, and a cloudflared
+        failure raises :class:`TunnelFailedError` at once."""
+        from ..langgraph_dev import manager as lgm
+
+        deadline = time.monotonic() + _TUNNEL_WAIT
+        while not self.stop.is_set() and time.monotonic() < deadline:
+            url = lgm.read_tunnel_url(timeout=_TICK)
+            if url:
+                return url
+        return None
+
+    def wait(self) -> None:
+        """Block until a stop is asked for; raise ``backend_exited`` when the
+        backend goes away first.
+
+        An owned backend is gone when its process ends, or when nothing
+        listens on its port any more (a server that stopped serving but did
+        not exit). A slow ``/ok`` never counts for it: a stalled backend
+        (swapping, a paused process, a blocked event loop) keeps its port,
+        and killing it would lose the runs in progress; the app decides.
+        An attached backend has no process handle here, so ``/ok`` is the
+        check, and nothing is stopped.
+        """
+        from ..langgraph_dev import manager as lgm
+
+        owned = self.proc is not None
+        failures = 0
+        next_check = time.monotonic() + HEALTH_INTERVAL
+        while not self.stop.wait(_TICK):
+            if self.proc is not None and self.proc.poll() is not None:
+                raise _Failure(
+                    "backend_exited",
+                    f"The backend exited with code {self.proc.returncode}.",
+                    {
+                        "exit_code": self.proc.returncode,
+                        "log_file": str(lgm.RUNTIME.log_file),
+                    },
+                )
+            if time.monotonic() < next_check:
+                continue
+            next_check = time.monotonic() + HEALTH_INTERVAL
+            if owned:
+                healthy = lgm._is_port_occupied(self.port, self.host)
+            else:
+                healthy = lgm.is_langgraph_dev_running(port=self.port, host=self.host)
+            if healthy:
+                failures = 0
+                continue
+            failures += 1
+            if failures >= HEALTH_FAILURES:
+                what = "stopped listening" if owned else "stopped answering"
+                raise _Failure(
+                    "backend_exited",
+                    f"The backend on port {self.port} {what}.",
+                    {
+                        "url": lgm._base_url(self.port, self.host),
+                        "log_file": str(self.log_file),
+                    },
+                )
+
+    def cleanup(self) -> None:
+        """Stop what this command started: the backend, then close the job
+        (which would end a backend the stop missed). Each step runs even when
+        the one before raised; ``run_json`` reports the error."""
+        from ..langgraph_dev import manager as lgm
+
+        try:
+            if self.starting:
+                # An interrupted start returns no handle; the manager holds
+                # it right after spawning.
+                proc = self.proc if self.proc is not None else lgm._PROCESS
+                if proc is not None:
+                    lgm.stop_langgraph_dev(proc, clean=self.proc is not None)
+        finally:
+            if self.job is not None:
+                self.job.close()
+
+
+def _check_sign_in(config: Any) -> None:
+    """``sign_in_required`` when OpenAI uses ChatGPT sign-in and nobody is
+    signed in, as ``EvoSci deploy`` checks before anything starts."""
+    if getattr(config, "openai_auth_mode", "api_key") != "oauth":
+        return
+    from ..llm import chatgpt_oauth
+
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        return
+    detail: dict[str, Any] = {"provider": "openai"}
+    if state.problem:
+        detail["problem"] = state.problem
+    raise _Failure("sign_in_required", chatgpt_oauth.SIGN_IN_HINT, detail)
+
+
+def _internal_error(exc: BaseException) -> dict[str, Any]:
+    traceback.print_exception(exc, file=sys.stderr)
+    return _Failure(
+        "internal_error",
+        str(exc) or type(exc).__name__,
+        {"type": type(exc).__name__},
+    ).event()
+
+
+def run_json(
+    *,
+    workdir: str | None,
+    port: int | None,
+    host: str | None,
+    tunnel: bool,
+    debug: bool,
+) -> int:
+    """Run ``EvoSci deploy --json``; returns the exit code."""
+    from ..stream.json_sink import redirect_console_to_stderr
+
+    redirect_console_to_stderr()
+    stop = threading.Event()
+    events = _Events(stop)
+    run = _Run(events, stop)
+
+    def _on_sigterm(_signum: int, _frame: Any) -> None:
+        stop.set()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
+    # From the start, so an app that goes away while the backend starts
+    # stops it as soon as the start returns.
+    if stdin_is_pipe():
+        threading.Thread(
+            target=_watch_stdin,
+            args=(_take_stdin(), stop),
+            name=_STDIN_THREAD,
+            daemon=True,
+        ).start()
+    terminal: dict[str, Any] = {"event": "stopped"}
+    try:
+        try:
+            run.start(workdir=workdir, port=port, host=host, tunnel=tunnel, debug=debug)
+            run.wait()
+        except _Failure as failure:
+            terminal = failure.event()
+        except KeyboardInterrupt:
+            pass
+        except Exception as exc:
+            terminal = _internal_error(exc)
+        # A second Ctrl+C must not cut the stop short and leave the backend.
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            run.cleanup()
+        except Exception as exc:
+            if terminal["event"] == "stopped":
+                terminal = _internal_error(exc)
+            else:
+                traceback.print_exception(exc, file=sys.stderr)
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+    events(**terminal)
+    return 0 if terminal["event"] == "stopped" else 1
