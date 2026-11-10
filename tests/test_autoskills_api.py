@@ -91,8 +91,10 @@ def _approve(workspace: Workspace, name: str) -> None:
     assert result["approved"] is True, result
 
 
-def _installed_skill(root, name: str, body: str = "Installed.") -> None:
-    folder = root / name
+def _installed_skill(
+    root, name: str, body: str = "Installed.", *, folder: str | None = None
+) -> None:
+    folder = root / (folder or name)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: Use when testing {name}.\n---\n\n{body}\n",
@@ -480,9 +482,68 @@ def test_counts_do_not_depend_on_the_filter(server, served, monkeypatch):
     ]
 
     assert {str(body["counts"]) for body in bodies} == {
-        str({"pending": 1, "approved": 0, "rejected": 0})
+        str({"pending": 1, "approved": 1, "rejected": 0})
     }
     assert [d["proposal_id"] for d in bodies[0]["proposals"]] == ["good-skill"]
+    assert bodies[2]["proposals"] == []
+
+
+def test_a_filtered_list_builds_only_the_drafts_it_returns(server, served, monkeypatch):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "good-skill")
+    _draft(served, "other-skill")
+    _approve(served, "other-skill")
+    built = []
+    real = autoskills_api._draft
+
+    def recording(proposal, key):
+        built.append(proposal.proposal_id)
+        return real(proposal, key)
+
+    monkeypatch.setattr(autoskills_api, "_draft", recording)
+
+    body = server.get("/api/autoskills/proposals", params={"status": "pending"}).json()
+
+    assert built == ["good-skill"]
+    assert body["counts"] == {"pending": 1, "approved": 1, "rejected": 0}
+
+
+def test_list_scans_installed_skills_once_per_request(server, served, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    for name in ("first-draft", "second-draft", "third-draft"):
+        _draft(served, name)
+    _installed_skill(served.skills_dir, "local-skill")
+    # Folders named unlike their skills: only a scan of that tier finds them.
+    _installed_skill(paths.GLOBAL_SKILLS_DIR, "second-draft", folder="global-folder")
+    reads = []
+    real = module._installed_skill_name
+
+    def recording(skill_dir):
+        reads.append(skill_dir.name)
+        return real(skill_dir)
+
+    monkeypatch.setattr(module, "_installed_skill_name", recording)
+
+    first = _install_errors(server)
+    once = len(reads)
+    _installed_skill(served.skills_dir, "first-draft", folder="later-folder")
+    second = _install_errors(server)
+
+    assert first["first-draft"] is None
+    assert first["third-draft"] is None
+    assert "already exists" in first["second-draft"]
+    # One scan per set of roots, however many drafts ask.
+    assert max(reads.count(name) for name in set(reads)) <= 4
+    assert once <= 8
+    # A later request scans again, so it sees the skill installed meanwhile.
+    assert "already exists" in second["first-draft"]
+
+
+def _install_errors(server) -> dict[str, str | None]:
+    body = server.get("/api/autoskills/proposals").json()
+    return {d["proposal_id"]: d["install_error"] for d in body["proposals"]}
 
 
 def test_list_reads_the_registry_once(server, served, monkeypatch):

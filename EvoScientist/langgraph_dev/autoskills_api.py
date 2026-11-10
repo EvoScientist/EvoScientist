@@ -33,6 +33,7 @@ from EvoScientist.memory.autoskills.proposals import (
     approve_skill_proposal,
     copied_files,
     find_skill_proposal,
+    installed_skills_read_once,
     list_skill_proposals,
     proposal_install_target,
     reject_skill_proposal,
@@ -220,22 +221,24 @@ def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
     counts = dict.fromkeys(_STATUSES, 0)
     by_project = {key: dict.fromkeys(_STATUSES, 0) for key in keys}
     drafts = []
-    for proposal in list_skill_proposals(paths.MEMORIES_DIR):
-        key = _listed(proposal, served)
-        if key is None:
-            continue
-        try:
-            draft = _draft(proposal, key)
-            json.dumps(draft, ensure_ascii=False).encode("utf-8")
-        except Exception:
-            # One draft that cannot be read or sent must not fail the page.
-            logger.warning(
-                "Could not list draft %s.", proposal.proposal_id, exc_info=True
-            )
-            continue
-        counts[proposal.status] += 1
-        by_project[key][proposal.status] += 1
-        if status is None or proposal.status == status:
+    with installed_skills_read_once():
+        for proposal in list_skill_proposals(paths.MEMORIES_DIR):
+            key = _listed(proposal, served)
+            if key is None:
+                continue
+            counts[proposal.status] += 1
+            by_project[key][proposal.status] += 1
+            if status is not None and proposal.status != status:
+                continue
+            try:
+                draft = _draft(proposal, key)
+                json.dumps(draft, ensure_ascii=False).encode("utf-8")
+            except Exception:
+                # One draft that cannot be read or sent must not fail the page.
+                logger.warning(
+                    "Could not list draft %s.", proposal.proposal_id, exc_info=True
+                )
+                continue
             drafts.append(draft)
     return 200, {"proposals": drafts, "counts": counts, "by_project": by_project}
 

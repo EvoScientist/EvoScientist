@@ -322,6 +322,29 @@ def _manifest(memory_dir, proposal_id):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_an_exact_decision_reads_only_its_own_draft(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    monkeypatch.setattr(
+        module, "list_skill_proposals", lambda *_a, **_k: pytest.fail("listed")
+    )
+
+    wrong = reject_skill_proposal(
+        memory_dir, "focused-validation", workspace_dir=tmp_path / "other", exact=True
+    )
+    prefix = reject_skill_proposal(memory_dir, "focused", exact=True)
+    rejected = reject_skill_proposal(
+        memory_dir, "focused-validation", workspace_dir=tmp_path, exact=True
+    )
+
+    assert wrong["rejected"] is False
+    assert prefix["rejected"] is False
+    assert rejected["rejected"] is True
+
+
 def test_approval_records_user_and_time(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"

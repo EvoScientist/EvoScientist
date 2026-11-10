@@ -11,6 +11,9 @@ import shutil
 import stat
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -394,6 +397,13 @@ def find_skill_proposal(
     memory_dir: str | Path, proposal_id: str
 ) -> SkillProposal | None:
     """The draft whose id is exactly ``proposal_id``, in any project."""
+    found = _find_with_manifest(memory_dir, proposal_id)
+    return found[0] if found else None
+
+
+def _find_with_manifest(
+    memory_dir: str | Path, proposal_id: str
+) -> tuple[SkillProposal, dict[str, Any]] | None:
     if not isinstance(proposal_id, str) or not _SKILL_NAME_RE.fullmatch(proposal_id):
         return None
     root = _proposal_root(memory_dir)
@@ -410,7 +420,7 @@ def find_skill_proposal(
     proposal = _proposal_from_manifest(proposal_dir, manifest)
     if proposal is None or proposal.proposal_id != proposal_id:
         return None
-    return proposal
+    return proposal, manifest
 
 
 def pending_skill_proposal_count(
@@ -619,12 +629,24 @@ def _resolves_within_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _find_installed_user_skill(
-    skill_name: str,
-    *,
-    roots: list[Path],
-) -> Path | None:
-    """Find an installed skill by name across the given roots."""
+_NamedSkill = tuple[Path, str | None]
+# Set while one listing is built: every draft looks up the same installed skills.
+_installed_scans: ContextVar[dict[tuple[Path, ...], list[_NamedSkill]] | None]
+_installed_scans = ContextVar("_installed_scans", default=None)
+
+
+@contextmanager
+def installed_skills_read_once() -> Iterator[None]:
+    """Scan each set of skill roots at most once inside the block."""
+    token = _installed_scans.set({})
+    try:
+        yield
+    finally:
+        _installed_scans.reset(token)
+
+
+def _visible_skills(roots: list[Path]) -> list[_NamedSkill]:
+    """The skill folders the runtime sees in ``roots``, in its order, with names."""
     # The merged runtime first hides lower-tier entries with the same resolved
     # virtual path, then resolves duplicate frontmatter names in path order.
     visible: dict[str, Path] = {}
@@ -643,13 +665,29 @@ def _find_installed_user_skill(
             resolved_entry = entry.resolve()
             virtual_path = resolved_entry.relative_to(resolved_root).as_posix()
             visible.setdefault(virtual_path, resolved_entry)
+    return [
+        (visible[virtual_path], _installed_skill_name(visible[virtual_path]))
+        for virtual_path in sorted(visible, key=lambda name: f"/{name}/")
+    ]
 
+
+def _find_installed_user_skill(
+    skill_name: str,
+    *,
+    roots: list[Path],
+) -> Path | None:
+    """Find an installed skill by name across the given roots."""
+    scans = _installed_scans.get()
+    skills = scans.get(tuple(roots)) if scans is not None else None
+    if skills is None:
+        skills = _visible_skills(roots)
+        if scans is not None:
+            scans[tuple(roots)] = skills
     match: Path | None = None
-    for virtual_path in sorted(visible, key=lambda name: f"/{name}/"):
-        entry = visible[virtual_path]
+    for entry, name in skills:
         # The merged runtime keeps the later metadata entry when multiple
         # visible folders declare the same frontmatter name.
-        if _installed_skill_name(entry) == skill_name:
+        if name == skill_name:
             match = entry
     return match
 
@@ -1083,14 +1121,20 @@ def _proposal_dir_by_id(
     requested = proposal_id.strip()
     if not requested:
         return None
+    found = find_skill_proposal(memory_dir, requested)
+    wanted = _normalize_workspace_dir(workspace_dir)
+    if found is not None and (
+        wanted is None or _normalize_workspace_dir(found.workspace_dir) == wanted
+    ):
+        return found.path
+    if exact:
+        return None
     proposals = list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
-    # The draft folder named exactly by the id wins, as in find_skill_proposal,
-    # so a draft stays reachable when another one's name extends it.
+    # A folder find_skill_proposal refuses still wins by its exact id, so a
+    # draft stays reachable when another one's name extends it.
     for proposal in proposals:
         if proposal.proposal_id == requested and proposal.path.name == requested:
             return proposal.path
-    if exact:
-        return None
     matches = [
         proposal.path
         for proposal in proposals
@@ -1410,13 +1454,8 @@ def proposal_install_target(
     scope: str | None = None,
 ) -> InstallTarget:
     """Where approving the draft named exactly ``proposal_id`` would write."""
-    proposal = find_skill_proposal(memory_dir, proposal_id)
-    manifest = (
-        _read_manifest(proposal.path / "manifest.json")
-        if proposal is not None
-        else None
-    )
-    if manifest is None:
+    found = _find_with_manifest(memory_dir, proposal_id)
+    if found is None:
         return InstallTarget(
             scope=None,
             path=None,
@@ -1424,6 +1463,7 @@ def proposal_install_target(
             workspace_shadow=None,
             error=f"No proposal named {proposal_id!r}",
         )
+    proposal, manifest = found
     try:
         target, _failure = _resolve_install(
             memory_dir, proposal.path, manifest, skills_dir=skills_dir, scope=scope
