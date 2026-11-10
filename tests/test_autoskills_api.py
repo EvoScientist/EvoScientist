@@ -1182,7 +1182,32 @@ def test_revert_route_removes_a_new_skill(server, served, secret, quiet_skill_in
     response = _decide(server, "focused-validation", "revert", secret)
 
     assert response.status_code == 200
+    assert response.json()["status"] == "pending"
     assert not (served.skills_dir / "focused-validation").exists()
+
+
+def test_revert_route_rejects_an_auto_approval(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    approved = approve_skill_proposal(
+        paths.MEMORIES_DIR,
+        "focused-validation",
+        skills_dir=served.skills_dir,
+        workspace_dir=served.root,
+        approved_by="auto",
+    )
+    assert approved["approved"] is True, approved
+
+    response = _decide(server, "focused-validation", "revert", secret)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "reverted": True,
+        "proposal_id": "focused-validation",
+        "status": "rejected",
+    }
+    assert _only_draft(server)["status"] == "rejected"
 
 
 def test_revert_route_refusals(server, served, secret, quiet_skill_index):

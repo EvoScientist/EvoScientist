@@ -1778,11 +1778,12 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
 
 
 def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any]:
-    """Put a rejected draft, or a new skill's approval, back to pending.
+    """Put a rejected draft, or a new skill's approval, back to pending; an
+    approval auto mode made becomes a rejection, so the agent cannot reinstall it.
 
     An approved update, in place or as a project fork, is refused: nothing
     records the installed skill it started from. Each step can be retried: the
-    manifest keeps its decision until the skill and the processed mark are gone.
+    manifest keeps its decision until the skill is gone and the mark is settled.
     """
     proposal = find_skill_proposal(memory_dir, proposal_id)
     manifest_path = proposal.path / "manifest.json" if proposal else None
@@ -1801,6 +1802,8 @@ def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str,
     installed = manifest.get("approved_skill_path") if status == "approved" else None
     if installed is not None and not isinstance(installed, str):
         return refused("skill_changed")
+    # Submit never overwrites a rejected draft, so the agent cannot bring it back.
+    rejects = status == "approved" and manifest.get("approved_by") == "auto"
     try:
         if installed:
             if not _installed_in_its_tier(manifest, Path(installed)):
@@ -1816,7 +1819,7 @@ def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str,
             and other.path != proposal.path
             for other in list_skill_proposals(memory_dir)
         )
-        if _CLUSTER_HASH_RE.fullmatch(cluster_hash) and not shared:
+        if _CLUSTER_HASH_RE.fullmatch(cluster_hash) and not shared and not rejects:
             unmark_cluster_processed(memory_dir, cluster_hash)
 
         for key in ("approved_by", "approved_at", "approved_skill_path", "rejected_at"):
@@ -1827,12 +1830,18 @@ def revert_skill_proposal(memory_dir: str | Path, proposal_id: str) -> dict[str,
                 manifest["scope"] = manifest["submitted_scope"]
             else:
                 manifest.pop("scope", None)
-        manifest["status"] = "pending"
+        manifest["status"] = "rejected" if rejects else "pending"
         manifest["updated_at"] = _now()
+        if rejects:
+            manifest["rejected_at"] = manifest["updated_at"]
         _write_manifest(manifest_path, manifest)
     except OSError as exc:
         return {**refused("revert_failed"), "detail": str(exc)}
-    return {"reverted": True, "proposal_id": proposal.proposal_id, "status": "pending"}
+    return {
+        "reverted": True,
+        "proposal_id": proposal.proposal_id,
+        "status": manifest["status"],
+    }
 
 
 def reject_skill_proposal(

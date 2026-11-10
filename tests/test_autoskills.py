@@ -847,6 +847,45 @@ def test_revert_approved_create_removes_installed_skill(tmp_path):
     assert manifest["scope"] == "workspace"
 
 
+def test_revert_of_an_auto_approval_rejects_the_draft(tmp_path):
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _approve_quietly(memory_dir, "focused-validation", skills_dir, approved_by="auto")
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert result == {
+        "reverted": True,
+        "proposal_id": "focused-validation",
+        "status": "rejected",
+    }
+    assert not (skills_dir / "focused-validation").exists()
+    assert "cluster-1" in processed_cluster_hashes(memory_dir)
+    manifest = _manifest(memory_dir, "focused-validation")
+    assert manifest["status"] == "rejected"
+    assert manifest["rejected_at"] == manifest["updated_at"]
+    for key in ("approved_by", "approved_at", "approved_skill_path"):
+        assert key not in manifest
+    resubmitted = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name="focused-validation",
+        cluster_hash="cluster-2",
+        source_observation_ids=["O-1", "O-2", "O-3", "O-4"],
+        rationale="The cluster grew by one observation.",
+        skills_dir=skills_dir,
+        workspace_dir=Path(skills_dir).parent,
+    )
+    assert resubmitted["submitted"] is False
+    assert resubmitted["status"] == "rejected"
+
+    reopened = revert_skill_proposal(memory_dir, "focused-validation")
+
+    assert reopened["status"] == "pending"
+    assert "cluster-1" not in processed_cluster_hashes(memory_dir)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
 def test_a_draft_under_a_symlinked_folder_is_approved_and_reverted(tmp_path):
     (tmp_path / "real" / "project").mkdir(parents=True)

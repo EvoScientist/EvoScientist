@@ -362,7 +362,7 @@ def _apply(
         return 200, {
             "reverted": True,
             "proposal_id": result.get("proposal_id"),
-            "status": "pending",
+            "status": result.get("status"),
         }
     code = str(result.get("error"))
     payload: dict[str, Any] = {"error": code}
