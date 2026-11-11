@@ -13,11 +13,13 @@ Four settings per provider, saved with `EvoSci config set` (or the matching envi
 | `custom_openai_api_key` | `CUSTOM_OPENAI_API_KEY` | only if the endpoint checks keys |
 | `model` | — | yes (see below) |
 
+Replace the placeholder values below with your own before running:
+
 ```bash
 EvoSci config set provider custom-openai
 EvoSci config set custom_openai_base_url https://example.com/v1
-EvoSci config set custom_openai_api_key <key>
-EvoSci config set model <model id>
+EvoSci config set custom_openai_api_key YOUR_API_KEY
+EvoSci config set model YOUR_MODEL_ID
 ```
 
 The same with `custom-anthropic`, `custom_anthropic_base_url` (e.g. `https://example.com`, no `/v1` — the client appends it) and `custom_anthropic_api_key`. A trailing `/` on either base URL is stripped before use. A missing base URL fails with an error naming the setting; a missing key does not (see below).
@@ -30,4 +32,4 @@ The same with `custom-anthropic`, `custom_anthropic_base_url` (e.g. `https://exa
 
 An endpoint without a key runs without one: instead of failing, a placeholder key (`not-needed`) is sent, with a one-time warning naming the setting to set if the endpoint does check keys. The key is passed explicitly to the client, so the SDK never falls back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` and never sends your vendor key to another server.
 
-`EvoSci onboard`'s key test lists the endpoint's models — `GET {base_url}/models` for `custom-openai`, `GET {base_url}/v1/models` for `custom-anthropic`, reading the first page only. A wrong key is reported as invalid (authentication/permission error from the endpoint); an endpoint without a model list reports unavailable, which says nothing about the key.
+`EvoSci onboard` sets a custom endpoint up through its base URL and does **not** validate the key for `custom-openai` / `custom-anthropic` — a wrong key is only surfaced by the endpoint itself on first use.
