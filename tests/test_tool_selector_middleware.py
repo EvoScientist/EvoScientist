@@ -889,7 +889,61 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
     assert captured["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in captured
     assert captured["tool_choice"]["function"]["name"] == "ToolSelectionResponse"
+    field = captured["tools"][0]["function"]["parameters"]["properties"]["tools"]
+    assert field["items"] == {"type": "string", "enum": ["tool_0", "tool_1", "tool_2"]}
+    assert "- tool_1: tool_1 test tool" in field["description"]
     assert selected == ["tool_1"]
+
+
+# ---------------------------------------------------------------------------
+# Selection schema: tool names as one enum
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_selection_schema_lists_tool_names_as_enum(count):
+    """Starts from langchain's own schema, so a change to its shape fails here."""
+    import json
+
+    from langchain.agents.middleware.tool_selection import (
+        _create_tool_selection_response,
+    )
+
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    names = [f"t{index}" for index in range(count)]
+    schema = _create_tool_selection_response([_tool(n) for n in names]).json_schema()
+
+    field = _names_as_enum(schema)["properties"]["tools"]
+
+    assert field["items"] == {"type": "string", "enum": names}
+    assert "const" not in json.dumps(field)
+    assert [line for line in field["description"].splitlines() if line[:1] == "-"] == [
+        f"- {name}: {name} test tool" for name in names
+    ]
+
+
+def test_selection_schema_indents_a_multi_line_description():
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    option = {"const": "t0", "description": "Summary.\n- an option"}
+    schema = {"properties": {"tools": {"type": "array", "items": option}}}
+
+    listing = _names_as_enum(schema)["properties"]["tools"]["description"]
+
+    assert listing.endswith("- t0: Summary.\n  - an option")
+
+
+def test_selection_schema_without_named_options_is_left_alone():
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    schema = {
+        "title": "ToolSelectionResponse",
+        "type": "object",
+        "properties": {"tools": {"type": "array", "items": {"type": "string"}}},
+    }
+
+    assert _names_as_enum(schema) is schema
 
 
 # ---------------------------------------------------------------------------
@@ -1204,6 +1258,10 @@ def test_real_selector_switches_to_auto_end_to_end(monkeypatch):
     assert cond.wrap_model_call(request, handler) == "response"
 
     assert [b.get("tool_choice", {}).get("type") for b in bodies] == ["tool", "auto"]
+    # Both selectors send the names as an enum.
+    for body in bodies:
+        field = body["tools"][0]["input_schema"]["properties"]["tools"]
+        assert field["items"]["enum"] == [f"t{i}" for i in range(10)]
     assert bodies[1]["output_config"]["effort"] == "low"
     hint = "Always respond by calling the ToolSelectionResponse tool"
     assert hint not in json.dumps(bodies[0]["system"])
