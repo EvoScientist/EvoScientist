@@ -2224,7 +2224,7 @@ def run_textual_interactive(
                             if tool_name in ("write_file", "read_file"):
                                 _forward_media_to_channel(
                                     state,
-                                    tool_name,
+                                    event,
                                     _media_sent,
                                     on_media_cb,
                                     str(self._dirs.work_dir),
@@ -4515,12 +4515,12 @@ def run_textual_interactive(
 
     def _forward_media_to_channel(
         state: StreamState,
-        tool_name: str,
+        event: dict[str, Any],
         media_sent: set[str],
         send_fn: Any,
         work_dir: str | None,
     ) -> None:
-        """Check tool calls for media files and forward to channel.
+        """Forward the media file a file tool result names to the channel.
 
         Virtual paths resolve against ``work_dir``, the folder the agent
         works in.
@@ -4528,23 +4528,19 @@ def run_textual_interactive(
         import os
 
         from ..paths import resolve_virtual_path
-        from ..stream.display import tool_call_file_path
+        from ..stream.display import tool_result_file_path
 
-        for tc in reversed(state.tool_calls):
-            if tc.get("name") == tool_name:
-                p = tool_call_file_path(tc.get("args", {}))
-                if p and p not in media_sent:
-                    ext = os.path.splitext(p)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = (
-                            str(resolve_virtual_path(work_dir, p)) if work_dir else p
-                        )
-                        if not os.path.isfile(real_path) and os.path.isfile(p):
-                            real_path = p
-                        if os.path.isfile(real_path):
-                            media_sent.add(p)
-                            send_fn(real_path)
-                break
+        p = tool_result_file_path(state, event)
+        if not p or p in media_sent:
+            return
+        if os.path.splitext(p)[1].lower() not in _MEDIA_EXTENSIONS:
+            return
+        real_path = str(resolve_virtual_path(work_dir, p)) if work_dir else p
+        if not os.path.isfile(real_path) and os.path.isfile(p):
+            real_path = p
+        if os.path.isfile(real_path):
+            media_sent.add(p)
+            send_fn(real_path)
 
     # ── Entry point ─────────────────────────────────────────
 

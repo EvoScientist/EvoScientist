@@ -42,6 +42,7 @@ from .utils import (
     EXECUTE_STATUS,
     DisplayLimits,
     ToolStatus,
+    _tool_path_arg,
     failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
@@ -64,13 +65,19 @@ _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
 
 
-def tool_call_file_path(args: dict[str, Any]) -> str:
-    """The path a file tool call names.
+def tool_result_file_path(state: StreamState, event: dict[str, Any]) -> str:
+    """The path named by the file tool call a ``tool_result`` event answers.
 
-    deepagents' ``read_file`` and ``write_file`` take ``file_path``; ``path``
-    is kept as a fallback for tools that still use it.
+    One model step can hold several calls of a tool, so the call is found
+    by the result's id.
     """
-    return args.get("file_path") or args.get("path") or ""
+    call_id = event.get("id")
+    if not call_id:
+        return ""
+    for tc in state.tool_calls:
+        if tc.get("id") == call_id:
+            return _tool_path_arg(tc.get("args"))
+    return ""
 
 
 class _ApprovalUnanswered(Exception):
@@ -1876,13 +1883,9 @@ def _run_streaming(
                     and event.get("name") == "write_file"
                     and event.get("success")
                 ):
-                    wf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "write_file":
-                            p = tool_call_file_path(tc.get("args", {}))
-                            if p and p not in _media_sent:
-                                wf_path = p
-                                break
+                    wf_path = tool_result_file_path(state, event)
+                    if wf_path in _media_sent:
+                        wf_path = ""
                     if wf_path:
                         ext = os.path.splitext(wf_path)[1].lower()
                         if ext in _MEDIA_EXTENSIONS:
@@ -1902,13 +1905,9 @@ def _run_streaming(
                     and event.get("name") == "read_file"
                     and event.get("success")
                 ):
-                    rf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "read_file":
-                            p = tool_call_file_path(tc.get("args", {}))
-                            if p and p not in _media_sent:
-                                rf_path = p
-                                break
+                    rf_path = tool_result_file_path(state, event)
+                    if rf_path in _media_sent:
+                        rf_path = ""
                     if rf_path:
                         ext = os.path.splitext(rf_path)[1].lower()
                         if ext in _MEDIA_EXTENSIONS:
