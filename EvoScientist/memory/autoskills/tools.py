@@ -186,6 +186,7 @@ def create_submit_autoskill_proposal_tool(
                         str(proposal["proposal_id"]),
                         skills_dir=workspace.skills_dir,
                         workspace_dir=workspace.root,
+                        approved_by="auto",
                     )
                     proposal["auto_approval"] = approved
         return json.dumps(proposal, ensure_ascii=False, default=str)
