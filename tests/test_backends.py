@@ -1965,10 +1965,17 @@ class TestResolvePath:
         # Should resolve to root dir
         assert resolved == backend._resolve_path("/")
 
-    def test_system_path_with_workspace_marker(self, tmp_workspace):
+    def test_host_path_is_cut_at_the_workspace_folder_name(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/project/workspace/main.py")
-        assert Path(resolved).parts[-1] == "main.py"
+        assert resolved == Path(tmp_workspace, "main.py").resolve()
+
+    def test_host_path_ending_in_the_workspace_folder_name_is_the_root(
+        self, tmp_workspace
+    ):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        resolved = backend._resolve_path("/Users/someone/workspace")
+        assert resolved == backend._resolve_path("/")
 
     @pytest.mark.parametrize(
         "key",
@@ -1998,9 +2005,7 @@ class TestResolvePath:
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/experiment-1/data/out.csv")
-        # Cross-platform suffix check: ``str(Path)`` uses backslashes on
-        # Windows, so testing for the literal POSIX suffix is brittle.
-        assert Path(resolved).parts[-2:] == ("data", "out.csv")
+        assert resolved == (ws / "data" / "out.csv").resolve()
 
     def test_normal_virtual_path(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
@@ -2067,19 +2072,40 @@ class TestFileToolsMatchCommands:
     @pytest.mark.parametrize(
         "key", ["/tmp/pool.jsonl", "./tmp/pool.jsonl", "tmp/pool.jsonl"]
     )
+    def test_file_tools_read_a_file_under_tmp(self, tmp_workspace, key):
+        Path(tmp_workspace, "tmp").mkdir()
+        Path(tmp_workspace, "tmp", "pool.jsonl").write_text("row\n")
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        assert "row" in self._tool(backend, "read_file", file_path=key)
+
+    @pytest.mark.parametrize("folder", ["tmp", "bin", "etc", "var", "home", "Users"])
+    @pytest.mark.parametrize("lead", ["/", ""])
+    def test_file_tools_write_under_a_system_folder_name(
+        self, tmp_workspace, folder, lead
+    ):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(
+            backend, "write_file", file_path=f"{lead}{folder}/new/a.txt", content="hi"
+        )
+        assert Path(tmp_workspace, folder, "new", "a.txt").read_text() == "hi"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+    @pytest.mark.parametrize(
+        "key", ["/tmp/pool.jsonl", "./tmp/pool.jsonl", "tmp/pool.jsonl"]
+    )
     def test_file_tools_read_what_a_command_wrote_under_tmp(self, tmp_workspace, key):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         backend.execute("echo row > /tmp/pool.jsonl")
         assert "row" in self._tool(backend, "read_file", file_path=key)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
     @pytest.mark.parametrize("folder", ["tmp", "bin", "etc", "var", "home", "Users"])
     def test_command_reads_what_a_file_tool_wrote(self, tmp_workspace, folder):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         self._tool(
             backend, "write_file", file_path=f"/{folder}/new/a.txt", content="hi"
         )
-        assert Path(tmp_workspace, folder, "new", "a.txt").read_text() == "hi"
-        assert backend.execute(f"cat ./{folder}/new/a.txt").output.strip() == "hi"
+        assert backend.execute(f"cat /{folder}/new/a.txt").output.strip() == "hi"
 
     def test_host_path_does_not_answer_with_a_workspace_file(self, tmp_workspace):
         Path(tmp_workspace, "data.csv").write_text("workspace copy")

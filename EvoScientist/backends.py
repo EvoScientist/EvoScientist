@@ -43,8 +43,9 @@ if TYPE_CHECKING:
 # SKILLS_DIR constant).
 _BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
 
-# System path prefixes that should never appear in virtual paths.
-# If the agent hallucinates an absolute system path, we block it.
+# Folder names that make a path look like a host path. Commands block such a
+# path unless it maps into the workspace; the file tools only cut it at the
+# workspace's folder name.
 _SYSTEM_PATH_PREFIXES = (
     "/Users/",
     "/home/",
@@ -2363,7 +2364,7 @@ class CustomSandboxBackend(LocalShellBackend):
         os.makedirs(str(self.cwd), exist_ok=True)
 
     def _resolve_path(self, key: str) -> Path:
-        """Resolve path with sanitization to prevent nested directories.
+        """Resolve a file-tool path to a path inside the workspace.
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
         ``/`` is the workspace root, so any other path is the workspace path
