@@ -274,6 +274,8 @@ class InboundConsumer:
         self.manager = manager
         self.agent = agent
         self._folders = SessionDirs(workspace).metadata()
+        # Where the agent's file tools resolve virtual paths.
+        self._work_dir = SessionDirs(workspace).work_dir
         self.thread_id = thread_id
         self.graph_gateway = graph_gateway
         self.send_thinking = send_thinking
@@ -524,6 +526,16 @@ class InboundConsumer:
             # Which calls carry this chat's grant: see ``_hitl_when``.
             approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
+            from ..stream.display import forward_media_result
+            from ..stream.state import StreamState
+
+            # Media files the agent writes or reads go out with the reply.
+            # One state spans the rounds: a resumed call's result answers a
+            # call the round before the pause streamed.
+            stream_state = StreamState()
+            media: list[str] = []
+            media_sent: set[str] = set()
+
             while True:
                 _hitl_round += 1
                 final_content = ""
@@ -575,6 +587,14 @@ class InboundConsumer:
                 ) as events:
                     async for event in events:
                         event_type = event.get("type")
+                        stream_state.handle_event(event)
+                        forward_media_result(
+                            stream_state,
+                            event,
+                            media_sent,
+                            media.append,
+                            self._work_dir,
+                        )
 
                         if self._on_streaming_event:
                             try:
@@ -644,6 +664,7 @@ class InboundConsumer:
                         or _join_subagent_text(subagent_text_buffers)
                         or "No response",
                         reply_to=msg.message_id or None,
+                        media=media,
                         metadata=msg.metadata,
                     )
                     await self.bus.publish_outbound(outbound)

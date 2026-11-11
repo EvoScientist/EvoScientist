@@ -1794,6 +1794,7 @@ def run_textual_interactive(
                     of mounting the AskUserWidget.
             """
             from ..stream.display import (
+                forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
             )
@@ -2215,20 +2216,14 @@ def run_textual_interactive(
                             on_todo_cb(state.todo_items)
                             _todo_sent = True
 
-                        if (
-                            on_media_cb
-                            and event_type == "tool_result"
-                            and event.get("success")
-                        ):
-                            tool_name = event.get("name", "")
-                            if tool_name in ("write_file", "read_file"):
-                                _forward_media_to_channel(
-                                    state,
-                                    event,
-                                    _media_sent,
-                                    on_media_cb,
-                                    str(self._dirs.work_dir),
-                                )
+                        if on_media_cb:
+                            forward_media_result(
+                                state,
+                                event,
+                                _media_sent,
+                                on_media_cb,
+                                str(self._dirs.work_dir),
+                            )
 
                         # -- Remove loading spinner on first content event --
                         if not loading_removed and event_type in (
@@ -4496,51 +4491,6 @@ def run_textual_interactive(
                 case _:
                     # Fallback for busy state with no specific phase (e.g. slash commands)
                     return f"Working...{elapsed}", busy_style
-
-    # ── Media forwarding helper (module-level) ──────────────
-
-    _MEDIA_EXTENSIONS = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".bmp",
-        ".webp",
-        ".svg",
-        ".pdf",
-        ".mp3",
-        ".wav",
-        ".mp4",
-    }
-
-    def _forward_media_to_channel(
-        state: StreamState,
-        event: dict[str, Any],
-        media_sent: set[str],
-        send_fn: Any,
-        work_dir: str | None,
-    ) -> None:
-        """Forward the media file a file tool result names to the channel.
-
-        Virtual paths resolve against ``work_dir``, the folder the agent
-        works in.
-        """
-        import os
-
-        from ..paths import resolve_virtual_path
-        from ..stream.display import tool_result_file_path
-
-        p = tool_result_file_path(state, event)
-        if not p or p in media_sent:
-            return
-        if os.path.splitext(p)[1].lower() not in _MEDIA_EXTENSIONS:
-            return
-        real_path = str(resolve_virtual_path(work_dir, p)) if work_dir else p
-        if not os.path.isfile(real_path) and os.path.isfile(p):
-            real_path = p
-        if os.path.isfile(real_path):
-            media_sent.add(p)
-            send_fn(real_path)
 
     # ── Entry point ─────────────────────────────────────────
 
