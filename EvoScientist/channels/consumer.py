@@ -269,13 +269,16 @@ class InboundConsumer:
         max_concurrent: int = 5,
         max_pending: int = 50,
         drain_timeout: float = 30.0,
+        dangerous: bool = False,
     ):
         self.bus = bus
         self.manager = manager
         self.agent = agent
         self._folders = SessionDirs(workspace).metadata()
-        # Where the agent's file tools resolve virtual paths.
-        self._work_dir = SessionDirs(workspace).work_dir
+        # Where the agent's file tools resolve paths, so media files the
+        # agent names are found the way its sandbox found them.
+        self._dirs = SessionDirs(workspace)
+        self._dangerous = dangerous
         self.thread_id = thread_id
         self.graph_gateway = graph_gateway
         self.send_thinking = send_thinking
@@ -471,6 +474,18 @@ class InboundConsumer:
                     refeed, channel, thread_id, session_key
                 )
 
+    async def _send_media(self, msg: InboundMessage, path: str) -> None:
+        """Queue the media file at *path* for the chat *msg* came from."""
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="",
+                media=[path],
+                metadata=msg.metadata,
+            )
+        )
+
     async def _close_parked(self, thread_id: str, reason: ParkedCloseReason) -> None:
         """Close the pause this turn ends at; the turn ends the same if that fails."""
         from ..backends import close_parked_checkpoint
@@ -529,9 +544,10 @@ class InboundConsumer:
             from ..stream.display import forward_media_result
             from ..stream.state import StreamState
 
-            # Media files the agent writes or reads go out with the reply.
-            # One state spans the rounds: a resumed call's result answers a
-            # call the round before the pause streamed.
+            # Media files the agent writes or reads are sent as their results
+            # arrive, so every way the turn ends keeps them. One state spans
+            # the rounds: a resumed call's result answers a call the round
+            # before the pause streamed.
             stream_state = StreamState()
             media: list[str] = []
             media_sent: set[str] = set()
@@ -593,8 +609,13 @@ class InboundConsumer:
                             event,
                             media_sent,
                             media.append,
-                            self._work_dir,
+                            self._dirs.work_dir,
+                            media_dir=self._dirs.sandbox_media_dir,
+                            dangerous=self._dangerous,
                         )
+                        for path in media:
+                            await self._send_media(msg, path)
+                        media.clear()
 
                         if self._on_streaming_event:
                             try:
@@ -664,7 +685,6 @@ class InboundConsumer:
                         or _join_subagent_text(subagent_text_buffers)
                         or "No response",
                         reply_to=msg.message_id or None,
-                        media=media,
                         metadata=msg.metadata,
                     )
                     await self.bus.publish_outbound(outbound)

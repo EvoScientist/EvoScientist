@@ -37,8 +37,8 @@ from .config import (
 )
 from .memory import MemorySourceType
 from .paths import (
+    SessionDirs,
     Workspace,
-    normalize_path,
     process_session_dirs,
     resolve_virtual_path,
 )
@@ -818,14 +818,11 @@ def load_mcp_and_build_kwargs(
 
 
 def _run_media_dir(workspace: Workspace, work_dir: str | Path) -> Path | None:
-    """The workspace's media folder, when the agent works outside the root.
+    """The media folder a sandbox rooted at *work_dir* is told about.
 
-    Channel attachments land in ``<root>/media`` and are referenced by their
-    real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
-    told about the folder to reach them; in the root it is already inside
-    the sandbox.
+    See :attr:`SessionDirs.sandbox_media_dir`.
     """
-    return None if normalize_path(work_dir) == workspace.root else workspace.media_dir
+    return SessionDirs(workspace, work_dir).sandbox_media_dir
 
 
 def _get_default_backend(

@@ -27,7 +27,6 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
-from ..paths import resolve_virtual_path
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
 from .diff_format import build_edit_diff
@@ -110,17 +109,29 @@ def _result_tool_calls(state: StreamState, event: dict[str, Any]) -> list[dict]:
     return []
 
 
-def resolve_media_path(path: str, work_dir: str | Path | None) -> str:
+def resolve_media_path(
+    path: str,
+    work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
+) -> str:
     """The file on disk a file tool's *path* names, or ``""`` if there is none.
 
-    The path is tried against ``work_dir`` first, as the virtual path the
-    sandbox gives it, then as given, so a host path (absolute, or inside
-    the workspace) is found too.
+    The path is mapped as the sandbox maps it (see
+    :func:`~EvoScientist.backends.sandbox_file_path`), so only a file inside
+    ``work_dir`` or ``media_dir`` is found, and a system path the sandbox
+    reads as a workspace basename names that workspace file, never the host
+    file. In dangerous mode a host path is the real file it names.
     """
-    candidates = [path]
-    if work_dir is not None:
-        candidates.insert(0, str(resolve_virtual_path(work_dir, path)))
-    return next((c for c in candidates if os.path.isfile(c)), "")
+    if work_dir is None:
+        return ""
+    from ..backends import sandbox_file_path
+
+    real_path = sandbox_file_path(
+        path, work_dir, media_dir=media_dir, dangerous=dangerous
+    )
+    return str(real_path) if real_path is not None and real_path.is_file() else ""
 
 
 def forward_media_result(
@@ -129,6 +140,9 @@ def forward_media_result(
     media_sent: set[str],
     send_fn: Callable[[str], Any],
     work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
 
@@ -136,7 +150,8 @@ def forward_media_result(
     sub-agents; *state* must already hold the event. Each path is sent once
     per turn, tracked in *media_sent*. Every channel surface (the Rich loop,
     the TUI, the standalone runner) forwards through this function, so they
-    all resolve paths the same way.
+    all resolve paths the same way: as the sandbox rooted at *work_dir* with
+    *media_dir* does, in dangerous mode when *dangerous* is set.
     """
     if (
         event.get("type") not in _MEDIA_RESULT_EVENTS
@@ -149,7 +164,9 @@ def forward_media_result(
         return
     if os.path.splitext(path)[1].lower() not in _MEDIA_EXTENSIONS:
         return
-    real_path = resolve_media_path(path, work_dir)
+    real_path = resolve_media_path(
+        path, work_dir, media_dir=media_dir, dangerous=dangerous
+    )
     if real_path:
         media_sent.add(path)
         send_fn(real_path)
@@ -1799,6 +1816,8 @@ def _run_streaming(
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
@@ -1840,6 +1859,10 @@ def _run_streaming(
         work_dir: The folder the agent works in; virtual paths in tool calls
             resolve against it before ``on_file_write`` is called (see
             :func:`resolve_media_path`).
+        media_dir: The workspace's media folder when the sandbox is told about
+            it (``SessionDirs.sandbox_media_dir``); files there are sent too.
+        dangerous: The sandbox runs in dangerous mode, so host paths in tool
+            calls name real files anywhere.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1861,6 +1884,8 @@ def _run_streaming(
                 on_todo=on_todo,
                 on_file_write=on_file_write,
                 work_dir=work_dir,
+                media_dir=media_dir,
+                dangerous=dangerous,
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
@@ -1956,7 +1981,13 @@ def _run_streaming(
                 # Send the media file a write_file / read_file result names
                 if on_file_write:
                     forward_media_result(
-                        state, event, _media_sent, on_file_write, work_dir
+                        state,
+                        event,
+                        _media_sent,
+                        on_file_write,
+                        work_dir,
+                        media_dir=media_dir,
+                        dangerous=dangerous,
                     )
 
                 if on_stream_event is not None:

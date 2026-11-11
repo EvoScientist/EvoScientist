@@ -1172,6 +1172,8 @@ def cmd_interactive(
                         sys.stdout.flush()
                         return
 
+                    from ..config import get_effective_config
+
                     try:
                         ready_agent = await _await_agent_ready()
                         meta = build_metadata(state["dirs"], model)
@@ -1192,6 +1194,8 @@ def cmd_interactive(
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
                             work_dir=str(state["dirs"].work_dir),
+                            media_dir=state["dirs"].sandbox_media_dir,
+                            dangerous=get_effective_config().dangerous_mode,
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,

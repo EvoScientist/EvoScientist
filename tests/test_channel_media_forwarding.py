@@ -260,41 +260,52 @@ class TestTui:
         assert await self._run(monkeypatch, workspace, events) == rich
 
 
+def _consumer(workspace, gateway, **kwargs):
+    from EvoScientist.channels.bus.message_bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.channels.consumer import InboundConsumer
+    from tests.fakes.common import StubChannel
+
+    bus = MessageBus()
+    manager = ChannelManager(bus, media_dir=workspace.root / "media")
+    manager.register(StubChannel())
+    return InboundConsumer(
+        bus=bus,
+        manager=manager,
+        agent=MagicMock(),
+        thread_id="",
+        workspace=workspace,
+        graph_gateway=gateway,
+        inference_timeout=5.0,
+        drain_timeout=1.0,
+        **kwargs,
+    )
+
+
+async def _consumer_turn(consumer) -> list:
+    """Run one turn and return everything it queued for the chat."""
+    from EvoScientist.channels.bus.events import InboundMessage
+
+    msg = InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
+    await consumer._stream_with_hitl(msg, None, "t1", msg.session_key)
+    queued = []
+    while not consumer.bus.outbound.empty():
+        queued.append(consumer.bus.outbound.get_nowait())
+    return queued
+
+
+def _queued_media(queued) -> list[str]:
+    return [path for out in queued for path in out.media]
+
+
 class TestStandaloneConsumer:
     """``EvoSci channel --agent`` replies through ``InboundConsumer``."""
 
     @staticmethod
     async def _run(workspace, events) -> list[str]:
-        from EvoScientist.channels.bus.events import InboundMessage
-        from EvoScientist.channels.bus.message_bus import MessageBus
-        from EvoScientist.channels.channel_manager import ChannelManager
-        from EvoScientist.channels.consumer import InboundConsumer
-        from tests.fakes.common import StubChannel
-
         _make_files(workspace.root)
-        bus = MessageBus()
-        manager = ChannelManager(bus, media_dir=workspace.root / "media")
-        manager.register(StubChannel())
-        consumer = InboundConsumer(
-            bus=bus,
-            manager=manager,
-            agent=MagicMock(),
-            thread_id="",
-            workspace=workspace,
-            graph_gateway=FakeGraphGateway(events=events),
-            inference_timeout=5.0,
-            drain_timeout=1.0,
-        )
-        await bus.publish_inbound(
-            InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
-        )
-        task = asyncio.create_task(consumer.run())
-        try:
-            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=5.0)
-        finally:
-            await consumer.stop()
-            await task
-        return outbound.media
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        return _queued_media(await _consumer_turn(consumer))
 
     @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
     @pytest.mark.parametrize("path", PATH_CASES)
@@ -315,19 +326,156 @@ class TestStandaloneConsumer:
         events = _file_tool_turn("write_file", args, success)
         assert await self._run(workspace, events) == []
 
+    async def test_the_file_goes_out_before_the_reply(self, workspace):
+        _make_files(workspace.root)
+        events = _file_tool_turn("write_file", {"file_path": "/fig.png"})
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        queued = await _consumer_turn(consumer)
+        assert [(out.content, out.media) for out in queued] == [
+            ("", [str((workspace.root / "fig.png").resolve())]),
+            ("finished", []),
+        ]
 
-def test_the_work_folder_wins_over_the_path_as_given(tmp_path, monkeypatch):
-    """A path both folders hold is the work folder's file; the rest fall back."""
-    work_dir = tmp_path / "ws"
-    work_dir.mkdir()
-    (work_dir / "fig.png").write_bytes(b"x")
-    (tmp_path / "fig.png").write_bytes(b"x")
-    (tmp_path / "host.png").write_bytes(b"x")
-    monkeypatch.chdir(tmp_path)
 
-    assert display_mod.resolve_media_path("fig.png", work_dir) == str(
-        (work_dir / "fig.png").resolve()
+class TestConsumerTurnEnds:
+    """A file collected before the turn ends early is still sent."""
+
+    @staticmethod
+    async def _run(monkeypatch, workspace, outcome=None, error=None) -> list[str]:
+        """A turn that writes ``fig.png``, then pauses for an approval answered
+        with *outcome*, or fails with *error*."""
+        import EvoScientist.channels.consumer as consumer_mod
+        from tests.fakes.common import interrupt_event
+
+        _make_files(workspace.root)
+        head = _file_tool_turn("write_file", {"file_path": "/fig.png"})[:2]
+
+        async def _stream(_request):
+            for event in head:
+                yield event
+            if error is not None:
+                raise error
+            yield interrupt_event(1)
+
+        async def _resolve(*_args, **_kwargs):
+            return outcome
+
+        monkeypatch.setattr(consumer_mod, "resolve_approval", _resolve)
+        consumer = _consumer(workspace, FakeGraphGateway(stream=_stream))
+        return _queued_media(await _consumer_turn(consumer))
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            pytest.param({"rejected": True}, id="rejected"),
+            pytest.param({}, id="unanswered"),
+            pytest.param({"unrecognized_reply": "what?"}, id="unrecognized-reply"),
+            pytest.param({"budget_exhausted": True}, id="round-limit"),
+        ],
     )
-    assert display_mod.resolve_media_path("host.png", work_dir) == "host.png"
-    assert display_mod.resolve_media_path("fig.png", None) == "fig.png"
-    assert display_mod.resolve_media_path("/gone.png", work_dir) == ""
+    async def test_an_approval_that_ends_the_turn(
+        self, monkeypatch, workspace, outcome
+    ):
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        sent = await self._run(monkeypatch, workspace, ApprovalOutcome(**outcome))
+        assert sent == [str((workspace.root / "fig.png").resolve())]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(TimeoutError(), id="timeout"),
+            pytest.param(RuntimeError(), id="error"),
+        ],
+    )
+    async def test_a_failed_stream(self, monkeypatch, workspace, error):
+        sent = await self._run(monkeypatch, workspace, error=error)
+        assert sent == [str((workspace.root / "fig.png").resolve())]
+
+
+class TestOnlySandboxFilesAreSent:
+    """A path is read as the sandbox reads it, so only a file inside the work
+    folder (or the media folder) is ever sent, never a host file elsewhere."""
+
+    @pytest.fixture
+    def folders(self, tmp_path, monkeypatch):
+        """A work folder, and a host folder the sandbox reads like ``/home/``."""
+        import EvoScientist.backends as backends_mod
+
+        work_dir = tmp_path / "ws"
+        host = tmp_path / "host"
+        work_dir.mkdir()
+        host.mkdir()
+        (host / "passport.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        return work_dir, host
+
+    def test_a_host_file_the_workspace_lacks_is_not_sent(self, folders):
+        work_dir, host = folders
+        assert (
+            display_mod.resolve_media_path(str(host / "passport.pdf"), work_dir) == ""
+        )
+
+    def test_a_host_path_names_the_workspace_file_the_sandbox_wrote(self, folders):
+        work_dir, host = folders
+        (work_dir / "passport.pdf").write_bytes(b"x")
+        assert display_mod.resolve_media_path(
+            str(host / "passport.pdf"), work_dir
+        ) == str((work_dir / "passport.pdf").resolve())
+
+    def test_the_rich_loop_does_not_send_the_host_file(self, folders, monkeypatch):
+        monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
+        work_dir, host = folders
+        events = _file_tool_turn("write_file", {"file_path": f"{host}/passport.pdf"})
+        assert _rich_sent(events, work_dir) == []
+
+    async def test_the_consumer_does_not_send_the_host_file(
+        self, workspace, tmp_path, monkeypatch
+    ):
+        import EvoScientist.backends as backends_mod
+
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "passport.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        events = _file_tool_turn("write_file", {"file_path": f"{host}/passport.pdf"})
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == []
+
+    def test_a_file_outside_the_work_folder_is_not_sent(self, tmp_path, monkeypatch):
+        """Whatever spelling names it: relative, host-absolute, ``..``."""
+        work_dir = tmp_path / "ws"
+        work_dir.mkdir()
+        (tmp_path / "host.png").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        for path in ("host.png", str(tmp_path / "host.png"), "/../host.png"):
+            assert display_mod.resolve_media_path(path, work_dir) == "", path
+
+    def test_a_link_out_of_the_work_folder_is_not_sent(self, tmp_path):
+        work_dir = tmp_path / "ws"
+        work_dir.mkdir()
+        (tmp_path / "host.png").write_bytes(b"x")
+        (work_dir / "link.png").symlink_to(tmp_path / "host.png")
+        assert display_mod.resolve_media_path("/link.png", work_dir) == ""
+
+    def test_without_a_work_folder_nothing_is_sent(self, tmp_path, monkeypatch):
+        (tmp_path / "fig.png").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        assert display_mod.resolve_media_path("fig.png", None) == ""
+
+    def test_a_file_in_the_media_folder_is_sent(self, tmp_path):
+        """In ``--mode=run`` the sandbox reaches attachments by real path."""
+        work_dir = tmp_path / "runs" / "r1"
+        media_dir = tmp_path / "media"
+        work_dir.mkdir(parents=True)
+        media_dir.mkdir()
+        (media_dir / "photo.png").write_bytes(b"x")
+        assert display_mod.resolve_media_path(
+            str(media_dir / "photo.png"), work_dir, media_dir=media_dir
+        ) == str((media_dir / "photo.png").resolve())
+
+    def test_dangerous_mode_sends_the_host_file(self, folders):
+        """There the sandbox writes host paths as given."""
+        work_dir, host = folders
+        path = str(host / "passport.pdf")
+        assert display_mod.resolve_media_path(path, work_dir, dangerous=True) == path

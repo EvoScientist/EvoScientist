@@ -2832,6 +2832,40 @@ class CustomSandboxBackend(LocalShellBackend):
         return response
 
 
+def sandbox_file_path(
+    path: str,
+    work_dir: str | Path,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
+) -> Path | None:
+    """The host file a file tool's *path* reached, or None outside the sandbox.
+
+    Maps *path* the way :class:`CustomSandboxBackend` rooted at *work_dir*
+    does, so a system path the sandbox reads as a workspace basename names
+    that workspace file, not the host file. Outside dangerous mode the result
+    lies inside *work_dir* or *media_dir* once resolved; anything else, or a
+    path the sandbox refuses, gives None.
+    """
+    backend = CustomSandboxBackend(
+        root_dir=str(work_dir),
+        inherit_env=False,
+        dangerous=dangerous,
+        media_dir=media_dir,
+    )
+    try:
+        resolved = backend._resolve_path(path)
+    except (ValueError, OSError):
+        return None
+    if dangerous:
+        return resolved
+    roots = [backend.cwd]
+    if media_dir is not None:
+        roots.append(Path(media_dir).resolve())
+    real = resolved.resolve()
+    return real if any(real.is_relative_to(root) for root in roots) else None
+
+
 class AutoskillProposalSandboxBackend(CustomSandboxBackend):
     """Shell backend rooted at the autoskill proposal directory.
 
