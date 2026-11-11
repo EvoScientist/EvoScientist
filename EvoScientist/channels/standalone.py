@@ -152,6 +152,7 @@ async def _async_main(
     consumer: InboundConsumer | None = None
     if use_agent:
         from ..gateway import create_runtime_gateways_for_config
+        from ..gateway.runtime import sandbox_dangerous_mode
         from ..gateway.types import runs_in_process
 
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
@@ -175,6 +176,7 @@ async def _async_main(
             workspace=workspace,
             graph_gateway=runtime_gateways.graph_gateway,
             send_thinking=send_thinking,
+            dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway, config),
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
 
