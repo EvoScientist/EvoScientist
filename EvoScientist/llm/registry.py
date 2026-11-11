@@ -133,6 +133,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
     ("mistral-large-2512", "mistral-large-2512", "opper"),
     # Google GenAI
+    ("gemini-4-carbon", "gemini-4-carbon", "google-genai"),
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
     ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
@@ -175,6 +176,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-6.1-terra", "openai/gpt-6.1-terra", "openrouter"),
     ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
+    ("gemini-4-carbon", "google/gemini-4-carbon", "openrouter"),
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
