@@ -313,6 +313,14 @@ def _offer_server_start() -> None:
     record = manager.read_record(older=True)
     if record is not None or manager.is_langgraph_dev_running(port=port, host=host):
         if manager.is_lasting(record):
+            recorded_fp = record.fields.get("config_fingerprint")
+            if (
+                not record.older
+                and isinstance(recorded_fp, str)
+                and recorded_fp == manager._server_config_fingerprint(config)
+            ):
+                # Nothing the server reads changed: no restart needed.
+                return
             # ``EvoSci server start`` registers ``default_workdir``.
             start_again = (
                 "then [bold]EvoSci server start[/bold]"
@@ -322,8 +330,8 @@ def _offer_server_start() -> None:
             console.print(
                 "[dim]The background agent server runs with your previous "
                 "settings; to apply the new ones, restart it: [bold]EvoSci "
-                f"server stop[/bold], {start_again} (this ends its running "
-                "background work).[/dim]"
+                f"server stop[/bold], {start_again} (its background jobs end, "
+                "and a run in progress runs again at the next start).[/dim]"
             )
         else:
             console.print(
