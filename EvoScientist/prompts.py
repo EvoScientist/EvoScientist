@@ -272,6 +272,8 @@ This prevents blocking the conversation during long operations."""
 # Sandbox (default) header: virtual `/` workspace.
 _SHELL_GUIDELINES_SANDBOX_HEADER = """# Shell Execution Guidelines
 
+**Workspace root**: `/` is the workspace root. The file tools take every path as a path inside it (`/tmp/pool.jsonl` is the workspace's `tmp/pool.jsonl`), and commands map `/tmp/...` the same way.
+
 When using the `execute` tool for shell commands:
 
 **Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below)."""
