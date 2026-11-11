@@ -2890,7 +2890,7 @@ def sandbox_file_path(
         try:
             routed, key = CompositeBackend(
                 default=backend, routes=routes
-            )._get_backend_and_key(validate_path(path))
+            )._get_backend_and_key(validate_path(paths.file_tool_path(path)))
         except ValueError:
             return None
         if routed is not backend:

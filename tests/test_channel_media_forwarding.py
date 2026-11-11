@@ -8,6 +8,7 @@ and ``read_file`` name the file in ``file_path``.
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -419,9 +420,13 @@ class TestOnlySandboxFilesAreSent:
     def test_a_host_path_names_the_workspace_file_the_sandbox_wrote(self, folders):
         work_dir, host = folders
         (work_dir / "passport.pdf").write_bytes(b"x")
-        assert display_mod.resolve_media_path(
-            str(host / "passport.pdf"), work_dir
-        ) == str((work_dir / "passport.pdf").resolve())
+        # On Windows the sandbox refuses a drive path outside the work folder,
+        # so the tool call fails and there is no file to send.
+        expected = "" if os.name == "nt" else str((work_dir / "passport.pdf").resolve())
+        assert (
+            display_mod.resolve_media_path(str(host / "passport.pdf"), work_dir)
+            == expected
+        )
 
     def test_the_rich_loop_does_not_send_the_host_file(self, folders, monkeypatch):
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
