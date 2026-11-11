@@ -9,14 +9,22 @@ from deepagents.backends import FilesystemBackend
 from deepagents.middleware.rubric import GRADER_SYSTEM_PROMPT
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.middleware.rubric import (
     GRADER_FILE_CHECK_PROMPT,
     create_rubric_middleware,
 )
-from tests.fakes.rubric import FAIL, PASS, MainModel, ScriptedGrader
+from tests.fakes.rubric import (
+    FAIL,
+    PASS,
+    MainModel,
+    RaisingFileBackend,
+    ScriptedGrader,
+)
 
 
 class _OtherAfterAgent(AgentMiddleware):
@@ -109,6 +117,110 @@ def test_grader_error_ends_the_run_and_clears_the_rubric(tmp_path):
     assert values["rubric"] is None
     assert values["_rubric_status"] == "grader_error"
     assert other.calls == 1
+
+
+def test_a_raising_file_tool_costs_one_file_not_the_whole_grading(tmp_path):
+    """A symlink out of the workspace makes ``read_file`` raise upstream.
+
+    The grader must get that error as the tool's result and still return a
+    verdict, as the main agent and sub-agents already do — not ``grader_error``.
+    """
+    backend = RaisingFileBackend(root_dir=tmp_path, virtual_mode=True)
+    grader = ScriptedGrader(
+        verdicts=[PASS],
+        preamble=[
+            AIMessage(
+                "",
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "args": {"file_path": "/link.md"},
+                        "id": "read-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ],
+    )
+    agent = create_agent(
+        model=MainModel(messages=iter([AIMessage("a")])),
+        tools=[],
+        middleware=[
+            create_rubric_middleware(model=grader, backend=backend, max_iterations=3)
+        ],
+        checkpointer=InMemorySaver(),
+    )
+
+    results, values = _run(
+        agent, {"messages": [HumanMessage("do it")], "rubric": "- c1"}
+    )
+
+    assert results == ["satisfied"]
+    assert values["_rubric_status"] == "satisfied"
+    # The grader saw the failure as that file's tool result and graded on.
+    tool_result = next(m for m in grader.seen[1] if isinstance(m, ToolMessage))
+    assert tool_result.status == "error"
+    assert "[TOOL ERROR] Tool 'read_file' failed" in tool_result.content
+    assert "outside root directory" in tool_result.content
+
+
+class _StuckGrader(BaseChatModel):
+    """Calls the raising file tool on every pass, never returning a verdict."""
+
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "stuck-grader"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls += 1
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"file_path": "/link.md"},
+                    "id": f"read-{self.calls}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+def test_a_grader_that_keeps_hitting_the_raising_tool_stops_at_the_budget(tmp_path):
+    """The handler must not turn a broken file into an endless grading loop."""
+    from EvoScientist.middleware.rubric import GRADER_MAX_CALLS
+
+    grader = _StuckGrader()
+    agent = create_agent(
+        model=MainModel(messages=iter([AIMessage("a")])),
+        tools=[],
+        middleware=[
+            create_rubric_middleware(
+                model=grader,
+                backend=RaisingFileBackend(root_dir=tmp_path, virtual_mode=True),
+                max_iterations=3,
+            )
+        ],
+        checkpointer=InMemorySaver(),
+    )
+
+    results, values = _run(
+        agent, {"messages": [HumanMessage("do it")], "rubric": "- c1"}
+    )
+
+    assert results == ["grader_error"]
+    assert values["_rubric_status"] == "grader_error"
+    assert grader.calls == GRADER_MAX_CALLS
+    assert (
+        f"exceeded {GRADER_MAX_CALLS} model calls"
+        in (values["_rubric_evaluations"][-1]["explanation"])
+    )
 
 
 def test_a_run_without_rubric_is_untouched(tmp_path):
