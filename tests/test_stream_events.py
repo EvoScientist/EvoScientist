@@ -37,6 +37,7 @@ from tests.fakes.stream_v3 import (
     protocol_event,
     tool_finished,
     tool_started,
+    whole_message,
 )
 
 
@@ -608,8 +609,10 @@ class TestV3ProtocolStreaming:
             for event in events
         )
         assert sink.tool_selection_active is False
-        assert sink.tool_selection_pending() is True
-        assert sink.consume_tool_selection() == (True, ["probe_tool"])
+        # Reported from the executor thread, shown by this stream.
+        selection = next(e for e in events if e.get("type") == "tool_selection")
+        assert selection["tools"] == ["probe_tool"]
+        assert sink.consume_tool_selection() == (False, None)
 
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
@@ -1162,32 +1165,98 @@ class TestV3ProtocolStreaming:
         assert tool_call["id"] == "tc-msg"
         assert tool_call["args"] == {"command": "ls"}
 
-    async def test_tool_selection_flushes_before_tool_only_step(self):
-        """Selector UI event is emitted even when selection is followed only by a tool."""
+    @pytest.mark.parametrize(
+        "first", ["text", "thinking", "tool_block", "tool_started", "whole_message"]
+    )
+    async def test_tool_selection_is_shown_without_selector_output(self, first):
+        """The selector's model call is kept out of the stream; the selection
+        the sink recorded is still shown, ahead of the model's own output."""
         from EvoScientist.stream.sink import SessionEventSink
 
-        # The frontend sink holds a pending selection (1 of 3 tools) — the
-        # suppressor must surface it before the tool-only step.
         sink = SessionEventSink()
-        sink.on_tool_selection(["read_file"], 3)
-        output = ToolMessage(
-            content="File content",
-            name="read_file",
-            tool_call_id="tc1",
-        )
-        agent = FakeV3Agent(
-            [
-                message_delta('{"tools":["read_file"]}'),
-                tool_started("read_file", {"path": "notes.txt"}),
-                tool_finished(output),
-            ]
-        )
+        reasoning = {"type": "reasoning-delta", "reasoning": "Let me look."}
+        args = {"path": "notes.txt"}
+        output = ToolMessage(content="File content", name="read_file", tool_call_id="1")
+        step = {
+            "text": [message_delta("Answer.")],
+            "thinking": [
+                protocol_event(
+                    "messages",
+                    (
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": reasoning,
+                        },
+                        {},
+                    ),
+                )
+            ],
+            # A streamed step that only calls a tool.
+            "tool_block": [message_tool_call_block("read_file", args)],
+            "tool_started": [tool_started("read_file", args), tool_finished(output)],
+            # The same step from a model that does not stream.
+            "whole_message": [
+                whole_message(
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"name": "read_file", "args": args, "id": "1"}],
+                    )
+                )
+            ],
+        }[first]
+        agent = FakeV3Agent(step)
+
+        def start_run(*_args, **_kwargs):
+            # The selector runs inside the run, before the model's first output.
+            sink.on_tool_selection_started(3)
+            sink.on_tool_selection(["read_file"], 3)
+            sink.on_tool_selection_ended()
+            return agent.astream_events.return_value
+
+        agent.astream_events.side_effect = start_run
+
         events = await collect_events(agent, events=sink)
 
         event_types = [e["type"] for e in events]
-        assert event_types.index("tool_selection") < event_types.index("tool_call")
+        shown = first if first in ("text", "thinking") else "tool_call"
+        assert event_types.index("tool_selection") < event_types.index(shown)
         selection = next(e for e in events if e.get("type") == "tool_selection")
         assert selection["tools"] == ["read_file"]
+
+    async def test_selector_output_is_hidden_while_its_call_is_active(self):
+        """Should the selector's own output reach the stream after all, neither
+        its JSON text nor its structured-output call is shown as the agent's."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        sink.on_tool_selection_started(30)  # selector call in flight
+        picked = {"tools": ["read_file"]}
+        agent = FakeV3Agent(
+            [
+                message_delta('{"tools": ["read_file"]}'),
+                message_tool_call_block("ToolSelectionResponse", picked),
+            ]
+        )
+
+        events = await collect_events(agent, events=sink)
+
+        assert not [e for e in events if e["type"] in ("text", "tool_call")]
+
+    async def test_selection_left_by_an_earlier_run_is_not_shown(self):
+        """A run that ended before its first output leaves its selection in the
+        session's sink; the next run did not make it."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        sink.on_tool_selection(["old_tool"], 3)
+
+        events = await collect_events(
+            FakeV3Agent([message_delta("Answer.")]), events=sink
+        )
+
+        assert "tool_selection" not in [e["type"] for e in events]
+        assert sink.consume_tool_selection() == (False, None)
 
     async def test_subagent_projection_routes_namespaced_events(self):
         """DeepAgents subagent projection supplies identity for namespaced events."""

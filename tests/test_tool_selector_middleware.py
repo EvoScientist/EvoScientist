@@ -452,13 +452,11 @@ def test_selector_resolved_once_across_repeated_requests():
 
 
 def _drive_selection(sink, suppressor, selected, total):
-    """Mimic one selection turn: sink records it, the suppressor observes the
-    selector JSON block, then a flush surfaces (or not) the UI event."""
+    """Mimic one selection turn: the sink records it (the selector's own
+    output never reaches the stream), then a flush surfaces (or not) the UI event."""
     sink.on_tool_selection_started(total)
     sink.on_tool_selection(selected, total)
     sink.on_tool_selection_ended()
-    # Suppressor observes the selector's structured-output tool block.
-    suppressor.observe_tool_block("ToolSelectionResponse")
     return suppressor.flush_selection()
 
 
@@ -492,10 +490,38 @@ def test_consume_is_once_only():
     first = _drive_selection(sink, suppressor, ["read_file"], 3)
     assert any(e.get("type") == "tool_selection" for e in first)
 
-    # No new selection recorded; the observation flag was consumed.
-    suppressor.observe_tool_block("ToolSelectionResponse")
+    # No new selection recorded.
     second = suppressor.flush_selection()
     assert not any(e.get("type") == "tool_selection" for e in second)
+
+
+def test_new_selector_call_drops_a_selection_never_shown():
+    """A retried model call selects again; when that fails every tool is
+    offered, so the earlier selection must not be shown for it."""
+    sink = SessionEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+    sink.on_tool_selection(["read_file"], 3)
+
+    sink.on_tool_selection_started(3)
+    sink.on_tool_selection_ended()
+
+    assert suppressor.flush_selection() == []
+
+
+def test_discarded_selection_is_not_counted_as_shown():
+    """Dropping an unshown selection must not hide the same one next time."""
+    sink = SessionEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+    sink.on_tool_selection(["read_file"], 3)
+
+    sink.discard_tool_selection()
+
+    assert suppressor.flush_selection() == []
+    shown = _drive_selection(sink, suppressor, ["read_file"], 3)
+    assert [event["tools"] for event in shown] == [["read_file"]]
+    # Nor does a discard forget what was shown.
+    sink.discard_tool_selection()
+    assert _drive_selection(sink, suppressor, ["read_file"], 3) == []
 
 
 # ---------------------------------------------------------------------------
