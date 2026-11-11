@@ -2301,7 +2301,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Args:
             root_dir: File system root directory
-            virtual_mode: Whether to enable virtual path mode
+            virtual_mode: Whether to enable virtual path mode; ``False`` only
+                with ``dangerous=True`` (it raises ``ValueError`` otherwise)
             timeout: Command execution timeout in seconds
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
@@ -2346,6 +2347,10 @@ class CustomSandboxBackend(LocalShellBackend):
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
             virtual_mode = False
+        elif not virtual_mode:
+            # Non-virtual resolution passes absolute paths to the host as-is,
+            # which only dangerous mode allows.
+            raise ValueError("virtual_mode=False requires dangerous=True")
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,

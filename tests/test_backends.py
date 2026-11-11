@@ -2107,6 +2107,18 @@ class TestFileToolsMatchCommands:
         )
         assert backend.execute(f"cat /{folder}/new/a.txt").output.strip() == "hi"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+    def test_quoted_command_reads_tmp_as_the_prompt_says(self, tmp_workspace):
+        """The sandbox prompt: inside quotes, write ``./tmp/...``."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(backend, "write_file", file_path="/tmp/pool.jsonl", content="row")
+        assert backend.execute('cat "./tmp/pool.jsonl"').output.strip() == "row"
+
+    def test_non_virtual_mode_needs_dangerous(self, tmp_workspace):
+        """Non-virtual resolution would pass host paths through as-is."""
+        with pytest.raises(ValueError, match="requires dangerous=True"):
+            CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=False)
+
     def test_host_path_does_not_answer_with_a_workspace_file(self, tmp_workspace):
         Path(tmp_workspace, "data.csv").write_text("workspace copy")
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)

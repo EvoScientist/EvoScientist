@@ -272,7 +272,7 @@ This prevents blocking the conversation during long operations."""
 # Sandbox (default) header: virtual `/` workspace.
 _SHELL_GUIDELINES_SANDBOX_HEADER = """# Shell Execution Guidelines
 
-**Workspace root**: `/` is the workspace root. Apart from `/skills/` and `/memories/`, the file tools take every path as a path inside it (`/tmp/pool.jsonl` is the workspace's `tmp/pool.jsonl`), and commands map `/tmp/...` the same way.
+**Workspace root**: `/` is the workspace root. Apart from `/skills/` and `/memories/`, the file tools take every path as a path inside it (`/tmp/pool.jsonl` is the workspace's `tmp/pool.jsonl`), and commands map an unquoted `/tmp/...` the same way; inside quotes, write `./tmp/...`.
 
 When using the `execute` tool for shell commands:
 
