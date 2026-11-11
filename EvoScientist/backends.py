@@ -2366,11 +2366,12 @@ class CustomSandboxBackend(LocalShellBackend):
         """Resolve path with sanitization to prevent nested directories.
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
-        Auto-corrects common LLM path mistakes instead of crashing:
+        ``/`` is the workspace root, so any other path is the workspace path
+        as written (``/tmp/x`` is the workspace's ``tmp/x``, as in commands).
+        Paths that name the workspace itself are mapped into it:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
           2. /<ws_name>/file.py            → /file.py
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
-          4. /Users/name/file.py           → /file.py (keep basename)
 
         On Windows a Git Bash path (``/c/...``) is read as the drive path it
         names when that lies in the working folder or the media folder;
@@ -2400,7 +2401,7 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
-        # confuse the basename-based fallback below.
+        # confuse the folder-name match below.
         key_path = Path(key)
         if key_path.is_absolute():
             try:
@@ -2432,21 +2433,18 @@ class CustomSandboxBackend(LocalShellBackend):
         elif key == f"/{ws_name}":
             key = "/"
 
-        # Auto-correct system absolute paths
-        for prefix in _SYSTEM_PATH_PREFIXES:
-            if key.startswith(prefix):
-                # rfind, not find: the cwd's parent path may itself contain
-                # "/<ws_name>/" as a substring, and we want the boundary
-                # nearest the file — the workspace mount.
-                idx = key.rfind(ws_prefix)
-                if idx != -1:
-                    key = "/" + key[idx + len(ws_prefix) :]
-                elif key.endswith(f"/{ws_name}"):
-                    key = "/"
-                else:
-                    # Fall back to basename
-                    key = "/" + Path(key).name
-                break
+        # A host path that names the workspace by its folder name maps into it;
+        # any other path, system folder names included, is the workspace path
+        # as written.
+        if _is_system_path(key):
+            # rfind, not find: the cwd's parent path may itself contain
+            # "/<ws_name>/" as a substring, and we want the boundary
+            # nearest the file — the workspace mount.
+            idx = key.rfind(ws_prefix)
+            if idx != -1:
+                key = "/" + key[idx + len(ws_prefix) :]
+            elif key.endswith(f"/{ws_name}"):
+                key = "/"
 
         return super()._resolve_path(key)
 
