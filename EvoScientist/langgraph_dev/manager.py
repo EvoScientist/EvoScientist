@@ -1366,6 +1366,12 @@ def _spawn_server(
     # in the CLI process and on a plain ``import EvoScientist``.
     sub_env["EVOSCIENTIST_SERVER_PROCESS"] = "1"
 
+    # ``langgraph dev`` posts usage data (OS, Python and CLI versions, the
+    # command and two flags) to LangChain's analytics store at every start
+    # unless ``LANGGRAPH_CLI_NO_ANALYTICS`` is exactly ``"1"``. A server
+    # EvoScientist starts sends none, whatever the caller's shell exports.
+    sub_env["LANGGRAPH_CLI_NO_ANALYTICS"] = "1"
+
     # Propagate the effective bind port into the subprocess's config resolution
     # via the standard ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` override (see
     # ``EvoScientist/config/settings.py``). Without this, ``EvoSci deploy
