@@ -2036,6 +2036,18 @@ class MergedSkillsBackend(BackendProtocol):
             yield self._global
         yield self._secondary
 
+    def file_path(self, file_path: str) -> Path | None:
+        """The tier file *file_path* names: the first tier that has it, as
+        :meth:`read` picks it, or None when no tier does."""
+        for backend in self._backends():
+            try:
+                path = backend._resolve_path(file_path)
+            except (ValueError, OSError):
+                continue
+            if path.is_file():
+                return path
+        return None
+
     # -- read: try each tier in priority order --
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
@@ -2832,27 +2844,57 @@ class CustomSandboxBackend(LocalShellBackend):
         return response
 
 
+def _routed_file_path(backend: BackendProtocol, key: str) -> Path | None:
+    """The file *key* names in a routed tier *backend*, or None if unknown."""
+    if isinstance(backend, MergedSkillsBackend):
+        return backend.file_path(key)
+    if not isinstance(backend, FilesystemBackend):
+        return None
+    try:
+        path = backend._resolve_path(key)
+    except (ValueError, OSError):
+        return None
+    return path if path.is_file() else None
+
+
 def sandbox_file_path(
     path: str,
     work_dir: str | Path,
     *,
     media_dir: str | Path | None = None,
     dangerous: bool = False,
+    routes: dict[str, BackendProtocol] | None = None,
 ) -> Path | None:
     """The host file a file tool's *path* reached, or None outside the sandbox.
 
-    Maps *path* the way :class:`CustomSandboxBackend` rooted at *work_dir*
-    does, so a system path the sandbox reads as a workspace basename names
-    that workspace file, not the host file. Outside dangerous mode the result
+    *routes* are the agent's file tool routes (see
+    ``EvoScientist.file_tool_routes``): a path under one of them names the
+    file in that route's tier, found as the agent's composite backend routes
+    it, or None when that tier keeps no file on disk. Any other path is
+    mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
+    so a system path the sandbox reads as a workspace basename names that
+    workspace file, not the host file. Outside dangerous mode the result
     lies inside *work_dir* or *media_dir* once resolved; anything else, or a
     path the sandbox refuses, gives None.
     """
+    from deepagents.backends import CompositeBackend
+    from deepagents.backends.utils import validate_path
+
     backend = CustomSandboxBackend(
         root_dir=str(work_dir),
         inherit_env=False,
         dangerous=dangerous,
         media_dir=media_dir,
     )
+    if routes:
+        try:
+            routed, key = CompositeBackend(
+                default=backend, routes=routes
+            )._get_backend_and_key(validate_path(path))
+        except ValueError:
+            return None
+        if routed is not backend:
+            return _routed_file_path(routed, key)
     try:
         resolved = backend._resolve_path(path)
     except (ValueError, OSError):

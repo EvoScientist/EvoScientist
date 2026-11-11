@@ -56,13 +56,6 @@ async def _create_standalone_agent(
     )
 
 
-def _dangerous_mode(config: Any) -> bool:
-    """Whether the agent's sandbox runs in dangerous mode, as it reads *config*."""
-    from ..config import get_effective_config
-
-    return (config if config is not None else get_effective_config()).dangerous_mode
-
-
 def _channel_trace_enabled(channel: Channel) -> bool:
     """Check if debug tracing is enabled on the channel."""
     try:
@@ -159,6 +152,7 @@ async def _async_main(
     consumer: InboundConsumer | None = None
     if use_agent:
         from ..gateway import create_runtime_gateways_for_config
+        from ..gateway.runtime import sandbox_dangerous_mode
         from ..gateway.types import runs_in_process
 
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
@@ -182,7 +176,7 @@ async def _async_main(
             workspace=workspace,
             graph_gateway=runtime_gateways.graph_gateway,
             send_thinking=send_thinking,
-            dangerous=_dangerous_mode(config),
+            dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway, config),
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
 

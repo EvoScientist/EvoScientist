@@ -479,3 +479,139 @@ class TestOnlySandboxFilesAreSent:
         work_dir, host = folders
         path = str(host / "passport.pdf")
         assert display_mod.resolve_media_path(path, work_dir, dangerous=True) == path
+
+
+class TestRoutedPaths:
+    """A path under one of the agent's routes names that tier's file."""
+
+    LOGO = "/skills/demo/assets/logo.svg"
+
+    @pytest.fixture
+    def run_dirs(self, workspace):
+        """A ``--mode=run`` folder holding a same-named decoy of each tier file."""
+        from EvoScientist.paths import SessionDirs
+
+        dirs = SessionDirs(workspace, workspace.runs_dir / "r1")
+        for decoy in ("skills/demo/assets/logo.svg", "memories/chart.png"):
+            (dirs.work_dir / decoy).parent.mkdir(parents=True, exist_ok=True)
+            (dirs.work_dir / decoy).write_bytes(b"decoy")
+        return dirs
+
+    @staticmethod
+    def _resolve(dirs, path, **kwargs) -> str:
+        from EvoScientist.EvoScientist import file_tool_routes
+
+        return display_mod.resolve_media_path(
+            path,
+            dirs.work_dir,
+            media_dir=dirs.sandbox_media_dir,
+            routes=file_tool_routes(dirs.workspace),
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_a_skills_write_sends_the_workspace_tier_file(self, run_dirs, dangerous):
+        logo = run_dirs.workspace.skills_dir / "demo" / "assets" / "logo.svg"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"x")
+        assert self._resolve(run_dirs, self.LOGO, dangerous=dangerous) == str(
+            logo.resolve()
+        )
+
+    def test_a_skills_read_sends_the_tier_it_found(self, run_dirs):
+        from EvoScientist import paths
+
+        logo = paths.GLOBAL_SKILLS_DIR / "demo" / "assets" / "logo.svg"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"x")
+        assert self._resolve(run_dirs, self.LOGO) == str(logo.resolve())
+
+    def test_a_memories_path_sends_the_memory_file(self, run_dirs):
+        from EvoScientist import paths
+
+        chart = paths.MEMORIES_DIR / "chart.png"
+        chart.parent.mkdir(parents=True, exist_ok=True)
+        chart.write_bytes(b"x")
+        assert self._resolve(run_dirs, "/memories/chart.png") == str(chart.resolve())
+
+    @pytest.mark.parametrize("path", [LOGO, "/memories/chart.png"])
+    def test_no_tier_file_sends_nothing_not_the_work_folder_file(self, run_dirs, path):
+        assert self._resolve(run_dirs, path) == ""
+
+    def test_a_tier_without_files_on_disk_sends_nothing(self, run_dirs):
+        from deepagents.backends.protocol import BackendProtocol
+
+        assert (
+            display_mod.resolve_media_path(
+                self.LOGO,
+                run_dirs.work_dir,
+                routes={"/skills/": MagicMock(spec=BackendProtocol)},
+            )
+            == ""
+        )
+
+    async def test_the_consumer_sends_the_memory_file(self, workspace):
+        from EvoScientist import paths
+
+        chart = paths.MEMORIES_DIR / "chart.png"
+        chart.parent.mkdir(parents=True, exist_ok=True)
+        chart.write_bytes(b"x")
+        (workspace.root / "memories").mkdir()
+        (workspace.root / "memories" / "chart.png").write_bytes(b"decoy")
+        events = _file_tool_turn("read_file", {"file_path": "/memories/chart.png"})
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == [str(chart.resolve())]
+
+
+class TestSandboxDangerousMode:
+    """Host paths are read as given only for a sandbox this session built."""
+
+    @staticmethod
+    def _config(dangerous: bool):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(dangerous_mode=dangerous)
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_an_in_process_agent_follows_the_config(self, dangerous):
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+
+        gateway = LocalGraphGateway(thread_store=MagicMock())
+        assert sandbox_dangerous_mode(gateway, self._config(dangerous)) is dangerous
+
+    def test_a_server_backed_session_is_never_dangerous(self):
+        """The server's sandbox keeps its own mode, which the session can't see."""
+        from EvoScientist.gateway.composite import CompositeGraphGateway
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        gateway = CompositeGraphGateway(
+            read=LocalGraphGateway(thread_store=MagicMock()),
+            execute=object.__new__(LangGraphServerGateway),
+        )
+        assert sandbox_dangerous_mode(gateway, self._config(True)) is False
+
+    async def test_a_server_backed_standalone_does_not_send_the_host_file(
+        self, workspace, tmp_path, monkeypatch
+    ):
+        """``channel --agent`` with ``--dangerous`` against a server."""
+        import EvoScientist.backends as backends_mod
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "private.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        events = _file_tool_turn("read_file", {"file_path": f"{host}/private.pdf"})
+        gateway = FakeGraphGateway(events=events)
+        consumer = _consumer(
+            workspace,
+            gateway,
+            dangerous=sandbox_dangerous_mode(
+                object.__new__(LangGraphServerGateway), self._config(True)
+            ),
+        )
+        assert _queued_media(await _consumer_turn(consumer)) == []

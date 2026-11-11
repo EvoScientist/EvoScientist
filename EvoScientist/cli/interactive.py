@@ -1172,7 +1172,8 @@ def cmd_interactive(
                         sys.stdout.flush()
                         return
 
-                    from ..config import get_effective_config
+                    from ..EvoScientist import file_tool_routes
+                    from ..gateway.runtime import sandbox_dangerous_mode
 
                     try:
                         ready_agent = await _await_agent_ready()
@@ -1195,7 +1196,10 @@ def cmd_interactive(
                             on_file_write=_send_media_to_channel,
                             work_dir=str(state["dirs"].work_dir),
                             media_dir=state["dirs"].sandbox_media_dir,
-                            dangerous=get_effective_config().dangerous_mode,
+                            routes=file_tool_routes(state["dirs"].workspace),
+                            dangerous=sandbox_dangerous_mode(
+                                runtime_gateways.graph_gateway
+                            ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,

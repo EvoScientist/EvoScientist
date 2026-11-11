@@ -1793,7 +1793,8 @@ def run_textual_interactive(
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
             """
-            from ..config import get_effective_config
+            from ..EvoScientist import file_tool_routes
+            from ..gateway.runtime import sandbox_dangerous_mode
             from ..stream.display import (
                 forward_media_result,
                 is_stream_cancel_requested,
@@ -1861,9 +1862,10 @@ def run_textual_interactive(
             _todo_sent = False
             _media_sent: set[str] = set()
             # Media paths resolve as the sandbox resolves them.
-            _media_dangerous = (
-                on_media_cb is not None and get_effective_config().dangerous_mode
+            _media_dangerous = on_media_cb is not None and sandbox_dangerous_mode(
+                self._runtime_gateways.graph_gateway
             )
+            _media_routes = file_tool_routes(self._dirs.workspace)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2230,6 +2232,7 @@ def run_textual_interactive(
                                 str(self._dirs.work_dir),
                                 media_dir=self._dirs.sandbox_media_dir,
                                 dangerous=_media_dangerous,
+                                routes=_media_routes,
                             )
 
                         # -- Remove loading spinner on first content event --

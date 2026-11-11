@@ -541,6 +541,7 @@ class InboundConsumer:
             # Which calls carry this chat's grant: see ``_hitl_when``.
             approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
+            from ..EvoScientist import file_tool_routes
             from ..stream.display import forward_media_result
             from ..stream.state import StreamState
 
@@ -551,6 +552,7 @@ class InboundConsumer:
             stream_state = StreamState()
             media: list[str] = []
             media_sent: set[str] = set()
+            media_routes = file_tool_routes(self._dirs.workspace)
 
             while True:
                 _hitl_round += 1
@@ -612,6 +614,7 @@ class InboundConsumer:
                             self._dirs.work_dir,
                             media_dir=self._dirs.sandbox_media_dir,
                             dangerous=self._dangerous,
+                            routes=media_routes,
                         )
                         for path in media:
                             await self._send_media(msg, path)

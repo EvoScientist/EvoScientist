@@ -114,6 +114,7 @@ def resolve_media_path(
     work_dir: str | Path | None,
     *,
     media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
     dangerous: bool = False,
 ) -> str:
     """The file on disk a file tool's *path* names, or ``""`` if there is none.
@@ -122,14 +123,15 @@ def resolve_media_path(
     :func:`~EvoScientist.backends.sandbox_file_path`), so only a file inside
     ``work_dir`` or ``media_dir`` is found, and a system path the sandbox
     reads as a workspace basename names that workspace file, never the host
-    file. In dangerous mode a host path is the real file it names.
+    file. In dangerous mode a host path is the real file it names. A path
+    under one of the agent's *routes* names that route's tier file instead.
     """
     if work_dir is None:
         return ""
     from ..backends import sandbox_file_path
 
     real_path = sandbox_file_path(
-        path, work_dir, media_dir=media_dir, dangerous=dangerous
+        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
     )
     return str(real_path) if real_path is not None and real_path.is_file() else ""
 
@@ -142,6 +144,7 @@ def forward_media_result(
     work_dir: str | Path | None,
     *,
     media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
     dangerous: bool = False,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
@@ -150,8 +153,9 @@ def forward_media_result(
     sub-agents; *state* must already hold the event. Each path is sent once
     per turn, tracked in *media_sent*. Every channel surface (the Rich loop,
     the TUI, the standalone runner) forwards through this function, so they
-    all resolve paths the same way: as the sandbox rooted at *work_dir* with
-    *media_dir* does, in dangerous mode when *dangerous* is set.
+    all resolve paths the same way: as the agent's backend does, with *routes*
+    in front of the sandbox rooted at *work_dir* with *media_dir*, in
+    dangerous mode when *dangerous* is set.
     """
     if (
         event.get("type") not in _MEDIA_RESULT_EVENTS
@@ -165,7 +169,7 @@ def forward_media_result(
     if os.path.splitext(path)[1].lower() not in _MEDIA_EXTENSIONS:
         return
     real_path = resolve_media_path(
-        path, work_dir, media_dir=media_dir, dangerous=dangerous
+        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
     )
     if real_path:
         media_sent.add(path)
@@ -1817,6 +1821,7 @@ def _run_streaming(
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
     media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
     dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
@@ -1863,6 +1868,8 @@ def _run_streaming(
             it (``SessionDirs.sandbox_media_dir``); files there are sent too.
         dangerous: The sandbox runs in dangerous mode, so host paths in tool
             calls name real files anywhere.
+        routes: The agent's file tool routes (``file_tool_routes``), so a
+            path under ``/skills/`` or ``/memories/`` names that tier's file.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1885,6 +1892,7 @@ def _run_streaming(
                 on_file_write=on_file_write,
                 work_dir=work_dir,
                 media_dir=media_dir,
+                routes=routes,
                 dangerous=dangerous,
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
@@ -1987,6 +1995,7 @@ def _run_streaming(
                         on_file_write,
                         work_dir,
                         media_dir=media_dir,
+                        routes=routes,
                         dangerous=dangerous,
                     )
 

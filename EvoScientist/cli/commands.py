@@ -2036,7 +2036,8 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        from ..config import get_effective_config
+        from ..EvoScientist import file_tool_routes
+        from ..gateway.runtime import sandbox_dangerous_mode
 
         meta = _serve_turn_metadata(
             dirs, model, runtime_state.thread_id, channel_runtime
@@ -2061,7 +2062,8 @@ def _serve_process_message(
                 on_file_write=_send_media,
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
-                dangerous=get_effective_config().dangerous_mode,
+                routes=file_tool_routes(dirs.workspace),
+                dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway),
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
