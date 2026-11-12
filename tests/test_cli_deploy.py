@@ -56,27 +56,6 @@ def _make_config(
     )
 
 
-class _ImmediateEvent:
-    """Fake ``threading.Event``: first ``is_set()`` returns False so the
-    while-loop body runs once; subsequent calls return True, exiting the
-    loop. ``wait`` is a no-op (no real blocking)."""
-
-    def __init__(self):
-        self._called = 0
-        self.set_was_called = False
-
-    def is_set(self) -> bool:
-        self._called += 1
-        return self._called > 1
-
-    def wait(self, timeout: float | None = None):
-        return None
-
-    def set(self):
-        self.set_was_called = True
-        self._called = 99
-
-
 def _run_deploy_once(
     monkeypatch,
     config,
@@ -93,13 +72,16 @@ def _run_deploy_once(
     tunnel_error: str | None = None,
     printed: list | None = None,
     server: Server | None = None,
+    on_wait=None,
+    on_stop=None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     *port_occupied*: something holds the port, this data folder's server
     when *langgraph_dev_running*, another program otherwise. *server* is the
-    fake the start goes through (a fresh one by default). Returns a
-    ``captured`` dict with observation points; *printed* collects the console
-    output, also of a run that exits."""
+    fake the start goes through (a fresh one by default). Serving ends with
+    a Ctrl+C, after *on_wait* runs; *on_stop* runs inside the server's stop.
+    Returns a ``captured`` dict with observation points; *printed* collects
+    the console output, also of a run that exits."""
     import EvoScientist.config as config_mod
 
     captured: dict[str, Any] = {
@@ -110,7 +92,7 @@ def _run_deploy_once(
         "port_passed": None,
         "host_passed": None,
         "printed": [] if printed is None else printed,
-        "atexit_callbacks": [],
+        "stops": [],
     }
 
     def _fake_get_effective_config(cli_overrides=None):
@@ -129,14 +111,25 @@ def _run_deploy_once(
 
     server = server or Server(monkeypatch, pid=99999)
     captured["server"] = server
+    # For a test whose deploy() raises.
+    _run_deploy_once.captured = captured
     effective_port = port if port is not None else config.langgraph_dev_port
     if port_occupied and langgraph_dev_running:
         server.run(4242, port=effective_port, lasting=True)
     elif port_occupied:
         server.occupied.add(effective_port)
 
-    def _fake_stop_langgraph_dev(_proc=None):
+    def _fake_stop_langgraph_dev(proc=None, *, clean=True):
         captured["langgraph_dev_stopped"] = True
+        captured["stops"].append(
+            {
+                "proc": proc,
+                "clean": clean,
+                "handlers": dict(captured["signal_handlers"]),
+            }
+        )
+        if on_stop is not None:
+            on_stop()
 
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
     from EvoScientist.langgraph_dev import registration
@@ -167,42 +160,30 @@ def _run_deploy_once(
     # The server's ccproxy answers.
     monkeypatch.setattr(ccp, "is_ccproxy_running", lambda port: True)
 
-    # atexit mock — capture without executing (don't pollute test process)
-    import atexit
-
-    def _fake_atexit_register(fn, *args, **kwargs):
-        captured["atexit_callbacks"].append((fn.__name__, args, kwargs))
-        return fn
-
-    monkeypatch.setattr(atexit, "register", _fake_atexit_register)
-
-    # signal mock — capture handlers so tests can exercise _handle_shutdown.
-    # Returning a no-op original means deploy()'s finally block restores
-    # something harmless onto the real signal module.
+    # signal mock: a table of the handlers deploy() installs, so tests can
+    # read what was in place at any point without touching the real ones.
     import signal
 
-    # deploy() calls signal.signal twice per signum: first to install
-    # _handle_shutdown, then in finally to restore the original. We want the
-    # first (real) handler — keep first-write-wins semantics.
-    captured["signal_handlers"] = {}
+    handlers: dict = {}
+    captured["signal_handlers"] = handlers
+    captured["installed"] = []
 
-    def _capture_signal(signum, handler):
-        if signum not in captured["signal_handlers"]:
-            captured["signal_handlers"][signum] = handler
-        return lambda *_a, **_kw: None
+    def _fake_signal(signum, handler):
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        captured["installed"].append((signum, handler))
+        return previous
 
-    monkeypatch.setattr(signal, "signal", _capture_signal)
+    monkeypatch.setattr(signal, "signal", _fake_signal)
 
-    # threading.Event mock — exits the wait loop after one iteration;
-    # factory captures the instance so tests can inspect set() calls.
-    import threading
+    # Serving ends as a Ctrl+C would end it, unless the test says otherwise.
+    def _fake_wait_for_stop():
+        captured["handlers_while_serving"] = dict(handlers)
+        if on_wait is not None:
+            on_wait()
+        raise KeyboardInterrupt
 
-    def _make_event():
-        ev = _ImmediateEvent()
-        captured["event_instance"] = ev
-        return ev
-
-    monkeypatch.setattr(threading, "Event", _make_event)
+    monkeypatch.setattr(deploy_server, "_wait_for_stop", _fake_wait_for_stop)
 
     # os.makedirs / os.getcwd
     import os
@@ -726,58 +707,99 @@ def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, ste
     assert any("langgraph dev startup failed" in p for p in _run_deploy_once.printed)
 
 
-def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):
-    config = _make_config(default_workdir=str(tmp_path))
-    captured = _run_deploy_once(monkeypatch, config)
-
-    names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
-    assert "_fake_stop_langgraph_dev" in names, (
-        "deploy must register stop_langgraph_dev via atexit for clean shutdown"
+def test_deploy_stops_its_server_when_it_ends(monkeypatch, tmp_path):
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
     )
 
+    server = captured["server"]
+    assert [(s["proc"], s["clean"]) for s in captured["stops"]] == [
+        (server.procs[0], True)
+    ]
+    assert any("Stopped." in p for p in captured["printed"])
 
-def test_deploy_registers_signal_handlers_for_shutdown(monkeypatch, tmp_path):
-    """deploy() must register SIGINT and SIGTERM handlers so external signals
-    trigger clean shutdown via the shutdown_event wait loop."""
+
+def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
+    """A second Ctrl+C (or a SIGTERM) during the stop must not cut it short;
+    the handlers are put back after it."""
     import signal
 
-    config = _make_config(default_workdir=str(tmp_path))
-    captured = _run_deploy_once(monkeypatch, config)
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
+    )
 
-    handlers = captured["signal_handlers"]
-    assert signal.SIGINT in handlers, "deploy must register a SIGINT handler"
-    assert signal.SIGTERM in handlers, "deploy must register a SIGTERM handler"
-    assert callable(handlers[signal.SIGINT])
-    assert callable(handlers[signal.SIGTERM])
+    during = captured["stops"][0]["handlers"]
+    assert during[signal.SIGINT] is signal.SIG_IGN
+    assert during[signal.SIGTERM] is signal.SIG_IGN
+    assert captured["signal_handlers"][signal.SIGINT] is signal.SIG_DFL
+    assert captured["signal_handlers"][signal.SIGTERM] is signal.SIG_DFL
 
 
-def test_handle_shutdown_sigterm_sets_shutdown_event(monkeypatch, tmp_path):
-    """Invoking the captured SIGTERM handler must set deploy()'s shutdown_event.
-
-    SIGTERM is used (not SIGINT) because the SIGINT branch of _handle_shutdown
-    calls signal.default_int_handler which raises KeyboardInterrupt — that
-    would terminate the test process rather than exercise the event path.
-    """
+def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
+    """SIGTERM ends deploy as Ctrl+C does, so the stop runs."""
     import signal
 
-    config = _make_config(default_workdir=str(tmp_path))
-    captured = _run_deploy_once(monkeypatch, config)
-
-    event = captured["event_instance"]
-    assert event is not None, "deploy() must have constructed a threading.Event"
-    # During the normal helper run the wait loop exits via is_set() flipping
-    # to True (not via set()), so set_was_called should still be False here.
-    assert event.set_was_called is False, (
-        "Sanity check: helper's _ImmediateEvent should exit naturally without "
-        "set() being called; if this fails, the helper changed behavior."
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
     )
 
-    sigterm_handler = captured["signal_handlers"][signal.SIGTERM]
-    sigterm_handler(signal.SIGTERM, None)
+    serving = captured["handlers_while_serving"]
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        assert serving[sig] is signal.default_int_handler
+        with pytest.raises(KeyboardInterrupt):
+            serving[sig](sig, None)
 
-    assert event.set_was_called is True, (
-        "_handle_shutdown(SIGTERM, None) must call shutdown_event.set()"
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        # The registration failed.
+        typer.Exit(1),
+        # A Ctrl+C before the Ready banner.
+        KeyboardInterrupt(),
+    ],
+    ids=["exit", "interrupt"],
+)
+def test_deploy_stops_its_server_when_it_ends_before_serving(
+    monkeypatch, tmp_path, ending
+):
+    def _serve(*_a):
+        raise ending
+
+    monkeypatch.setattr(deploy_server, "_serve", _serve)
+    with pytest.raises(type(ending)):
+        _run_deploy_once(monkeypatch, _make_config(default_workdir=str(tmp_path)))
+
+    captured = _run_deploy_once.captured
+    assert [s["proc"] for s in captured["stops"]] == captured["server"].procs
+
+
+def test_deploy_stops_the_server_an_interrupted_start_left(monkeypatch):
+    """No handle came back from the start: the stop takes the manager's,
+    without the clean stop a server that never became ready does not need."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    left = object()
+    monkeypatch.setattr(lgm, "_PROCESS", left)
+    stops: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda proc, *, clean: stops.append((proc, clean))
     )
+    monkeypatch.setattr(deploy_server, "console", _SilentConsole([]))
+
+    deploy_server._stop_own_server(None)
+
+    assert stops == [(left, False)]
+
+
+def test_deploy_refused_start_stops_nothing(monkeypatch, tmp_path):
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            port_occupied=True,
+        )
+    assert _run_deploy_once.captured["stops"] == []
 
 
 @pytest.mark.parametrize("hint", [None, "Run `EvoSci setup`, then restart."])
