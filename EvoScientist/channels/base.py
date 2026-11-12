@@ -5,6 +5,7 @@ This module defines the Channel interface that all messaging channels
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 import threading
@@ -17,6 +18,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..paths import file_tool_path
 from ..runtime import AsyncRuntime
@@ -155,6 +157,17 @@ def media_path(media_dir: Path, filename: str) -> Path:
     """Ensure *media_dir* exists and return a path inside it."""
     media_dir.mkdir(parents=True, exist_ok=True)
     return media_dir / filename
+
+
+def attachment_filename(filename: str, message_id: str, index: int) -> str:
+    """Keep attachments distinct across messages and within one message."""
+    identity = (
+        hashlib.sha256(str(message_id).encode()).hexdigest()[:16]
+        if message_id
+        else uuid4().hex
+    )
+    safe_name = filename.replace("\\", "_").replace("/", "_")
+    return f"{identity}_{index}_{safe_name}"
 
 
 def check_attachment_size(file_size: int, filename: str) -> str | None:
