@@ -22,6 +22,7 @@ from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
 from ..langgraph_dev.assistants import launch_assistant_id
+from ..langgraph_dev.manager import RUNTIME
 from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
@@ -54,6 +55,8 @@ _ACTIVE_RUN_STATUSES = ("pending", "running")
 _REPLAY_QUIET_SECONDS = 2.0
 _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
+# langgraph-api's text for an exception it does not pass on to clients.
+_SERVER_HIDDEN_ERROR = "An internal error occurred"
 
 
 def _run_has_request_id(run: Mapping[str, Any], request_id: str) -> bool:
@@ -244,21 +247,27 @@ def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
     return run_id
 
 
-def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
-    """The phase of a root-namespace lifecycle envelope, else None."""
+def _root_lifecycle_data(event: Mapping[str, Any]) -> Mapping[str, object] | None:
+    """The data of a root-namespace lifecycle envelope, else None."""
     if event.get("method") != "lifecycle" or _event_namespace(event):
         return None
     params = _as_raw_map(event.get("params"))
-    data = _as_raw_map(params.get("data")) if params is not None else None
+    return _as_raw_map(params.get("data")) if params is not None else None
+
+
+def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
+    """The phase of a root-namespace lifecycle envelope, else None."""
+    data = _root_lifecycle_data(event)
     return data.get("event") if data is not None else None
 
 
 def _run_failure_message(event: Mapping[str, Any]) -> str:
     """The turn's error for a root ``lifecycle: failed`` envelope."""
-    params = _as_raw_map(event.get("params"))
-    data = _as_raw_map(params.get("data")) if params is not None else None
+    data = _root_lifecycle_data(event)
     error = data.get("error") if data is not None else None
-    return f"Run failed: {error}" if error else "Run failed"
+    if not error or error == _SERVER_HIDDEN_ERROR:
+        return f"Run failed on the server; the cause is in {RUNTIME.log_file}"
+    return f"Run failed: {error}"
 
 
 class _ThreadEvents:

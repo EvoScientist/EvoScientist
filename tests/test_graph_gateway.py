@@ -2690,9 +2690,24 @@ def _run_lifecycle(phase: str, *, namespace=(), error=None) -> dict[str, Any]:
     }
 
 
-async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error():
+@pytest.mark.parametrize("hidden", [False, True], ids=["server-error", "hidden-error"])
+@pytest.mark.parametrize(
+    "other_run_active", [False, True], ids=["idle", "other-run-active"]
+)
+async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
+    hidden, other_run_active
+):
     """A run that raises on the server ends the turn with an error, not done,
-    and the thread is repaired without cancelling the run that has already ended."""
+    without cancelling the run that has already ended; the thread is repaired
+    unless another request's run is still active."""
+    from EvoScientist.langgraph_dev.manager import RUNTIME
+
+    server_error = "An internal error occurred" if hidden else "RuntimeError('boom')"
+    expected = (
+        f"Run failed on the server; the cause is in {RUNTIME.log_file}"
+        if hidden
+        else "Run failed: RuntimeError('boom')"
+    )
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -2706,7 +2721,7 @@ async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
                     },
                 },
             },
-            _run_lifecycle("failed", error="RuntimeError('boom')"),
+            _run_lifecycle("failed", error=server_error),
         ],
     )
     threads = FakeLangGraphThreadsClient(
@@ -2719,6 +2734,8 @@ async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
 
     class _EndedRunsClient:
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if other_run_active and status == "running" and offset == 0:
+                return [{"run_id": "other-run", "status": "running"}]
             return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
@@ -2735,15 +2752,18 @@ async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
         ):
             events.append(event)
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RuntimeError) as raised:
         await collect()
 
+    assert str(raised.value) == expected
     types = [event["type"] for event in events]
     assert "done" not in types
     (error,) = [event for event in events if event["type"] == "error"]
-    assert "boom" in error["message"]
+    assert error["message"] == expected
     assert cancel_calls == []
-    assert threads.state_updates == [("abc12345", None, "__end__")]
+    assert threads.state_updates == (
+        [] if other_run_active else [("abc12345", None, "__end__")]
+    )
 
 
 @pytest.mark.parametrize(
