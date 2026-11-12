@@ -237,19 +237,23 @@ def test_offer_restart_hint_follows_default_workdir(
     assert ("EvoSci session" in output) is not default_workdir
     assert "--workdir" not in output
 
-    assert "--workdir" not in output
 
-
-@pytest.mark.parametrize("changed", [False, True], ids=["unchanged", "changed"])
-def test_offer_restart_hint_only_on_drift(monkeypatch, changed):
+@pytest.mark.parametrize(
+    ("changed", "older"),
+    [(False, False), (True, False), (False, True)],
+    ids=["unchanged", "changed", "older-release"],
+)
+def test_offer_restart_hint_only_on_drift(monkeypatch, changed, older):
     """The hint shows only when settings the server reads changed since its
-    launch."""
+    launch, or when an older release started the server."""
     from EvoScientist.cli import commands
     from EvoScientist.config import get_effective_config
 
     fingerprint = manager._server_config_fingerprint(get_effective_config())
     recorded = "stale" if changed else fingerprint
-    _running_service(monkeypatch, _record(fields={"config_fingerprint": recorded}))
+    _running_service(
+        monkeypatch, _record(fields={"config_fingerprint": recorded}, older=older)
+    )
     _answer(monkeypatch, True)
     steps = _record_steps(monkeypatch)
 
@@ -257,7 +261,8 @@ def test_offer_restart_hint_only_on_drift(monkeypatch, changed):
         commands._offer_server_start()
 
     assert steps == []
-    assert ("EvoSci server stop" in " ".join(captured.get().split())) is changed
+    output = " ".join(captured.get().split())
+    assert ("EvoSci server stop" in output) is (changed or older)
 
 
 def test_offer_server_start_failure_is_reported(monkeypatch, tmp_path):
