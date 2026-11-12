@@ -26,6 +26,7 @@ from tests.fakes.stream_v3 import (
     ErroringV3Agent,
     FakeSubagent,
     FakeV3Agent,
+    FakeV3Run,
     HangingV3Agent,
     SubscriptionSensitiveV3Agent,
     async_iter,
@@ -44,6 +45,25 @@ from tests.fakes.stream_v3 import (
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self
+
+
+def _select(sink, tools: list[str], total: int) -> None:
+    """One finished selector call, as the middleware reports it to the sink."""
+    sink.on_tool_selection_started(total)
+    sink.on_tool_selection(tools, total)
+    sink.on_tool_selection_ended()
+
+
+def _selecting_at_start(agent: FakeV3Agent, sink, tools: list[str], total: int):
+    """Have the run select once it starts, before the model's first output."""
+    run = agent.astream_events.return_value
+
+    def start_run(*_args, **_kwargs):
+        _select(sink, tools, total)
+        return run
+
+    agent.astream_events.side_effect = start_run
+    return agent
 
 
 class TestExtractToolContent:
@@ -1205,16 +1225,7 @@ class TestV3ProtocolStreaming:
                 )
             ],
         }[first]
-        agent = FakeV3Agent(step)
-
-        def start_run(*_args, **_kwargs):
-            # The selector runs inside the run, before the model's first output.
-            sink.on_tool_selection_started(3)
-            sink.on_tool_selection(["read_file"], 3)
-            sink.on_tool_selection_ended()
-            return agent.astream_events.return_value
-
-        agent.astream_events.side_effect = start_run
+        agent = _selecting_at_start(FakeV3Agent(step), sink, ["read_file"], 3)
 
         events = await collect_events(agent, events=sink)
 
@@ -1242,6 +1253,58 @@ class TestV3ProtocolStreaming:
         events = await collect_events(agent, events=sink)
 
         assert not [e for e in events if e["type"] in ("text", "tool_call")]
+
+    async def test_tool_selection_is_shown_before_its_own_step(self):
+        """The selector runs before every model call: each step's selection
+        lands after the earlier step's result and before its own output."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        output = ToolMessage(content="File content", name="read_file", tool_call_id="1")
+
+        async def steps():
+            _select(sink, ["read_file"], 3)
+            yield tool_started("read_file", {"path": "notes.txt"})
+            yield tool_finished(output)
+            _select(sink, ["ls"], 3)
+            yield message_delta("Answer.")
+
+        class TwoStepRun(FakeV3Run):
+            def __aiter__(self):
+                return steps()
+
+        agent = FakeV3Agent([])
+        agent.astream_events.return_value = TwoStepRun([])
+
+        events = await collect_events(agent, events=sink)
+
+        order = [e["type"] for e in events if e["type"] != "done"]
+        assert order == [
+            "tool_selection",
+            "tool_call",
+            "tool_result",
+            "tool_selection",
+            "text",
+        ]
+        shown = [e["tools"] for e in events if e["type"] == "tool_selection"]
+        assert shown == [["read_file"], ["ls"]]
+
+    async def test_json_answer_with_tools_key_is_shown_after_a_selection(self):
+        """Once the selector call has ended, JSON with a ``tools`` key is the
+        agent's own answer, not the selector's."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        answer = '{"tools": ["hammer"], "note": "from the agent"}'
+        agent = _selecting_at_start(
+            FakeV3Agent([message_delta(answer)]), sink, ["read_file"], 3
+        )
+
+        events = await collect_events(agent, events=sink)
+
+        shown = [e["tools"] for e in events if e["type"] == "tool_selection"]
+        assert shown == [["read_file"]]
+        assert "".join(e["content"] for e in events if e["type"] == "text") == answer
 
     async def test_selection_left_by_an_earlier_run_is_not_shown(self):
         """A run that ended before its first output leaves its selection in the

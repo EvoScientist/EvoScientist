@@ -972,6 +972,40 @@ def test_selection_schema_without_named_options_is_left_alone():
     assert _names_as_enum(schema) is schema
 
 
+@pytest.mark.parametrize("auto", [False, True])
+def test_unexpected_selection_schema_is_reported_once(auto, caplog):
+    """A shape the rewrite does not know goes out unchanged, with one warning,
+    on the forced and on the auto tool-choice path."""
+    from langchain.agents.middleware.tool_selection import (
+        _create_tool_selection_response,
+    )
+
+    from EvoScientist.middleware.tool_selector import (
+        _AutoToolChoiceSelectorModel,
+        _SelectorModel,
+    )
+
+    wrapper = _AutoToolChoiceSelectorModel if auto else _SelectorModel
+    unknown = {"properties": {"tools": {"type": "array", "items": {"type": "string"}}}}
+    known = _create_tool_selection_response([_tool("t0")]).json_schema()
+    inner = MagicMock()
+    model = wrapper(inner)
+
+    with caplog.at_level("WARNING", logger="EvoScientist.middleware.tool_selector"):
+        wrapper(MagicMock()).with_structured_output(known)
+        assert not caplog.records
+        model.with_structured_output(unknown)
+        model.with_structured_output(unknown)
+
+    if auto:
+        [sent] = inner.bind_tools.call_args.args[0]
+    else:
+        sent = inner.with_structured_output.call_args.args[0]
+    assert sent is unknown
+    assert len(caplog.records) == 1
+    assert "tool_selector.schema_shape" in caplog.records[0].getMessage()
+
+
 # ---------------------------------------------------------------------------
 # Forced tool_choice rejected (Claude Fable 5.1 / Opus 5.5): retry with auto
 # ---------------------------------------------------------------------------
