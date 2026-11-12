@@ -800,8 +800,25 @@ def _refused_cause() -> str:
 def owned_by_its_starter(record: ServerRecord | None) -> bool:
     """Whether the recorded server is one that ``EvoSci deploy`` or the
     desktop app owns, not the background server: ``EvoSci server stop``
-    leaves it running. A record that does not say counts as not."""
-    return record is not None and record.lasting is False
+    leaves it running. A record that does not say counts as not. Once its
+    owner is gone (killed, or crashed) it is that owner's leftover, which
+    nothing else would stop (:func:`owner_running`)."""
+    return record is not None and record.lasting is False and owner_running(record)
+
+
+def owner_running(record: ServerRecord) -> bool:
+    """Whether the process the record names as the server's owner still
+    runs: its PID is alive with the creation time recorded, or one that
+    cannot be read. A record that names no owner (an older release, or an
+    owner that could not be read) counts as running."""
+    pid = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
+    created = record.fields.get(server_record.OWNER_CREATE_TIME_KEY)
+    if pid is None or isinstance(created, bool) or not isinstance(created, int | float):
+        return True
+    if not psutil.pid_exists(pid):
+        return False
+    now = _create_time(pid)
+    return now is None or abs(now - created) <= _CREATE_TIME_TOLERANCE
 
 
 def _request_clean_stop(pid: int) -> bool:
@@ -1052,8 +1069,8 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
 
     *record* is what the caller read (``read_record(older=True)``); read here
     when not given. With *keep_owned* (``EvoSci server stop``), a server
-    that ``EvoSci deploy`` or the desktop app owns is left running:
-    :class:`ServerKeptError`. One the stop may not end (access refused) or
+    that ``EvoSci deploy`` or the desktop app owns is left running while
+    that owner runs (:func:`owned_by_its_starter`): :class:`ServerKeptError`. One the stop may not end (access refused) or
     could not open is left running too: :class:`ServerStopFailedError`.
     """
     if record is _UNREAD:

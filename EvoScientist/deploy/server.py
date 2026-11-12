@@ -305,7 +305,7 @@ def _start_server(
     before, and return its handle; exits 1 when one already runs for this
     data folder, or the port or the start fails."""
     from ..ccproxy_manager import uses_oauth
-    from ..langgraph_dev.manager import ensure_server, is_lasting
+    from ..langgraph_dev.manager import ensure_server, is_lasting, owner_running
 
     starting = (
         "[dim]Starting langgraph dev and its ccproxy...[/dim]"
@@ -374,6 +374,12 @@ def _start_server(
         status = " [bold]EvoSci server status[/bold] lists the projects it serves."
         if record is None:
             console.print("[dim]Stop the existing EvoSci/serve session first.[/dim]")
+        elif record.lasting is False and not owner_running(record):
+            console.print(
+                "[dim]The EvoSci deploy or desktop app that started it no "
+                "longer runs. Stop it with [bold]EvoSci server stop[/bold], "
+                f"then deploy again.{status}[/dim]"
+            )
         elif not is_lasting(record):
             console.print(
                 f"[dim]It is not the background service: another "

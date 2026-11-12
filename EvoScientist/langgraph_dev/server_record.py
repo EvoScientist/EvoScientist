@@ -55,6 +55,11 @@ SERVING = "serving"
 # end when this one is killed and leaves it running.
 CCPROXY_PID_KEY = "ccproxy_pid"
 CCPROXY_CREATE_TIME_KEY = "ccproxy_create_time"
+# The process that started a server which does not outlive it (``EvoSci
+# deploy``, the desktop app) and stops it: once that is gone, the server is
+# its leftover, which ``EvoSci server stop`` may stop.
+OWNER_PID_KEY = "owner_pid"
+OWNER_CREATE_TIME_KEY = "owner_create_time"
 
 # How far up from itself the server looks for the process its starter
 # started: on Windows ``langgraph.exe`` is a launcher whose child runs Python,
@@ -183,9 +188,24 @@ def _build() -> dict:
     }
     if lasting is not None:
         record["lasting"] = lasting == "1"
+    if found and lasting == "0":
+        record.update(_owner(process))
     if fingerprint:
         record["config_fingerprint"] = fingerprint
     return record
+
+
+def _owner(started: psutil.Process) -> dict:
+    """The record keys naming the starter of *started*, the process it
+    started, as :data:`OWNER_PID_KEY` and :data:`OWNER_CREATE_TIME_KEY`;
+    none when it cannot be read, and the server then counts as owned."""
+    try:
+        owner = started.parent()
+        if owner is None:
+            return {}
+        return {OWNER_PID_KEY: owner.pid, OWNER_CREATE_TIME_KEY: owner.create_time()}
+    except psutil.Error:
+        return {}
 
 
 def _resolved(resolve: Callable[[], str | None]) -> str | None:

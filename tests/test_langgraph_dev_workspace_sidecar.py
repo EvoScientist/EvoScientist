@@ -693,6 +693,64 @@ def test_stop_server_keep_owned_leaves_server_its_starter_owns(
     assert manager.owned_by_its_starter(manager.read_record()) is True
 
 
+def _owned_record(monkeypatch, *, owner_created: float) -> Processes:
+    """A server that ``EvoSci deploy`` (pid 77, created at 50) owns; the
+    owner runs only once the test adds it."""
+    processes = Processes(monkeypatch)
+    processes.add(4242)
+    monkeypatch.setattr(manager.psutil, "pid_exists", lambda pid: pid in processes.live)
+    write_record(
+        4242,
+        lasting=False,
+        **{
+            server_record.OWNER_PID_KEY: 77,
+            server_record.OWNER_CREATE_TIME_KEY: owner_created,
+        },
+    )
+    return processes
+
+
+def test_stop_server_keep_owned_leaves_server_while_its_owner_runs(
+    monkeypatch, runtime_paths
+):
+    processes = _owned_record(monkeypatch, owner_created=50.0)
+    processes.add(77, created=50.0, cmdline=["EvoSci", "deploy"])
+    monkeypatch.setattr(manager, "_end_server_tree", lambda *a, **k: None)
+
+    with pytest.raises(manager.ServerKeptError):
+        manager.stop_server(keep_owned=True)
+
+
+@pytest.mark.parametrize("owner", ["gone", "pid reused"])
+def test_stop_server_keep_owned_stops_server_its_owner_left(
+    monkeypatch, runtime_paths, owner
+):
+    """``EvoSci deploy`` was killed and left its server: nothing else would
+    stop it."""
+    processes = _owned_record(monkeypatch, owner_created=50.0)
+    if owner == "pid reused":
+        processes.add(77, created=900.0, cmdline=["bash"])
+    ended: list = []
+    monkeypatch.setattr(
+        manager, "_end_server_tree", lambda pid, *a, **k: ended.append(pid)
+    )
+
+    assert manager.owned_by_its_starter(manager.read_record()) is False
+    assert manager.stop_server(keep_owned=True) == 4242
+    assert ended == [4242]
+
+
+def test_owner_running_when_its_creation_time_cannot_be_read(
+    monkeypatch, runtime_paths
+):
+    """A live owner PID whose creation time is unreadable counts as the owner."""
+    _owned_record(monkeypatch, owner_created=50.0)
+    monkeypatch.setattr(manager.psutil, "pid_exists", lambda pid: True)
+    monkeypatch.setattr(manager, "_create_time", lambda pid: None)
+
+    assert manager.owner_running(manager.read_record()) is True
+
+
 def test_stop_server_reaps_server_this_process_started(monkeypatch, runtime_paths):
     proc = SimpleNamespace(pid=4242, returncode=None, poll=lambda: None)
     Processes(monkeypatch).add(4242)

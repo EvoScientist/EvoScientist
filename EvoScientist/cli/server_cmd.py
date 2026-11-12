@@ -240,7 +240,7 @@ def server_stop(
 ) -> None:
     """Stop the background langgraph dev server started by EvoSci, and its
     ccproxy. A server that EvoSci deploy or the desktop app owns is left
-    running, and a busy one is stopped after asking."""
+    running while that owner runs, and a busy one is stopped after asking."""
     stop_server(yes=yes)
 
 
@@ -304,7 +304,7 @@ def _stop_busy_server_anyway(record) -> bool:
 
 def stop_server(*, yes: bool = False) -> bool:
     """``EvoSci server stop``: a server that ``EvoSci deploy`` or the desktop
-    app owns is left running. A server it may not end (another user's or an
+    app owns is left running while that owner runs. A server it may not end (another user's or an
     elevated one) or could not open is left running too; it says why and
     exits 1. A busy
     server is stopped only after asking, or with *yes*; a server that took
