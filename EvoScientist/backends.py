@@ -2368,7 +2368,7 @@ class CustomSandboxBackend(LocalShellBackend):
         Intercepts all file operations (read, write, edit, ls, grep, glob).
         Auto-corrects common LLM path mistakes instead of crashing:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
-          2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> exists)
+          2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> is a folder)
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
@@ -2426,11 +2426,16 @@ class CustomSandboxBackend(LocalShellBackend):
             return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting, unless the
-        # workspace has its own <ws_name>: then the path is that folder.
+        # workspace has its own <ws_name>: then the path is that folder, kept
+        # out of the system path correction below (a workspace named "tmp").
         ws_prefix = f"/{ws_name}/"
-        if key.startswith(ws_prefix) and not (self.cwd / ws_name).exists():
+        if key.startswith(ws_prefix):
+            if (self.cwd / ws_name).is_dir():
+                return super()._resolve_path(key)
             key = key[len(ws_prefix) - 1 :]  # "/<ws>/main.py" → "/main.py"
-        elif key == f"/{ws_name}" and not (self.cwd / ws_name).exists():
+        elif key == f"/{ws_name}":
+            if (self.cwd / ws_name).exists():
+                return super()._resolve_path(key)
             key = "/"
 
         # Auto-correct system absolute paths

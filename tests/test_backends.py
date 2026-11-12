@@ -2037,6 +2037,21 @@ class TestResolvePath:
         listed = [entry["path"] for entry in backend.ls("/myproj").entries]
         assert listed == ["/myproj/core.py"]
 
+    def test_folder_named_like_a_system_workspace_is_kept(self, tmp_path):
+        ws = tmp_path / "tmp"
+        (ws / "tmp").mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolved = backend._resolve_path("/tmp/core.py")
+        assert resolved == (ws / "tmp" / "core.py").resolve()
+
+    def test_file_named_like_the_workspace_keeps_the_prefix_strip(self, tmp_path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (ws / "myproj").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path("/myproj/core.py") == (ws / "core.py").resolve()
+        assert backend._resolve_path("/myproj") == (ws / "myproj").resolve()
+
     def test_custom_workspace_name_system_path(self, tmp_path):
         ws = tmp_path / "experiment-1"
         ws.mkdir()
