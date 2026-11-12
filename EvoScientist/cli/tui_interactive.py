@@ -1115,6 +1115,13 @@ def run_textual_interactive(
 
             yield Static("", id="status")
 
+        async def _process_messages(self, *args: Any, **kwargs: Any) -> None:
+            # Both run_async and Textual's test runner use this lifecycle.
+            from .tui_logging import tui_warning_notifications
+
+            with tui_warning_notifications(self):
+                await super()._process_messages(*args, **kwargs)
+
         def on_mount(self) -> None:
             # Bind the session sink's fallback-notice display so model-fallback
             # messages appear as SystemMessage widgets in the chat container.
