@@ -1084,8 +1084,9 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
     *record* is what the caller read (``read_record(older=True)``); read here
     when not given. With *keep_owned* (``EvoSci server stop``), a server
     that ``EvoSci deploy`` or the desktop app owns is left running while
-    that owner runs (:func:`owned_by_its_starter`): :class:`ServerKeptError`. One the stop may not end (access refused) or
-    could not open is left running too: :class:`ServerStopFailedError`.
+    that owner runs (:func:`owned_by_its_starter`): :class:`ServerKeptError`.
+    One the stop may not end (access refused) or could not open is left
+    running too: :class:`ServerStopFailedError`.
     """
     if record is _UNREAD:
         record = read_record(older=True)

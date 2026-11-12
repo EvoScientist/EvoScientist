@@ -304,14 +304,14 @@ def _stop_busy_server_anyway(record) -> bool:
 
 def stop_server(*, yes: bool = False) -> bool:
     """``EvoSci server stop``: a server that ``EvoSci deploy`` or the desktop
-    app owns is left running while that owner runs. A server it may not end (another user's or an
-    elevated one) or could not open is left running too; it says why and
-    exits 1. A busy
-    server is stopped only after asking, or with *yes*; a server that took
-    the place of the one asked about, or appeared meanwhile, is not stopped.
-    Whether it was left running."""
+    app owns is left running while that owner runs. A server it may not end
+    (another user's or an elevated one) or could not open is left running
+    too; it says why and exits 1. A busy server is stopped only after
+    asking, or with *yes*; a server that took the place of the one asked
+    about, or appeared meanwhile, is not stopped. Whether it was left
+    running."""
     from ..config import get_effective_config
-    from ..langgraph_dev import manager
+    from ..langgraph_dev import manager, server_record
     from ..langgraph_dev.manager import (
         ServerKeptError,
         ServerStopFailedError,
@@ -361,10 +361,18 @@ def stop_server(*, yes: bool = False) -> bool:
         console.print(f"[yellow]⚠ {escape(str(exc))}[/yellow]")
         if isinstance(exc, ServerStopFailedError):
             raise typer.Exit(1) from None
-        console.print(
-            "[dim]If its owner is gone, stop it by hand: "
-            f"[bold]{manual_stop_command(record.port)}[/bold][/dim]"
-        )
+        if server_record.OWNER_PID_KEY in record.fields:
+            # The stop ends it once its owner is gone.
+            console.print(
+                "[dim]If that owner is killed instead, run "
+                "[bold]EvoSci server stop[/bold] again.[/dim]"
+            )
+        else:
+            # An older release's record does not name its owner.
+            console.print(
+                "[dim]If its owner is gone, stop it by hand: "
+                f"[bold]{manual_stop_command(record.port)}[/bold][/dim]"
+            )
         return True
     if pid is not None:
         console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")
