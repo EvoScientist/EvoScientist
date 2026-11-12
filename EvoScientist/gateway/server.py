@@ -228,23 +228,6 @@ def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
 
 
-def _root_run_failure(event: Mapping[str, Any]) -> str | None:
-    """Return the error for a root-namespace ``lifecycle`` ``failed`` event.
-
-    The server reports a run that raised as ``{method: "lifecycle", params:
-    {namespace: [], data: {event: "failed", error: ...}}}``. Lifecycle events
-    with a namespace belong to sub-agents and are left to the subagent tracker.
-    """
-    if event.get("method") != "lifecycle" or _event_namespace(event):
-        return None
-    params = _as_raw_map(event.get("params"))
-    data = _as_raw_map(params.get("data")) if params is not None else None
-    if data is None or data.get("event") != "failed":
-        return None
-    error = data.get("error")
-    return f"Run failed: {error}" if error else "Run failed"
-
-
 def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
     """Return the run id in a synthetic ``synth:{run_id}:...`` event id, if any.
 
@@ -268,6 +251,14 @@ def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
     params = _as_raw_map(event.get("params"))
     data = _as_raw_map(params.get("data")) if params is not None else None
     return data.get("event") if data is not None else None
+
+
+def _run_failure_message(event: Mapping[str, Any]) -> str:
+    """The turn's error for a root ``lifecycle: failed`` envelope."""
+    params = _as_raw_map(event.get("params"))
+    data = _as_raw_map(params.get("data")) if params is not None else None
+    error = data.get("error") if data is not None else None
+    return f"Run failed: {error}" if error else "Run failed"
 
 
 class _ThreadEvents:
@@ -1461,6 +1452,7 @@ class LangGraphServerGateway:
         run_attempted = False
         run_id: str | None = None
         run_completed = False
+        run_failed = False
         emitted_interrupt = False
         run_cleaned_up = False
 
@@ -1538,16 +1530,16 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
-                    # A run that failed on the server ends the turn through the
-                    # error path below, like a local failure (#599).
-                    if (failure := _root_run_failure(event_map)) is not None:
-                        raise RuntimeError(failure)
                     # Stop at this run's root completed/failed/interrupted.
                     # The server sends the root interrupted right after the
                     # pause's input.requested, also while another task of
                     # the run still works.
                     phase = _root_lifecycle_phase(event_map)
-                    if phase in {"completed", "failed"}:
+                    if phase == "failed":
+                        # End the turn through the error path, like a local failure.
+                        run_failed = True
+                        raise RuntimeError(_run_failure_message(event_map))
+                    if phase == "completed":
                         break
                     if phase == "interrupted":
                         paused = True
@@ -1586,12 +1578,15 @@ class LangGraphServerGateway:
             # a consumer that stops iterating after the error event (aclose /
             # abandon) triggers GeneratorExit at the yield, so nothing after it
             # runs and the thread keeps its non-empty ``next`` — the failed step
-            # would replay on the next request.
-            cancelled_run_id = await self._cancel_incomplete_run(
-                request.thread_id,
-                run_id,
-                request_id if run_attempted else None,
-            )
+            # would replay on the next request. A run the server reported as
+            # failed has already ended, so only the repair is left.
+            cancelled_run_id = None
+            if not run_failed:
+                cancelled_run_id = await self._cancel_incomplete_run(
+                    request.thread_id,
+                    run_id,
+                    request_id if run_attempted else None,
+                )
             run_cleaned_up = True
             can_repair = (
                 cancelled_run_id is not None

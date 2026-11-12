@@ -2692,9 +2692,7 @@ def _run_lifecycle(phase: str, *, namespace=(), error=None) -> dict[str, Any]:
 
 async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error():
     """A run that raises on the server ends the turn with an error, not done,
-    and the thread is repaired even though the ended run can't be cancelled."""
-    from langgraph_sdk.errors import NotFoundError
-
+    and the thread is repaired without cancelling the run that has already ended."""
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -2724,15 +2722,7 @@ async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
             return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
-            # The run has already ended on the server, so it can't be cancelled.
             cancel_calls.append(list(run_ids))
-            raise NotFoundError(
-                "run not found",
-                response=httpx.Response(
-                    404, request=httpx.Request("POST", "http://test/cancel")
-                ),
-                body=None,
-            )
 
     client.runs = _EndedRunsClient()
     gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
@@ -2752,7 +2742,7 @@ async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
     assert "done" not in types
     (error,) = [event for event in events if event["type"] == "error"]
     assert "boom" in error["message"]
-    assert len(cancel_calls) == 1
+    assert cancel_calls == []
     assert threads.state_updates == [("abc12345", None, "__end__")]
 
 
