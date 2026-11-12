@@ -1991,6 +1991,13 @@ class TestResolvePath:
         resolved = backend._resolve_path("/data/workspace/main.py")
         assert resolved == Path(tmp_workspace, "data", "workspace", "main.py").resolve()
 
+    @pytest.mark.parametrize("name", ["tmp", "home", "bin"])
+    def test_folder_named_like_its_system_named_workspace(self, tmp_path, name):
+        ws = tmp_path / name
+        ws.mkdir()
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path(f"/{name}/{name}") == (ws / name).resolve()
+
     def test_custom_workspace_name_prefix_stripped(self, tmp_path):
         """_resolve_path uses the actual dir name, not hardcoded 'workspace'."""
         ws = tmp_path / "my-project"

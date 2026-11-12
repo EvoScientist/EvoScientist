@@ -2442,7 +2442,7 @@ class CustomSandboxBackend(LocalShellBackend):
         # A host path that names the workspace by its folder name maps into it;
         # any other path, system folder names included, is the workspace path
         # as written.
-        if _is_system_path(key):
+        if key.startswith(_SYSTEM_PATH_PREFIXES):
             # rfind, not find: the cwd's parent path may itself contain
             # "/<ws_name>/" as a substring, and we want the boundary
             # nearest the file — the workspace mount.
