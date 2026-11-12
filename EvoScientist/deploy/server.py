@@ -152,6 +152,14 @@ def _say(markup: str) -> None:
         console.print(markup)
 
 
+def _interrupt(signum: int, frame: Any) -> None:
+    """End deploy as Ctrl+C does, with the signals that end it ignored from
+    now on, so a second one cannot cut the stop short."""
+    for sig in _stop_signals():
+        signal.signal(sig, signal.SIG_IGN)
+    signal.default_int_handler(signum, frame)
+
+
 @contextlib.contextmanager
 def _stop_signals_interrupt() -> Iterator[None]:
     """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
@@ -162,10 +170,14 @@ def _stop_signals_interrupt() -> Iterator[None]:
     process started with ignored stays ignored: ``nohup EvoSci deploy &``
     keeps deploy and its server up after a logout. (SIGINT is taken over
     even when ignored, as a shell ignores it for ``EvoSci deploy &`` and a
-    later ``kill -INT`` stops deploy.)"""
+    later ``kill -INT`` stops deploy.)
+
+    The first such signal also ignores the rest from then on: every stop
+    that follows it, the one ``ensure_server`` makes of a server it was
+    starting as well as deploy's own, runs to the end."""
     hangup = getattr(signal, "SIGHUP", None)
     previous = {
-        sig: signal.signal(sig, signal.default_int_handler)
+        sig: signal.signal(sig, _interrupt)
         for sig in _stop_signals()
         if sig != hangup or signal.getsignal(sig) is not signal.SIG_IGN
     }

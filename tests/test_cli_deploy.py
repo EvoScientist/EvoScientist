@@ -786,7 +786,6 @@ def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
 
 def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
     """SIGTERM and SIGHUP end deploy as Ctrl+C does, so the stop runs."""
-    import signal
 
     captured = _run_deploy_once(
         monkeypatch, _make_config(default_workdir=str(tmp_path))
@@ -794,22 +793,34 @@ def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
 
     serving = captured["handlers_while_serving"]
     for sig in deploy_server._stop_signals():
-        assert serving[sig] is signal.default_int_handler
+        assert serving[sig] is deploy_server._interrupt
         with pytest.raises(KeyboardInterrupt):
             serving[sig](sig, None)
 
 
-def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path):
-    """A SIGTERM or SIGHUP during the start stops the server it started."""
+def test_deploy_interrupt_ignores_the_signals_that_follow(monkeypatch):
+    """After the first signal, every stop runs shielded: also the one
+    ``ensure_server`` makes of a server it was starting."""
     import signal
 
+    handlers: dict = {}
+    monkeypatch.setattr(signal, "signal", lambda sig, h: handlers.__setitem__(sig, h))
+
+    with pytest.raises(KeyboardInterrupt):
+        deploy_server._interrupt(signal.SIGTERM, None)
+
+    assert handlers == dict.fromkeys(deploy_server._stop_signals(), signal.SIG_IGN)
+
+
+def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path):
+    """A SIGTERM or SIGHUP during the start stops the server it started."""
     captured = _run_deploy_once(
         monkeypatch, _make_config(default_workdir=str(tmp_path))
     )
 
     starting = captured["handlers_while_starting"]
     for sig in deploy_server._stop_signals():
-        assert starting[sig] is signal.default_int_handler
+        assert starting[sig] is deploy_server._interrupt
 
 
 @pytest.mark.skipif(
@@ -829,8 +840,8 @@ def test_deploy_under_nohup_outlives_its_terminal(monkeypatch, tmp_path):
 
     serving = captured["handlers_while_serving"]
     assert serving[signal.SIGHUP] is signal.SIG_IGN
-    assert serving[signal.SIGINT] is signal.default_int_handler
-    assert serving[signal.SIGTERM] is signal.default_int_handler
+    assert serving[signal.SIGINT] is deploy_server._interrupt
+    assert serving[signal.SIGTERM] is deploy_server._interrupt
     assert captured["signal_handlers"][signal.SIGHUP] is signal.SIG_IGN
     assert captured["signal_handlers"][signal.SIGINT] is signal.SIG_IGN
 
