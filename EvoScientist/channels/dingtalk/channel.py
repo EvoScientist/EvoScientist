@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import ClassVar
 from urllib.parse import quote_plus
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..capabilities import DINGTALK as DINGTALK_CAPS
 from ..config import BaseChannelConfig
 from ..mixins import TokenMixin, WebSocketMixin
@@ -176,7 +176,8 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
             file_name = (
                 raw_content_obj.get("fileName")
                 or raw_content_obj.get("name")
-                or f"dingtalk_{msg_type}"
+                or msg_type
+                or "attachment"
             )
             download_code = raw_content_obj.get("downloadCode") or ""
             download_url = raw_content_obj.get("downloadUrl") or ""
@@ -195,7 +196,7 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
                     dl_headers = None
                 local, ann = await self._download_attachment(
                     download_url,
-                    f"dingtalk_{file_name}",
+                    attachment_filename(file_name, msg_id, 0),
                     headers=dl_headers,
                     file_size=int(file_size) if file_size else None,
                 )
@@ -207,7 +208,9 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
             elif file_name:
                 annotations.append(f"[{media_label}: {file_name}]")
 
-        for att_key in ("imageContent", "fileContent", "videoContent", "audioContent"):
+        for index, att_key in enumerate(
+            ("imageContent", "fileContent", "videoContent", "audioContent"), start=1
+        ):
             att = payload.get(att_key)
             if att and isinstance(att, dict):
                 file_size = att.get("fileSize") or att.get("downloadSize") or 0
@@ -236,7 +239,7 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
                         dl_headers = None
                     local, ann = await self._download_attachment(
                         download_url,
-                        f"dingtalk_{file_name}",
+                        attachment_filename(file_name, msg_id, index),
                         headers=dl_headers,
                         file_size=int(file_size) if file_size else None,
                     )
