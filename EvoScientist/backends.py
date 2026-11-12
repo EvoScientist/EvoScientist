@@ -2876,8 +2876,8 @@ def sandbox_file_path(
     file in that route's tier, found as the agent's composite backend routes
     it, or None when that tier keeps no file on disk. Any other path is
     mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
-    so a system path the sandbox reads as a workspace basename names that
-    workspace file, not the host file. Outside dangerous mode the result
+    so a host-looking path names the workspace file at that path as written,
+    not the host file. Outside dangerous mode the result
     lies inside *work_dir* or *media_dir* once resolved; anything else, or a
     path the sandbox refuses, gives None.
     """
