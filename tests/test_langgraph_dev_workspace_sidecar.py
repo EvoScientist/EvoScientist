@@ -710,11 +710,21 @@ def _owned_record(monkeypatch, *, owner_created: float) -> Processes:
     return processes
 
 
+@pytest.mark.parametrize(
+    "owner_now",
+    [
+        50.0,
+        # A clock step moved the creation time psutil reports; it still
+        # runs deploy.
+        55.0,
+    ],
+    ids=["same", "clock step"],
+)
 def test_stop_server_keep_owned_leaves_server_while_its_owner_runs(
-    monkeypatch, runtime_paths
+    monkeypatch, runtime_paths, owner_now
 ):
     processes = _owned_record(monkeypatch, owner_created=50.0)
-    processes.add(77, created=50.0, cmdline=["EvoSci", "deploy"])
+    processes.add(77, created=owner_now, cmdline=["EvoSci", "deploy"])
     monkeypatch.setattr(manager, "_end_server_tree", lambda *a, **k: None)
 
     with pytest.raises(manager.ServerKeptError):

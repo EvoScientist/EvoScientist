@@ -158,13 +158,16 @@ def _stop_signals_interrupt() -> Iterator[None]:
     does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
     otherwise end the process without it, and leave the server, which runs
     in its own session or process group, running. Installed before the
-    start, so a signal while the server starts stops it too. A signal this
+    start, so a signal while the server starts stops it too. A SIGHUP this
     process started with ignored stays ignored: ``nohup EvoSci deploy &``
-    keeps deploy and its server up after a logout."""
+    keeps deploy and its server up after a logout. (SIGINT is taken over
+    even when ignored, as a shell ignores it for ``EvoSci deploy &`` and a
+    later ``kill -INT`` stops deploy.)"""
+    hangup = getattr(signal, "SIGHUP", None)
     previous = {
         sig: signal.signal(sig, signal.default_int_handler)
         for sig in _stop_signals()
-        if signal.getsignal(sig) is not signal.SIG_IGN
+        if sig != hangup or signal.getsignal(sig) is not signal.SIG_IGN
     }
     try:
         yield

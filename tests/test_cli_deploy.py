@@ -816,21 +816,23 @@ def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path)
     not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP on Windows"
 )
 def test_deploy_under_nohup_outlives_its_terminal(monkeypatch, tmp_path):
-    """``nohup EvoSci deploy &`` starts with SIGHUP ignored: it stays
-    ignored, so deploy and its server stay up after a logout."""
+    """``nohup EvoSci deploy &`` from a script starts with SIGHUP and SIGINT
+    ignored: SIGHUP stays ignored, so deploy and its server stay up after a
+    logout, and a ``kill -INT`` still stops deploy, as before."""
     import signal
 
     captured = _run_deploy_once(
         monkeypatch,
         _make_config(default_workdir=str(tmp_path)),
-        inherited={signal.SIGHUP: signal.SIG_IGN},
+        inherited={signal.SIGHUP: signal.SIG_IGN, signal.SIGINT: signal.SIG_IGN},
     )
 
-    assert captured["handlers_while_serving"][signal.SIGHUP] is signal.SIG_IGN
-    assert (
-        captured["handlers_while_serving"][signal.SIGTERM] is signal.default_int_handler
-    )
+    serving = captured["handlers_while_serving"]
+    assert serving[signal.SIGHUP] is signal.SIG_IGN
+    assert serving[signal.SIGINT] is signal.default_int_handler
+    assert serving[signal.SIGTERM] is signal.default_int_handler
     assert captured["signal_handlers"][signal.SIGHUP] is signal.SIG_IGN
+    assert captured["signal_handlers"][signal.SIGINT] is signal.SIG_IGN
 
 
 @pytest.mark.skipif(

@@ -809,8 +809,10 @@ def owned_by_its_starter(record: ServerRecord | None) -> bool:
 def owner_running(record: ServerRecord) -> bool:
     """Whether the process the record names as the server's owner still
     runs: its PID is alive with the creation time recorded, or one that
-    cannot be read. A record that names no owner (an older release, or an
-    owner that could not be read) counts as running."""
+    cannot be read, or, since a clock step moves the creation time psutil
+    reports, another one while it still runs ``deploy``
+    (:func:`_runs_deploy`). A record that names no owner (an older release,
+    or an owner that could not be read) counts as running."""
     pid = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
     created = record.fields.get(server_record.OWNER_CREATE_TIME_KEY)
     if pid is None or isinstance(created, bool) or not isinstance(created, int | float):
@@ -818,7 +820,19 @@ def owner_running(record: ServerRecord) -> bool:
     if not psutil.pid_exists(pid):
         return False
     now = _create_time(pid)
-    return now is None or abs(now - created) <= _CREATE_TIME_TOLERANCE
+    if now is None or abs(now - created) <= _CREATE_TIME_TOLERANCE:
+        return True
+    return _runs_deploy(pid)
+
+
+def _runs_deploy(pid: int) -> bool:
+    """Whether *pid* runs ``EvoSci deploy`` (``--json`` for the desktop app
+    too); a command line that cannot be read counts as one."""
+    try:
+        cmdline = _process_cmdline(pid)
+    except psutil.Error:
+        return True
+    return cmdline is not None and "deploy" in cmdline
 
 
 def _request_clean_stop(pid: int) -> bool:
