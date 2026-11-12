@@ -167,7 +167,15 @@ def attachment_filename(filename: str, message_id: str, index: int) -> str:
         else uuid4().hex
     )
     safe_name = filename.replace("\\", "_").replace("/", "_")
-    return f"{identity}_{index}_{safe_name}"
+    prefix = f"{identity}_{index}_"
+    # Leave room for the longest channel prefix ("dingtalk_") in NAME_MAX.
+    budget = 255 - len("dingtalk_") - len(prefix.encode())
+    suffix = Path(safe_name).suffix
+    stem = safe_name[: -len(suffix)] if suffix else safe_name
+    suffix = suffix.encode()[:budget].decode(errors="ignore")
+    stem_budget = budget - len(suffix.encode())
+    stem = stem.encode()[:stem_budget].decode(errors="ignore")
+    return f"{prefix}{stem}{suffix}"
 
 
 def check_attachment_size(file_size: int, filename: str) -> str | None:
