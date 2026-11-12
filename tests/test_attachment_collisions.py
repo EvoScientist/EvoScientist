@@ -174,3 +174,17 @@ def test_attachment_filename_without_message_id_is_unique():
     assert attachment_filename("image.jpeg", "", 0) != attachment_filename(
         "image.jpeg", "", 0
     )
+
+
+@pytest.mark.parametrize("message_id", ["sender/123", ""])
+@pytest.mark.parametrize("filename", ["x" * 250 + ".jpeg", "图" * 80 + ".jpeg"])
+def test_long_attachment_filename_fits_filesystem(tmp_path, message_id, filename):
+    from EvoScientist.channels.base import attachment_filename
+
+    name = attachment_filename(filename, message_id, 0)
+    for prefix in ("signal_", "imsg_", "qq_", "dingtalk_"):
+        path = tmp_path / (prefix + name)
+        assert len(path.name.encode()) <= 255
+        assert path.suffix == ".jpeg"
+        path.write_bytes(b"attachment")
+        assert path.read_bytes() == b"attachment"
