@@ -2368,7 +2368,7 @@ class CustomSandboxBackend(LocalShellBackend):
         Intercepts all file operations (read, write, edit, ls, grep, glob).
         Auto-corrects common LLM path mistakes instead of crashing:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
-          2. /<ws_name>/file.py            → /file.py
+          2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> exists)
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
@@ -2425,11 +2425,12 @@ class CustomSandboxBackend(LocalShellBackend):
             virtual = relative.as_posix()
             return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
-        # Auto-strip /<ws_name>/ prefix to prevent nesting
+        # Auto-strip /<ws_name>/ prefix to prevent nesting, unless the
+        # workspace has its own <ws_name>: then the path is that folder.
         ws_prefix = f"/{ws_name}/"
-        if key.startswith(ws_prefix):
+        if key.startswith(ws_prefix) and not (self.cwd / ws_name).exists():
             key = key[len(ws_prefix) - 1 :]  # "/<ws>/main.py" → "/main.py"
-        elif key == f"/{ws_name}":
+        elif key == f"/{ws_name}" and not (self.cwd / ws_name).exists():
             key = "/"
 
         # Auto-correct system absolute paths
@@ -2525,7 +2526,21 @@ class CustomSandboxBackend(LocalShellBackend):
             return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
         if self._in_media(file_path):
             return DeleteResult(error=self._MEDIA_READ_ONLY_ERROR)
+        if self._is_workspace_root(file_path):
+            return DeleteResult(error=self._DELETE_ROOT_ERROR)
         return super().delete(file_path)
+
+    _DELETE_ROOT_ERROR = (
+        "Delete blocked: the path is the workspace root. Delete the files or "
+        "folders inside it instead."
+    )
+
+    def _is_workspace_root(self, file_path: str) -> bool:
+        try:
+            return self._resolve_path(file_path) == self.cwd
+        except (OSError, RuntimeError, ValueError):
+            # Let the parent report a path it cannot resolve.
+            return False
 
     _MEDIA_READ_ONLY_ERROR = (
         "The media folder holds channel attachments; the file tools do not "
