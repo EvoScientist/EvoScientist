@@ -888,6 +888,25 @@ def test_deploy_stops_its_server_when_it_ends_before_serving(
     assert [s["proc"] for s in captured["stops"]] == captured["server"].procs
 
 
+def test_deploy_stops_the_server_a_start_left_when_interrupted(monkeypatch, tmp_path):
+    """A signal that lands after the spawn, before the start returned its
+    handle, stops the manager's handle, without the clean stop."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    left = object()
+
+    def _start(*_a):
+        monkeypatch.setattr(lgm, "_PROCESS", left)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(deploy_server, "_start_server", _start)
+    with pytest.raises(KeyboardInterrupt):
+        _run_deploy_once(monkeypatch, _make_config(default_workdir=str(tmp_path)))
+
+    stops = _run_deploy_once.captured["stops"]
+    assert [(s["proc"], s["clean"]) for s in stops] == [(left, False)]
+
+
 def test_deploy_stops_the_server_an_interrupted_start_left(monkeypatch):
     """No handle came back from the start: the stop takes the manager's,
     without the clean stop a server that never became ready does not need."""
