@@ -121,9 +121,9 @@ def resolve_media_path(
 
     The path is mapped as the sandbox maps it (see
     :func:`~EvoScientist.backends.sandbox_file_path`), so only a file inside
-    ``work_dir`` or ``media_dir`` is found, and a system path the sandbox
-    reads as a workspace basename names that workspace file, never the host
-    file. In dangerous mode a host path is the real file it names. A path
+    ``work_dir`` or ``media_dir`` is found, and a host-looking path names the
+    workspace file at that path as written, never the host file. In
+    dangerous mode a host path is the real file it names. A path
     under one of the agent's *routes* names that route's tier file instead.
     """
     if work_dir is None:
