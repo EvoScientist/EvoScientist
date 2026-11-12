@@ -7,6 +7,7 @@ import os
 import posixpath
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -2369,6 +2370,7 @@ class CustomSandboxBackend(LocalShellBackend):
         Auto-corrects common LLM path mistakes instead of crashing:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
           2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> is a folder)
+             /<ws_name>                    → /        (unless <cwd>/<ws_name> exists)
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
@@ -2523,6 +2525,9 @@ class CustomSandboxBackend(LocalShellBackend):
     def delete(self, file_path: str) -> DeleteResult:
         """Refuse ``delete`` for guarded async sub-agents (no approval path).
 
+        Also refuse a path that would remove the workspace root, and delete
+        exactly the path that was checked.
+
         No ``adelete`` override is needed: the inherited ``BackendProtocol.adelete``
         runs ``asyncio.to_thread(self.delete, ...)``, so async sub-agents reach
         this refusal too.
@@ -2531,21 +2536,49 @@ class CustomSandboxBackend(LocalShellBackend):
             return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
         if self._in_media(file_path):
             return DeleteResult(error=self._MEDIA_READ_ONLY_ERROR)
-        if self._is_workspace_root(file_path):
+        # Resolve once and delete exactly that path: resolving again could
+        # name the workspace root if a folder named like it went away in
+        # between. A ValueError (path traversal) is raised, as the parent's
+        # delete raises it.
+        try:
+            resolved = self._resolve_path(file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+        if self._is_workspace_or_above(resolved):
             return DeleteResult(error=self._DELETE_ROOT_ERROR)
-        return super().delete(file_path)
+        # FilesystemBackend.delete's body, on the path resolved above.
+        try:
+            if not resolved.exists() and not resolved.is_symlink():
+                return DeleteResult(error=f"Error: '{file_path}' not found")
+            if resolved.is_symlink():
+                resolved.unlink()
+            elif resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+            return DeleteResult(path=file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
 
     _DELETE_ROOT_ERROR = (
-        "Delete blocked: the path is the workspace root. Delete the files or "
-        "folders inside it instead."
+        "Delete blocked: the path is the workspace root or a folder that holds "
+        "it. Delete the files or folders inside the workspace instead."
     )
 
-    def _is_workspace_root(self, file_path: str) -> bool:
-        try:
-            return self._resolve_path(file_path) == self.cwd
-        except (OSError, RuntimeError, ValueError):
-            # Let the parent report a path it cannot resolve.
+    def _is_workspace_or_above(self, path: Path) -> bool:
+        """Whether deleting *path* would remove the workspace root.
+
+        Dangerous mode leaves absolute paths as written, so ``..`` and
+        symlinked parents are resolved before comparing. A symlink is
+        removed as a link, so it never takes the workspace with it.
+        """
+        if path.is_symlink():
             return False
+        try:
+            real = path.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return real == self.cwd or self.cwd.is_relative_to(real)
 
     _MEDIA_READ_ONLY_ERROR = (
         "The media folder holds channel attachments; the file tools do not "
