@@ -157,9 +157,14 @@ def _stop_signals_interrupt() -> Iterator[None]:
     """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
     does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
     otherwise end the process without it, and leave the server, which runs
-    in its own session or process group, running."""
+    in its own session or process group, running. Installed before the
+    start, so a signal while the server starts stops it too. A signal this
+    process started with ignored stays ignored: ``nohup EvoSci deploy &``
+    keeps deploy and its server up after a logout."""
     previous = {
-        sig: signal.signal(sig, signal.default_int_handler) for sig in _stop_signals()
+        sig: signal.signal(sig, signal.default_int_handler)
+        for sig in _stop_signals()
+        if signal.getsignal(sig) is not signal.SIG_IGN
     }
     try:
         yield

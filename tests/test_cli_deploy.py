@@ -74,12 +74,14 @@ def _run_deploy_once(
     server: Server | None = None,
     on_wait=None,
     on_stop=None,
+    inherited: dict | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     *port_occupied*: something holds the port, this data folder's server
     when *langgraph_dev_running*, another program otherwise. *server* is the
     fake the start goes through (a fresh one by default). Serving ends with
     a Ctrl+C, after *on_wait* runs; *on_stop* runs inside the server's stop.
+    *inherited*: the signal handlers the process started with.
     Returns a ``captured`` dict with observation points; *printed* collects
     the console output, also of a run that exits."""
     import EvoScientist.config as config_mod
@@ -164,7 +166,7 @@ def _run_deploy_once(
     # read what was in place at any point without touching the real ones.
     import signal
 
-    handlers: dict = {}
+    handlers: dict = dict(inherited or {})
     captured["signal_handlers"] = handlers
     captured["installed"] = []
 
@@ -175,6 +177,18 @@ def _run_deploy_once(
         return previous
 
     monkeypatch.setattr(signal, "signal", _fake_signal)
+    monkeypatch.setattr(
+        signal, "getsignal", lambda signum: handlers.get(signum, signal.SIG_DFL)
+    )
+
+    # What was in place while the server started.
+    start_server = deploy_server._start_server
+
+    def _recording_start_server(*args):
+        captured["handlers_while_starting"] = dict(handlers)
+        return start_server(*args)
+
+    monkeypatch.setattr(deploy_server, "_start_server", _recording_start_server)
 
     # Serving ends as a Ctrl+C would end it, unless the test says otherwise.
     def _fake_wait_for_stop():
@@ -783,6 +797,40 @@ def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
         assert serving[sig] is signal.default_int_handler
         with pytest.raises(KeyboardInterrupt):
             serving[sig](sig, None)
+
+
+def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path):
+    """A SIGTERM or SIGHUP during the start stops the server it started."""
+    import signal
+
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
+    )
+
+    starting = captured["handlers_while_starting"]
+    for sig in deploy_server._stop_signals():
+        assert starting[sig] is signal.default_int_handler
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP on Windows"
+)
+def test_deploy_under_nohup_outlives_its_terminal(monkeypatch, tmp_path):
+    """``nohup EvoSci deploy &`` starts with SIGHUP ignored: it stays
+    ignored, so deploy and its server stay up after a logout."""
+    import signal
+
+    captured = _run_deploy_once(
+        monkeypatch,
+        _make_config(default_workdir=str(tmp_path)),
+        inherited={signal.SIGHUP: signal.SIG_IGN},
+    )
+
+    assert captured["handlers_while_serving"][signal.SIGHUP] is signal.SIG_IGN
+    assert (
+        captured["handlers_while_serving"][signal.SIGTERM] is signal.default_int_handler
+    )
+    assert captured["signal_handlers"][signal.SIGHUP] is signal.SIG_IGN
 
 
 @pytest.mark.skipif(
