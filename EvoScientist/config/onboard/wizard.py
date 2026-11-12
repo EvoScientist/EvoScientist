@@ -17,6 +17,7 @@ from ..settings import (
     EvoScientistConfig,
     get_config_path,
     load_config,
+    providers_in_use,
     save_config,
 )
 from ..store import (
@@ -230,17 +231,9 @@ def _configure_provider_auth_mode(
             config.openai_auth_mode = _step_openai_auth_mode(config)
 
 
-def _active_llm_providers(config: EvoScientistConfig) -> set[str]:
-    """Return providers currently selected by the main and auxiliary models."""
-    providers = {config.provider}
-    if config.auxiliary_provider:
-        providers.add(config.auxiliary_provider)
-    return providers
-
-
 def _reconcile_oauth_modes(config: EvoScientistConfig) -> None:
     """Clear OAuth flags for providers no selected model uses."""
-    active_providers = _active_llm_providers(config)
+    active_providers = providers_in_use(config)
     if "anthropic" not in active_providers:
         config.anthropic_auth_mode = "api_key"
     if "openai" not in active_providers:
@@ -790,7 +783,10 @@ def _run_onboard(
                     config.model = _step_model(
                         config, provider, ollama_detected_models=ollama_detected_models
                     )
-                if _asks_reasoning_effort(provider) and _preset("model") is None:
+                if (
+                    _asks_reasoning_effort(config, provider)
+                    and _preset("model") is None
+                ):
                     config.reasoning_effort = _step_reasoning_effort(config, provider)
                 _autosave(config)
 

@@ -73,9 +73,6 @@ def run_serve_once(
     def _fake_ensure_dirs():
         order.append(("ensure_dirs", None))
 
-    def _fake_reload_env_dirs():
-        order.append(("reload_env_dirs", None))
-
     def _fake_load_agent(
         work_dir=None,
         checkpointer=None,
@@ -83,10 +80,12 @@ def run_serve_once(
         *,
         workspace,
         runtime=None,
+        graph_gateway=None,
     ):
         captured["work_dir"] = work_dir
         captured["workspace"] = workspace
         captured["async_runtime"] = runtime
+        captured["load_graph_gateway"] = graph_gateway
         return object()
 
     def _fake_start_channels_bus_mode(
@@ -112,7 +111,6 @@ def run_serve_once(
         captured["ensure_backend"] = backend
 
     monkeypatch.setattr(commands, "ensure_dirs", _fake_ensure_dirs)
-    monkeypatch.setattr(commands, "reload_env_dirs", _fake_reload_env_dirs)
     monkeypatch.setattr(
         commands, "_ensure_async_subagent_server", _fake_ensure_async_server
     )

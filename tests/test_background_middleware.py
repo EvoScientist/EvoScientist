@@ -104,6 +104,14 @@ def test_middleware_registers_four_tools(tmp_path):
     }
 
 
+def test_run_in_background_keeps_short_commands_on_execute(tmp_path):
+    """Its output reaches only the log, so a quick command's errors go unseen."""
+    mw = BackgroundExecutionMiddleware(work_dir=tmp_path, skills_dir=None)
+    [tool] = [t for t in mw.tools if t.name == "run_in_background"]
+    assert "Output goes only to a log file" in tool.description
+    assert "finishes in seconds use execute" in tool.description
+
+
 def test_no_job_in_tool_names(tmp_path):
     """Naming ADR: the word 'job' must not appear in the tool surface."""
     mw = BackgroundExecutionMiddleware(work_dir=tmp_path, skills_dir=None)
@@ -428,7 +436,7 @@ def test_list_processes_forwards_all_threads(monkeypatch):
 
 def test_stop_process_is_scoped_to_the_launching_thread(tmp_path, monkeypatch):
     """A session's agent cannot stop another session's process (shared
-    keepalive server); the launching session can."""
+    server); the launching session can."""
     owner = SimpleNamespace(
         tool_call_id="call-owner", config={"configurable": {"thread_id": "T-owner"}}
     )

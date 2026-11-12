@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from starlette.testclient import TestClient
 
 from EvoScientist.config import EvoScientistConfig
@@ -167,14 +168,21 @@ def test_ollama_discovery_skipped_when_base_url_absent():
 # ---- /api/teams -----------------------------------------------------------
 
 
-def _expert_info(
-    name: str,
-    *,
-    description: str = "",
-    byline: str = "",
-    capability_tags: list[str] | None = None,
-    avatar_hint: str = "",
-):
+@pytest.fixture
+def project(tmp_path):
+    """A served project."""
+    from EvoScientist.langgraph_dev import registry
+
+    workspace = Workspace(tmp_path)
+    registry.REGISTRY.set_registered(workspace.key, True)
+    return workspace
+
+
+def _get_teams(workspace: Workspace):
+    return client.get("/api/teams", params={"workspace_dir": workspace.key})
+
+
+def _expert_info(name: str, *, description: str = ""):
     """Build a SkillInfo for an expert skill (agent-teams v1)."""
     from pathlib import Path
 
@@ -186,13 +194,10 @@ def _expert_info(
         path=Path(f"/skills/{name}"),
         source="builtin",
         type="expert",
-        byline=byline,
-        capability_tags=list(capability_tags or []),
-        avatar_hint=avatar_hint,
     )
 
 
-def test_get_teams_returns_installed_expert_skills():
+def test_get_teams_returns_installed_expert_skills(project):
     experts = [
         _expert_info("expert-a", description="First expert"),
         _expert_info("expert-b", description="Second expert"),
@@ -201,7 +206,7 @@ def test_get_teams_returns_installed_expert_skills():
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        resp = client.get("/api/teams")
+        resp = _get_teams(project)
     assert resp.status_code == 200
     body = resp.json()
     assert "teams" in body
@@ -209,7 +214,7 @@ def test_get_teams_returns_installed_expert_skills():
     assert names == ["expert-a", "expert-b"]
 
 
-def test_get_teams_omits_backend_implementation_fields():
+def test_get_teams_omits_backend_implementation_fields(project):
     """Never leak SKILL.md body / role / dispatch / source / path / etc.
     onto the gallery endpoint — those are backend-only."""
     experts = [_expert_info("expert-a")]
@@ -217,7 +222,7 @@ def test_get_teams_omits_backend_implementation_fields():
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     entry = body["teams"][0]
     forbidden = {
         "system_prompt",
@@ -236,57 +241,32 @@ def test_get_teams_omits_backend_implementation_fields():
     )
 
 
-def test_get_teams_projects_optional_gallery_metadata_when_present():
-    experts = [
-        _expert_info(
-            "idea-brainstorm",
-            description="Multi-round brainstorm",
-            byline="Research idea brainstormer",
-            capability_tags=["Iteration", "ELO ranking"],
-            avatar_hint="lightbulb",
-        ),
-    ]
+def test_get_teams_entry_is_name_and_description(project):
+    """Each gallery card carries name and description only."""
+    experts = [_expert_info("minimal-expert", description="Minimal expert")]
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=experts,
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     entry = body["teams"][0]
-    assert entry["name"] == "idea-brainstorm"
-    assert entry["description"] == "Multi-round brainstorm"
-    assert entry["byline"] == "Research idea brainstormer"
-    assert entry["capability_tags"] == ["Iteration", "ELO ranking"]
-    assert entry["avatar_hint"] == "lightbulb"
+    assert entry == {"name": "minimal-expert", "description": "Minimal expert"}
 
 
-def test_get_teams_omits_optional_fields_when_absent():
-    """Gallery card should degrade gracefully when an expert declares
-    only the minimum (name, description, type: expert)."""
-    experts = [_expert_info("minimal-expert")]  # no byline / tags / avatar
-    with patch(
-        "EvoScientist.tools.skills_manager.list_expert_skills",
-        return_value=experts,
-    ):
-        body = client.get("/api/teams").json()
-    entry = body["teams"][0]
-    assert set(entry.keys()) == {"name", "description"}
-
-
-def test_get_teams_returns_empty_list_when_no_experts_installed():
+def test_get_teams_returns_empty_list_when_no_experts_installed(project):
     with patch(
         "EvoScientist.tools.skills_manager.list_expert_skills",
         return_value=[],
     ):
-        body = client.get("/api/teams").json()
+        body = _get_teams(project).json()
     assert body == {"teams": []}
 
 
-def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
+def test_get_teams_calls_loader_with_include_system_true(project):
     """First-party experts ship as builtin skills; the endpoint must
     include the builtin tier or the gallery will be empty on a fresh
     workspace with no user-installed experts, and it must look in the
-    server's workspace."""
-    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+    named project."""
     calls = []
 
     def spy(include_system=False, *, workspace):
@@ -297,47 +277,60 @@ def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
         "EvoScientist.tools.skills_manager.list_expert_skills",
         new=spy,
     ):
-        client.get("/api/teams")
-    assert calls == [(True, Workspace(tmp_path))]
+        _get_teams(project)
+    assert calls == [(True, project)]
 
 
-# ---- /api/workspace -------------------------------------------------------
-# The WebUI reads the served folder here instead of from a file on its own
-# machine, and uses the string as-is.
+def test_get_teams_lists_named_project(project, tmp_path):
+    from EvoScientist.langgraph_dev import registry
+
+    other = Workspace(tmp_path / "other")
+    other.root.mkdir()
+    registry.REGISTRY.set_registered(other.key, True)
+    calls = []
+
+    def spy(include_system=False, *, workspace):
+        calls.append(workspace)
+        return []
+
+    with patch("EvoScientist.tools.skills_manager.list_expert_skills", new=spy):
+        resp = client.get("/api/teams", params={"workspace_dir": other.key})
+
+    assert resp.status_code == 200
+    assert calls == [other]
 
 
-def test_get_workspace_returns_the_served_folder_key(monkeypatch, tmp_path):
-    (tmp_path / "real").mkdir()
-    (tmp_path / "link").symlink_to(tmp_path / "real")
-    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "link"))
-    monkeypatch.delenv("EVOSCIENTIST_RUN_DIR", raising=False)
+@pytest.mark.parametrize(
+    ("workspace_dir", "status", "error"),
+    [("relative/ws", 400, "invalid_path"), (None, 404, "not_served")],
+)
+@pytest.mark.usefixtures("project")
+def test_get_teams_refuses_unserved_project(workspace_dir, status, error, tmp_path):
+    if workspace_dir is None:
+        workspace_dir = str(tmp_path / "nonexistent")
+    resp = client.get("/api/teams", params={"workspace_dir": workspace_dir})
 
-    resp = client.get("/api/workspace")
-
-    assert resp.json() == {
-        "workspace_dir": Workspace(tmp_path / "real").key,
-        "run_dir": None,
-    }
-
-
-def test_get_workspace_returns_the_run_folder_of_a_run_mode_server(
-    monkeypatch, tmp_path
-):
-    run_dir = tmp_path / "runs" / "r1"
-    run_dir.mkdir(parents=True)
-    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
-    monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run_dir))
-
-    resp = client.get("/api/workspace")
-
-    assert resp.json() == {
-        "workspace_dir": Workspace(tmp_path).key,
-        "run_dir": run_dir.resolve().as_posix(),
-    }
+    assert resp.status_code == status
+    assert resp.json() == {"error": error}
 
 
-def test_get_workspace_refuses_a_foreign_origin():
-    resp = client.get("/api/workspace", headers={"Origin": "https://evil.example"})
+@pytest.mark.usefixtures("project")
+def test_get_teams_requires_workspace_dir():
+    """The server serves every registered project and has no default one."""
+    resp = client.get("/api/teams")
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "workspace_dir_required"
+
+
+def test_get_workspace_route_is_gone(project):
+    """The server reports no project of its own; a client lists the
+    registered ones (``GET /api/workspaces``)."""
+    assert client.get("/api/workspace").status_code == 404
+
+
+def test_get_workspaces_refuses_a_foreign_origin():
+    resp = client.get("/api/workspaces", headers={"Origin": "https://evil.example"})
 
     assert resp.status_code == 403
 

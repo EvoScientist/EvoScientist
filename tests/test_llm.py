@@ -676,7 +676,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
-        model = get_chat_model("deepseek-v4-flash", provider="deepseek")
+        model = get_chat_model("deepseek-flash", provider="deepseek")
 
         mock_init.assert_not_called()
         assert isinstance(model, EvoChatDeepSeek)
@@ -883,8 +883,12 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        # The dated canonical_slug is routable too and must be equally covered.
-        for model_name in ("moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"):
+        # The rule covers the K3 family: dated slugs and point releases too.
+        for model_name in (
+            "moonshotai/kimi-k3",
+            "moonshotai/kimi-k3-20260715",
+            "moonshotai/kimi-k3.1-pro",
+        ):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -902,8 +906,8 @@ class TestThirdPartyRouting:
         """Non-Moonshot models keep the function_calling default.
 
         Includes always-thinking models like grok-4.5 — the forced tool_choice
-        restriction is Moonshot-specific, so the json_schema rerouting must
-        stay limited to _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS.
+        restriction is Moonshot-specific — and Moonshot models outside the
+        always-thinking K3 family.
         """
         from pydantic import BaseModel
 
@@ -912,7 +916,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5"):
+        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5", "moonshotai/kimi-k2.6"):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -1193,6 +1197,20 @@ class TestThirdPartyRouting:
 
         mock_init.assert_not_called()
 
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_does_not_borrow_another_providers_id(
+        self, mock_init, monkeypatch, provider
+    ):
+        # A vendor/model id from another provider's entry can be routable too
+        # and would silently run an older snapshot.
+        monkeypatch.setitem(MODELS, "listed-elsewhere", ("vendor/model-0731", "novita"))
+
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model("listed-elsewhere", provider=provider)
+
+        mock_init.assert_not_called()
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_router_accepts_a_full_model_id(self, mock_init, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
@@ -1385,7 +1403,7 @@ class TestThirdPartyRouting:
 
     @pytest.mark.parametrize(
         ("configured_model", "api_model"),
-        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
+        [("glm-5.2", "glm-5-2")],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_volcengine_code_routes_through_openai(
@@ -1526,7 +1544,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "anthropic"
@@ -1637,21 +1655,23 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
         monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
-        """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
+        """MiniMax gets the only thinking shape its API takes and its documented
+        output limit (no langchain profile, so the fallback would be 4096)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert "thinking" in call_kwargs
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["max_tokens"] == 131072
         assert "reasoning" not in call_kwargs
 
     @patch("EvoScientist.llm.models._patch_openai_compat_content")
@@ -1688,6 +1708,7 @@ class TestThirdPartyRouting:
         model._client = anthropic.Anthropic(
             api_key="mm-key",
             base_url="https://api.minimaxi.com/anthropic",
+            timeout=None,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 
@@ -1769,22 +1790,10 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("minimax-m2.5", provider="minimax")
+        get_chat_model("minimax-m3.1-flash", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5"
-        assert call_kwargs["model_provider"] == "anthropic"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_minimax_highspeed_model(self, mock_init, monkeypatch):
-        """MiniMax M2.5-highspeed model should resolve correctly."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
-
-        get_chat_model("minimax-m2.5-highspeed", provider="minimax")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
+        assert call_kwargs["model"] == "MiniMax-M3.1-Flash"
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
 
@@ -1827,28 +1836,20 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
-        minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 5
-        model_names = {name for name, _ in minimax_models}
-        assert "minimax-m3" in model_names
-        assert "minimax-m2.7" in model_names
-        assert "minimax-m2.7-highspeed" in model_names
-        assert "minimax-m2.5" in model_names
-        assert "minimax-m2.5-highspeed" in model_names
+        """MiniMax lists the two models its API serves."""
+        model_names = {name for name, _ in get_models_for_provider("minimax")}
+        assert model_names == {"minimax-m3.1-flash", "minimax-m3"}
 
     def test_minimax_model_ids_correct(self):
         """MiniMax model IDs should match the official API model names."""
-        minimax_models = get_models_for_provider("minimax")
-        model_dict = dict(minimax_models)
-        assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
-        assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
-        assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"
+        model_dict = dict(get_models_for_provider("minimax"))
+        assert model_dict["minimax-m3.1-flash"] == "MiniMax-M3.1-Flash"
+        assert model_dict["minimax-m3"] == "MiniMax-M3"
 
     def test_minimax_short_name_in_models_dict(self):
         """MiniMax short names should be accessible via the MODELS dict."""
         # Note: MODELS dict uses last-entry-wins, so direct minimax entries
-        # may be overridden by nvidia/siliconflow/openrouter entries.
+        # may be overridden by openrouter entries.
         # Use get_models_for_provider() for provider-specific lookups.
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
@@ -2876,7 +2877,7 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider="deepseek",
             http_client=client,
         )
@@ -2901,6 +2902,109 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
     assert captured["messages"][2]["content"] == (
         "[attachment omitted: this model does not support this input type]"
     )
+
+
+@pytest.mark.parametrize(
+    ("configured", "sent"),
+    [("", "high"), ("low", "low"), ("none", "none"), ("turbo", "high")],
+)
+@pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
+def test_deepseek_sends_the_configured_reasoning_effort(monkeypatch, configured, sent):
+    import json
+
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    if configured:
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+    captured = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        get_chat_model(
+            "deepseek-flash", provider="deepseek", http_client=client
+        ).invoke("hi")
+
+    assert captured.get("reasoning_effort") == sent
+
+
+def test_a_tie_between_two_levels_picks_the_lower_one():
+    from EvoScientist.llm.models import _nearest_reasoning_level
+
+    assert _nearest_reasoning_level("xhigh", ("max", "high", "medium", "low")) == "high"
+
+
+@pytest.mark.parametrize(
+    ("model_name", "configured", "sent"),
+    [
+        ("claude-sonnet-5-5", "medium", "medium"),
+        # Claude 4.6 lists no xhigh, so it gets the nearest level it lists.
+        ("claude-sonnet-4-6", "xhigh", "high"),
+        # No level list in the profile: sent as configured.
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+    ],
+)
+def test_native_claude_effort_reaches_the_wire(
+    monkeypatch, model_name, configured, sent
+):
+    import json
+
+    import anthropic
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+    captured = {}
+
+    def handler(request) -> object:
+        captured.update(json.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": model_name,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # A small max_tokens keeps the SDK from requiring streaming.
+    model = get_chat_model(model_name, provider="anthropic", max_tokens=1024)
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    model.invoke("hi")
+
+    assert captured["output_config"]["effort"] == sent
+    assert captured["thinking"] == {"type": "adaptive", "display": "summarized"}
 
 
 class TestDeepseekReasoningPassback:
@@ -2952,6 +3056,27 @@ class TestDeepseekReasoningPassback:
         payload = model._get_request_payload(messages)
 
         assert "reasoning_content" not in payload["messages"][1]
+
+    def test_effort_none_omits_reasoning_passback(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from EvoScientist.llm.deepseek import EvoChatDeepSeek
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        model = EvoChatDeepSeek(model="deepseek-v4-flash", reasoning_effort="none")
+        messages = [
+            HumanMessage("q1"),
+            AIMessage("a1", additional_kwargs={"reasoning_content": "rc1"}),
+            HumanMessage("q2"),
+        ]
+
+        payload = model._get_request_payload(messages)
+
+        assert "reasoning_content" not in payload["messages"][1]
+        # A call-time level turns thinking back on, so the passback returns.
+        payload = model._get_request_payload(messages, reasoning_effort="high")
+
+        assert payload["messages"][1]["reasoning_content"] == "rc1"
 
 
 # =============================================================================
@@ -3042,142 +3167,6 @@ class TestPatchOpenAICaptureReasoningContent:
         assert len(msg.tool_calls) == 1
         assert msg.tool_calls[0]["name"] == "get_weather"
         assert msg.additional_kwargs.get("reasoning_content") == "use the tool"
-
-
-class TestIsResponsesReasoningItem:
-    """_is_responses_reasoning_item flags encrypted OpenAI-Responses items."""
-
-    def test_rs_id_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"id": "rs_09363d42", "type": "x"})
-
-    def test_encrypted_data_is_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert _is_responses_reasoning_item({"data": "gAAAAAB...", "type": "x"})
-
-    def test_plain_text_reasoning_is_not_responses_item(self):
-        from EvoScientist.llm.patches import _is_responses_reasoning_item
-
-        assert not _is_responses_reasoning_item(
-            {"type": "reasoning.text", "text": "thinking", "index": 0}
-        )
-        assert not _is_responses_reasoning_item("not a dict")
-
-
-class TestPatchOpenrouterStripResponsesReasoning:
-    """OpenAI-Responses encrypted reasoning items (`rs_` id / encrypted data)
-    are stripped from outgoing OpenRouter assistant messages, preventing the
-    multi-turn "Item with id 'rs_...' not found" 400 (store=false; #37777).
-    """
-
-    def _apply(self):
-        import langchain_openrouter.chat_models as mod
-
-        import EvoScientist.llm.patches as patches
-
-        orig = mod._convert_message_to_dict
-        orig_flag = patches._openrouter_reasoning_strip_patched
-        patches._openrouter_reasoning_strip_patched = False
-        patches._patch_openrouter_strip_responses_reasoning()
-        return patches, mod, orig, orig_flag
-
-    @staticmethod
-    def _restore(patches, mod, orig, orig_flag):
-        mod._convert_message_to_dict = orig
-        patches._openrouter_reasoning_strip_patched = orig_flag
-
-    def test_strips_encrypted_item_drops_key_when_empty(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {
-                            "type": "reasoning.summary",
-                            "format": "openai-responses-v1",
-                            "id": "rs_09363d42b054",
-                            "data": "gAAAAAB...",
-                            "summary": "real reasoning text",
-                            "index": 0,
-                        }
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            # sole entry was an rs_ item → reasoning_details removed entirely.
-            assert "reasoning_details" not in result
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_keeps_plain_text_reasoning(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        {"type": "reasoning.text", "text": "thinking", "index": 0},
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            kept = result["reasoning_details"]
-            assert len(kept) == 1
-            assert kept[0]["type"] == "reasoning.text"
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_does_not_mutate_original_message(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            details = [{"id": "rs_abc", "data": "blob"}]
-            msg = AIMessage(
-                content="x", additional_kwargs={"reasoning_details": details}
-            )
-            mod._convert_message_to_dict(msg)
-            # stored history untouched — we filter a fresh list, not in place.
-            assert details == [{"id": "rs_abc", "data": "blob"}]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_patch_is_idempotent(self):
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            wrapper = mod._convert_message_to_dict
-            # Second call is guarded by the flag → must not re-wrap.
-            patches._patch_openrouter_strip_responses_reasoning()
-            assert mod._convert_message_to_dict is wrapper
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
-
-    def test_non_dict_entry_is_kept(self):
-        from langchain_core.messages import AIMessage
-
-        patches, mod, orig, orig_flag = self._apply()
-        try:
-            msg = AIMessage(
-                content="done",
-                additional_kwargs={
-                    "reasoning_details": [
-                        "opaque",  # non-dict slipped in → kept, not crashed on
-                        {"id": "rs_abc", "data": "blob", "index": 1},
-                    ],
-                },
-            )
-            result = mod._convert_message_to_dict(msg)
-            assert result["reasoning_details"] == ["opaque"]
-        finally:
-            self._restore(patches, mod, orig, orig_flag)
 
 
 # =============================================================================
@@ -3337,6 +3326,153 @@ class TestAnthropicStripForeignReasoning:
 
 
 # =============================================================================
+# Test _patch_deepagents_bound_reasoning_claude_only
+# =============================================================================
+
+
+class TestSummaryKeepsNonClaudeThinking:
+    """Only Claude binds thinking to the history a summary replaces; Kimi backends
+    reject a tool-call turn whose thinking is missing."""
+
+    @pytest.fixture(autouse=True)
+    def _agent_summarization(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.language_models import FakeListChatModel
+
+        from EvoScientist.middleware import create_per_run_summarization_middleware
+
+        # Building the agent's summarization middleware installs the patch.
+        create_per_run_summarization_middleware(
+            FakeListChatModel(responses=["unused"]),
+            FilesystemBackend(root_dir=tmp_path),
+        )
+
+    @staticmethod
+    def _events(model: str) -> list[dict]:
+        return [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "ls",
+                    "input": {},
+                },
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 2},
+            },
+            {"type": "message_stop"},
+        ]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["invoke", "stream"])
+    @pytest.mark.parametrize(
+        ("provider", "model", "key_env", "kept"),
+        [
+            ("anthropic", "claude-sonnet-5-5", "ANTHROPIC_API_KEY", ["tool_use"]),
+            (
+                "kimi-coding",
+                "kimi-for-coding",
+                "KIMI_API_KEY",
+                ["thinking", "tool_use"],
+            ),
+        ],
+    )
+    def test_reply_kept_across_a_summary(
+        self, monkeypatch, provider, model, key_env, kept, stream
+    ):
+        import json
+
+        import anthropic
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import HumanMessage
+
+        httpx = _anthropic_httpx()
+        monkeypatch.setenv(key_env, "test-key")
+        chat_model = get_chat_model(model, provider=provider)
+        events = self._events(model)
+
+        def respond(request):
+            if json.loads(request.content).get("stream"):
+                body = "".join(
+                    f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events
+                )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=body.encode(),
+                )
+            message = {
+                **events[0]["message"],
+                "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": ""},
+                    events[4]["content_block"],
+                ],
+                "stop_reason": "tool_use",
+            }
+            return httpx.Response(200, json=message)
+
+        chat_model._client = anthropic.Anthropic(
+            api_key=chat_model.anthropic_api_key.get_secret_value(),
+            base_url=chat_model.anthropic_api_url,
+            timeout=None,
+            http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        )
+        prompt = [HumanMessage("list files")]
+        if stream:
+            reply = None
+            for chunk in chat_model.stream(prompt):
+                reply = chunk if reply is None else reply + chunk
+        else:
+            reply = chat_model.invoke(prompt)
+
+        assert reply.response_metadata["model_name"] == model
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == kept
+
+    def test_unnamed_reply_keeps_upstreams_drop(self):
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import AIMessage
+
+        reply = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "done"},
+            ],
+            response_metadata={"model_provider": "anthropic"},
+        )
+
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == ["text"]
+
+
+# =============================================================================
 # Test _patch_anthropic_structured_output
 # =============================================================================
 
@@ -3421,6 +3557,421 @@ class TestAnthropicStructuredOutput:
 
 
 # =============================================================================
+# Test _patch_anthropic_thinking_binding
+# =============================================================================
+
+
+class TestAnthropicThinkingBinding:
+    MISMATCH = (
+        "messages.1.content.0: Invalid `signature` in `thinking` block. The block "
+        "is bound to a different conversation. Remove the block, or set "
+        '`thinking.block_binding.prefix_mismatch_behavior` to "drop_block".'
+    )
+    SETTING_REFUSED = "thinking.block_binding: Extra inputs are not permitted"
+    BETA_REFUSED = (
+        "Unexpected value(s) `thinking-binding-controls-2026-08-01` for the "
+        "`anthropic-beta` header"
+    )
+
+    @staticmethod
+    def _serve(
+        model,
+        error_message,
+        *,
+        setting_status=200,
+        setting_error=SETTING_REFUSED,
+        stripped_status=200,
+    ):
+        """Answer ``model`` like the API: a replayed thinking block is refused
+        unless the request asks to drop stale blocks, which gets
+        ``setting_status`` (with ``setting_error``). A later request that
+        replays none gets ``stripped_status``. Returns the requests."""
+        import json
+
+        import anthropic
+
+        httpx = _anthropic_httpx()
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode())
+            thinking = body.get("thinking")
+            replayed = sum(
+                block.get("type") in ("thinking", "redacted_thinking")
+                for message in body["messages"]
+                if isinstance(message["content"], list)
+                for block in message["content"]
+            )
+            requests.append(
+                {
+                    "thinking": thinking,
+                    "beta": request.headers.get("anthropic-beta", ""),
+                    "replayed": replayed,
+                    "roles": [message["role"] for message in body["messages"]],
+                    "messages": body["messages"],
+                }
+            )
+            asks_to_drop = "block_binding" in (thinking or {})
+            status, refusal = 200, None
+            if asks_to_drop and setting_status != 200:
+                status, refusal = setting_status, setting_error
+            elif replayed and not asks_to_drop:
+                status, refusal = 400, error_message
+            elif len(requests) > 1 and stripped_status != 200:
+                status, refusal = stripped_status, "overloaded"
+            if refusal:
+                return httpx.Response(
+                    status,
+                    json={
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": refusal},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "model": "test",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        model._client = anthropic.Anthropic(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.Client(transport=transport),
+        )
+        model._async_client = anthropic.AsyncAnthropic(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=transport),
+        )
+        return requests
+
+    @staticmethod
+    def _model(monkeypatch):
+        from EvoScientist.llm import patches
+
+        monkeypatch.setattr(patches, "_thinking_setting_accepted", set())
+        monkeypatch.setattr(patches, "_thinking_setting_refused", set())
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        return get_chat_model(
+            "claude-sonnet-5-5", provider="anthropic", max_tokens=1024, max_retries=0
+        )
+
+    @staticmethod
+    def _notes(exc):
+        """Notes on ``exc`` and on the SDK error langchain re-raised as it."""
+        return "".join(
+            note
+            for error in (exc, exc.__cause__)
+            for note in getattr(error, "__notes__", ())
+        )
+
+    @staticmethod
+    def _history():
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        earlier = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "first answer"},
+            ]
+        )
+        return [HumanMessage("hi"), earlier, HumanMessage("again")]
+
+    def test_refused_replay_is_sent_again_asking_to_drop_stale_blocks(
+        self, monkeypatch
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH)
+
+        assert model.invoke(self._history()).text == "ok"
+
+        first, retry = requests
+        assert "block_binding" not in first["thinking"]
+        assert "thinking-binding-controls" not in first["beta"]
+        assert retry["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+        }
+        assert "thinking-binding-controls-2026-08-01" in retry["beta"]
+        assert retry["replayed"] == 1
+
+    def test_later_requests_of_that_endpoint_and_key_carry_the_setting(
+        self, monkeypatch
+    ):
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        model.invoke(self._history())
+
+        copy = model.model_copy()
+        requests = self._serve(copy, self.MISMATCH)
+        assert copy.invoke(self._history()).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" in requests[0]["thinking"]
+
+    async def test_later_async_requests_carry_it_but_another_account_does_not(
+        self, monkeypatch
+    ):
+        from pydantic import SecretStr
+
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        await model.ainvoke(self._history())
+
+        copy = model.model_copy()
+        requests = self._serve(copy, self.MISMATCH)
+        assert (await copy.ainvoke(self._history())).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" in requests[0]["thinking"]
+
+        # The same model id on another account or endpoint was never refused.
+        for elsewhere in (
+            {"anthropic_api_key": SecretStr("other")},
+            {"anthropic_api_url": "https://gateway.example"},
+        ):
+            other = model.model_copy(update=elsewhere)
+            requests = self._serve(other, self.MISMATCH)
+            await other.ainvoke("hi")
+            assert "block_binding" not in requests[0]["thinking"]
+            assert "thinking-binding-controls" not in requests[0]["beta"]
+
+    # The field or the beta is unknown, or the field was dropped on the way.
+    @pytest.mark.parametrize("refusal", [SETTING_REFUSED, BETA_REFUSED, MISMATCH])
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_an_endpoint_refusing_the_setting_gets_no_thinking_blocks(
+        self, monkeypatch, caplog, use_async, refusal
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(
+            model, self.MISMATCH, setting_status=400, setting_error=refusal
+        )
+
+        async def ask(messages):
+            if use_async:
+                return await model.ainvoke(messages)
+            return model.invoke(messages)
+
+        assert (await ask(self._history())).text == "ok"
+
+        refused, with_setting, without_blocks = requests
+        assert refused["replayed"] == 1
+        assert "block_binding" in with_setting["thinking"]
+        assert without_blocks["replayed"] == 0
+        assert "block_binding" not in without_blocks["thinking"]
+        assert "thinking-binding-controls" not in without_blocks["beta"]
+
+        # The setting did not work there, so a new conversation never sends it,
+        # and the next refused replay goes straight to the resend without blocks.
+        del requests[:]
+        assert (await ask("hi")).text == "ok"
+        assert len(requests) == 1
+        assert "block_binding" not in requests[0]["thinking"]
+
+        del requests[:]
+        assert (await ask(self._history())).text == "ok"
+        assert [request["replayed"] for request in requests] == [1, 0]
+        assert not any("block_binding" in request["thinking"] for request in requests)
+
+        # Said once, at a level the default logging shows.
+        (warning,) = [
+            record
+            for record in caplog.records
+            if record.name == "EvoScientist.llm.patches"
+            and record.levelname == "WARNING"
+        ]
+        assert "without any replayed thinking" in warning.getMessage()
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_another_400_on_that_resend_is_no_refusal_of_the_setting(
+        self, monkeypatch, use_async
+    ):
+        model = self._model(monkeypatch)
+        requests = self._serve(
+            model,
+            self.MISMATCH,
+            setting_status=400,
+            setting_error="prompt is too long: 1200000 tokens > 1000000 maximum",
+        )
+
+        async def ask():
+            if use_async:
+                return await model.ainvoke(self._history())
+            return model.invoke(self._history())
+
+        assert (await ask()).text == "ok"
+        assert [request["replayed"] for request in requests] == [1, 1, 0]
+
+        # So the next refused replay asks for the setting again.
+        del requests[:]
+        assert (await ask()).text == "ok"
+        assert "block_binding" in requests[1]["thinking"]
+
+    def test_a_tool_turn_keeps_its_call_and_result(self, monkeypatch):
+        """The second model call of an agent turn: thinking, a tool call, its result."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH, setting_status=400)
+        tool_use = {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "add",
+            "input": {"a": 2, "b": 3},
+        }
+        call = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                tool_use,
+            ],
+            tool_calls=[
+                {
+                    "name": "add",
+                    "args": {"a": 2, "b": 3},
+                    "id": "toolu_1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        history = [
+            HumanMessage("add 2 and 3"),
+            call,
+            ToolMessage("5", tool_call_id="toolu_1"),
+        ]
+
+        assert model.invoke(history).text == "ok"
+
+        refused, with_setting, without_blocks = requests
+        assert with_setting["messages"] == refused["messages"]
+        user, assistant, result = refused["messages"]
+        assert [block["type"] for block in assistant["content"]] == [
+            "thinking",
+            "tool_use",
+        ]
+        assert result["content"][0]["tool_use_id"] == "toolu_1"
+        assert without_blocks["messages"] == [
+            user,
+            {"role": "assistant", "content": [assistant["content"][1]]},
+            result,
+        ]
+
+    def test_a_copy_without_thinking_keeps_sending_none(self, monkeypatch):
+        model = self._model(monkeypatch)
+        self._serve(model, self.MISMATCH)
+        model.invoke(self._history())
+
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        plain.invoke("hi")
+
+        (request,) = requests
+        assert (request["thinking"], request["beta"]) == (None, "")
+        assert (request["replayed"], request["roles"]) == (0, ["user"])
+
+    def test_without_adaptive_thinking_the_replayed_blocks_are_removed(
+        self, monkeypatch
+    ):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        earlier = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "first answer"},
+            ]
+        )
+
+        reply = plain.invoke([HumanMessage("hi"), earlier, HumanMessage("again")])
+
+        assert reply.text == "ok"
+        first, retry = requests
+        assert first["replayed"] == 2
+        assert (retry["thinking"], retry["beta"]) == (None, "")
+        assert (retry["replayed"], retry["roles"]) == (0, ["user", "assistant", "user"])
+
+    def test_a_turn_of_thinking_alone_is_left_out_of_that_resend(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH)
+        thought = AIMessage(
+            content=[{"type": "thinking", "thinking": "plan", "signature": "sig"}]
+        )
+
+        reply = plain.invoke([HumanMessage("hi"), thought, HumanMessage("again")])
+
+        assert reply.text == "ok"
+        first, retry = requests
+        assert first["roles"] == ["user", "assistant", "user"]
+        assert (retry["replayed"], retry["roles"]) == (0, ["user", "user"])
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_a_failed_retry_that_is_no_refusal_is_raised(
+        self, monkeypatch, use_async
+    ):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, self.MISMATCH, setting_status=500)
+
+        async def ask():
+            if use_async:
+                return await model.ainvoke(self._history())
+            return model.invoke(self._history())
+
+        with pytest.raises(anthropic.InternalServerError) as raised:
+            await ask()
+
+        assert len(requests) == 2
+        assert "bound to a different conversation" in self._notes(raised.value)
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_a_failed_resend_without_blocks_names_the_refusal_it_followed(
+        self, monkeypatch, use_async
+    ):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        plain = model.model_copy(update={"thinking": None, "reasoning_effort": None})
+        requests = self._serve(plain, self.MISMATCH, stripped_status=500)
+
+        async def ask():
+            if use_async:
+                return await plain.ainvoke(self._history())
+            return plain.invoke(self._history())
+
+        with pytest.raises(anthropic.InternalServerError) as raised:
+            await ask()
+
+        assert [request["replayed"] for request in requests] == [1, 0]
+        assert "bound to a different conversation" in self._notes(raised.value)
+
+    def test_other_bad_requests_are_not_sent_again(self, monkeypatch):
+        import anthropic
+
+        model = self._model(monkeypatch)
+        requests = self._serve(model, "messages.1.content.0: unexpected block")
+
+        with pytest.raises(anthropic.BadRequestError):
+            model.invoke(self._history())
+
+        assert len(requests) == 1
+
+
+# =============================================================================
 # Test _apply_auto_config
 # =============================================================================
 
@@ -3444,7 +3995,7 @@ class TestAutoConfig:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_adaptive_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-6 models get adaptive thinking with max effort."""
+        """Anthropic 4-6 models get adaptive thinking with the default effort."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
@@ -3452,11 +4003,11 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_8_adaptive_thinking(self, mock_init, monkeypatch):
-        """Anthropic 4-8 models get adaptive thinking with max effort."""
+        """Anthropic 4-8 models get adaptive thinking with the default effort."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
@@ -3464,7 +4015,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
 
     @pytest.mark.parametrize(
         ("model", "max_tokens"),
@@ -3488,7 +4039,7 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
         assert call_kwargs.get("max_tokens") == max_tokens
 
     @pytest.mark.parametrize(
@@ -3569,6 +4120,18 @@ class TestAutoConfig:
         assert "thinking" not in call_kwargs
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_anthropic_claude_gets_no_effort(self, mock_init, monkeypatch):
+        """A configured level does not reach Anthropic-compatible endpoints."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
+        monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-5-5", provider="custom-anthropic")
+
+        assert "effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_4_6_proxy_no_thinking(self, mock_init, monkeypatch):
         """Anthropic 4-6 models via proxy skip thinking (history round-trip 422)."""
         mock_init.return_value = "mock_model"
@@ -3604,7 +4167,78 @@ class TestAutoConfig:
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
-        assert call_kwargs["effort"] == "max"
+        assert call_kwargs["effort"] == "high"
+
+    @pytest.mark.parametrize(
+        ("configured", "sent"),
+        [("", "high"), ("low", "low"), ("xhigh", "xhigh"), ("none", "low")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_native_claude_takes_the_configured_effort(
+        self, mock_init, configured, sent, monkeypatch
+    ):
+        """A level Claude does not take is sent as the nearest one it does."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        if configured:
+            monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+
+        get_chat_model("claude-sonnet-5-5", provider="anthropic")
+
+        assert mock_init.call_args[1]["effort"] == sent
+
+    @pytest.mark.parametrize(
+        ("configured", "sent"), [("High", "high"), ("Low ", "low"), ("default", "high")]
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_native_claude_never_gets_a_value_off_the_scale(
+        self, mock_init, configured, sent, monkeypatch
+    ):
+        """Case is folded; an unknown value runs at the default, so Claude still builds."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", configured)
+        monkeypatch.setattr("EvoScientist.llm.models._UNKNOWN_EFFORT_WARNED", set())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("claude-sonnet-5-5", provider="anthropic")
+            get_chat_model("claude-haiku-5-5", provider="anthropic")
+
+        assert mock_init.call_args[1]["effort"] == sent
+        unknown = [w for w in caught if "Unknown reasoning_effort" in str(w.message)]
+        assert len(unknown) == (1 if configured == "default" else 0)
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_a_caller_level_skips_the_configured_one(self, mock_init, monkeypatch):
+        """No warning about the configured value when the caller sets its own."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "default")
+        monkeypatch.setattr("EvoScientist.llm.models._UNKNOWN_EFFORT_WARNED", set())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("claude-sonnet-5-5", provider="anthropic", effort="low")
+            assert mock_init.call_args[1]["effort"] == "low"
+            get_chat_model(
+                "claude-sonnet-5-5", provider="anthropic", reasoning_effort="low"
+            )
+            assert "effort" not in mock_init.call_args[1]
+
+        assert not [w for w in caught if "Unknown reasoning_effort" in str(w.message)]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_claude_through_ccproxy_gets_no_effort(self, mock_init, monkeypatch):
+        """Pro/Max sign-in sends no effort, so onboarding does not ask for one."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-5-5", provider="anthropic")
+
+        assert "effort" not in mock_init.call_args[1]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_thinking_not_overridden(self, mock_init):
@@ -3617,34 +4251,29 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == custom_thinking
 
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-6-sol",
+            "gpt-5.4",
+            "gpt-5.3-codex",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+            "gpt-5.2",
+            "gpt-5-nano",
+        ],
+    )
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_reasoning_xhigh(self, mock_init, monkeypatch):
-        """gpt-5.4+ and codex models get xhigh reasoning."""
+    def test_openai_reasoning_defaults_to_high(self, mock_init, model, monkeypatch):
+        """Every OpenAI model runs at the shared default level when none is set."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
-        get_chat_model("gpt-5.4", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
+        get_chat_model(model, provider="openai")
 
-        get_chat_model("gpt-5.3-codex", provider="openai")
         assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.5", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.6-sol", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "xhigh",
+            "effort": "high",
             "summary": "auto",
         }
 
@@ -3653,30 +4282,12 @@ class TestAutoConfig:
         """Native OpenAI reasoning effort should be configurable via env var."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "high")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
 
         get_chat_model("gpt-5.5", provider="openai")
 
         assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
-            "summary": "auto",
-        }
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_openai_reasoning_high_fallback(self, mock_init, monkeypatch):
-        """Other OpenAI models get high reasoning effort."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-
-        get_chat_model("gpt-5-nano")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
-            "summary": "auto",
-        }
-
-        get_chat_model("gpt-5.2", provider="openai")
-        assert mock_init.call_args[1]["reasoning"] == {
-            "effort": "high",
+            "effort": "low",
             "summary": "auto",
         }
 
@@ -3965,7 +4576,10 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
 
     def respond(request):
         captured["url"] = str(request.url)
-        captured["api_key"] = request.headers.get("x-api-key")
+        # anthropic 2.x sends the key as a bearer token, 1.x as x-api-key.
+        captured["api_key"] = request.headers.get("x-api-key") or request.headers.get(
+            "authorization", ""
+        ).removeprefix("Bearer ")
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -3995,6 +4609,51 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["model"] == "mimo-v2.6-pro"
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
+
+
+def test_minimax_wire_request(monkeypatch):
+    """Wire-level: MiniMax gets adaptive thinking and its documented output limit."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-test")
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+    model = get_chat_model("minimax-m3.1-flash", provider="minimax")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "MiniMax-M3.1-Flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
+    assert captured["body"]["model"] == "MiniMax-M3.1-Flash"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"] == {"type": "adaptive"}
 
 
 # =============================================================================
@@ -4108,6 +4767,13 @@ class TestChatGPTSignIn:
         assert "use_responses_api" not in kwargs
         assert "default_headers" not in kwargs
 
+    def test_sign_in_models_share_the_default_level(self, built, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+        get_chat_model("gpt-5.6-sol", provider="openai")
+
+        assert built[0][1]["reasoning"]["effort"] == "high"
+
     def test_caller_reasoning_context_wins(self, built, monkeypatch):
         monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
         reasoning = {"effort": "low", "context": "current_turn"}
@@ -4203,10 +4869,11 @@ class TestReasoningEffortAcrossProviders:
             ("openrouter", "gpt-6.1-sol", "max", "max"),
             ("openrouter", "gpt-6.1-sol", "minimal", "minimal"),
             ("openrouter", "gpt-6.1-sol", "none", "none"),
-            ("openai", "gpt-6-sol", "turbo", "turbo"),
-            ("openrouter", "gpt-6.1-sol", "turbo", "turbo"),
+            ("openai", "gpt-6-sol", "turbo", "high"),
+            ("openrouter", "gpt-6.1-sol", "turbo", "high"),
         ],
     )
+    @pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
     def test_api_key_routes_get_the_stored_level(
         self, monkeypatch, provider, model, stored, sent
     ):
@@ -4236,10 +4903,11 @@ class TestReasoningEffortAcrossProviders:
             ("low", "low"),
             ("xhigh", "xhigh"),
             ("max", "max"),
-            # Not a level on the scale: the backend answers for itself.
-            ("turbo", "turbo"),
+            # Not a level on the scale: the route's default.
+            ("turbo", "high"),
         ],
     )
+    @pytest.mark.filterwarnings("ignore:Unknown reasoning_effort:UserWarning")
     def test_sign_in_route_gets_the_nearest_level_it_accepts(
         self, monkeypatch, stored, sent
     ):

@@ -126,8 +126,9 @@ class Emitter(Protocol):
 class JsonEmitter:
     """Write each event as one JSON line and flush, so a reader sees it at once.
 
-    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a piped stdout on
-    Windows uses the ANSI code page, which cannot encode every path.
+    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a
+    ``PYTHONIOENCODING`` the user set can still select the ANSI code page for a
+    piped stdout on Windows, which cannot encode every path.
     """
 
     def __init__(self, stream: TextIO | None = None) -> None:
@@ -195,6 +196,40 @@ def wait_with_heartbeat(
             last, changed_at = current, clock()
         elif clock() - changed_at >= silence_limit:
             raise StepStalled(f"no progress for {silence_limit:g} s")
+
+
+class Heartbeat:
+    """A ``(fraction, message)`` progress callback that remembers its last
+    line, so a step that reports nothing for a while can repeat it.
+
+    :meth:`beat` repeats the line now (between the polls of
+    :func:`wait_with_heartbeat`); :meth:`tick` repeats it only when
+    :data:`HEARTBEAT_INTERVAL` has passed since the last line, for a loop in
+    this process (between archive members). Both run on the caller's thread.
+    """
+
+    def __init__(
+        self,
+        report: Callable[[float, str], None],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._report = report
+        self._clock = clock
+        self._last: tuple[float, str] | None = None
+        self._at = clock()
+
+    def __call__(self, fraction: float, message: str) -> None:
+        self._last = (fraction, message)
+        self._at = self._clock()
+        self._report(fraction, message)
+
+    def beat(self) -> None:
+        if self._last is not None:
+            self(*self._last)
+
+    def tick(self) -> None:
+        if self._clock() - self._at >= HEARTBEAT_INTERVAL:
+            self.beat()
 
 
 class ProgressThrottle:

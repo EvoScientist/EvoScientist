@@ -43,7 +43,6 @@ tests/
 # Local runtime data (must never leak into the image)
 .env
 .env.*
-!.env.example
 runs/
 workspace/
 skills/

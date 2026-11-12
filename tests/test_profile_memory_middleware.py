@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from blockbuster import BlockBuster
 from langchain_core.messages import SystemMessage
 
@@ -43,13 +44,6 @@ def _request():
 
 def _path_project_id(workspace) -> str:
     return memory_module.resolve_project_id(workspace)
-
-
-def _profile_texts(memories):
-    return [
-        path.read_text(encoding="utf-8")
-        for path in (memories / "profile").rglob("*.md")
-    ]
 
 
 def _sorted_tool_names(middleware) -> list[str]:
@@ -615,6 +609,31 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     assert (memories / "profile" / "USER_PROFILE.md").exists()
 
 
+def test_profile_without_frontmatter_is_injected_as_stored_when_repair_fails(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+    middleware.modify_request(_request())  # profile files exist now
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "# User profile\n\n## Preferences\n- Likes short reports\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        memory_module.EvoMemoryMiddleware,
+        "_write_text",
+        lambda _self, _path, _content: False,
+    )
+
+    system = _system(middleware.modify_request(_request()))
+
+    assert "- Likes short reports" in system
+    assert "intro: pending" not in system
+
+
 def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
@@ -697,72 +716,6 @@ async def test_profile_memory_async_path_inlines_content_under_blockbuster(
     )
 
 
-def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: RL",
-                "",
-                "## Experiment History",
-                "### [2026-01-01] Baseline",
-                "- **Conclusion**: Worked",
-                "",
-                "## Learned Preferences",
-                "- Prefers concise plans.",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    research_taste = (memories / "profile" / "RESEARCH_TASTE.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert user_profile.count("- **Name**: Alice") == 1
-    assert user_profile.count("Prefers concise plans.") == 1
-    assert user_profile.count("### Experiment History") == 1
-    assert user_profile.count("- **Conclusion**: Worked") == 1
-    assert research_taste.count("- **Primary Domain**: RL") == 1
-    assert "Migrated from /memories/MEMORY.md" not in user_profile
-    assert "Migrated from /memories/MEMORY.md" not in research_taste
-    assert not (memories / "MEMORY.md").exists()
-
-
-def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    legacy_path.write_text("  \n\n", encoding="utf-8")
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    assert not legacy_path.exists()
-
-
 def test_profile_memory_uses_explicit_workspace_for_project_profile(tmp_path):
     memories = tmp_path / "memories"
     active_workspace = tmp_path / "active-workspace"
@@ -806,79 +759,6 @@ async def test_profile_memory_resolves_project_id_once_per_middleware(
         path == "/profile/projects/P-cached-project/PROJECT_PROFILE.md"
         for path, _template in middleware._profile_specs
     )
-
-
-def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    legacy_path = memories / "MEMORY.md"
-    custom_note = "Keep this custom deployment note."
-    legacy_path.write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: Alice",
-                "",
-                "## Custom Notes",
-                custom_note,
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
-        encoding="utf-8"
-    )
-    assert custom_note in user_profile
-    assert not legacy_path.exists()
-
-
-def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch):
-    memories = tmp_path / "memories"
-    memories.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (memories / "MEMORY.md").write_text(
-        "\n".join(
-            [
-                "# EvoScientist Memory",
-                "",
-                "## User Profile",
-                "- **Name**: (unknown)",
-                "- **Role**: (unknown)",
-                "",
-                "## Research Preferences",
-                "- **Primary Domain**: (unknown)",
-                "- **Preferred Methods**: (unknown)",
-                "",
-                "## Experiment History",
-                "(No experiments yet)",
-                "",
-                "## Learned Preferences",
-                "- (none yet)",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    middleware = memory_module.create_memory_middleware(
-        str(memories), workspace_dir=workspace
-    )
-    middleware.modify_request(_request())
-
-    migrated_profile_text = "\n".join(_profile_texts(memories))
-    assert "(unknown)" not in migrated_profile_text
-    assert "Imported from legacy MEMORY.md" not in migrated_profile_text
-    assert not (memories / "MEMORY.md").exists()
 
 
 # ---- profile bootstrap: frontmatter helpers ---------------------------------
@@ -1250,6 +1130,119 @@ def test_bootstrap_block_injected_last_on_fresh_first_turn(tmp_path, monkeypatch
     assert "first exchange with this researcher" in system
     assert system.index("</profile_memory>") < system.index("<profile_bootstrap>")
     assert system.rstrip().endswith("</profile_bootstrap>")
+
+
+def _profile(memories, frontmatter):
+    """A profile whose counters come from an older thread."""
+    path = memories / "profile" / "USER_PROFILE.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\n{frontmatter}\nevoscientist:\n  sessions: 3\n  intro_attempts: 2\n"
+        "  last_thread: old\n  intro_asked_thread: old\n---\n# User profile\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+# Not introduced yet, with a value quoted as a hand edit leaves it.
+_UNNAMED = "name: ''\nfield: \"Computer science / AI\"\nhomepage: ''\nintro: pending"
+
+
+def test_first_call_of_a_thread_shows_the_profile_as_later_calls_do(
+    tmp_path, monkeypatch
+):
+    """The counter update rewrites the frontmatter; it runs before the profile is read."""
+    memories, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    path = _profile(memories, _UNNAMED)
+
+    first = _system(middleware.modify_request(_bootstrap_request()))
+    assert "last_thread: t1" in path.read_text(encoding="utf-8")
+    second = _system(middleware.modify_request(_bootstrap_request()))
+
+    assert first == second
+    assert "field: Computer science / AI" in first
+
+
+async def test_first_async_call_of_a_thread_shows_the_profile_as_later_calls_do(
+    tmp_path, monkeypatch
+):
+    memories, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    _profile(memories, _UNNAMED)
+
+    first = _system(await middleware.amodify_request(_bootstrap_request()))
+    second = _system(await middleware.amodify_request(_bootstrap_request()))
+
+    assert first == second
+    assert "field: Computer science / AI" in first
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "name: \"Ada\"\nfield: ''\nhomepage: ''\nintro: pending",
+        "name: ''\nfield: ''\nhomepage: ''\nintro: skipped",
+    ],
+    ids=["named", "declined"],
+)
+def test_counters_stay_as_they_are_once_first_contact_is_over(
+    tmp_path, monkeypatch, frontmatter
+):
+    memories, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    path = _profile(memories, frontmatter)
+    stored = path.read_text(encoding="utf-8")
+
+    system = _system(middleware.modify_request(_bootstrap_request()))
+
+    assert path.read_text(encoding="utf-8") == stored
+    assert "<profile_bootstrap>" not in system
+    assert "last_thread: old" in system
+
+
+def test_first_contact_does_not_depend_on_the_other_profile_files(
+    tmp_path, monkeypatch
+):
+    memories, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    unreadable = memories / "profile" / "RESEARCH_TASTE.md"
+    unreadable.parent.mkdir(parents=True)
+    unreadable.write_bytes(b"\xff\xfe not utf-8")
+
+    system = _system(middleware.modify_request(_bootstrap_request()))
+
+    assert "<profile_bootstrap>" in system
+
+
+def test_first_contact_is_skipped_when_the_profile_cannot_be_created(
+    tmp_path, monkeypatch
+):
+    _, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    monkeypatch.setattr(middleware, "_write_text", lambda path, content: False)
+
+    system = _system(middleware.modify_request(_bootstrap_request()))
+
+    assert "<profile_bootstrap>" not in system
+
+
+def test_first_contact_reads_the_profile_it_just_created(tmp_path, monkeypatch):
+    """Another writer may save a name right after the file appears."""
+    memories, middleware = _bootstrap_middleware(tmp_path, monkeypatch)
+    path = memories / "profile" / "USER_PROFILE.md"
+    write = middleware._write_text
+
+    edited = []
+
+    def write_then_someone_edits(target, content):
+        written = write(target, content)
+        if target == path and not edited:
+            edited.append(True)
+            path.write_text(content.replace("name: ''", "name: Ada"), encoding="utf-8")
+        return written
+
+    monkeypatch.setattr(middleware, "_write_text", write_then_someone_edits)
+
+    system = _system(middleware.modify_request(_bootstrap_request()))
+
+    assert "name: Ada" in path.read_text(encoding="utf-8")
+    assert "<profile_bootstrap>" not in system
 
 
 def test_bootstrap_block_absent_by_default(tmp_path, monkeypatch):

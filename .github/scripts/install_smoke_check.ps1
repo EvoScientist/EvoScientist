@@ -18,11 +18,10 @@ param([Parameter(Mandatory = $true)][ValidateSet('online', 'block', 'offline', '
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-# EvoSci's output goes to pipes and files here; with the ANSI code page Python
-# fails on its progress symbols, as in install.ps1.
-$env:PYTHONIOENCODING = 'utf-8'
-# ... and their output (and uv's) is UTF-8: decode it as such, not in the
-# console code page (paths with non-ASCII characters).
+# No PYTHONIOENCODING: EvoSci writes UTF-8 to pipes and files on its own
+# (0.3.8 and later), and these checks are what test that on Windows. Its output
+# (and uv's) is UTF-8: decode it as such, not in the console code page (paths
+# with non-ASCII characters).
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 
 $IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }
@@ -80,7 +79,9 @@ function Test-Answers([string]$Url, [int]$Below = 500) {
 function Show-Logs([string]$Log) {
     Write-Host '--- EvoSci output'
     Get-Content -Encoding UTF8 -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
-    foreach ($file in @("$UserHome\.config\evoscientist\langgraph_dev.log", "$UserHome\.config\evoscientist\webui.log")) {
+    # Older releases log to ~/.config/evoscientist.
+    $older = Join-Path $UserHome '.config\evoscientist'
+    foreach ($file in @("$DataDir\server\langgraph_dev.log", "$DataDir\server\webui.log", "$older\langgraph_dev.log", "$older\webui.log")) {
         Write-Host "--- $file"
         Get-Content -Encoding UTF8 -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
     }

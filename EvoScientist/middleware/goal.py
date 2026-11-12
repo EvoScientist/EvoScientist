@@ -390,6 +390,7 @@ class GoalDrafter:
         from .model_fallback import ModelFallbackMiddleware
         from .model_retry import ModelCallBoundaryMiddleware
         from .rubric import _GraderCallBudget
+        from .windows_paths import WindowsFilePathMiddleware
 
         retry = self._model_retry
         self._agent = create_agent(
@@ -405,6 +406,8 @@ class GoalDrafter:
                     tool_token_limit_before_evict=None,
                     human_message_token_limit_before_evict=None,
                 ),
+                # The user's request can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 _GraderCallBudget(
                     max_calls=GOAL_DRAFTER_MAX_CALLS,
                     who="goal drafter",
@@ -895,19 +898,9 @@ _REPORTABLE_STATUSES = frozenset({"active", "blocked"})
 
 def _without_update_goal(request: Any) -> Any:
     """*request* without the goal tool: nothing to report on in this call."""
+    from .utils import request_without_tool
 
-    def _name(candidate: Any) -> Any:
-        if isinstance(candidate, Mapping):
-            # A provider schema names its tool at the top or under "function".
-            nested = candidate.get("function")
-            inner = nested.get("name") if isinstance(nested, Mapping) else None
-            return candidate.get("name") or inner
-        return getattr(candidate, "name", None)
-
-    tools = [t for t in request.tools if _name(t) != update_goal.name]
-    return (
-        request if len(tools) == len(request.tools) else request.override(tools=tools)
-    )
+    return request_without_tool(request, update_goal.name)
 
 
 class GoalContextMiddleware(AgentMiddleware):

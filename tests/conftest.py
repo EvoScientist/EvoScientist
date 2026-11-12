@@ -2,6 +2,7 @@
 
 import errno
 import ipaddress
+import logging
 import os
 import shutil
 import socket
@@ -20,9 +21,8 @@ def pytest_configure(config):
     """Point the home folder at an empty one before EvoScientist is imported.
 
     ``EvoScientist.paths`` resolves the data and config folders from it at
-    import, and the import itself migrates files there, so a fixture would
-    act too late. ``XDG_CONFIG_HOME`` and ``EVOSCIENTIST_DATA_DIR`` would
-    override it, so they go too.
+    import, so a fixture would act too late. ``XDG_CONFIG_HOME`` and
+    ``EVOSCIENTIST_DATA_DIR`` would override it, so they go too.
     """
     global _test_home
     if "EvoScientist" in sys.modules:
@@ -158,7 +158,6 @@ def _no_network(monkeypatch):
 @pytest.fixture
 def langgraph_api_env(monkeypatch):
     """Read when langgraph-api's config is first imported, as in the server."""
-    import logging
 
     for name, value in {
         "LANGGRAPH_RUNTIME_EDITION": "inmem",
@@ -257,17 +256,20 @@ def _fresh_langgraph_dev_state(monkeypatch):
 
     ``langgraph_dev.manager`` keeps the server it started and what it found
     in module globals; a test that leaves one set (a fake ``Popen`` among
-    them) changes what the next test's ``ensure_langgraph_dev`` does.
+    them) changes what the next test's ``ensure_server`` does.
     """
-    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.langgraph_dev import manager, sdk
 
+    monkeypatch.setattr(sdk, "_SERVED_URL", None)
     for name, value in {
         "_PROCESS": None,
-        "_PROCESS_WORKSPACE": None,
-        "_PROCESS_RUN_DIR": None,
-        "SERVED_WORKSPACE": None,
+        "SERVER_UNAVAILABLE": False,
+        "SERVER_UNAVAILABLE_REASON": None,
+        "OLDER_SERVER": None,
+        "CCPROXY_MISSING": None,
         "CONFIG_DRIFT_SINCE_LAUNCH": False,
         "AGENT_SHELL_DRIFT": None,
+        "SERVER_EXPOSURE": None,
         "_ASYNC_SUBAGENTS_AVAILABLE": False,
         "_LOG_OFFSET_AT_START": 0,
     }.items():
@@ -302,14 +304,35 @@ def _no_health_server(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_process_workspace():
-    """``process_workspace()`` is read once per process; tests change env/cwd."""
+    """``process_workspace()`` and ``process_session_dirs()`` are read once
+    per process; tests change env/cwd."""
     from EvoScientist.paths import process_session_dirs, process_workspace
 
-    process_workspace.cache_clear()
-    process_session_dirs.cache_clear()
+    for cached in (process_workspace, process_session_dirs):
+        cached.cache_clear()
     yield
-    process_workspace.cache_clear()
-    process_session_dirs.cache_clear()
+    for cached in (process_workspace, process_session_dirs):
+        cached.cache_clear()
+
+
+@pytest.fixture
+def tiny_graph():
+    """A function returning a new small compiled graph, as graph builders do."""
+
+    def build(*_args, **_kwargs):
+        from typing import TypedDict
+
+        from langgraph.graph import StateGraph
+
+        class State(TypedDict):
+            x: int
+
+        builder = StateGraph(State)
+        builder.add_node("n", lambda state: state)
+        builder.set_entry_point("n")
+        return builder.compile()
+
+    return build
 
 
 @pytest.fixture
@@ -332,23 +355,14 @@ def workspace(tmp_path):
 
 
 @pytest.fixture
-def runtime_paths(tmp_path, monkeypatch):
-    """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
+def runtime_paths():
+    """The server's files (``langgraph_dev.manager.RUNTIME``), in the
+    test's server home, created: ``_isolate_user_dirs`` points
+    ``paths.SERVER_HOME`` at a fresh folder, and the files follow it."""
+    from EvoScientist.langgraph_dev import manager, server_home
 
-    Replaces the module-level ``RUNTIME`` with a fully temp-rooted bundle
-    so every path (``pid_dir``, ``pid_file``, ``log_file``,
-    ``workspace_sidecar``, ``lock_file``) is contained under ``tmp_path``.
-
-    Tests that need a variant of a single field can still call
-    ``dataclasses.replace(runtime_paths, log_file=…)`` etc. — the
-    baseline is already isolated, so forgetting a field just keeps it
-    under ``tmp_path``, never ``~/.config/evoscientist``.
-    """
-    from EvoScientist.langgraph_dev import manager
-
-    runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
-    monkeypatch.setattr(manager, "RUNTIME", runtime)
-    return runtime
+    server_home.ensure_server_home()
+    return manager.RUNTIME
 
 
 @pytest.fixture(autouse=True)
@@ -387,12 +401,110 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(paths, "GLOBAL_MEMORIES_DIR", data_dir / "memories")
     monkeypatch.setattr(paths, "MEMORIES_DIR", data_dir / "memories")
     monkeypatch.setattr(paths, "SERVER_HOME", data_dir / "server")
+    # Where an older release kept the server's record.
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "OLDER_RUNTIME_DIR", root / "older-runtime")
     monkeypatch.setattr(tui_interactive, "DATA_DIR", data_dir)
     monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(mcp_client, "USER_CONFIG_DIR", config_dir)
     monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
     monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
     monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_env_origins(monkeypatch):
+    """Where this process's configuration variables came from is recorded in
+    one dict; what one test records (a flag's, say) would change what the
+    server gets and the drift fingerprint in later tests."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
+
+
+@pytest.fixture(autouse=True)
+def _restore_console_stream(monkeypatch):
+    """The CLI points the shared console at stderr (stream-json, ``deploy
+    --json``), and reading ``console.file`` back yields the running test's
+    captured stream: either would stay for every later test in the worker,
+    whose CLI output then goes missing."""
+    from EvoScientist.stream.console import console
+
+    monkeypatch.setattr(console, "_file", console._file)
+    monkeypatch.setattr(console, "stderr", console.stderr)
+
+
+@pytest.fixture(autouse=True)
+def _no_registration(monkeypatch):
+    """Clients register their project with the server they use; tests that
+    fake a running server would otherwise send the request. A test of the
+    registration itself imports ``register_folder`` at module level."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration, "register_folder", lambda *_a, **_k: registration.ServerExposure()
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_dotenv_record(monkeypatch):
+    """The ``.env`` keys a merge warned about are per test."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "_DOTENV_IGNORED", set())
+
+
+@pytest.fixture(autouse=True)
+def _fresh_registry(monkeypatch):
+    """Each test reads the project registry from its own data folder,
+    registers projects with a lock of its own event loop, and starts with no
+    threads restored and no project set up."""
+    import sys
+
+    module = sys.modules.get("EvoScientist.langgraph_dev.registry")
+    if module is not None:
+        monkeypatch.setattr(module, "REGISTRY", module.Registry())
+    module = sys.modules.get("EvoScientist.langgraph_dev.workspace_setup")
+    if module is not None:
+        monkeypatch.setattr(module, "_lock", None)
+        monkeypatch.setattr(module, "_warm_lock", None)
+        monkeypatch.setattr(module, "SET_UP", set())
+    module = sys.modules.get("EvoScientist.sessions")
+    if module is not None:
+        monkeypatch.setattr(module, "RESTORED_WORKSPACES", set())
+
+
+@pytest.fixture
+def no_workspace_setup(monkeypatch):
+    """Start the custom app without setting the registered projects up: that
+    needs the runtime's store, which only ``runtime_store`` provides."""
+    from EvoScientist.langgraph_dev import workspace_setup
+
+    async def skip():
+        return None
+
+    monkeypatch.setattr(workspace_setup, "set_up_at_start", skip)
+
+
+@pytest.fixture
+def runtime_store(langgraph_api_env, monkeypatch):
+    """The in-memory runtime's store, empty, with every served graph registered."""
+    import langgraph_api.graph as lg_graph
+    from langgraph_runtime_inmem.database import GLOBAL_STORE
+
+    from EvoScientist.langgraph_dev.assistants import served_graph_ids
+    from EvoScientist.langgraph_dev.legacy_import import IMPORTED_KEY
+
+    for graph_id in served_graph_ids():
+        monkeypatch.setitem(lg_graph.GRAPHS, graph_id, object())
+    monkeypatch.setitem(GLOBAL_STORE, IMPORTED_KEY, {})
+    tables = ("assistants", "assistant_versions", "threads", "runs", "crons")
+    saved = {key: list(GLOBAL_STORE.get(key, [])) for key in tables}
+    for key in tables:
+        GLOBAL_STORE[key] = []
+    yield GLOBAL_STORE
+    GLOBAL_STORE.update(saved)
 
 
 @pytest.fixture(autouse=True)

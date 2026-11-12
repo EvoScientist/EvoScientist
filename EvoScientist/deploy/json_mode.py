@@ -10,12 +10,16 @@ Events:
 - ``starting``: ``workspace``, ``host``, ``port``.
 - ``ready``: ``url``, ``owned``, ``workspace``, ``assistant_id``, ``data_dir``,
   ``config_dir``, ``log_file``, ``warnings`` (a list of strings), and with
-  ``--tunnel`` also ``public_url`` (null when no URL was reported in time).
+  ``--tunnel`` also ``public_url`` (null when no URL was reported in time,
+  or when cloudflared could not create the tunnel, which adds a warning).
   ``owned`` is true when this command started the backend and stops it on
-  exit, false when it attached to a running one for the same workspace and
-  leaves it running. When attached, ``workspace``, ``data_dir`` and
-  ``config_dir`` are the running backend's, from its ownership record (or
-  this command's own when an older release wrote the record without them).
+  exit, false when it attached to a running one and leaves it running.
+  ``url`` is where the backend answers: this data folder's backend is
+  attached to on whatever port it runs, which may differ from ``starting``'s
+  ``port`` (``warnings`` then says so). ``workspace`` is the project this
+  command registered, and ``assistant_id`` its chat assistant.
+  ``data_dir`` and ``config_dir`` are the backend's, from the record it
+  keeps of itself (this command's own for a backend without one).
   ``data_dir`` and ``config_dir`` are paths to open files at, never to
   compare as strings: one folder can have more than one spelling (an 8.3
   short name on Windows, a symlink).
@@ -24,25 +28,38 @@ Events:
 
   - ``invalid_port``: ``port``.
   - ``port_conflict``: ``reason``, always: ``foreign`` (another program holds
-    the port), ``no_record`` (a langgraph dev without an ownership record, so
-    its workspace is unknown) or ``record_mismatch`` (the ownership record
-    names a process that does not serve this port, or one bound to another
-    interface).
-  - ``workspace_conflict``: ``workspace``, the running backend's, and
-    ``run_dir`` when it serves a run folder of this workspace.
-  - ``ccproxy_failed``: empty.
-  - ``backend_start_failed``: ``log_file`` when the start failed, or
-    ``lock_file`` when another EvoScientist process held the start lock too
-    long.
+    the port), ``other_data_folder`` (an EvoScientist backend of another data
+    folder answers on it) or ``older_server`` (a backend too old to say whose
+    it is answers on it).
+  - ``ccproxy_failed``: ``log_file`` (and ``exit_code`` when it exited):
+    the started backend could not start the ccproxy Anthropic's OAuth goes
+    through, so it did not serve.
+  - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
+    ``lock_file``: the start lock another EvoScientist process held too
+    long or that could not be used, or the data folder's server lock, held
+    without a record or unreadable. ``log_file`` (and ``exit_code`` when the
+    started backend exited): the started backend failed or never answered,
+    or the recorded backend is stopping, does not answer at its address, or
+    another program or EvoScientist server answers there. Neither when no
+    log was written: the server home could not be created, or the start
+    failed before the backend was launched.
   - ``sign_in_required``: ``provider``, and ``problem`` when there is one.
-  - ``backend_exited``: ``exit_code`` and ``log_file`` when the owned process
+  - ``backend_exited``: ``log_file``; ``exit_code`` when the owned process
     ended; ``url`` when an owned backend stopped listening or an attached one
     stopped answering.
+  - ``folder_missing``: ``workspace``, a folder EvoScientist knows as a
+    project whose folder is gone (it is not recreated).
+  - ``server_outdated``: empty; the running backend predates the project
+    registry, so it has to be stopped first.
+  - ``registration_failed``: empty; the backend did not register the
+    workspace.
   - ``internal_error``: ``type``, the exception's class; or ``launcher_code``
     for a backend-decision error this mode has no code for.
 
-  ``port_conflict`` and ``workspace_conflict`` also carry ``hint``, the line
-  the human mode prints.
+  ``port_conflict`` also carries ``hint``, the line the human mode prints.
+  ``workspace_conflict`` is not sent any more; older releases send it, with
+  ``workspace`` and ``hint``, when the backend was started from another
+  project.
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
@@ -68,13 +85,14 @@ How a program runs the command:
   quitting. A terminal, ``/dev/null``, ``NUL`` or a file as stdin is ignored;
   the command then stops on Ctrl+C or SIGTERM.
 - When the program exits without closing stdin, the command still stops: on
-  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend,
-  and a ccproxy this command started, run in a job object that ends them
-  together with this command.
+  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend
+  (and the ccproxy it starts) runs in a job object that ends it together with
+  this command.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -83,13 +101,15 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Iterator
 from typing import Any
 
+from ..langgraph_dev.assistants import chat_assistant_id
+from ..langgraph_dev.registration import ServerExposure, exposure_messages
+from ..paths import Workspace
 from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe
 
 logger = logging.getLogger(__name__)
-
-ASSISTANT_ID = "EvoScientist"
 
 # The ``detail`` of each is in the module docstring. ``internal_error``:
 # anything else, with the traceback on stderr.
@@ -97,19 +117,24 @@ ERROR_CODES = frozenset(
     {
         "invalid_port",
         "port_conflict",
-        "workspace_conflict",
         "ccproxy_failed",
         "backend_start_failed",
         "sign_in_required",
         "backend_exited",
+        "folder_missing",
+        "server_outdated",
+        "registration_failed",
         "internal_error",
     }
 )
 
 _LAUNCHER_CODES = {
     "port_conflict": "port_conflict",
-    "sidecar_port_mismatch": "port_conflict",
-    "workspace_mismatch": "workspace_conflict",
+    "ccproxy_failed": "ccproxy_failed",
+    "backend_start_failed": "backend_start_failed",
+    "folder_missing": "folder_missing",
+    "server_outdated": "server_outdated",
+    "registration_failed": "registration_failed",
 }
 
 # The health check runs this often; this many failures in a row mean the
@@ -145,6 +170,25 @@ class _Failure(Exception):
             "message": self.message,
             "detail": self.detail,
         }
+
+
+@contextlib.contextmanager
+def _launcher_failures() -> Iterator[None]:
+    """Raise a :class:`~EvoScientist.deploy.launcher.LauncherError` as the
+    matching :class:`_Failure`; a code without one is ``internal_error``."""
+    from .launcher import LauncherError
+
+    try:
+        yield
+    except LauncherError as exc:
+        detail = dict(exc.fields)
+        if exc.detail:
+            detail["hint"] = exc.detail
+        code = _LAUNCHER_CODES.get(exc.code)
+        if code is None:
+            detail["launcher_code"] = exc.code
+            code = "internal_error"
+        raise _Failure(code, exc.message, detail) from exc
 
 
 class _Events:
@@ -242,7 +286,9 @@ class _Run:
         self.port = 0
         self.starting = False  # an owned backend may exist from here on
         self.proc: Any = None
-        self.ccproxy: Any = None
+        # The log of the backend this command uses (an attached older
+        # release's writes its own).
+        self.log_file: Any = None
         self.job: Any = None
 
     def start(
@@ -258,13 +304,14 @@ class _Run:
         from ..agent_shell import server_setup_hint, setup_hint
         from ..langgraph_dev import manager as lgm
         from . import server
-        from .launcher import BackendTarget
+        from .launcher import prepare_launch_folder, reuse_warnings
 
         config = server._load_config(debug, host, port)
         _check_sign_in(config)
 
         ws = str(paths.start_workspace_path(workdir, config.default_workdir))
-        os.makedirs(ws, exist_ok=True)
+        with _launcher_failures():
+            prepare_launch_folder(ws)
         self.port = server._resolve_port(port, config)
         if not server._port_in_range(self.port):
             raise _Failure(
@@ -275,40 +322,31 @@ class _Run:
         self.host = server._resolve_host(host, config)
         self.events("starting", workspace=ws, host=self.host, port=self.port)
 
-        target = BackendTarget(
-            workspace_dir=ws, backend_host=self.host, backend_port=self.port
-        )
-        decision = self._decide_and_start(target, config, ws, tunnel)
-        # A stop asked for while waiting for the lock, during the decision or
-        # during the start: stop now, without the tunnel wait or ready.
-        if decision is None or self.stop.is_set():
+        result = self._ensure(config, tunnel)
+        # A stop asked for while waiting or during the start: stop now,
+        # without the tunnel wait or ready.
+        if result is None or self.stop.is_set():
             return
-        warnings = list(decision.warnings)
+        warnings = reuse_warnings(result, self.port)
+        self.port = result.port or self.port
+        self.host = result.host or self.host
+        exposure = self._register(ws)
+        # The backend's bind and tunnel, as it answered the registration: for
+        # a reused one, --host and --tunnel here say nothing about it.
+        warnings.extend(exposure_messages(exposure))
+        record = result.record
+        data_dir = record.data_dir if record is not None else str(paths.DATA_DIR)
+        config_dir = record.config_dir if record is not None else str(paths.CONFIG_DIR)
         public_url: str | None = None
-        if decision.action == "reuse":
-            record = decision.sidecar or {}
-            # The running backend's bind, from its record; a record written
-            # before it carried one gives no warning, since --host here says
-            # nothing about that backend.
-            bound = record.get("host")
-            if isinstance(bound, str) and not lgm._is_loopback_host(bound):
-                warnings.append(_public_bind_warning(bound))
-            owned = False
-            workspace = record.get("workspace", ws)
-            data_dir = record.get("data_dir") or str(paths.DATA_DIR)
-            config_dir = record.get("config_dir") or str(paths.CONFIG_DIR)
-            hint = server_setup_hint(record)
+        if not result.started:
+            hint = server_setup_hint(record.fields if record is not None else None)
             if tunnel:
                 warnings.append(
                     "--tunnel applies only to a backend this command starts; "
                     "the running backend is used as it is."
                 )
         else:
-            owned = True
-            workspace = ws
             # The human mode's banners, for the app to show.
-            if not lgm._is_loopback_host(self.host):
-                warnings.append(_public_bind_warning(self.host))
             if getattr(config, "dangerous_mode", False):
                 from ..cli._constants import (
                     DANGEROUS_BANNER_LABEL,
@@ -316,17 +354,14 @@ class _Run:
                 )
 
                 warnings.append(f"{DANGEROUS_BANNER_LABEL}: {DANGEROUS_BANNER_MESSAGE}")
-            if tunnel:
-                warnings.append(
-                    "Public tunnel: no auth, share the URL only with people you trust."
-                )
-            data_dir = str(paths.DATA_DIR)
-            config_dir = str(paths.CONFIG_DIR)
             if self.job is not None and self.job.warning:
                 warnings.append(self.job.warning)
             hint = setup_hint()
             if tunnel:
-                public_url = self._wait_for_tunnel_url()
+                try:
+                    public_url = self._wait_for_tunnel_url()
+                except lgm.TunnelFailedError as exc:
+                    warnings.append(f"Cloudflare quick tunnel failed: {exc}")
                 if self.stop.is_set():
                     return
         if hint is not None:
@@ -334,127 +369,70 @@ class _Run:
 
         fields: dict[str, Any] = {
             "url": lgm._base_url(self.port, self.host),
-            "owned": owned,
-            "workspace": workspace,
-            "assistant_id": ASSISTANT_ID,
+            "owned": result.started,
+            "workspace": ws,
+            "assistant_id": chat_assistant_id(Workspace(ws)),
             "data_dir": data_dir,
             "config_dir": config_dir,
-            "log_file": str(lgm.RUNTIME.log_file),
+            "log_file": str(self.log_file),
             "warnings": warnings,
         }
         if tunnel:
             fields["public_url"] = public_url
         self.events("ready", **fields)
 
-    def _decide_and_start(self, target: Any, config: Any, ws: str, tunnel: bool) -> Any:
-        """The backend decision, and the start it calls for, under the lock
-        the TUI's ``ensure_langgraph_dev()`` takes.
-
-        Without it a second starter can see a backend that is bound but not
-        answering yet and kill it as stale, or overwrite its ownership
-        record. With it, a second ``deploy --json`` waits for the first
-        backend to answer, then attaches. None when a stop came first.
-        """
-        from filelock import FileLock
-
+    def _register(self, ws: str) -> ServerExposure:
+        """Register the workspace with the backend this command uses; how
+        that backend can be reached from other machines."""
         from ..langgraph_dev import manager as lgm
-        from .launcher import LauncherError, _resolve_backend
+        from .launcher import register_launch_folder
 
-        lgm.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
-        lock = FileLock(str(lgm.RUNTIME.lock_file))
-        if not self._acquire(lock, lgm._FILE_LOCK_TIMEOUT):
+        with _launcher_failures():
+            return register_launch_folder(ws, url=lgm._base_url(self.port, self.host))
+
+    def _ensure(self, config: Any, tunnel: bool) -> Any:
+        """This data folder's backend, attached to on whatever port it runs,
+        or one this command starts and owns (``ensure_server``). None when a
+        stop came first."""
+        from ..langgraph_dev import manager as lgm
+        from .launcher import server_error
+
+        # An interrupted start returns no handle: cleanup() finds it in the
+        # manager, which holds it right after spawning.
+        self.starting = True
+        result = lgm.ensure_server(
+            config,
+            backend="langgraph_server",
+            port=self.port,
+            host=self.host,
+            # The app owns the backend it started: it stops it.
+            lasting=False,
+            tunnel=tunnel,
+            job=lambda: self.job,
+            any_port=True,
+            before_start=self._before_start,
+            cancelled=self.stop.is_set,
+        )
+        if result.started:
+            self.proc = result.proc
+        if result.problem == "cancelled":
             return None
-        try:
-            try:
-                decision = _resolve_backend(target, config, require_record=True)
-            except LauncherError as exc:
-                detail = dict(exc.fields)
-                if exc.detail:
-                    detail["hint"] = exc.detail
-                code = _LAUNCHER_CODES.get(exc.code)
-                if code is None:
-                    detail["launcher_code"] = exc.code
-                    code = "internal_error"
-                raise _Failure(code, exc.message, detail) from exc
-            if decision.action == "start" and not self.stop.is_set():
-                self._start_backend(config, ws, tunnel)
-            return decision
-        finally:
-            lock.release()
+        if not result.available:
+            with _launcher_failures():
+                raise server_error(result)
+        self.log_file = lgm.log_file_of(result.record)
+        return result
 
-    def _acquire(self, lock: Any, limit: float) -> bool:
-        """Take ``lock`` in short waits that check for a stop; False on a
-        stop. Waiting longer than ``limit`` is ``backend_start_failed``: the
-        holder is stuck in its own start."""
-        from filelock import Timeout
-
-        deadline = time.monotonic() + limit
-        while not self.stop.is_set():
-            try:
-                lock.acquire(timeout=_TICK)
-                return True
-            except Timeout:
-                if time.monotonic() >= deadline:
-                    raise _Failure(
-                        "backend_start_failed",
-                        f"Another EvoScientist process has been starting a "
-                        f"backend for over {limit:.0f} s.",
-                        {"lock_file": str(lock.lock_file)},
-                    ) from None
-        return False
-
-    def _start_backend(self, config: Any, ws: str, tunnel: bool) -> None:
-        from pathlib import Path
-
-        from ..langgraph_dev import manager as lgm
+    def _before_start(self) -> None:
+        """Right before this command starts a backend: the job it joins."""
         from .backend_job import backend_job
 
-        # First, so ccproxy joins it too: Node's job lets children break away,
-        # so a ccproxy outside ours would outlive a killed app.
         self.job = backend_job()
-        if config.anthropic_auth_mode == "oauth":
-            from ..ccproxy_manager import maybe_start_ccproxy
-
-            try:
-                self.ccproxy = maybe_start_ccproxy(config)
-            except RuntimeError as exc:
-                raise _Failure(
-                    "ccproxy_failed", f"ccproxy startup failed: {exc}"
-                ) from exc
-            # None: another session's ccproxy, reused and left alone.
-            if self.ccproxy is not None and self.job is not None:
-                self.job.adopt(self.ccproxy)
-            # A stop during the ccproxy start: cleanup() stops only ccproxy.
-            if self.stop.is_set():
-                return
-
-        self.starting = True
-        try:
-            self.proc = lgm.start_langgraph_dev(
-                workspace_dir=Path(ws),
-                port=self.port,
-                host=self.host,
-                file_persistence=bool(
-                    getattr(config, "langgraph_dev_file_persistence", True)
-                ),
-                jobs_per_worker=int(
-                    getattr(config, "langgraph_dev_jobs_per_worker", 10)
-                ),
-                tunnel=tunnel,
-                config_fingerprint=lgm._server_config_fingerprint(config),
-                allowed_origins=getattr(config, "backend_allowed_origins", ""),
-                job=self.job,
-            )
-        except Exception as exc:
-            raise _Failure(
-                "backend_start_failed",
-                f"langgraph dev startup failed: {exc}",
-                {"log_file": str(lgm.RUNTIME.log_file)},
-            ) from exc
 
     def _wait_for_tunnel_url(self) -> str | None:
         """The tunnel URL, in short waits that check for a stop between them;
-        each read scans the log from this server's start."""
+        each read scans the log from this server's start, and a cloudflared
+        failure raises :class:`TunnelFailedError` at once."""
         from ..langgraph_dev import manager as lgm
 
         deadline = time.monotonic() + _TUNNEL_WAIT
@@ -507,38 +485,28 @@ class _Run:
                 raise _Failure(
                     "backend_exited",
                     f"The backend on port {self.port} {what}.",
-                    {"url": lgm._base_url(self.port, self.host)},
+                    {
+                        "url": lgm._base_url(self.port, self.host),
+                        "log_file": str(self.log_file),
+                    },
                 )
 
     def cleanup(self) -> None:
-        """Stop what this command started: the backend, then ccproxy, then
-        close the job (which would end a backend the stop missed). Each step
-        runs even when the one before raised; ``run_json`` reports the error."""
+        """Stop what this command started: the backend, then close the job
+        (which would end a backend the stop missed). Each step runs even when
+        the one before raised; ``run_json`` reports the error."""
         from ..langgraph_dev import manager as lgm
 
         try:
             if self.starting:
-                # An interrupted or failed start returns no handle; the
-                # manager records it right after spawning.
+                # An interrupted start returns no handle; the manager holds
+                # it right after spawning.
                 proc = self.proc if self.proc is not None else lgm._PROCESS
                 if proc is not None:
-                    lgm.stop_langgraph_dev(proc)
+                    lgm.stop_langgraph_dev(proc, clean=self.proc is not None)
         finally:
-            try:
-                if self.ccproxy is not None:
-                    from ..ccproxy_manager import stop_ccproxy
-
-                    stop_ccproxy(self.ccproxy)
-            finally:
-                if self.job is not None:
-                    self.job.close()
-
-
-def _public_bind_warning(host: str) -> str:
-    return (
-        f"Listening on {host}: no auth, and the agent can run shell. "
-        "Trusted networks only."
-    )
+            if self.job is not None:
+                self.job.close()
 
 
 def _check_sign_in(config: Any) -> None:

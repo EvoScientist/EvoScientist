@@ -27,7 +27,6 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
-from ..paths import resolve_virtual_path
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
 from .diff_format import build_edit_diff
@@ -39,8 +38,11 @@ from .state import (
     _parse_todo_items,
 )
 from .utils import (
+    EXECUTE_STATUS,
     DisplayLimits,
     ToolStatus,
+    _tool_path_arg,
+    failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
     is_success,
@@ -57,9 +59,121 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 # Media file extensions that should trigger on_file_write callback
-_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+_MEDIA_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".svg",
+    ".pdf",
+    ".mp3",
+    ".wav",
+    ".mp4",
+}
+
+# File tool results that may name a media file to send to the channel.
+_MEDIA_TOOLS = ("write_file", "read_file")
+_MEDIA_RESULT_EVENTS = ("tool_result", "subagent_tool_result")
 _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
+
+
+def tool_result_file_path(state: StreamState, event: dict[str, Any]) -> str:
+    """The path named by the file tool call a tool result event answers.
+
+    One model step can hold several calls of a tool, so the call is found
+    by the result's id.
+    """
+    call_id = event.get("id")
+    if not call_id:
+        return ""
+    for tc in _result_tool_calls(state, event):
+        if tc.get("id") == call_id:
+            return _tool_path_arg(tc.get("args"))
+    return ""
+
+
+def _result_tool_calls(state: StreamState, event: dict[str, Any]) -> list[dict]:
+    """The tool calls of the agent a result event belongs to.
+
+    A sub-agent's calls live on its own state, found by ``instance_id``.
+    """
+    if event.get("type") != "subagent_tool_result":
+        return state.tool_calls
+    instance_id = event.get("instance_id")
+    for sa in state.subagents:
+        if sa.instance_id == instance_id:
+            return sa.tool_calls
+    return []
+
+
+def resolve_media_path(
+    path: str,
+    work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
+) -> str:
+    """The file on disk a file tool's *path* names, or ``""`` if there is none.
+
+    The path is mapped as the sandbox maps it (see
+    :func:`~EvoScientist.backends.sandbox_file_path`), so only a file inside
+    ``work_dir`` or ``media_dir`` is found, and a host-looking path names the
+    workspace file at that path as written, never the host file. In
+    dangerous mode a host path is the real file it names. A path
+    under one of the agent's *routes* names that route's tier file instead.
+    """
+    if work_dir is None:
+        return ""
+    from ..backends import sandbox_file_path
+
+    real_path = sandbox_file_path(
+        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
+    )
+    return str(real_path) if real_path is not None and real_path.is_file() else ""
+
+
+def forward_media_result(
+    state: StreamState,
+    event: dict[str, Any],
+    media_sent: set[str],
+    send_fn: Callable[[str], Any],
+    work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
+) -> None:
+    """Send the media file a successful file tool result names to the channel.
+
+    Covers ``write_file`` and ``read_file`` results of the main agent and of
+    sub-agents; *state* must already hold the event. Each path is sent once
+    per turn, tracked in *media_sent*. Every channel surface (the Rich loop,
+    the TUI, the standalone runner) forwards through this function, so they
+    all resolve paths the same way: as the agent's backend does, with *routes*
+    in front of the sandbox rooted at *work_dir* with *media_dir*, in
+    dangerous mode when *dangerous* is set.
+    """
+    if (
+        event.get("type") not in _MEDIA_RESULT_EVENTS
+        or event.get("name") not in _MEDIA_TOOLS
+        or not event.get("success")
+    ):
+        return
+    path = tool_result_file_path(state, event)
+    if not path or path in media_sent:
+        return
+    if os.path.splitext(path)[1].lower() not in _MEDIA_EXTENSIONS:
+        return
+    real_path = resolve_media_path(
+        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
+    )
+    if real_path:
+        media_sent.add(path)
+        send_fn(real_path)
 
 
 class _ApprovalUnanswered(Exception):
@@ -83,7 +197,7 @@ def _update_final_live_frame(
 
 
 def _graph_target_for_local_agent(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     metadata: dict[str, object] | None = None,
 ) -> GraphTarget:
     folders: dict[str, str] = {}
@@ -371,25 +485,35 @@ def _format_single_todo(item: dict) -> Text:
 # ---------------------------------------------------------------------------
 
 
+def _result_succeeded(tr: dict) -> bool:
+    """The decoder's verdict; a result that has none is judged from its text."""
+    success = tr.get("success")
+    if isinstance(success, bool):
+        return success
+    return is_success(tr.get("content", ""))
+
+
 def format_tool_result_compact(
     _name: str,
     content: str,
     max_lines: int = 5,
     tool_args: dict | None = None,
+    success: bool | None = None,
 ) -> list:
     """Format tool result as tree output.
 
-    Special handling for write_todos: shows formatted checklist with status symbols.
-    Special handling for edit_file: shows color-coded unified diff.
+    ``success`` (the stream's verdict) overrides the text check. A successful write_todos
+    shows its checklist and edit_file its diff; a long failure shows its first and last lines.
     """
     elements = []
+    ok = is_success(content) if success is None else success
 
     if not content.strip():
         elements.append(Text("  \u2514 (empty)", style="dim"))
         return elements
 
     # Special handling for edit_file: show diff
-    if _name == "edit_file" and tool_args and is_success(content):
+    if _name == "edit_file" and tool_args and ok:
         old_str = tool_args.get("old_string", "")
         new_str = tool_args.get("new_string", "")
         path = tool_args.get("path", tool_args.get("file_path", ""))
@@ -399,8 +523,8 @@ def format_tool_result_compact(
                 elements.append(Text.from_markup(diff_markup))
                 return elements
 
-    # Special handling for write_todos
-    if _name == "write_todos":
+    # Special handling for write_todos (a failed call shows its error instead)
+    if _name == "write_todos" and ok:
         items = _parse_todo_items(content)
         if items:
             stats = _build_todo_stats(items)
@@ -422,18 +546,32 @@ def format_tool_result_compact(
 
     lines = content.strip().split("\n")
     total_lines = len(lines)
+    remaining = total_lines - max_lines
+    style = "dim" if ok else "red dim"
 
-    display_lines = lines[:max_lines]
-    for i, line in enumerate(display_lines):
+    # A long failure shows its end too: a command reports there how it ended.
+    tail = max_lines - max_lines // 2 if not ok and remaining > 0 else 0
+    rows: list[str | None] = [*lines[: max_lines - tail]]
+    if remaining > 0:
+        # Blank lines, and the sandbox's exit code that repeats deepagents' status line,
+        # would crowd out the reason above them.
+        end = [line for line in lines[max_lines - tail :] if line.strip()]
+        end = [
+            line
+            for line, after in zip(end, [*end[1:], ""], strict=True)
+            if not (line.startswith("Exit code: ") and after.startswith(EXECUTE_STATUS))
+        ]
+        end = end[-tail:] if tail else []
+        remaining = total_lines - len(rows) - len(end)
+        rows += [None, *end]
+    for i, line in enumerate(rows):
+        if line is None:
+            elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
+            continue
         prefix = "\u2514" if i == 0 else " "
         if len(line) > 80:
             line = line[:77] + "\u2026"
-        style = "dim" if is_success(content) else "red dim"
         elements.append(Text(f"  {prefix} {line}", style=style))
-
-    remaining = total_lines - max_lines
-    if remaining > 0:
-        elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
 
     return elements
 
@@ -448,8 +586,7 @@ def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
     is_task = tc.get("name", "").lower() == "task"
 
     if tr is not None:
-        content = tr.get("content", "")
-        if is_success(content):
+        if _result_succeeded(tr):
             style = "bold green"
             indicator = "\u2713" if is_task else ToolStatus.SUCCESS.value
         else:
@@ -573,11 +710,10 @@ def _render_subagent_section(sa: "SubAgentState", compact: bool = False) -> list
             tc_line.append(f"\u2713 {tc_name}", style="green")
         else:
             tc_line.append(f"\u2717 {tc_name}", style="red")
-            content = tr.get("content", "")
-            first_line = content.strip().split("\n")[0][:70]
-            if first_line:
+            reason = failure_summary(tc["name"], tr.get("content", ""))[:70]
+            if reason:
                 err_line = Text("\u2502   ", style=BORDER)
-                err_line.append(f"\u2514 {first_line}", style="red dim")
+                err_line.append(f"\u2514 {reason}", style="red dim")
                 elements.append(tc_line)
                 elements.append(err_line)
                 continue
@@ -1047,12 +1183,13 @@ def create_streaming_display(
                 _append_narration_before_tool(tool_index)
                 elements.append(_render_tool_call_line(tc, tr))
                 content = tr.get("content", "") if tr else ""
-                if tr and (not is_success(content) or tc.get("name") == "edit_file"):
+                if tr and (not _result_succeeded(tr) or tc.get("name") == "edit_file"):
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=10,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1077,7 +1214,7 @@ def create_streaming_display(
             if hidden:
                 for tool_index, _, _ in hidden:
                     _append_narration_before_tool(tool_index)
-                ok = sum(1 for _, _, tr in hidden if is_success(tr.get("content", "")))
+                ok = sum(1 for _, _, tr in hidden if _result_succeeded(tr))
                 fail = len(hidden) - ok
                 summary = Text()
                 summary.append(f"\u2713 {ok} completed", style="dim green")
@@ -1120,12 +1257,13 @@ def create_streaming_display(
                     continue
 
                 content = tr.get("content", "")
-                if not is_success(content) or tc.get("name") == "edit_file":
+                if not _result_succeeded(tr) or tc.get("name") == "edit_file":
                     result_elements = format_tool_result_compact(
                         tr["name"],
                         content,
                         max_lines=5,
                         tool_args=tc.get("args"),
+                        success=_result_succeeded(tr),
                     )
                     elements.extend(result_elements)
 
@@ -1312,6 +1450,7 @@ def display_final_results(
                     content,
                     max_lines=10,
                     tool_args=tc.get("args"),
+                    success=_result_succeeded(tr),
                 )
                 for elem in result_elements:
                     console.print(elem)
@@ -1672,7 +1811,7 @@ def _resolve_ask_user_prompt(
 
 
 def _run_streaming(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     message: GraphRunInput,
     thread_id: str,
     show_thinking: bool,
@@ -1681,6 +1820,9 @@ def _run_streaming(
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
@@ -1704,7 +1846,7 @@ def _run_streaming(
     Bridges the async stream_agent_events() into synchronous Rich Live rendering.
 
     Args:
-        agent: Compiled agent graph
+        agent: Compiled agent graph; None when the langgraph server runs it
         message: User message
         thread_id: Thread ID
         show_thinking: Whether to show thinking panel
@@ -1717,9 +1859,17 @@ def _run_streaming(
         on_todo: Optional sync callback receiving todo items list.
             Called once when write_todos tool_call is detected.
         on_file_write: Optional sync callback receiving the real filesystem path
-            when the agent writes a media file (image/pdf) via write_file.
+            when the agent or a sub-agent writes or reads a media file
+            (image/pdf/audio/video) via write_file or read_file.
         work_dir: The folder the agent works in; virtual paths in tool calls
-            resolve against it before ``on_file_write`` is called.
+            resolve against it before ``on_file_write`` is called (see
+            :func:`resolve_media_path`).
+        media_dir: The workspace's media folder when the sandbox is told about
+            it (``SessionDirs.sandbox_media_dir``); files there are sent too.
+        dangerous: The sandbox runs in dangerous mode, so host paths in tool
+            calls name real files anywhere.
+        routes: The agent's file tool routes (``file_tool_routes``), so a
+            path under ``/skills/`` or ``/memories/`` names that tier's file.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1741,6 +1891,9 @@ def _run_streaming(
                 on_todo=on_todo,
                 on_file_write=on_file_write,
                 work_dir=work_dir,
+                media_dir=media_dir,
+                routes=routes,
+                dangerous=dangerous,
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
@@ -1833,57 +1986,18 @@ def _run_streaming(
                     on_todo(state.todo_items)
                     _todo_sent = True
 
-                # Send media file to channel when write_file succeeds
-                if (
-                    on_file_write
-                    and event_type == "tool_result"
-                    and event.get("name") == "write_file"
-                    and event.get("success")
-                ):
-                    wf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "write_file":
-                            p = tc.get("args", {}).get("path", "")
-                            if p and p not in _media_sent:
-                                wf_path = p
-                                break
-                    if wf_path:
-                        ext = os.path.splitext(wf_path)[1].lower()
-                        if ext in _MEDIA_EXTENSIONS:
-                            real_path = (
-                                str(resolve_virtual_path(work_dir, wf_path))
-                                if work_dir is not None
-                                else wf_path
-                            )
-                            if os.path.isfile(real_path):
-                                _media_sent.add(wf_path)
-                                on_file_write(real_path)
-
-                # Send media file to channel when read_file returns an image
-                if (
-                    on_file_write
-                    and event_type == "tool_result"
-                    and event.get("name") == "read_file"
-                    and event.get("success")
-                ):
-                    rf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "read_file":
-                            p = tc.get("args", {}).get("file_path", "") or tc.get(
-                                "args", {}
-                            ).get("path", "")
-                            if p and p not in _media_sent:
-                                rf_path = p
-                                break
-                    if rf_path:
-                        ext = os.path.splitext(rf_path)[1].lower()
-                        if ext in _MEDIA_EXTENSIONS:
-                            real_path = rf_path
-                            if not os.path.isfile(real_path) and work_dir is not None:
-                                real_path = str(resolve_virtual_path(work_dir, rf_path))
-                            if os.path.isfile(real_path):
-                                _media_sent.add(rf_path)
-                                on_file_write(real_path)
+                # Send the media file a write_file / read_file result names
+                if on_file_write:
+                    forward_media_result(
+                        state,
+                        event,
+                        _media_sent,
+                        on_file_write,
+                        work_dir,
+                        media_dir=media_dir,
+                        routes=routes,
+                        dangerous=dangerous,
+                    )
 
                 if on_stream_event is not None:
                     callback_result = on_stream_event(event_type, state)
@@ -2276,8 +2390,10 @@ async def _astream_to_console(
             continue
         tr = _tool_result_for_call(state.tool_results, tc)
         console.print(_render_tool_call_line(tc, tr))
-        if tr and not is_success(tr.get("content", "")):
-            for elem in format_tool_result_compact(tr["name"], tr.get("content", "")):
+        if tr and not _result_succeeded(tr):
+            for elem in format_tool_result_compact(
+                tr["name"], tr.get("content", ""), success=False
+            ):
                 console.print(elem)
 
     # 2) Task List panel — middle

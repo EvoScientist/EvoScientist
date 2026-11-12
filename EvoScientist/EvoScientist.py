@@ -37,8 +37,8 @@ from .config import (
 )
 from .memory import MemorySourceType
 from .paths import (
+    SessionDirs,
     Workspace,
-    normalize_path,
     process_session_dirs,
     resolve_virtual_path,
 )
@@ -48,6 +48,7 @@ from .prompts import get_system_prompt
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 if TYPE_CHECKING:
+    from deepagents.backends.protocol import BackendProtocol
     from langchain.agents.middleware import InterruptOnConfig
     from langgraph.graph.state import CompiledStateGraph
 
@@ -96,7 +97,8 @@ _auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
 _MCP_TOOLS_CACHE_KEY: str | None = None
 _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
 
-# Default agent (no checkpointer) — used by langgraph dev / LangSmith / notebooks.
+# Default agent (no checkpointer) — used by LangSmith / notebooks; the server
+# builds its graphs per project (``build_main_graph``).
 # Lazily constructed on first access so MCP tools are included without
 # spawning subprocesses at import time.
 _EvoScientist_agent = None
@@ -354,6 +356,7 @@ def _inject_subagent_middleware(
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
@@ -407,6 +410,7 @@ def _inject_subagent_middleware(
             create_context_editing_middleware(chat_model),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
+            WindowsFilePathMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
             # Inside the retry layer: marks each provider call for the
@@ -505,8 +509,8 @@ def _maybe_swap_async_subagents(
     swapped from synchronous in-process dicts to ``AsyncSubAgent`` references
     pointing at the langgraph dev graph of the same name.
 
-    The deployed graphs live in ``EvoScientist.langgraph_dev.graphs`` and
-    are registered in ``EvoScientist/langgraph_dev/langgraph.json``.
+    The deployed graphs are built in ``EvoScientist.langgraph_dev.factories``
+    and registered in ``EvoScientist/langgraph_dev/langgraph.json``.
 
     Adding a new async sub-agent requires no change here — flip
     ``async: true`` in its yaml and create the matching deployment graph.
@@ -558,12 +562,13 @@ def _maybe_swap_async_subagents(
 
     from deepagents import AsyncSubAgent
 
-    from .langgraph_dev.sdk import langgraph_dev_url
+    from .langgraph_dev.sdk import configured_langgraph_dev_url
 
-    # Self-dispatch target. Resolved through ``langgraph_dev_url`` so it tracks
-    # both ``langgraph_dev_port`` and ``langgraph_dev_host`` — a wildcard bind
-    # maps back to loopback, a pinned interface is honored verbatim.
-    dev_url = langgraph_dev_url(cfg)
+    # Self-dispatch target: the server this process's session uses, else (in
+    # the server itself) the one ``langgraph_dev_port`` and
+    # ``langgraph_dev_host`` name — a wildcard bind maps back to loopback, a
+    # pinned interface is honored verbatim.
+    dev_url = configured_langgraph_dev_url(cfg)
     out = []
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory
@@ -814,14 +819,33 @@ def load_mcp_and_build_kwargs(
 
 
 def _run_media_dir(workspace: Workspace, work_dir: str | Path) -> Path | None:
-    """The workspace's media folder, when the agent works outside the root.
+    """The media folder a sandbox rooted at *work_dir* is told about.
 
-    Channel attachments land in ``<root>/media`` and are referenced by their
-    real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
-    told about the folder to reach them; in the root it is already inside
-    the sandbox.
+    See :attr:`SessionDirs.sandbox_media_dir`.
     """
-    return None if normalize_path(work_dir) == workspace.root else workspace.media_dir
+    return SessionDirs(workspace, work_dir).sandbox_media_dir
+
+
+def file_tool_routes(workspace: Workspace) -> "dict[str, BackendProtocol]":
+    """The agent's file tool routes: path prefix to the backend it reaches.
+
+    ``/skills/`` merges the workspace, global and built-in skill tiers;
+    ``/memories/`` is the memory folder. Every other path goes to the
+    sandbox, which the caller roots at its work folder.
+    """
+    from .backends import MemoryFilesystemBackend, MergedSkillsBackend
+
+    return {
+        "/skills/": MergedSkillsBackend(
+            primary_dir=str(workspace.skills_dir),
+            global_dir=str(_paths_mod.GLOBAL_SKILLS_DIR),
+            secondary_dir=SKILLS_DIR,
+        ),
+        "/memories/": MemoryFilesystemBackend(
+            root_dir=str(_paths_mod.MEMORIES_DIR),
+            virtual_mode=True,
+        ),
+    }
 
 
 def _get_default_backend(
@@ -852,12 +876,8 @@ def _get_default_backend(
     """
     from deepagents.backends import CompositeBackend
 
-    from .backends import (
-        CustomSandboxBackend,
-        MemoryFilesystemBackend,
-        MergedSkillsBackend,
-    )
-    from .setup.research_env import research_env_overrides
+    from .backends import CustomSandboxBackend
+    from .setup.agent_env import agent_shell_overrides
 
     cfg = _ensure_config()
     if guard_dangerous is None:
@@ -865,8 +885,6 @@ def _get_default_backend(
         # the run's HITL-suppression state so a mid-session flip can't go stale.
         guard_dangerous = False
     root_dir = str(work_dir if work_dir is not None else workspace.root)
-    memory_dir = str(_paths_mod.MEMORIES_DIR)
-    global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
     # Dangerous mode opens the workspace (`/`) route to the real filesystem;
     # the /skills/ and /memories/ routes stay confined (virtual_mode=True).
@@ -878,36 +896,27 @@ def _get_default_backend(
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
         refuse_delete=refuse_delete,
-        env=research_env_overrides(),
+        env=agent_shell_overrides(),
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )
-    sk_backend = MergedSkillsBackend(
-        primary_dir=str(workspace.skills_dir),
-        global_dir=global_skills_dir,
-        secondary_dir=SKILLS_DIR,
-    )
-    mem_backend = MemoryFilesystemBackend(
-        root_dir=memory_dir,
-        virtual_mode=True,
-    )
-    return CompositeBackend(
-        default=ws_backend,
-        routes={
-            "/skills/": sk_backend,
-            "/memories/": mem_backend,
-        },
-    )
+    return CompositeBackend(default=ws_backend, routes=file_tool_routes(workspace))
 
 
 def _model_retry_middleware(
-    cfg=None, *, unattended: bool = False, honor_run_key: bool = True
+    cfg=None,
+    *,
+    unattended: bool = False,
+    honor_run_key: bool = True,
+    follow_auto_mode: bool = True,
 ):
     """The retry layer for one middleware list; always mounted, the budget may be 0."""
     from .middleware.model_retry import ModelRetryMiddleware
 
     cfg = cfg if cfg is not None else _ensure_config()
-    tier_unattended = unattended or bool(getattr(cfg, "auto_mode", False))
+    tier_unattended = unattended or (
+        follow_auto_mode and bool(getattr(cfg, "auto_mode", False))
+    )
     budget = (
         cfg.auto_mode_retry_wait_seconds
         if tier_unattended
@@ -983,6 +992,7 @@ def _get_default_middleware(
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        WindowsFilePathMiddleware,
         create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
@@ -1082,6 +1092,7 @@ def _get_default_middleware(
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
+        WindowsFilePathMiddleware(),
         # deepagents 0.7.0 dropped TodoListMiddleware from its defaults;
         # EXPERIMENT_WORKFLOW planning and the todo UI pipeline require it.
         TodoListMiddleware(),
@@ -1283,7 +1294,7 @@ def _build_hitl_interrupt_on(
     the session grant, :func:`_hitl_when_served` (a served graph) only under
     ``hitl_suppressed``. Otherwise a graph built once for an unattended session
     would silently disable HITL for a later attended session on the same
-    keepalive server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    shared server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
     lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
     so async agents can't hang on an approval nobody can deliver.
     """
@@ -1301,31 +1312,34 @@ def _build_hitl_interrupt_on(
 def _get_default_agent():
     """Build the default agent (no checkpointer) on first access.
 
-    This is the main graph the langgraph dev server serves, and the agent a
-    plain ``from EvoScientist import EvoScientist_agent`` gets. It always
-    loads MCP. Inside the server (``EVOSCIENTIST_SERVER_PROCESS``, set by
-    ``start_langgraph_dev``) async sub-agents dispatch back to that server;
-    elsewhere they stay disabled, since there is no server to dispatch to.
+    The agent a plain ``from EvoScientist import EvoScientist_agent`` gets
+    (notebooks, LangSmith), built for this process's folders. The server
+    builds its main graphs per project with :func:`build_main_graph`.
     """
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
-        from deepagents import create_deep_agent
-
-        cfg = _ensure_config()
         dirs = process_session_dirs()
-        workspace, work_dir = dirs.workspace, dirs.work_dir
-        be = _get_default_backend(workspace, work_dir=work_dir)
-        mw = _get_default_middleware(workspace=workspace, work_dir=work_dir, backend=be)
-
-        kwargs = load_mcp_and_build_kwargs(
-            be, mw, workspace=workspace, work_dir=work_dir
-        )
-
-        _EvoScientist_agent = create_deep_agent(
-            **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
-        ).with_config({"recursion_limit": cfg.recursion_limit})
+        _EvoScientist_agent = build_main_graph(dirs.workspace, work_dir=dirs.work_dir)
     return _EvoScientist_agent
+
+
+def build_main_graph(workspace: Workspace, *, work_dir: str | Path):
+    """Build the main graph for *workspace*, working in *work_dir*.
+
+    What the server serves for a project, and the default agent's builder.
+    It always loads MCP; async sub-agents dispatch back to the server inside
+    the server process only.
+    """
+    from deepagents import create_deep_agent
+
+    cfg = _ensure_config()
+    be = _get_default_backend(workspace, work_dir=work_dir)
+    mw = _get_default_middleware(workspace=workspace, work_dir=work_dir, backend=be)
+    kwargs = load_mcp_and_build_kwargs(be, mw, workspace=workspace, work_dir=work_dir)
+    return create_deep_agent(
+        **kwargs,
+        interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
+    ).with_config({"recursion_limit": cfg.recursion_limit})
 
 
 def __getattr__(name: str):
@@ -1386,13 +1400,8 @@ def create_cli_agent(
     from deepagents import create_deep_agent
     from deepagents.backends import CompositeBackend
 
-    from . import paths as _paths
-    from .backends import (
-        CustomSandboxBackend,
-        MemoryFilesystemBackend,
-        MergedSkillsBackend,
-    )
-    from .setup.research_env import research_env_overrides
+    from .backends import CustomSandboxBackend
+    from .setup.agent_env import agent_shell_overrides
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
@@ -1418,9 +1427,6 @@ def create_cli_agent(
 
     work_dir = str(work_dir if work_dir is not None else workspace.root)
 
-    _mem_dir = str(_paths.MEMORIES_DIR)
-    _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
-
     media_dir = _run_media_dir(workspace, work_dir)
     ws_backend = CustomSandboxBackend(
         root_dir=work_dir,
@@ -1430,26 +1436,11 @@ def create_cli_agent(
         # Guard derived per call from the run's HITL-suppression state (see
         # CustomSandboxBackend._effective_guard_dangerous), not baked here.
         guard_dangerous=False,
-        env=research_env_overrides(),
+        env=agent_shell_overrides(),
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )
-    sk_backend = MergedSkillsBackend(
-        primary_dir=str(workspace.skills_dir),
-        global_dir=_global_skills_dir,
-        secondary_dir=SKILLS_DIR,
-    )
-    mem_backend = MemoryFilesystemBackend(
-        root_dir=_mem_dir,
-        virtual_mode=True,
-    )
-    be = CompositeBackend(
-        default=ws_backend,
-        routes={
-            "/skills/": sk_backend,
-            "/memories/": mem_backend,
-        },
-    )
+    be = CompositeBackend(default=ws_backend, routes=file_tool_routes(workspace))
 
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain.

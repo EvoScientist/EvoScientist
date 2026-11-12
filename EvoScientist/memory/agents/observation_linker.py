@@ -72,8 +72,6 @@ def build_observation_linker_graph(
     memory_dir: str | Path | None = None,
 ) -> CompiledStateGraph:
     """Build the registered LangGraph observation linker."""
-    from ...middleware.error_normalization import ErrorNormalizationMiddleware
-
     agent_paths = resolve_memory_agent_paths(
         workspace=workspace,
         memory_dir=memory_dir,
@@ -88,7 +86,5 @@ def build_observation_linker_graph(
         tools=tools,
         memory_dir=agent_paths.memory_dir,
         workspace_dir=agent_paths.workspace_dir,
-        # Outermost — normalize provider-SDK exceptions from the
-        # auxiliary model call before any inner middleware sees them.
-        middleware=[ErrorNormalizationMiddleware(), *memory_agent_middleware()],
+        middleware=memory_agent_middleware(),
     )

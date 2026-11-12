@@ -14,7 +14,7 @@ from .server import (
     LangGraphServerGateway,
     LangGraphServerThreadStore,
 )
-from .types import GraphGateway, ThreadStore
+from .types import GraphGateway, ThreadStore, runs_in_process
 
 if TYPE_CHECKING:
     from ..middleware.events import SessionEvents
@@ -126,7 +126,7 @@ def create_runtime_gateways_for_config(
     ``backend`` is the surface's effective backend, resolved once at the
     surface's entry point via
     :func:`EvoScientist.config.resolve_gateway_backend` and threaded down (the
-    same value the surface passed to ``ensure_langgraph_dev``). When ``None``,
+    same value the surface passed to ``ensure_server``). When ``None``,
     falls back to the global ``config.gateway_backend`` — the pre-per-surface
     behavior, kept for callers that do not resolve a surface (and tests).
 
@@ -134,7 +134,7 @@ def create_runtime_gateways_for_config(
     ``langgraph_server`` keeps reads on the local SQLite store while routing
     execution to the running langgraph dev server, via
     :class:`CompositeGraphGateway` (the Stage 4 read-path strategy of #432). The
-    dev server must already be ensured — surfaces call ``ensure_langgraph_dev``
+    dev server must already be ensured — surfaces call ``ensure_server``
     before this. Shared by every surface's cutover so the flag wiring lives in
     one place; the base URL and auth headers come from the effective config via
     ``configured_langgraph_dev_url`` / ``langgraph_dev_headers``, matching every
@@ -151,7 +151,7 @@ def create_runtime_gateways_for_config(
         )
 
         # The server backend has no server to execute against unless the dev
-        # server actually came up. Surfaces call ``ensure_langgraph_dev`` before
+        # server actually came up. Surfaces call ``ensure_server`` before
         # this, which soft-fails (warns, leaves ``_ASYNC_SUBAGENTS_AVAILABLE``
         # False) when the port is held or the subprocess dies. Without this
         # guard the composite would be built against a dead URL and the first
@@ -173,3 +173,23 @@ def create_runtime_gateways_for_config(
             events=events,
         )
     return create_runtime_gateways(events=events)
+
+
+def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any = None) -> bool:
+    """Whether the sandbox running this session's turns is in dangerous mode.
+
+    Only an in-process agent is built from this session's *config* (the
+    effective config when ``None``). Turns on the langgraph server run in the
+    server's sandbox, which keeps the mode it was launched with, and this
+    session cannot tell what that is (``--dangerous`` never reaches it, and
+    config.yaml may have changed since). So for any gateway that does not
+    execute in process the answer is ``False``: file tool paths are then read
+    the confined way, never as host paths.
+    """
+    if not runs_in_process(graph_gateway):
+        return False
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
+    return bool(config.dangerous_mode)

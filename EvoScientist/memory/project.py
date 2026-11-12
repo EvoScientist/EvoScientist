@@ -29,6 +29,10 @@ def _run_git(args: list[str], cwd: Path) -> str | None:
     return value or None
 
 
+def _project_id(source: str) -> str:
+    return f"P-{_short_hash(source)}"
+
+
 def resolve_project_id(workspace: str | Path) -> str:
     """Return the stable id used for this workspace's project memory."""
     root = Path(workspace).expanduser().resolve()
@@ -37,5 +41,13 @@ def resolve_project_id(workspace: str | Path) -> str:
         git_root_path = Path(git_root).expanduser().resolve()
         remote = _run_git(["remote", "get-url", "origin"], git_root_path)
         source = f"git-remote:{remote}" if remote else f"git-root:{git_root_path}"
-        return f"P-{_short_hash(source)}"
-    return f"P-{_short_hash(f'path:{root}')}"
+        return _project_id(source)
+    return _project_id(f"path:{root}")
+
+
+def path_project_ids(workspace: str | Path) -> set[str]:
+    """The ids :func:`resolve_project_id` gives *workspace* from its path
+    alone: outside git, or as the top folder of a repository without a
+    remote. A folder that is gone can no longer be asked which applies."""
+    root = Path(workspace).expanduser().resolve()
+    return {_project_id(f"path:{root}"), _project_id(f"git-root:{root}")}

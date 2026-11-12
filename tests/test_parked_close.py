@@ -368,6 +368,22 @@ async def test_the_close_through_the_server_gateway_classifies_like_the_local_on
     assert threads.states["t-srv"]["next"] == []
 
 
+async def test_the_close_through_the_server_gateway_answers_an_invalid_call():
+    """A malformed call in the server's dict state is closed too (#509)."""
+    state = _parked_server_state()
+    state["values"]["messages"][-1]["invalid_tool_calls"] = [_invalid("bad-1")]
+    threads = _ParkedServerThreads(threads=[], states={"t-srv": state})
+    await close_parked_checkpoint(
+        _server_gateway(threads), GraphTarget(), "t-srv", reason="rejected"
+    )
+    assert _results(_texts(threads.state_updates[1][1]["messages"])) == {
+        "c1": ("asked", "rejected", True),
+        "w1": ("not executed", "rejected", False),
+        "bad-1": ("not executed", "rejected", False),
+    }
+    assert threads.states["t-srv"]["next"] == []
+
+
 async def test_a_server_that_refuses_the_write_fails_the_close_with_one_short_line(
     caplog,
 ):

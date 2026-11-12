@@ -4,15 +4,14 @@ Verifies the orchestration:
 - workspace resolution (CLI > config > cwd)
 - port resolution (CLI > config > default)
 - host resolution (CLI > config > default) + the public-bind warning
-- port collision pre-flight
-- ccproxy lifecycle (only if Anthropic OAuth configured)
-- ``start_langgraph_dev`` invocation
+- the refusal of a running server or an occupied port
+- no ccproxy of its own (the server starts it)
+- the start ``ensure_server`` makes
 - clean shutdown via signal handler / KeyboardInterrupt
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,11 +19,12 @@ import pytest
 import typer
 
 from EvoScientist.deploy import server as deploy_server
+from tests.fakes.langgraph_dev import Server
 
 
 @pytest.fixture(autouse=True)
 def _isolated_runtime(runtime_paths):
-    """The start lock, pid file and sidecar under tmp_path."""
+    """The server's files in the test's server home."""
 
 
 def _make_config(
@@ -49,6 +49,10 @@ def _make_config(
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
         langgraph_dev_file_persistence=langgraph_dev_file_persistence,
         dangerous_mode=dangerous_mode,
+        provider="anthropic",
+        auxiliary_provider="",
+        model_fallbacks="",
+        ccproxy_port=8000,
     )
 
 
@@ -83,24 +87,29 @@ def _run_deploy_once(
     debug: bool = False,
     cwd: str | None = None,
     port_occupied: bool = False,
-    langgraph_dev_running: bool = True,  # health-check passes after start
+    langgraph_dev_running: bool = True,
     tunnel: bool = False,
     tunnel_url: str | None = None,
-    on_port_check: Callable[[], None] | None = None,
+    tunnel_error: str | None = None,
+    printed: list | None = None,
+    server: Server | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
-    Returns a ``captured`` dict with observation points."""
+    *port_occupied*: something holds the port, this data folder's server
+    when *langgraph_dev_running*, another program otherwise. *server* is the
+    fake the start goes through (a fresh one by default). Returns a
+    ``captured`` dict with observation points; *printed* collects the console
+    output, also of a run that exits."""
     import EvoScientist.config as config_mod
 
     captured: dict[str, Any] = {
         "ccproxy_started": False,
-        "ccproxy_stopped": False,
         "langgraph_dev_started": False,
         "langgraph_dev_stopped": False,
         "workspace_passed": None,
         "port_passed": None,
         "host_passed": None,
-        "printed": [],
+        "printed": [] if printed is None else printed,
         "atexit_callbacks": [],
     }
 
@@ -118,61 +127,45 @@ def _run_deploy_once(
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 
-    def _fake_is_port_occupied(_p, *_a, **_kw):
-        if on_port_check is not None:
-            on_port_check()
-        return port_occupied
-
-    monkeypatch.setattr(lgm, "_is_port_occupied", _fake_is_port_occupied)
-    monkeypatch.setattr(
-        lgm,
-        "is_langgraph_dev_running",
-        lambda **_kw: langgraph_dev_running,
-    )
-
-    def _fake_start_langgraph_dev(
-        workspace_dir=None,
-        *,
-        port=None,
-        host=None,
-        file_persistence=True,
-        jobs_per_worker=10,
-        tunnel=False,
-        config_fingerprint=None,
-        allowed_origins="",
-    ):
-        captured["langgraph_dev_started"] = True
-        captured["allowed_origins_passed"] = allowed_origins
-        captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
-        captured["port_passed"] = port
-        captured["host_passed"] = host
-        captured["jobs_per_worker_passed"] = jobs_per_worker
-        captured["file_persistence_passed"] = file_persistence
-        captured["tunnel_passed"] = tunnel
-        return SimpleNamespace(pid=99999)
+    server = server or Server(monkeypatch, pid=99999)
+    captured["server"] = server
+    effective_port = port if port is not None else config.langgraph_dev_port
+    if port_occupied and langgraph_dev_running:
+        server.run(4242, port=effective_port, lasting=True)
+    elif port_occupied:
+        server.occupied.add(effective_port)
 
     def _fake_stop_langgraph_dev(_proc=None):
         captured["langgraph_dev_stopped"] = True
 
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
-    # Never poll a real log for the tunnel URL in tests.
-    monkeypatch.setattr(
-        lgm, "read_tunnel_url", lambda *a, **k: tunnel_url, raising=False
-    )
+    from EvoScientist.langgraph_dev import registration
 
-    # ccproxy mocks
+    # The started server's answer: the options it started with.
+    def _fake_register_folder(workspace, **_k):
+        captured["workspace_passed"] = str(workspace.root)
+        spawn = server.spawns[0]
+        return registration.ServerExposure.of(spawn["host"], spawn["tunnel"])
+
+    monkeypatch.setattr(registration, "register_folder", _fake_register_folder)
+
+    # Never poll a real log for the tunnel URL in tests.
+    def _fake_read_tunnel_url(*_a, **_k):
+        if tunnel_error is not None:
+            raise lgm.TunnelFailedError(tunnel_error)
+        return tunnel_url
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _fake_read_tunnel_url, raising=False)
+
+    # A ccproxy start of its own would show here.
     from EvoScientist import ccproxy_manager as ccp
 
-    def _fake_maybe_start_ccproxy(_cfg):
+    def _fake_spawn_ccproxy(*_a, **_kw):
         captured["ccproxy_started"] = True
-        return SimpleNamespace(pid=88888)
 
-    def _fake_stop_ccproxy(_proc):
-        captured["ccproxy_stopped"] = True
-
-    monkeypatch.setattr(ccp, "maybe_start_ccproxy", _fake_maybe_start_ccproxy)
-    monkeypatch.setattr(ccp, "stop_ccproxy", _fake_stop_ccproxy)
+    monkeypatch.setattr(ccp, "spawn_ccproxy", _fake_spawn_ccproxy)
+    # The server's ccproxy answers.
+    monkeypatch.setattr(ccp, "is_ccproxy_running", lambda port: True)
 
     # atexit mock — capture without executing (don't pollute test process)
     import atexit
@@ -223,9 +216,21 @@ def _run_deploy_once(
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
 
-    deploy_server.deploy(
-        workdir=workdir, port=port, host=host, debug=debug, tunnel=tunnel
-    )
+    try:
+        deploy_server.deploy(
+            workdir=workdir, port=port, host=host, debug=debug, tunnel=tunnel
+        )
+    finally:
+        if server.spawns:
+            spawn = server.spawns[0]
+            captured["langgraph_dev_started"] = True
+            captured["lasting"] = spawn["lasting"]
+            captured["allowed_origins_passed"] = spawn["allowed_origins"]
+            captured["port_passed"] = spawn["port"]
+            captured["host_passed"] = spawn["host"]
+            captured["jobs_per_worker_passed"] = spawn["jobs_per_worker"]
+            captured["file_persistence_passed"] = spawn["file_persistence"]
+            captured["tunnel_passed"] = spawn["tunnel"]
     return captured
 
 
@@ -243,15 +248,22 @@ class _SilentConsole:
 
     def print(self, *args, **kwargs):
         if self._sink is not None:
-            self._sink.append(" ".join(str(a) for a in args))
+            # A panel records the text inside it.
+            self._sink.append(" ".join(str(getattr(a, "renderable", a)) for a in args))
 
     def status(self, *args, **kwargs):
+        sink = self._sink
+
         class _Ctx:
             def __enter__(self_inner):
                 return self_inner
 
             def __exit__(self_inner, *a):
                 return False
+
+            def update(self_inner, text):
+                if sink is not None:
+                    sink.append(f"status: {text}")
 
         return _Ctx()
 
@@ -262,7 +274,7 @@ class _SilentConsole:
 
 
 def test_deploy_tunnel_default_off(monkeypatch, tmp_path):
-    """Without ``--tunnel``, start_langgraph_dev is called with tunnel=False."""
+    """Without ``--tunnel``, the server starts without one."""
     config = _make_config(default_workdir=str(tmp_path))
     captured = _run_deploy_once(monkeypatch, config)
 
@@ -270,7 +282,7 @@ def test_deploy_tunnel_default_off(monkeypatch, tmp_path):
 
 
 def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
-    """``--tunnel`` propagates to start_langgraph_dev(tunnel=True)."""
+    """``--tunnel`` reaches the server's start."""
     config = _make_config(default_workdir=str(tmp_path))
     captured = _run_deploy_once(
         monkeypatch,
@@ -280,6 +292,36 @@ def test_deploy_tunnel_flag_passed_through(monkeypatch, tmp_path):
     )
 
     assert captured["tunnel_passed"] is True
+    assert any("PUBLIC TUNNEL" in line for line in captured["printed"])
+
+
+def test_deploy_reports_a_tunnel_failure(monkeypatch, tmp_path):
+    """A failure cloudflared logged is reported with its reason, not as a URL
+    the user should look for in the log."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(
+        monkeypatch,
+        config,
+        tunnel=True,
+        tunnel_error="failed to request quick Tunnel: i/o timeout",
+    )
+
+    printed = "\n".join(captured["printed"])
+    assert (
+        "Cloudflare quick tunnel failed: failed to request quick Tunnel: i/o timeout"
+        in printed
+    )
+    assert "tunnel up" not in printed
+    assert "not detected" not in printed
+
+
+def test_deploy_reports_a_tunnel_url_that_never_came(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, tunnel=True)
+
+    printed = "\n".join(captured["printed"])
+    assert "Tunnel URL not detected" in printed
+    assert "quick tunnel failed" not in printed
 
 
 def test_deploy_workdir_cli_arg_beats_config(monkeypatch, tmp_path):
@@ -435,7 +477,7 @@ def test_deploy_whitespace_config_host_collapses_to_default(monkeypatch, tmp_pat
 
 
 def test_deploy_padded_loopback_config_host_suppresses_warning(monkeypatch, tmp_path):
-    """Consequence of the unstripped path: `_is_loopback_host` would not match
+    """Consequence of the unstripped path: `is_loopback_host` would not match
     " 127.0.0.1 ", so a padded loopback config would print a false PUBLIC BIND
     warning while binding a value socket.bind() rejects outright."""
     config = _make_config(
@@ -477,22 +519,13 @@ def test_deploy_refuses_invalid_port(monkeypatch, tmp_path, bad_port):
     assert exc.value.exit_code == 1
 
 
-def test_deploy_no_ccproxy_when_api_key_auth(monkeypatch, tmp_path):
-    config = _make_config(
-        default_workdir=str(tmp_path),
-        anthropic_auth_mode="api_key",
-        openai_auth_mode="api_key",
-    )
-    captured = _run_deploy_once(monkeypatch, config)
-
-    assert captured["ccproxy_started"] is False
-
-
-def test_deploy_starts_ccproxy_when_anthropic_oauth(monkeypatch, tmp_path):
+def test_deploy_starts_no_ccproxy_with_anthropic_oauth(monkeypatch, tmp_path):
+    """The server it starts runs its own."""
     config = _make_config(default_workdir=str(tmp_path), anthropic_auth_mode="oauth")
     captured = _run_deploy_once(monkeypatch, config)
 
-    assert captured["ccproxy_started"] is True
+    assert captured["ccproxy_started"] is False
+    assert captured["langgraph_dev_started"] is True
 
 
 def test_deploy_needs_no_ccproxy_for_openai_oauth(monkeypatch, tmp_path):
@@ -540,38 +573,110 @@ def test_describe_auth(anthropic, openai, expected):
     assert deploy_server._describe_auth(config) == expected
 
 
-def test_deploy_refuses_when_port_occupied_by_evosci(monkeypatch, tmp_path):
-    """If port is occupied AND it's serving an EvoSci langgraph dev,
-    refuse with exit code 1."""
+def test_deploy_refuses_this_data_folders_running_server(monkeypatch, tmp_path):
+    """deploy owns the server it starts: one already running for this data
+    folder is refused, whatever its port, and nothing is started."""
     config = _make_config(default_workdir=str(tmp_path))
+    printed: list = []
     with pytest.raises(typer.Exit) as exc:
         _run_deploy_once(
             monkeypatch,
             config,
+            port=7000,
             port_occupied=True,
-            langgraph_dev_running=True,  # /ok responds → existing EvoSci instance
+            langgraph_dev_running=True,
+            printed=printed,
         )
     assert exc.value.exit_code == 1
+    output = " ".join(" ".join(printed).split())
+    assert "4242" in output
+    assert "EvoSci server stop" in output
+
+
+@pytest.mark.parametrize("lasting", [True, False])
+def test_deploy_names_who_runs_recorded_server(monkeypatch, tmp_path, lasting):
+    """It names the recorded server's pid, and whether the sessions share
+    it; ``EvoSci server status`` reads the record, so it always describes
+    this server."""
+    server = Server(monkeypatch, pid=99999)
+    server.run(4242, lasting=lasting)
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            printed=printed,
+            server=server,
+        )
+    output = " ".join(" ".join(printed).split())
+    assert "4242" in output
+    assert "EvoSci server status" in output
+    assert ("not the background service" in output) is not lasting
+    assert server.spawns == []
+
+
+def test_deploy_prints_no_banner_for_refused_start(monkeypatch, tmp_path):
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            port_occupied=True,
+            printed=printed,
+        )
+    assert not any("Workspace:" in line for line in printed)
 
 
 def test_deploy_refuses_when_port_occupied_by_foreign(monkeypatch, tmp_path):
     """If port is occupied but /ok doesn't respond, treat as foreign process
     and refuse."""
     config = _make_config(default_workdir=str(tmp_path))
+    printed: list = []
     with pytest.raises(typer.Exit) as exc:
         _run_deploy_once(
             monkeypatch,
             config,
             port_occupied=True,
             langgraph_dev_running=False,  # foreign process holds the port
+            printed=printed,
         )
     assert exc.value.exit_code == 1
+    assert any("occupied by another process" in p for p in printed)
 
 
-def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_path):
-    """Another start holds the server start lock: the port check and the start
-    wait for it, so a backend that is bound but not answering yet is never
-    taken for a stale one."""
+def test_deploy_refuses_another_data_folders_server(monkeypatch, tmp_path):
+    server = Server(monkeypatch, pid=99999)
+    server.answering.add(6174)
+    server.whose[6174] = "other"
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            printed=printed,
+            server=server,
+        )
+    assert any("another data folder" in p for p in printed)
+    assert server.spawns == []
+
+
+def test_deploy_reports_server_that_exits(monkeypatch, tmp_path):
+    server = Server(monkeypatch, pid=99999)
+    server.exit_code = 1
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            printed=printed,
+            server=server,
+        )
+    assert any("langgraph dev startup failed" in p for p in printed)
+
+
+def test_deploy_waits_for_another_start(monkeypatch, tmp_path):
+    """Another start holds the start lock: deploy waits for it, says so,
+    then starts."""
     import threading
 
     from filelock import FileLock
@@ -580,76 +685,44 @@ def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_p
     from tests.fakes.langgraph_dev import LockHolder
 
     holder = LockHolder()
-    checks: list[bool] = []
-    threading.Timer(0.3, holder.done).start()
+    threading.Timer(0.05, holder.done).start()
     captured = _run_deploy_once(
-        monkeypatch,
-        _make_config(default_workdir=str(tmp_path)),
-        on_port_check=lambda: checks.append(holder.release.is_set()),
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
     )
-    assert checks
-    assert all(checks)
     assert captured["langgraph_dev_started"] is True
+    assert any("Waiting for another EvoSci process" in p for p in captured["printed"])
     lock = FileLock(str(lgm.RUNTIME.lock_file))
     lock.acquire(timeout=0.5)
     lock.release()
 
 
 def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
-    from EvoScientist.langgraph_dev import manager as lgm
     from tests.fakes.langgraph_dev import LockHolder
 
-    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
     holder = LockHolder()
-    checks: list[bool] = []
     try:
         with pytest.raises(typer.Exit) as exc:
-            _run_deploy_once(
-                monkeypatch,
-                _make_config(default_workdir=str(tmp_path)),
-                on_port_check=lambda: checks.append(True),
-            )
+            _run_deploy_once(monkeypatch, _make_config(default_workdir=str(tmp_path)))
     finally:
         holder.done()
     assert exc.value.exit_code == 1
-    assert checks == []
     assert any("for over" in p for p in _run_deploy_once.printed)
-
-
-def test_deploy_starts_under_the_start_lock(monkeypatch, tmp_path):
-    from EvoScientist.langgraph_dev import manager as lgm
-    from tests.fakes.langgraph_dev import start_lock_is_held
-
-    held: list[bool] = []
-    monkeypatch.setattr(
-        lgm,
-        "_server_config_fingerprint",
-        lambda _c: held.append(start_lock_is_held()) or "fp",
-    )
-    captured = _run_deploy_once(
-        monkeypatch, _make_config(default_workdir=str(tmp_path))
-    )
-    assert captured["langgraph_dev_started"] is True
-    assert held == [True]
-    assert not start_lock_is_held()
 
 
 @pytest.mark.parametrize("step", ["mkdir", "acquire"])
 def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
-    """An OSError from the start lock ends in the startup failed message, as
-    before the lock, not in a traceback."""
+    """An OSError from the start lock ends in the startup failed message, not
+    in a traceback."""
     from tests.fakes.langgraph_dev import break_start_lock
 
+    server = Server(monkeypatch, pid=99999)
     break_start_lock(monkeypatch, tmp_path, step)
-    checks: list[bool] = []
     with pytest.raises(typer.Exit) as exc:
         _run_deploy_once(
-            monkeypatch,
-            _make_config(default_workdir=str(tmp_path)),
-            on_port_check=lambda: checks.append(True),
+            monkeypatch, _make_config(default_workdir=str(tmp_path)), server=server
         )
     assert exc.value.exit_code == 1
-    assert checks == []
+    assert server.spawns == []
     assert any("langgraph dev startup failed" in p for p in _run_deploy_once.printed)
 
 
@@ -661,14 +734,6 @@ def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):
     assert "_fake_stop_langgraph_dev" in names, (
         "deploy must register stop_langgraph_dev via atexit for clean shutdown"
     )
-
-
-def test_deploy_registers_cleanup_for_ccproxy_when_oauth(monkeypatch, tmp_path):
-    config = _make_config(default_workdir=str(tmp_path), anthropic_auth_mode="oauth")
-    captured = _run_deploy_once(monkeypatch, config)
-
-    names = [name for (name, _args, _kw) in captured["atexit_callbacks"]]
-    assert "_fake_stop_ccproxy" in names
 
 
 def test_deploy_registers_signal_handlers_for_shutdown(monkeypatch, tmp_path):
@@ -725,3 +790,19 @@ def test_deploy_prints_the_setup_hint(monkeypatch, tmp_path, hint):
     )
     shown = any("EvoSci setup" in line for line in captured["printed"])
     assert shown is (hint is not None)
+
+
+def test_deploy_start_failure_prints_log_and_exit_code(monkeypatch, tmp_path):
+    server = Server(monkeypatch, pid=99999)
+    server.exit_code = 3
+    printed: list = []
+    with pytest.raises(typer.Exit):
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            printed=printed,
+            server=server,
+        )
+    output = " ".join(printed)
+    assert "langgraph_dev.log" in output
+    assert "Exit code: 3" in output

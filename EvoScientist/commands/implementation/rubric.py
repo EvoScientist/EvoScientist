@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
 
-from ...rubric_session import runs_in_process
+from ...gateway.types import runs_in_process
 from ..base import Command, SubCommand
 from ..manager import manager
 

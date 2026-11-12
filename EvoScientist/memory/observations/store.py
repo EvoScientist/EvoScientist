@@ -7,15 +7,26 @@ can grep and read with ordinary file tools today.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
+import logging
+import os
+import re
+import stat
 import threading
+import time
+import uuid
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
+from filelock import FileLock, Timeout
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..search import (
@@ -35,6 +46,8 @@ from ..types import (
 )
 
 OBSERVATION_DIR = "/observations"
+
+logger = logging.getLogger(__name__)
 
 
 ObservationFrontmatterValue = str | dict[str, str] | list[dict[str, str]]
@@ -100,6 +113,13 @@ class ObservationFrontmatter(BaseModel):
     project_id: str | None = Field(default=None, min_length=1, strict=True)
     source: ObservationSourceFrontmatter | None = None
     related_observations: list[RelatedObservationEntry] = Field(default_factory=list)
+
+    @field_validator("related_observations", mode="before")
+    @classmethod
+    def _empty_relations(cls, value: object) -> object:
+        # A key with no value reads as None; an edit that removes the last
+        # relation leaves one.
+        return [] if value is None else value
 
     @field_validator("id", "summary", "created_at", "project_id")
     @classmethod
@@ -194,16 +214,58 @@ def _read_observation_document_with_text(
     document_path = Path(path).expanduser()
     try:
         text = document_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        with contextlib.suppress(OSError):
+            _report_unreadable(document_path, document_path.read_bytes(), "not UTF-8")
+        return None
+    except OSError:
         return None
     if not text.startswith("---\n"):
+        _report_unreadable(document_path, text.encode("utf-8"), "no frontmatter")
+        return None
+    frontmatter, closed, body = text.removeprefix("---\n").partition("\n---\n")
+    if not closed:
+        _report_unreadable(
+            document_path, text.encode("utf-8"), "frontmatter is not closed"
+        )
         return None
     try:
-        frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
         metadata = ObservationFrontmatter.model_validate(yaml.safe_load(frontmatter))
-    except (ValueError, ValidationError, yaml.YAMLError):
+    except ValidationError as exc:
+        reason = "; ".join(
+            f"{'.'.join(map(str, error['loc'])) or 'frontmatter'}: {error['msg']}"
+            for error in exc.errors()
+        )
+        _report_unreadable(document_path, text.encode("utf-8"), reason)
+        return None
+    except yaml.MarkedYAMLError as exc:
+        # +1 for 0-based, +1 for the opening ---
+        line = exc.problem_mark.line + 2 if exc.problem_mark else "?"
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML at line {line}"
+        )
+        return None
+    except (ValueError, yaml.YAMLError) as exc:
+        _report_unreadable(
+            document_path, text.encode("utf-8"), f"invalid YAML ({type(exc).__name__})"
+        )
         return None
     return metadata, body, text
+
+
+# Index builds reread the whole store on every model call and parse failures
+# are not cached, so a broken file is reported again only once it changes.
+_reported_unreadable: dict[str, str] = {}
+_reported_lock = threading.Lock()
+
+
+def _report_unreadable(path: Path, content: bytes, reason: str) -> None:
+    digest = hashlib.sha256(content).hexdigest()
+    with _reported_lock:
+        if _reported_unreadable.get(str(path)) == digest:
+            return
+        _reported_unreadable[str(path)] = digest
+    logger.warning("Skipped unreadable observation %s: %s", path, reason[:300])
 
 
 def read_observation_document(
@@ -229,7 +291,70 @@ def write_observation_document(
         allow_unicode=True,
         sort_keys=False,
     )
-    Path(path).write_text(f"---\n{frontmatter}---\n{body}", encoding="utf-8")
+    _write_file_atomically(Path(path), f"---\n{frontmatter}---\n{body}")
+
+
+def write_text_atomically(path: Path, content: str) -> None:
+    """Write next to ``path`` and move into place in one step, so a reader
+    never sees a partial document."""
+    staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        # A rewrite keeps the file's own permissions; until it takes them
+        # over, the staging copy is readable by its owner only.
+        mode = _existing_mode(path)
+        opener = functools.partial(os.open, mode=0o666 if mode is None else 0o600)
+        with open(staging, "x", encoding="utf-8", opener=opener) as handle:
+            handle.write(content)
+        if mode is not None:
+            os.chmod(staging, mode)
+        _replace_file(staging, path)
+    finally:
+        # A failing cleanup must not hide the error of the write itself; a
+        # read-only mode taken from the target blocks deletion on Windows.
+        with contextlib.suppress(OSError):
+            if staging.exists():
+                os.chmod(staging, stat.S_IREAD | stat.S_IWRITE)
+        with contextlib.suppress(OSError):
+            staging.unlink(missing_ok=True)
+
+
+def _write_file_atomically(path: Path, content: str) -> None:
+    """Write an observation file whole (the summary scan, the index and a
+    search never read a partial one) and drop its cached parse."""
+    global _cache_generation
+    write_text_atomically(path, content)
+    # The writer's own process must not serve the old parse even where the
+    # stat signature cannot tell the files apart, and a parse that began
+    # before this write must not be cached afterwards.
+    with _cache_lock:
+        _file_parse_cache.pop(str(path), None)
+        _cache_generation += 1
+
+
+def _existing_mode(path: Path) -> int | None:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return None
+
+
+_REPLACE_ATTEMPTS = 5
+_REPLACE_RETRY_SECONDS = 0.05
+_os_replace = os.replace
+_sleep = time.sleep
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    """``os.replace`` with a short retry: on Windows a reader's open handle on
+    ``target`` fails the rename, and readers hold the file only briefly."""
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            _os_replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS:
+                raise
+            _sleep(_REPLACE_RETRY_SECONDS)
 
 
 def read_observation_id_from_path(path: str | Path) -> str | None:
@@ -320,6 +445,9 @@ def _parse_observation_search_document(
             body=body,
             text=text,
             created_at=metadata.created_at,
+            source_session_id=(
+                metadata.source.session_id if metadata.source is not None else None
+            ),
         ),
         related_observation_entries(metadata),
     )
@@ -366,8 +494,8 @@ def _resolve_document_links(
 # ── Parsed-document cache ─────────────────────────────────────────────
 #
 # One layer: a per-file parse cache keyed on the observation file path.
-# Each value carries the file's ``(st_mtime_ns, st_size)`` signature, so a
-# rewrite invalidates exactly that entry and replaces it in place.  Scope
+# Each value carries the file's ``(st_mtime_ns, st_size, st_ino)`` signature,
+# so a rewrite invalidates exactly that entry and replaces it in place.  Scope
 # filtering is just which directories get globbed, and link resolution
 # reruns on every call over the memoized parses — its fallback walk parses
 # through the same cache, so fallback visits are dict hits instead of
@@ -386,11 +514,13 @@ def _resolve_document_links(
 # inactive workspaces rather than correctness.
 #
 _FileParseValue = tuple[
-    tuple[int, int],
+    tuple[int, int, int],
     tuple[ObservationSearchDocument, list[RelatedObservationEntry]],
 ]
 
 _file_parse_cache: OrderedDict[str, _FileParseValue] = OrderedDict()
+# Counts observation writes; a parse begun under an older count is not cached.
+_cache_generation = 0
 
 # Serializes cache transactions (lookup+recency, insert+recency, trim) so
 # concurrent calls cannot evict a key between another call's lookup and its
@@ -423,17 +553,20 @@ def _parse_with_cache(
     """Return the parsed document for *path*, memoized per file.
 
     The cached entry is validated against the file's current
-    ``(st_mtime_ns, st_size)`` signature, so a rewrite replaces it in
-    place.  Parse failures are not cached; the file is retried on the next
-    call.  No copy on read or write: callers only iterate the documents or
-    build new ones via ``replace``.
+    ``(st_mtime_ns, st_size, st_ino)`` signature, so a rewrite replaces it in
+    place (an atomic rewrite always lands on a new inode).  Parse failures are
+    not cached, nor is a parse that began before an observation write; the
+    file is retried on the next call.  No copy on read or write: callers only
+    iterate the documents or build new ones via ``replace``.
     """
     key = str(path)
+    with _cache_lock:
+        generation = _cache_generation
     try:
         st = path.stat()
     except OSError:
         return None
-    signature = (st.st_mtime_ns, st.st_size)
+    signature = (st.st_mtime_ns, st.st_size, st.st_ino)
     with _cache_lock:
         cached = _file_parse_cache.get(key)
         if cached is not None and cached[0] == signature:
@@ -444,8 +577,9 @@ def _parse_with_cache(
     if parsed_document is None:
         return None
     with _cache_lock:
-        _file_parse_cache[key] = (signature, parsed_document)
-        _file_parse_cache.move_to_end(key)
+        if generation == _cache_generation:
+            _file_parse_cache[key] = (signature, parsed_document)
+            _file_parse_cache.move_to_end(key)
         touched.add(key)
     return parsed_document
 
@@ -492,7 +626,7 @@ def list_observation_documents(
 
     Observation files are parsed once per file and shared across every
     project_id and scope; each cached entry is validated against the file's
-    current ``(st_mtime_ns, st_size)`` signature.  A deleted file simply
+    current ``(st_mtime_ns, st_size, st_ino)`` signature.  A deleted file simply
     drops out of the glob.  Link resolution reruns on each call over the
     memoized parses.
     """
@@ -679,6 +813,109 @@ def _format_observation_markdown(
     return body
 
 
+_NOTE_IDENTICAL = (
+    "An identical observation already exists; nothing was written. "
+    "Treat it as recorded and do not retry."
+)
+_NOTE_SUMMARY_EXISTS = (
+    "An observation with this summary already exists; nothing was written. "
+    "Treat it as recorded and do not retry."
+)
+_NOTE_STUB = (
+    "The `{field}` field is a placeholder; nothing was written. "
+    "Record the observation with its real content, or leave it out."
+)
+# A stub is what a model writes when it has no content yet: a placeholder word
+# with only glue around it, one of a few fixed phrases, or no words at all.
+# Real text in any language carries other words.
+_STUB_MARKERS = frozenset(
+    "placeholder placeholders stub stubs dummy tbd tba tbc todo lorem ipsum xxx".split()
+)
+_STUB_GLUE = frozenset(
+    """
+    n a na none null nil applicable see below above same as ignore ignored
+    skip skipped fill filled in later to be added add determined for now the
+    this here text body content observation summary details
+    """.split()
+)
+_STUB_PHRASES = frozenset(
+    (
+        "same as above",
+        "same as below",
+        "same as summary",
+        "not applicable",
+        "no content",
+        "no details",
+        "to be determined",
+        "to be added",
+        "to be filled",
+        "to be filled in",
+        "fill in later",
+        "see above",
+        "see below",
+        "none",
+        "null",
+        "nil",
+        "n a",
+        "na",
+    )
+)
+_record_lock = threading.Lock()
+_RECORD_LOCK_TIMEOUT = 10.0
+
+
+@contextmanager
+def _record_guard(memory_dir: str | Path) -> Iterator[None]:
+    """One writer at a time across threads and processes: the main agent and
+    the memory workers run in different processes on one memory folder."""
+    folder = Path(memory_dir).expanduser() / "observations"
+    folder.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(folder / ".record.lock"), is_singleton=True)
+    busy = TimeoutError(
+        "Another writer holds the observation store; nothing was written."
+    )
+    deadline = time.monotonic() + _RECORD_LOCK_TIMEOUT
+    if not _record_lock.acquire(timeout=_RECORD_LOCK_TIMEOUT):
+        raise busy
+    try:
+        try:
+            lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        except Timeout:
+            raise busy from None
+        try:
+            yield
+        finally:
+            lock.release()
+    finally:
+        _record_lock.release()
+
+
+def _is_stub(text: str) -> bool:
+    words = re.findall(r"[^\W_]+", text.lower())
+    if not words:
+        return True
+    if " ".join(words) in _STUB_PHRASES:
+        return True
+    marker = False
+    for word in words:
+        if word in _STUB_MARKERS:
+            marker = True
+        elif word not in _STUB_GLUE and not word.isdigit():
+            return False
+    return marker
+
+
+def _stub_field(summary: str, observation: str, why_it_matters: str) -> str | None:
+    for field, text in (
+        ("summary", summary),
+        ("observation", observation),
+        ("why_it_matters", why_it_matters),
+    ):
+        if _is_stub(text):
+            return field
+    return None
+
+
 def record_observation_file(
     *,
     memory_dir: str | Path,
@@ -697,7 +934,10 @@ def record_observation_file(
 
     The id is derived from the normalized observation text, rationale, type, and
     scope, so repeated attempts to save the same observation return the existing
-    path instead of creating duplicates.
+    path instead of creating duplicates. A new observation whose summary matches
+    an existing global or current-project one is refused the same way, so one
+    lesson cannot be restated under other bodies or scopes. A field that is only
+    filler (placeholder, TBD, see below) is refused too, so a stub never lands.
     """
 
     summary_text = summary.strip()
@@ -711,6 +951,14 @@ def record_observation_file(
         raise ValueError("why_it_matters must not be empty")
     if not source_session_id.strip():
         raise ValueError("source_session_id must not be empty")
+    stub_field = _stub_field(summary_text, observation_text, why_text)
+    if stub_field is not None:
+        return _stub_result(
+            memory_type=memory_type,
+            scope=scope,
+            project_id=project_id,
+            field=stub_field,
+        )
 
     observation_id = _observation_id(
         memory_type=memory_type,
@@ -724,8 +972,26 @@ def record_observation_file(
         project_id=project_id,
     )
     path = Path(memory_dir).expanduser() / memory_path.lstrip("/")
-    created = False
-    if not path.exists():
+    result: ObservationRecordResult = {
+        "observation_id": observation_id,
+        "path": _agent_path(memory_path),
+        "created": False,
+        "memory_type": memory_type,
+        "scope": scope,
+    }
+    if scope == MemoryScope.PROJECT:
+        result["project_id"] = project_id
+
+    # One writer at a time, so two parallel calls cannot both pass the checks.
+    with _record_guard(memory_dir):
+        if path.exists():
+            result["note"] = _NOTE_IDENTICAL
+            return result
+        existing = _observation_with_summary(
+            memory_dir=memory_dir, project_id=project_id, summary=summary_text
+        )
+        if existing is not None:
+            return _summary_exists_result(existing, project_id=project_id)
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         content = _format_observation_markdown(
             observation_id=observation_id,
@@ -742,16 +1008,57 @@ def record_observation_file(
             project_id=project_id,
         )
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        created = True
+        _write_file_atomically(path, content)
+    result["created"] = True
+    return result
 
+
+def _observation_with_summary(
+    *,
+    memory_dir: str | Path,
+    project_id: str,
+    summary: str,
+) -> ObservationSearchDocument | None:
+    """Return the global or current-project observation whose summary matches."""
+    root = Path(memory_dir).expanduser()
+    wanted = _normalize(summary).casefold()
+    touched: set[str] = set()
+    found: ObservationSearchDocument | None = None
+    for path in _observation_files(memory_dir=root, project_id=project_id, scope=None):
+        parsed = _parse_with_cache(root, path, touched)
+        if parsed is not None and _normalize(parsed[0].summary).casefold() == wanted:
+            found = parsed[0]
+            break
+    _trim_parse_cache(touched)
+    return found
+
+
+def _stub_result(
+    *, memory_type: MemoryType, scope: MemoryScope, project_id: str, field: str
+) -> ObservationRecordResult:
+    """A refused stub names no file: there is nothing to link, read or retry."""
     result: ObservationRecordResult = {
-        "observation_id": observation_id,
-        "path": _agent_path(memory_path),
-        "created": created,
+        "created": False,
         "memory_type": memory_type,
         "scope": scope,
+        "note": _NOTE_STUB.format(field=field),
     }
     if scope == MemoryScope.PROJECT:
+        result["project_id"] = project_id
+    return result
+
+
+def _summary_exists_result(
+    existing: ObservationSearchDocument, *, project_id: str
+) -> ObservationRecordResult:
+    result: ObservationRecordResult = {
+        "observation_id": existing.observation_id,
+        "path": existing.path,
+        "created": False,
+        "memory_type": existing.memory_type,
+        "scope": existing.scope,
+        "note": _NOTE_SUMMARY_EXISTS,
+    }
+    if existing.scope == MemoryScope.PROJECT:
         result["project_id"] = project_id
     return result

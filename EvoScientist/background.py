@@ -111,7 +111,7 @@ def poll_status(process_id: str) -> str:
 
     Records the exit first (like :func:`status`), then returns ``"running"`` or the
     terminal status. Returns ``"unknown"`` when the process is not in the registry
-    (e.g. a server restart cleared it) so the reader treats it as not-yet-notifiable.
+    (e.g. a server restart cleared it); the reader then reports it as untracked.
     """
     with _LOCK:
         proc = _PROCESSES.get(process_id)
@@ -250,15 +250,16 @@ def launch(
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
 
     The child gets the same env overrides as the ``execute`` shell
-    (:func:`~EvoScientist.setup.research_env.research_env_overrides`), so a
-    background ``python`` resolves the same interpreter as a foreground one.
+    (:func:`~EvoScientist.setup.agent_env.agent_shell_overrides`), so a
+    background ``python`` or ``node`` resolves the same program as a
+    foreground one.
     """
     from . import agent_shell
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     # PWD as in the execute shell: the folder the job runs in, not a symlink
     # this process was started in.
-    overrides = research_env_overrides()
+    overrides = agent_shell_overrides()
     env = {**os.environ, **(overrides or {}), "PWD": cwd}
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
@@ -350,6 +351,17 @@ def status(
     return (
         f"{head}\nCommand: {command}\n--- output (last {tail_bytes} bytes) ---\n{tail}"
     )
+
+
+def check(
+    process_id: str, *, thread_id: str | None = None
+) -> tuple[str, dict[str, Any] | None]:
+    """Return status text and a state record that agree on whether a process exited."""
+    text = status(process_id, thread_id=thread_id)
+    record = state_record(process_id)
+    if record is not None and record["status"] != "running":
+        text = status(process_id, thread_id=thread_id)
+    return text, record
 
 
 def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:

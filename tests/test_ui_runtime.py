@@ -3,7 +3,6 @@
 import asyncio
 import threading
 import time
-from dataclasses import dataclass
 
 import pytest
 
@@ -14,7 +13,7 @@ from EvoScientist.cli.tui_runtime import (
     run_streaming,
     run_streaming_async,
 )
-from EvoScientist.runtime import AsyncRuntimeError
+from EvoScientist.config import EvoScientistConfig
 from tests.fakes.common import FakeGraphGateway
 
 
@@ -29,15 +28,11 @@ def test_normalize_ui_backend_accepts_known_values():
     assert normalize_ui_backend("TUI") == "tui"
 
 
-def test_normalize_ui_backend_maps_legacy_values():
-    assert normalize_ui_backend("textual") == "tui"
-    assert normalize_ui_backend("Textual") == "tui"
-    assert normalize_ui_backend("rich") == "cli"
-    assert normalize_ui_backend("Rich") == "cli"
-
-
-def test_normalize_ui_backend_unknown_falls_back_to_cli():
-    assert normalize_ui_backend("unknown-ui") == "cli"
+def test_normalize_ui_backend_unknown_lands_where_the_config_file_does():
+    assert (
+        normalize_ui_backend("unknown-ui")
+        == EvoScientistConfig(ui_backend="unknown-ui").ui_backend
+    )
 
 
 def test_resolve_ui_backend_falls_back_when_textual_unavailable(monkeypatch):
@@ -54,42 +49,36 @@ def test_resolve_ui_backend_keeps_tui_when_available(monkeypatch):
     assert resolve_ui_backend("tui") == "tui"
 
 
-@dataclass
-class _BrokenBackend:
-    name: str = "tui"
+@pytest.mark.parametrize("ui_backend", ["tui", "cli"])
+def test_run_streaming_runs_a_failing_turn_once(monkeypatch, ui_backend):
+    """A turn that fails is not run again: its tools have already run."""
+    attempts = 0
 
-    def run_streaming(self, **kwargs):
-        raise RuntimeError("boom")
-
-
-def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_runtime.get_backend", lambda *a, **k: _BrokenBackend()
-    )
-
-    class _RichStub:
+    class _FailingBackend:
         def run_streaming(self, **kwargs):
-            return "fallback-ok"
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "EvoScientist.cli.tui_runtime.RichStreamingBackend", lambda: _RichStub()
+        "EvoScientist.cli.tui_runtime.get_backend", lambda *a, **k: _FailingBackend()
     )
 
-    result = run_streaming(
-        ui_backend="tui",
-        agent=object(),
-        message="hello",
-        thread_id="t1",
-        show_thinking=False,
-        interactive=True,
-        gateway=FakeGraphGateway(),
-    )
-    assert result == "fallback-ok"
+    with pytest.raises(RuntimeError, match="boom"):
+        run_streaming(
+            ui_backend=ui_backend,
+            agent=object(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=FakeGraphGateway(),
+        )
+    assert attempts == 1
 
 
-@pytest.mark.parametrize("broken_first", [False, True], ids=["direct", "fallback"])
-def test_run_streaming_passes_the_starting_grant_to_the_loop(monkeypatch, broken_first):
-    """Both ways into the Rich loop hand it ``approve_all_at_start``."""
+def test_run_streaming_passes_the_starting_grant_to_the_loop(monkeypatch):
+    """The Rich loop gets ``approve_all_at_start``."""
     seen = {}
 
     def _loop(**kwargs):
@@ -97,12 +86,8 @@ def test_run_streaming_passes_the_starting_grant_to_the_loop(monkeypatch, broken
         return "ok"
 
     monkeypatch.setattr("EvoScientist.cli.tui_backends._run_streaming", _loop)
-    if broken_first:
-        monkeypatch.setattr(
-            "EvoScientist.cli.tui_runtime.get_backend", lambda *a, **k: _BrokenBackend()
-        )
     result = run_streaming(
-        ui_backend="tui" if broken_first else "cli",
+        ui_backend="cli",
         agent=object(),
         message="hello",
         thread_id="t1",
@@ -113,38 +98,6 @@ def test_run_streaming_passes_the_starting_grant_to_the_loop(monkeypatch, broken
     )
     assert result == "ok"
     assert seen["approve_all_at_start"] is True
-
-
-def test_run_streaming_does_not_retry_on_owned_runtime_error(monkeypatch):
-    attempts = 0
-
-    class _RuntimeFailureBackend:
-        def run_streaming(self, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            raise AsyncRuntimeError("owned runtime failed")
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_runtime.get_backend",
-        lambda *a, **k: _RuntimeFailureBackend(),
-    )
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_runtime.RichStreamingBackend",
-        lambda: _RuntimeFailureBackend(),
-    )
-
-    with pytest.raises(AsyncRuntimeError, match="owned runtime failed"):
-        run_streaming(
-            ui_backend="tui",
-            agent=object(),
-            message="hello",
-            thread_id="t1",
-            show_thinking=False,
-            interactive=True,
-            gateway=FakeGraphGateway(),
-        )
-
-    assert attempts == 1
 
 
 async def test_async_streaming_cancellation_stops_and_joins_worker(monkeypatch):

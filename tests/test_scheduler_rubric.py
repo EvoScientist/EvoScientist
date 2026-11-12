@@ -436,12 +436,13 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     assert [type(m).__name__ for m in grader_mw] == [
         "ModelRetryMiddleware",
         "FilesystemMiddleware",
+        "WindowsFilePathMiddleware",
         "_GraderCallBudget",
         "UnsupportedContentMiddleware",
         "ModelCallBoundaryMiddleware",
     ]
-    assert isinstance(grader_mw[2], _GraderCallBudget)
-    assert grader_mw[2].max_calls == 12
+    assert isinstance(grader_mw[3], _GraderCallBudget)
+    assert grader_mw[3].max_calls == 12
 
 
 class _RecordingGrader(BaseChatModel):
@@ -538,4 +539,7 @@ def test_scheduler_build_is_quiet_for_an_unsupported_grader(tmp_path, caplog):
         _build(
             "scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-fable-5.1")
         )
-    assert caplog.text == ""
+    # Only the rubric's own: a dependency's first probe in this process may
+    # warn too.
+    rubric = "EvoScientist.middleware.rubric"
+    assert [r for r in caplog.records if r.name.startswith(rubric)] == []

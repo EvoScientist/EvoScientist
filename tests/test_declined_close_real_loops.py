@@ -373,6 +373,7 @@ async def test_the_consumer_closes_a_declined_sub_agent_command(tmp_path, monkey
         manager=manager,
         agent=agent,
         thread_id="",
+        workspace=Workspace("/tmp/channel-project"),
         graph_gateway=LocalGraphGateway(),
         max_concurrent=2,
         max_pending=10,

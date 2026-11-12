@@ -1,11 +1,11 @@
 """Memory middleware for EvoScientist.
 
 The middleware owns the markdown files under ``/memories/profile/``: it creates
-them when missing, migrates the old ``/memories/MEMORY.md`` file when present,
-injects either profile contents or profile file pointers into model calls, and
-points agents at observation memory under ``/memories/observations/``. Agents
-still read and edit profile files through their normal ``/memories/...`` tools;
-observation writes go through the structured ``record_observation`` tool.
+them when missing, injects either profile contents or profile file pointers into
+model calls, and points agents at observation memory under
+``/memories/observations/``. Agents still read and edit profile files through
+their normal ``/memories/...`` tools; observation writes go through the
+structured ``record_observation`` tool.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 
 from .. import paths as _paths
 from ..memory import (
+    DEFAULT_INLINE_ROWS_PER_SESSION,
     MemorySourceType,
     ObservationRecordResult,
     build_observation_index_context,
@@ -47,8 +48,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_INLINE_PROFILE_CHARS = 60_000
 _TRUNCATED_PROFILE_HEAD_RATIO = 0.75
 _warned_profile_truncations: set[tuple[str, ...]] = set()
-_LEGACY_MEMORY_FILENAME = "MEMORY.md"
-_LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
 
 PROFILE_MEMORY_INSTRUCTIONS = """
@@ -304,6 +303,11 @@ def _bootstrap_view(meta: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _intro_settled(view: dict[str, object]) -> bool:
+    """The user gave a name or declined: first contact is over for good."""
+    return bool(view["name"]) or view["intro"] == "skipped"
+
+
 def _bootstrap_decision(
     view: dict[str, object],
     *,
@@ -311,7 +315,7 @@ def _bootstrap_decision(
     human_messages: int,
 ) -> BootstrapVariant | None:
     """Which first-contact block (if any) this model call should carry."""
-    if view["name"] or view["intro"] == "skipped":
+    if _intro_settled(view):
         return None
     if human_messages != 1:
         return None
@@ -486,59 +490,11 @@ def _warn_profile_truncation(agent_paths: list[str], budget: int) -> None:
     )
 
 
-def _legacy_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
-    """Split the old ``MEMORY.md`` format into preface and top-level sections."""
-    pattern = re.compile(
-        r"^## (?P<heading>.+?)\n(?P<body>.*?)(?=^## |\Z)",
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    sections = [
-        (match.group("heading").strip(), match.group("body").strip())
-        for match in pattern.finditer(content)
-    ]
-    first = pattern.search(content)
-    preface = content[: first.start()].strip() if first else content.strip()
-    return preface, sections
-
-
-def _is_legacy_placeholder_line(line: str) -> bool:
-    """Return whether a legacy line is only default-template filler."""
-    stripped = line.strip()
-    if stripped in {"", "- (none yet)", "- (none)", "(No experiments yet)", "(none)"}:
-        return True
-    return bool(re.fullmatch(r"- \*\*[^*]+\*\*:\s*\(unknown\)", stripped))
-
-
-def _clean_legacy_body(body: str) -> str:
-    """Drop old template placeholders while keeping real legacy notes."""
-    lines = [
-        line.rstrip()
-        for line in body.strip().splitlines()
-        if not _is_legacy_placeholder_line(line)
-    ]
-    return "\n".join(lines).strip()
-
-
-def _clean_legacy_preface(preface: str) -> str:
-    """Remove the old root heading from pre-section legacy text."""
-    lines = [
-        line.rstrip()
-        for line in preface.strip().splitlines()
-        if line.strip() != "# EvoScientist Memory"
-    ]
-    return "\n".join(lines).strip()
-
-
-def _append_imported_section(content: str, body: str) -> str:
-    """Append migrated legacy text under a clear, inspectable heading."""
-    return content.rstrip() + f"\n\n## {_LEGACY_IMPORT_HEADING}\n\n{body.strip()}\n"
-
-
 class EvoMemoryMiddleware(AgentMiddleware):
     """Middleware that maintains the profile memory files used by EvoScientist.
 
-    The middleware bootstraps missing files, migrates legacy memory, and adds
-    profile context to model requests.
+    The middleware bootstraps missing files and adds profile context to model
+    requests.
     """
 
     def __init__(
@@ -554,6 +510,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_observation_tool: bool = True,
         memory_scheduler: MemoryScheduler | None = None,
         enable_profile_bootstrap: bool = False,
+        inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir).expanduser()
@@ -562,6 +519,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._enable_profile_memory = enable_profile_memory
         self._enable_profile_bootstrap = enable_profile_bootstrap
         self._enable_observation_memory = enable_observation_memory
+        self._inline_rows_per_session = inline_rows_per_session
         self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
@@ -664,17 +622,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return False
         return True
 
-    def _delete_legacy_memory(self, legacy_path: Path) -> bool:
-        """Remove the old memory file after it has no content left to preserve."""
-        try:
-            legacy_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning("Failed to delete legacy memory %s: %s", legacy_path, e)
-            return False
-        return True
-
     def _ensure_observation_dirs(self) -> None:
         """Create non-project observation directories agents are prompted to search."""
         try:
@@ -697,88 +644,21 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 and content.strip()
                 and _FRONTMATTER_RE.match(content) is None
             ):
-                # Pre-frontmatter profiles: prepend defaults, keep the body verbatim.
-                content = _join_frontmatter(
+                # A profile without frontmatter: prepend defaults, keep the body
+                # verbatim; inject what is on disk if the rewrite fails.
+                repaired = _join_frontmatter(
                     _default_user_profile_frontmatter(), content
                 )
-                self._write_text(path, content)
+                if self._write_text(path, repaired):
+                    content = repaired
             records.append((memory_path, content))
         return records
 
-    def _migrate_legacy_memory(self) -> bool:
-        """Import recognized sections from legacy ``MEMORY.md`` into profiles.
-
-        The legacy file is removed only after real content is copied or the file
-        is found to contain only old template placeholders.
-        """
-        legacy_path = self._memory_dir / _LEGACY_MEMORY_FILENAME
-        legacy = self._read_text(legacy_path)
-        if legacy is None:
-            return True
-        if not legacy.strip():
-            return self._delete_legacy_memory(legacy_path)
-
-        user_profile_path = "/profile/USER_PROFILE.md"
-        research_taste_path = "/profile/RESEARCH_TASTE.md"
-        imports: dict[str, list[str]] = {
-            user_profile_path: [],
-            research_taste_path: [],
-        }
-        recognized_paths = {
-            "User Profile": user_profile_path,
-            "Research Preferences": research_taste_path,
-            "Experiment History": user_profile_path,
-            "Learned Preferences": user_profile_path,
-        }
-
-        preface, legacy_sections = _legacy_sections(legacy)
-        preface_body = _clean_legacy_preface(preface)
-        if preface_body:
-            imports[user_profile_path].append(f"### Notes\n{preface_body}")
-        for heading, body in legacy_sections:
-            cleaned = _clean_legacy_body(body)
-            if not cleaned:
-                continue
-            target_path = recognized_paths.get(heading, user_profile_path)
-            imports.setdefault(target_path, []).append(f"### {heading}\n{cleaned}")
-
-        imported_any = False
-        for memory_path, bodies in imports.items():
-            if not bodies:
-                continue
-            path = self._file_path(memory_path)
-            content = self._read_text(path)
-            if content is None:
-                logger.warning(
-                    "Skipping legacy memory migration for missing profile %s", path
-                )
-                return False
-            body = "\n\n".join(bodies)
-            if not self._write_text(path, _append_imported_section(content, body)):
-                return False
-            imported_any = True
-
-        if not imported_any:
-            logger.debug("Legacy MEMORY.md contained no real content to migrate")
-
-        return self._delete_legacy_memory(legacy_path)
-
-    def _read_bootstrapped_profile_records(self) -> list[tuple[str, str]]:
-        records = self._ensure_profile_files()
-        if self._migrate_legacy_memory():
-            records = [
-                (memory_path, self._read_text(self._file_path(memory_path)) or "")
-                for memory_path, _ in records
-            ]
-        return records
-
     def _read_profile_records(self) -> list[tuple[str, str]]:
-        """Load all profile files after bootstrapping and legacy migration."""
-        if not self._enable_observation_memory:
-            return self._read_bootstrapped_profile_records()
-
-        self._ensure_observation_dirs()
-        return self._read_bootstrapped_profile_records()
+        """Load all profile files, creating any that are missing."""
+        if self._enable_observation_memory:
+            self._ensure_observation_dirs()
+        return self._ensure_profile_files()
 
     def _profile_context_from_records(self, records: list[tuple[str, str]]) -> str:
         """Inline profile files, truncating only those over their share of the budget."""
@@ -820,6 +700,12 @@ class EvoMemoryMiddleware(AgentMiddleware):
         path = self._file_path(_USER_PROFILE_PATH)
         try:
             content = self._read_text(path)
+            if content is None:
+                # A brand-new memory folder: this runs before the profile read.
+                template = dict(self._profile_specs).get(_USER_PROFILE_PATH)
+                if template is None or not self._write_text(path, template):
+                    return ""
+                content = self._read_text(path)
         except Exception as e:
             logger.debug("Skipping profile bootstrap: %s", e)
             return ""
@@ -832,6 +718,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
             logger.warning("Unparsable frontmatter in %s; skipping bootstrap", path)
             return ""
         view = _bootstrap_view(meta)
+        if _intro_settled(view):
+            # Nothing left to schedule, so the counters stay as they are.
+            return ""
         dirty = False
         if thread_id is not None and view["last_thread"] != thread_id:
             view["sessions"] += 1
@@ -870,6 +759,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 memory_dir=self._memory_dir,
                 project_id=self._project_id,
                 include_search_hints=include_search_hints,
+                rows_per_session=self._inline_rows_per_session,
             )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
@@ -982,17 +872,18 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for synchronous model calls."""
-        profile_content = self._profile_context_for_request()
+        # Before the profile read: its bookkeeping write rewrites the frontmatter.
+        bootstrap_context = self._bootstrap_context(
+            thread_id=_current_thread_id(),
+            human_messages=_count_human_messages(request.state),
+        )
         return self._inject_memory_context(
             request,
             observation_index_context=self._refresh_observation_index_context(
                 include_search_hints=_request_has_tools(request)
             ),
-            profile_content=profile_content,
-            bootstrap_context=self._bootstrap_context(
-                thread_id=_current_thread_id(),
-                human_messages=_count_human_messages(request.state),
-            ),
+            profile_content=self._profile_context_for_request(),
+            bootstrap_context=bootstrap_context,
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
@@ -1008,6 +899,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
             include_search_hints=_request_has_tools(request),
         )
 
+        # Before the profile read: its bookkeeping write rewrites the frontmatter.
+        if self._enable_profile_memory and self._enable_profile_bootstrap:
+            bootstrap_context = await asyncio.to_thread(
+                self._bootstrap_context,
+                thread_id=thread_id,
+                human_messages=human_messages,
+            )
+
         if self._enable_observation_memory and self._enable_profile_memory:
             observation_index_context, profile_context = await asyncio.gather(
                 asyncio.to_thread(refresh_index),
@@ -1017,14 +916,6 @@ class EvoMemoryMiddleware(AgentMiddleware):
             observation_index_context = await asyncio.to_thread(refresh_index)
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
-
-        # After the profile read so the file exists on a brand-new memory dir.
-        if self._enable_profile_memory and self._enable_profile_bootstrap:
-            bootstrap_context = await asyncio.to_thread(
-                self._bootstrap_context,
-                thread_id=thread_id,
-                human_messages=human_messages,
-            )
 
         return self._inject_memory_context(
             request,
@@ -1062,6 +953,7 @@ def create_memory_middleware(
     enable_observation_tool: bool = True,
     memory_scheduler: MemoryScheduler | None = None,
     enable_profile_bootstrap: bool = False,
+    inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -1079,4 +971,5 @@ def create_memory_middleware(
         enable_observation_tool=enable_observation_tool,
         memory_scheduler=memory_scheduler,
         enable_profile_bootstrap=enable_profile_bootstrap,
+        inline_rows_per_session=inline_rows_per_session,
     )

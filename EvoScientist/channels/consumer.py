@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
+from ..paths import SessionDirs, Workspace
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import InboundMessage, OutboundMessage
@@ -224,6 +225,8 @@ class InboundConsumer:
         The local agent object used by local graph gateway targets.
     thread_id:
         Default thread ID for agent conversations.
+    workspace:
+        The channel's project: every turn's target names it.
     graph_gateway:
         Gateway used for thread creation and graph streaming.
     send_thinking:
@@ -256,6 +259,7 @@ class InboundConsumer:
         agent: Any,
         thread_id: str,
         *,
+        workspace: Workspace,
         graph_gateway: GraphGateway,
         send_thinking: bool = False,
         on_message_received: Callable[[InboundMessage], None] | None = None,
@@ -265,10 +269,16 @@ class InboundConsumer:
         max_concurrent: int = 5,
         max_pending: int = 50,
         drain_timeout: float = 30.0,
+        dangerous: bool = False,
     ):
         self.bus = bus
         self.manager = manager
         self.agent = agent
+        self._folders = SessionDirs(workspace).metadata()
+        # Where the agent's file tools resolve paths, so media files the
+        # agent names are found the way its sandbox found them.
+        self._dirs = SessionDirs(workspace)
+        self._dangerous = dangerous
         self.thread_id = thread_id
         self.graph_gateway = graph_gateway
         self.send_thinking = send_thinking
@@ -321,9 +331,14 @@ class InboundConsumer:
             self._sessions[sender_id] = f"{self.thread_id}:{sender_id}"
         else:
             self._sessions[sender_id] = await self.graph_gateway.create_thread(
-                GraphTarget(local_graph=self.agent)
+                self._target
             )
         return self._sessions[sender_id]
+
+    @property
+    def _target(self) -> GraphTarget:
+        """The target of every turn: the agent, in the channel's project."""
+        return GraphTarget(local_graph=self.agent, **self._folders)
 
     def _get_channel(self, channel_name: str) -> Channel | None:
         """Look up the channel by name from the manager."""
@@ -459,6 +474,18 @@ class InboundConsumer:
                     refeed, channel, thread_id, session_key
                 )
 
+    async def _send_media(self, msg: InboundMessage, path: str) -> None:
+        """Queue the media file at *path* for the chat *msg* came from."""
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="",
+                media=[path],
+                metadata=msg.metadata,
+            )
+        )
+
     async def _close_parked(self, thread_id: str, reason: ParkedCloseReason) -> None:
         """Close the pause this turn ends at; the turn ends the same if that fails."""
         from ..backends import close_parked_checkpoint
@@ -466,7 +493,7 @@ class InboundConsumer:
         try:
             await close_parked_checkpoint(
                 self.graph_gateway,
-                GraphTarget(local_graph=self.agent),
+                self._target,
                 thread_id,
                 reason=reason,
             )
@@ -514,6 +541,19 @@ class InboundConsumer:
             # Which calls carry this chat's grant: see ``_hitl_when``.
             approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
+            from ..EvoScientist import file_tool_routes
+            from ..stream.display import forward_media_result
+            from ..stream.state import StreamState
+
+            # Media files the agent writes or reads are sent as their results
+            # arrive, so every way the turn ends keeps them. One state spans
+            # the rounds: a resumed call's result answers a call the round
+            # before the pause streamed.
+            stream_state = StreamState()
+            media: list[str] = []
+            media_sent: set[str] = set()
+            media_routes = file_tool_routes(self._dirs.workspace)
+
             while True:
                 _hitl_round += 1
                 final_content = ""
@@ -554,7 +594,7 @@ class InboundConsumer:
                                 media=msg.media or None
                                 if isinstance(stream_input, str)
                                 else None,
-                                target=GraphTarget(local_graph=self.agent),
+                                target=self._target,
                                 configurable_extra=approve_all_configurable_extra(
                                     approve_all_carry
                                 ),
@@ -565,6 +605,20 @@ class InboundConsumer:
                 ) as events:
                     async for event in events:
                         event_type = event.get("type")
+                        stream_state.handle_event(event)
+                        forward_media_result(
+                            stream_state,
+                            event,
+                            media_sent,
+                            media.append,
+                            self._dirs.work_dir,
+                            media_dir=self._dirs.sandbox_media_dir,
+                            dangerous=self._dangerous,
+                            routes=media_routes,
+                        )
+                        for path in media:
+                            await self._send_media(msg, path)
+                        media.clear()
 
                         if self._on_streaming_event:
                             try:

@@ -127,6 +127,39 @@ def test_create_tool_selector_always_include():
         ]
 
 
+@pytest.mark.usefixtures("no_mcp")
+def test_always_include_covers_every_builtin_tool(tmp_path, monkeypatch):
+    """Selection must never drop a built-in tool of the main agent, so a new
+    built-in has to join ``DEFAULT_ALWAYS_INCLUDE_TOOLS``."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import create_cli_agent
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.middleware.tool_selector import DEFAULT_ALWAYS_INCLUDE_TOOLS
+    from EvoScientist.paths import Workspace
+
+    class _Model(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    # Every optional tool on, the async-task tools included.
+    monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", True)
+    model = _Model(messages=iter([]))
+    model.profile = {"max_input_tokens": 200_000}
+    agent = create_cli_agent(
+        workspace=Workspace(tmp_path),
+        config=EvoScientistConfig(),
+        chat_model=model,
+        checkpointer=InMemorySaver(),
+    )
+
+    builtins = set(agent.nodes["tools"].bound.tools_by_name)
+    assert "start_async_task" in builtins
+    assert builtins - DEFAULT_ALWAYS_INCLUDE_TOOLS == set()
+
+
 def test_custom_threshold():
     p1, p2, p3, p4 = _factory_patches()
     with p1, p2, p3, p4:
@@ -419,13 +452,11 @@ def test_selector_resolved_once_across_repeated_requests():
 
 
 def _drive_selection(sink, suppressor, selected, total):
-    """Mimic one selection turn: sink records it, the suppressor observes the
-    selector JSON block, then a flush surfaces (or not) the UI event."""
+    """Mimic one selection turn: the sink records it (the selector's own
+    output never reaches the stream), then a flush surfaces (or not) the UI event."""
     sink.on_tool_selection_started(total)
     sink.on_tool_selection(selected, total)
     sink.on_tool_selection_ended()
-    # Suppressor observes the selector's structured-output tool block.
-    suppressor.observe_tool_block("ToolSelectionResponse")
     return suppressor.flush_selection()
 
 
@@ -459,10 +490,38 @@ def test_consume_is_once_only():
     first = _drive_selection(sink, suppressor, ["read_file"], 3)
     assert any(e.get("type") == "tool_selection" for e in first)
 
-    # No new selection recorded; the observation flag was consumed.
-    suppressor.observe_tool_block("ToolSelectionResponse")
+    # No new selection recorded.
     second = suppressor.flush_selection()
     assert not any(e.get("type") == "tool_selection" for e in second)
+
+
+def test_new_selector_call_drops_a_selection_never_shown():
+    """A retried model call selects again; when that fails every tool is
+    offered, so the earlier selection must not be shown for it."""
+    sink = SessionEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+    sink.on_tool_selection(["read_file"], 3)
+
+    sink.on_tool_selection_started(3)
+    sink.on_tool_selection_ended()
+
+    assert suppressor.flush_selection() == []
+
+
+def test_discarded_selection_is_not_counted_as_shown():
+    """Dropping an unshown selection must not hide the same one next time."""
+    sink = SessionEventSink()
+    suppressor = _ToolSelectionSuppressor(StreamEventEmitter(), sink)
+    sink.on_tool_selection(["read_file"], 3)
+
+    sink.discard_tool_selection()
+
+    assert suppressor.flush_selection() == []
+    shown = _drive_selection(sink, suppressor, ["read_file"], 3)
+    assert [event["tools"] for event in shown] == [["read_file"]]
+    # Nor does a discard forget what was shown.
+    sink.discard_tool_selection()
+    assert _drive_selection(sink, suppressor, ["read_file"], 3) == []
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +852,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
     else:
         monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-test")
         monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "max")
     captured = {}
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -834,7 +894,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider=provider,
             http_async_client=client,
         )
@@ -853,8 +913,97 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     assert "response_format" not in captured
     assert captured["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured
     assert captured["tool_choice"]["function"]["name"] == "ToolSelectionResponse"
+    field = captured["tools"][0]["function"]["parameters"]["properties"]["tools"]
+    assert field["items"] == {"type": "string", "enum": ["tool_0", "tool_1", "tool_2"]}
+    assert "- tool_1: tool_1 test tool" in field["description"]
     assert selected == ["tool_1"]
+
+
+# ---------------------------------------------------------------------------
+# Selection schema: tool names as one enum
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_selection_schema_lists_tool_names_as_enum(count):
+    """Starts from langchain's own schema, so a change to its shape fails here."""
+    import json
+
+    from langchain.agents.middleware.tool_selection import (
+        _create_tool_selection_response,
+    )
+
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    names = [f"t{index}" for index in range(count)]
+    schema = _create_tool_selection_response([_tool(n) for n in names]).json_schema()
+
+    field = _names_as_enum(schema)["properties"]["tools"]
+
+    assert field["items"] == {"type": "string", "enum": names}
+    assert "const" not in json.dumps(field)
+    assert [line for line in field["description"].splitlines() if line[:1] == "-"] == [
+        f"- {name}: {name} test tool" for name in names
+    ]
+
+
+def test_selection_schema_indents_a_multi_line_description():
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    option = {"const": "t0", "description": "Summary.\n- an option"}
+    schema = {"properties": {"tools": {"type": "array", "items": option}}}
+
+    listing = _names_as_enum(schema)["properties"]["tools"]["description"]
+
+    assert listing.endswith("- t0: Summary.\n  - an option")
+
+
+def test_selection_schema_without_named_options_is_left_alone():
+    from EvoScientist.middleware.tool_selector import _names_as_enum
+
+    schema = {
+        "title": "ToolSelectionResponse",
+        "type": "object",
+        "properties": {"tools": {"type": "array", "items": {"type": "string"}}},
+    }
+
+    assert _names_as_enum(schema) is schema
+
+
+@pytest.mark.parametrize("auto", [False, True])
+def test_unexpected_selection_schema_is_reported_once(auto, caplog):
+    """A shape the rewrite does not know goes out unchanged, with one warning,
+    on the forced and on the auto tool-choice path."""
+    from langchain.agents.middleware.tool_selection import (
+        _create_tool_selection_response,
+    )
+
+    from EvoScientist.middleware.tool_selector import (
+        _AutoToolChoiceSelectorModel,
+        _SelectorModel,
+    )
+
+    wrapper = _AutoToolChoiceSelectorModel if auto else _SelectorModel
+    unknown = {"properties": {"tools": {"type": "array", "items": {"type": "string"}}}}
+    known = _create_tool_selection_response([_tool("t0")]).json_schema()
+    inner = MagicMock()
+    model = wrapper(inner)
+
+    with caplog.at_level("WARNING", logger="EvoScientist.middleware.tool_selector"):
+        wrapper(MagicMock()).with_structured_output(known)
+        assert not caplog.records
+        model.with_structured_output(unknown)
+        model.with_structured_output(unknown)
+
+    if auto:
+        [sent] = inner.bind_tools.call_args.args[0]
+    else:
+        sent = inner.with_structured_output.call_args.args[0]
+    assert sent is unknown
+    assert len(caplog.records) == 1
+    assert "tool_selector.schema_shape" in caplog.records[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1318,10 @@ def test_real_selector_switches_to_auto_end_to_end(monkeypatch):
     assert cond.wrap_model_call(request, handler) == "response"
 
     assert [b.get("tool_choice", {}).get("type") for b in bodies] == ["tool", "auto"]
+    # Both selectors send the names as an enum.
+    for body in bodies:
+        field = body["tools"][0]["input_schema"]["properties"]["tools"]
+        assert field["items"]["enum"] == [f"t{i}" for i in range(10)]
     assert bodies[1]["output_config"]["effort"] == "low"
     hint = "Always respond by calling the ToolSelectionResponse tool"
     assert hint not in json.dumps(bodies[0]["system"])

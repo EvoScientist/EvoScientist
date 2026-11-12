@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, Interrupt
 
+from EvoScientist.backends import CustomSandboxBackend
 from EvoScientist.middleware.ask_user import AskUserMiddleware
 from EvoScientist.stream.events import stream_agent_events
 from EvoScientist.stream.summarization import (
@@ -25,6 +26,7 @@ from tests.fakes.stream_v3 import (
     ErroringV3Agent,
     FakeSubagent,
     FakeV3Agent,
+    FakeV3Run,
     HangingV3Agent,
     SubscriptionSensitiveV3Agent,
     async_iter,
@@ -36,12 +38,32 @@ from tests.fakes.stream_v3 import (
     protocol_event,
     tool_finished,
     tool_started,
+    whole_message,
 )
 
 
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self
+
+
+def _select(sink, tools: list[str], total: int) -> None:
+    """One finished selector call, as the middleware reports it to the sink."""
+    sink.on_tool_selection_started(total)
+    sink.on_tool_selection(tools, total)
+    sink.on_tool_selection_ended()
+
+
+def _selecting_at_start(agent: FakeV3Agent, sink, tools: list[str], total: int):
+    """Have the run select once it starts, before the model's first output."""
+    run = agent.astream_events.return_value
+
+    def start_run(*_args, **_kwargs):
+        _select(sink, tools, total)
+        return run
+
+    agent.astream_events.side_effect = start_run
+    return agent
 
 
 class TestExtractToolContent:
@@ -607,8 +629,10 @@ class TestV3ProtocolStreaming:
             for event in events
         )
         assert sink.tool_selection_active is False
-        assert sink.tool_selection_pending() is True
-        assert sink.consume_tool_selection() == (True, ["probe_tool"])
+        # Reported from the executor thread, shown by this stream.
+        selection = next(e for e in events if e.get("type") == "tool_selection")
+        assert selection["tools"] == ["probe_tool"]
+        assert sink.consume_tool_selection() == (False, None)
 
     async def test_tool_selector_whole_message_reasoning_is_suppressed(self):
         """Selector reasoning in whole-message payloads is also hidden."""
@@ -651,6 +675,184 @@ class TestV3ProtocolStreaming:
         assert tool_result["content"] == "File content"
         assert tool_result["success"] is True
         assert tool_result["id"] == "tc1"
+
+    async def test_a_tool_result_with_error_status_is_a_failure(self):
+        """An MCP server's error result reaches the stream as a handled
+        ToolMessage whose text carries no error marker."""
+        output = ToolMessage(
+            name="lookup_dataset",
+            content="Error executing tool lookup_dataset: dataset not found: iris",
+            tool_call_id="tc1",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(output),
+            ]
+        )
+        events = await collect_events(agent)
+        tool_result = next(e for e in events if e.get("type") == "tool_result")
+        assert tool_result["success"] is False
+
+    async def test_a_serialized_tool_message_is_read_like_the_message(self):
+        """The server gateway delivers tool results in their JSON form."""
+        failed = {
+            "type": "tool",
+            "content": [{"type": "text", "text": "dataset not found: iris"}],
+            "name": "lookup_dataset",
+            "tool_call_id": "tc1",
+            "status": "error",
+        }
+        done = {
+            "type": "tool",
+            "content": "File content",
+            "name": "read_file",
+            "tool_call_id": "tc2",
+            "status": "success",
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup_dataset", {"name": "iris"}),
+                tool_finished(failed),
+                tool_started("read_file", {"path": "notes.txt"}, tool_call_id="tc2"),
+                tool_finished(done, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [(r["content"], r["success"]) for r in results] == [
+            ("dataset not found: iris", False),
+            ("File content", True),
+        ]
+
+    async def test_an_execute_result_is_judged_by_its_exit_code(self):
+        """``execute`` reports ``status="success"`` and puts the exit code in
+        ``artifact``; the text can say anything in its first lines."""
+        failed = ToolMessage(
+            name="execute",
+            content="l1\nl2\nl3\nl4\n[Command failed with exit code 3]",
+            tool_call_id="tc1",
+            artifact={"exit_code": 3, "truncated": False},
+        )
+        passed = {
+            "type": "tool",
+            "content": "Error: a line the command printed\n"
+            "[Command succeeded with exit code 0]",
+            "name": "execute",
+            "tool_call_id": "tc2",
+            "status": "success",
+            "artifact": {"exit_code": 0, "truncated": False},
+        }
+        agent = FakeV3Agent(
+            [
+                tool_started("execute", {"command": "build"}),
+                tool_finished(failed),
+                tool_started("execute", {"command": "check"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
+
+    async def test_a_long_result_keeps_its_end(self):
+        """A long command output is cut in the middle, so its exit status stays."""
+        content = (
+            "\n".join(f"collected line {i}" for i in range(400))
+            + "\n[Command failed with exit code 1]"
+        )
+        output = ToolMessage(
+            name="execute",
+            content=content,
+            tool_call_id="tc1",
+            artifact={"exit_code": 1, "truncated": False},
+        )
+        agent = FakeV3Agent(
+            [tool_started("execute", {"command": "pytest"}), tool_finished(output)]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["content"].startswith("collected line 0\n")
+        assert "... (truncated) ..." in result["content"]
+        assert result["content"].endswith("[Command failed with exit code 1]")
+
+    async def test_a_long_tool_error_keeps_its_end(self):
+        message = "boom " * 1000 + "the last words"
+        agent = FakeV3Agent(
+            [
+                tool_started("lookup", {}),
+                protocol_event(
+                    "tools",
+                    {
+                        "event": "tool-error",
+                        "message": message,
+                        "tool_call_id": "tc1",
+                    },
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        result = next(e for e in events if e.get("type") == "tool_result")
+        assert result["success"] is False
+        assert len(result["content"]) < 2100
+        assert result["content"].endswith("the last words")
+
+    async def test_a_write_todos_result_is_judged_by_its_status(self):
+        """Its result echoes the todos, which may name an error."""
+        todos = (
+            "[{'content': 'Fix RuntimeError: CUDA out of memory', 'status': 'pending'}]"
+        )
+        updated = Command(
+            update={
+                "messages": [
+                    ToolMessage(f"Updated todo list to {todos}", tool_call_id="tc1")
+                ]
+            }
+        )
+        rejected = ToolMessage(
+            "Error invoking tool 'write_todos': todos.0.status: Input should be ...",
+            name="write_todos",
+            tool_call_id="tc2",
+            status="error",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("write_todos", {}),
+                tool_finished(updated),
+                tool_started("write_todos", {}, tool_call_id="tc2"),
+                tool_finished(rejected, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [True, False]
+
+    async def test_an_interpreter_result_is_judged_by_its_closing_tag(self):
+        """The interpreter's error or result follows any stdout it printed."""
+        failed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nstarting\n</stdout>\n"
+            '<error type="TypeError">x is not a function</error>',
+            tool_call_id="tc1",
+        )
+        passed = ToolMessage(
+            name="code_interpreter",
+            content="<stdout>\nError: logged by the script\n</stdout>\n"
+            '<result kind="number">1</result>',
+            tool_call_id="tc2",
+        )
+        agent = FakeV3Agent(
+            [
+                tool_started("code_interpreter", {"code": "x()"}),
+                tool_finished(failed),
+                tool_started("code_interpreter", {"code": "1"}, tool_call_id="tc2"),
+                tool_finished(passed, tool_call_id="tc2"),
+            ]
+        )
+        events = await collect_events(agent)
+        results = [e for e in events if e.get("type") == "tool_result"]
+        assert [r["success"] for r in results] == [False, True]
 
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
@@ -710,6 +912,47 @@ class TestV3ProtocolStreaming:
             "id": "call_probe_1",
         }
         assert done["content"] == "final answer"
+
+    @pytest.mark.filterwarnings(
+        "ignore:The v3 streaming protocol on Pregel is experimental"
+    )
+    async def test_live_execute_exit_code_reaches_the_tool_result(self, tmp_path):
+        """A real ``execute`` that exits non-zero is a failed tool result."""
+        model = _ToolCallingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "exit 3"},
+                            "id": "call_fail",
+                        },
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo ok"},
+                            "id": "call_ok",
+                        },
+                    ],
+                ),
+                AIMessage(content="final answer"),
+            ]
+        )
+        agent = create_deep_agent(
+            model=model,
+            backend=CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True),
+            system_prompt="Use tools when requested.",
+        )
+
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent, "run commands", "live-execute-exit-code"
+            )
+        ]
+
+        results = {e["id"]: e["success"] for e in events if e["type"] == "tool_result"}
+        assert results == {"call_fail": False, "call_ok": True}
 
     @pytest.mark.filterwarnings(
         "ignore:The v3 streaming protocol on Pregel is experimental"
@@ -942,32 +1185,141 @@ class TestV3ProtocolStreaming:
         assert tool_call["id"] == "tc-msg"
         assert tool_call["args"] == {"command": "ls"}
 
-    async def test_tool_selection_flushes_before_tool_only_step(self):
-        """Selector UI event is emitted even when selection is followed only by a tool."""
+    @pytest.mark.parametrize(
+        "first", ["text", "thinking", "tool_block", "tool_started", "whole_message"]
+    )
+    async def test_tool_selection_is_shown_without_selector_output(self, first):
+        """The selector's model call is kept out of the stream; the selection
+        the sink recorded is still shown, ahead of the model's own output."""
         from EvoScientist.stream.sink import SessionEventSink
 
-        # The frontend sink holds a pending selection (1 of 3 tools) — the
-        # suppressor must surface it before the tool-only step.
         sink = SessionEventSink()
-        sink.on_tool_selection(["read_file"], 3)
-        output = ToolMessage(
-            content="File content",
-            name="read_file",
-            tool_call_id="tc1",
-        )
-        agent = FakeV3Agent(
-            [
-                message_delta('{"tools":["read_file"]}'),
-                tool_started("read_file", {"path": "notes.txt"}),
-                tool_finished(output),
-            ]
-        )
+        reasoning = {"type": "reasoning-delta", "reasoning": "Let me look."}
+        args = {"path": "notes.txt"}
+        output = ToolMessage(content="File content", name="read_file", tool_call_id="1")
+        step = {
+            "text": [message_delta("Answer.")],
+            "thinking": [
+                protocol_event(
+                    "messages",
+                    (
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": reasoning,
+                        },
+                        {},
+                    ),
+                )
+            ],
+            # A streamed step that only calls a tool.
+            "tool_block": [message_tool_call_block("read_file", args)],
+            "tool_started": [tool_started("read_file", args), tool_finished(output)],
+            # The same step from a model that does not stream.
+            "whole_message": [
+                whole_message(
+                    AIMessage(
+                        content="",
+                        tool_calls=[{"name": "read_file", "args": args, "id": "1"}],
+                    )
+                )
+            ],
+        }[first]
+        agent = _selecting_at_start(FakeV3Agent(step), sink, ["read_file"], 3)
+
         events = await collect_events(agent, events=sink)
 
         event_types = [e["type"] for e in events]
-        assert event_types.index("tool_selection") < event_types.index("tool_call")
+        shown = first if first in ("text", "thinking") else "tool_call"
+        assert event_types.index("tool_selection") < event_types.index(shown)
         selection = next(e for e in events if e.get("type") == "tool_selection")
         assert selection["tools"] == ["read_file"]
+
+    async def test_selector_output_is_hidden_while_its_call_is_active(self):
+        """Should the selector's own output reach the stream after all, neither
+        its JSON text nor its structured-output call is shown as the agent's."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        sink.on_tool_selection_started(30)  # selector call in flight
+        picked = {"tools": ["read_file"]}
+        agent = FakeV3Agent(
+            [
+                message_delta('{"tools": ["read_file"]}'),
+                message_tool_call_block("ToolSelectionResponse", picked),
+            ]
+        )
+
+        events = await collect_events(agent, events=sink)
+
+        assert not [e for e in events if e["type"] in ("text", "tool_call")]
+
+    async def test_tool_selection_is_shown_before_its_own_step(self):
+        """The selector runs before every model call: each step's selection
+        lands after the earlier step's result and before its own output."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        output = ToolMessage(content="File content", name="read_file", tool_call_id="1")
+
+        async def steps():
+            _select(sink, ["read_file"], 3)
+            yield tool_started("read_file", {"path": "notes.txt"})
+            yield tool_finished(output)
+            _select(sink, ["ls"], 3)
+            yield message_delta("Answer.")
+
+        class TwoStepRun(FakeV3Run):
+            def __aiter__(self):
+                return steps()
+
+        agent = FakeV3Agent([])
+        agent.astream_events.return_value = TwoStepRun([])
+
+        events = await collect_events(agent, events=sink)
+
+        order = [e["type"] for e in events if e["type"] != "done"]
+        assert order == [
+            "tool_selection",
+            "tool_call",
+            "tool_result",
+            "tool_selection",
+            "text",
+        ]
+        shown = [e["tools"] for e in events if e["type"] == "tool_selection"]
+        assert shown == [["read_file"], ["ls"]]
+
+    async def test_json_answer_with_tools_key_is_shown_after_a_selection(self):
+        """Once the selector call has ended, JSON with a ``tools`` key is the
+        agent's own answer, not the selector's."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        answer = '{"tools": ["hammer"], "note": "from the agent"}'
+        agent = _selecting_at_start(
+            FakeV3Agent([message_delta(answer)]), sink, ["read_file"], 3
+        )
+
+        events = await collect_events(agent, events=sink)
+
+        shown = [e["tools"] for e in events if e["type"] == "tool_selection"]
+        assert shown == [["read_file"]]
+        assert "".join(e["content"] for e in events if e["type"] == "text") == answer
+
+    async def test_selection_left_by_an_earlier_run_is_not_shown(self):
+        """A run that ended before its first output leaves its selection in the
+        session's sink; the next run did not make it."""
+        from EvoScientist.stream.sink import SessionEventSink
+
+        sink = SessionEventSink()
+        sink.on_tool_selection(["old_tool"], 3)
+
+        events = await collect_events(
+            FakeV3Agent([message_delta("Answer.")]), events=sink
+        )
+
+        assert "tool_selection" not in [e["type"] for e in events]
+        assert sink.consume_tool_selection() == (False, None)
 
     async def test_subagent_projection_routes_namespaced_events(self):
         """DeepAgents subagent projection supplies identity for namespaced events."""
@@ -1169,6 +1521,85 @@ class TestV3ProtocolStreaming:
         assert text["subagent"] == "research-agent"
         assert text["content"] == "Sub-agent finding."
         assert text["instance_id"] == "task:early"
+
+    async def test_whitespace_deltas_between_text_are_kept(self):
+        """Spaces and blank lines that arrive as their own deltas stay in the answer."""
+        chunks = ["F", " ", "10.6667", "\n\n", "Next", " ", "para", "."]
+        agent = FakeV3Agent([*(message_delta(c) for c in chunks), message_finish()])
+        events = await collect_events(agent)
+
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert "".join(texts) == "F 10.6667\n\nNext para."
+        assert not any(t.isspace() for t in texts)
+        done = next(e for e in events if e.get("type") == "done")
+        assert done["content"] == "F 10.6667\n\nNext para."
+
+    async def test_whitespace_at_a_message_edge_is_dropped(self):
+        """A message that opens with whitespace before its reasoning (OpenRouter)
+        shows no text until the answer, and trailing whitespace is dropped."""
+        reasoning = protocol_event(
+            "messages",
+            (
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "reasoning-delta", "reasoning": "thinking"},
+                },
+                {},
+            ),
+        )
+        agent = FakeV3Agent(
+            [
+                message_delta("\n\n"),
+                reasoning,
+                message_delta("Answer"),
+                message_delta("\n"),
+                message_finish(),
+                message_delta("\n"),
+                message_delta("Next"),
+                message_delta(" "),
+                protocol_event("messages", ({"event": "message-start"}, {})),
+                message_delta("Last"),
+                message_finish(),
+            ]
+        )
+        events = await collect_events(agent)
+
+        kinds = [e["type"] for e in events if e["type"] in ("thinking", "text")]
+        assert kinds == ["thinking", "text", "text", "text"]
+        texts = [e["content"] for e in events if e.get("type") == "text"]
+        assert texts == ["Answer", "Next", "Last"]
+
+    async def test_each_subagent_holds_its_own_whitespace(self):
+        """A held space belongs to the stream it arrived in."""
+        ns1 = ("task", "one")
+        ns2 = ("task", "two")
+        agent = FakeV3Agent(
+            [
+                message_delta("One", namespace=ns1),
+                message_delta("Two", namespace=ns2),
+                message_delta(" ", namespace=ns1),
+                message_delta("\n\n", namespace=ns2),
+                message_delta("Root"),
+                message_delta("more", namespace=ns2),
+                message_delta("more", namespace=ns1),
+            ],
+            subagents=[
+                FakeSubagent(ns1, "research-agent"),
+                FakeSubagent(ns2, "research-agent"),
+            ],
+        )
+        events = await collect_events(agent)
+
+        by_instance: dict[str, list[str]] = {}
+        for e in events:
+            if e.get("type") == "subagent_text":
+                by_instance.setdefault(e["instance_id"], []).append(e["content"])
+        assert by_instance == {
+            "task:one": ["One", " more"],
+            "task:two": ["Two", "\n\nmore"],
+        }
+        assert [e["content"] for e in events if e.get("type") == "text"] == ["Root"]
 
     async def test_parallel_same_name_subagent_events_carry_instance_ids(self):
         """Lifecycle and tool events distinguish same-name parallel subagents."""
@@ -1748,6 +2179,31 @@ class TestModelRetryRollback:
         assert "message_id" not in retry
         assert self._done(out)["response"] == "Full answer."
         assert [e["type"] for e in out if e["type"] == "model_call"] == []
+
+    async def test_a_new_call_does_not_inherit_held_whitespace(self):
+        """Whitespace a failed call held back is not put in front of the retry's answer."""
+        from tests.fakes.stream_v3 import (
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Half a sen"),
+                local_text_delta("\n\n"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                local_text_delta("Full answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._done(out)["response"] == "Full answer."
 
     async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
         """A graded run's last pass starts after the verdict; a failed call of

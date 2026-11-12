@@ -28,21 +28,23 @@ from .deepseek import EvoChatDeepSeek
 from .patches import (
     _patch_anthropic_strip_foreign_reasoning,
     _patch_anthropic_structured_output,
+    _patch_anthropic_thinking_binding,
     _patch_openai_compat_content,
     _patch_openai_responses_whole_tool_args,
-    _patch_openrouter_strip_responses_reasoning,
     _patch_openrouter_structured_output,
 )
 from .registry import (
     _ANTHROPIC_ROUTED_PROVIDERS,
     _MODEL_ENTRIES,
     _OPENAI_ROUTED_PROVIDERS,
-    _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS,  # noqa: F401 — re-exported
     _THINKING_CAPABLE_PROVIDERS,
     DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
     MODELS,
+    REASONING_LEVELS,
     UnknownModelError,
     _is_mandatory_thinking_kimi,
+    _openrouter_needs_json_schema,  # noqa: F401 — re-exported
     get_model_info,  # noqa: F401 — re-exported for existing import sites
     get_models_for_provider,  # noqa: F401 — re-exported for existing import sites
     list_model_picker_entries,  # noqa: F401 — re-exported for existing import sites
@@ -59,20 +61,50 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 # Reasoning levels on one scale. One level is stored for every model (main,
 # auxiliary, fallbacks); a route listed here accepts only a slice of the
 # scale, so a level outside it is sent as the nearest one it accepts.
-_REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_REASONING_SCALE = REASONING_LEVELS
 _ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "chatgpt": ("low", "medium", "high", "xhigh", "max"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
+
+
+def _nearest_reasoning_level(effort: str, levels: tuple[str, ...]) -> str:
+    """Return ``effort`` if ``levels`` has it, else the nearest level it has
+    (the lower one on a tie)."""
+    known = [level for level in levels if level in _REASONING_SCALE]
+    if not known or effort in levels or effort not in _REASONING_SCALE:
+        return effort
+    rank = _REASONING_SCALE.index(effort)
+    return min(
+        known,
+        key=lambda level: (
+            abs(_REASONING_SCALE.index(level) - rank),
+            _REASONING_SCALE.index(level),
+        ),
+    )
+
+
+_UNKNOWN_EFFORT_WARNED: set[str] = set()
 
 
 def _resolve_reasoning_effort(default: str, route: str) -> str:
     """Return the configured reasoning effort (or ``default``) as ``route`` takes it."""
-    effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
-    levels = _ROUTE_REASONING_LEVELS.get(route)
-    if not levels or effort in levels or effort not in _REASONING_SCALE:
-        return effort
-    rank = _REASONING_SCALE.index(effort)
-    return min(levels, key=lambda level: abs(_REASONING_SCALE.index(level) - rank))
+    configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "")
+    effort = configured.strip().lower() or default
+    levels = _ROUTE_REASONING_LEVELS.get(route, ())
+    # A value off the scale runs at the default: native Claude would not build,
+    # and other routes would have every request refused.
+    if effort not in _REASONING_SCALE:
+        if effort not in _UNKNOWN_EFFORT_WARNED:
+            _UNKNOWN_EFFORT_WARNED.add(effort)
+            warnings.warn(
+                f"Unknown reasoning_effort {effort!r}; using {default!r}. "
+                f"Set one of: {', '.join(_REASONING_SCALE)}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        effort = default
+    return _nearest_reasoning_level(effort, levels)
 
 
 # Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
@@ -224,9 +256,9 @@ def _require_routed_api_key(
             )
         return "not-needed"
     raise ValueError(
-        f"The '{provider}' provider requires an API key. Please set the "
-        f"{api_key_env} environment variable (or configure it in your "
-        "config.yaml / .env) before using this provider."
+        f"The '{provider}' provider requires an API key. Save it with "
+        f"`EvoSci config set {api_key_env.lower()} <key>`, or set the "
+        f"{api_key_env} environment variable, before using this provider."
     )
 
 
@@ -342,6 +374,20 @@ def _fill_claude_structured_output(chat_model: Any, model_id: str) -> None:
         pass
 
 
+def _fit_claude_effort(chat_model: Any) -> None:
+    """Send the effort as a level the model's profile lists (Claude 4.6 has no xhigh)."""
+    profile = getattr(chat_model, "profile", None)
+    levels = (
+        profile.get("reasoning_effort_levels") if isinstance(profile, dict) else None
+    )
+    effort = getattr(chat_model, "reasoning_effort", None)
+    if not isinstance(levels, (list, tuple)) or not isinstance(effort, str):
+        return
+    fitted = _nearest_reasoning_level(effort, tuple(levels))
+    if fitted != effort:
+        chat_model.reasoning_effort = fitted
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -381,26 +427,30 @@ def _apply_auto_config(
                 kwargs.setdefault("max_tokens", 16000)
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            kwargs.setdefault("effort", "max")
+            # A caller's own level (either name) skips the configured one.
+            if "effort" not in kwargs and "reasoning_effort" not in kwargs:
+                kwargs["effort"] = _resolve_reasoning_effort(
+                    DEFAULT_REASONING_EFFORT, "anthropic"
+                )
+        elif original_provider == "minimax":
+            # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
+            kwargs["thinking"] = {"type": "adaptive"}
         else:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
     # OpenAI (native, not third-party routed): reasoning
     if provider == "openai" and not is_third_party and "reasoning" not in kwargs:
-        _default_effort = (
-            "xhigh"
-            if (
-                "5.4" in model_id
-                or "5.5" in model_id
-                or "5.6" in model_id
-                or "codex" in model_id
-            )
-            else "high"
-        )
         _eff = _resolve_reasoning_effort(
-            _default_effort, "chatgpt" if chatgpt_signin else "openai"
+            DEFAULT_REASONING_EFFORT, "chatgpt" if chatgpt_signin else "openai"
         )
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
+
+    # DeepSeek (native): the configured level or the default, sent as is (DeepSeek
+    # maps its aliases).
+    if provider == "deepseek" and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = _resolve_reasoning_effort(
+            DEFAULT_REASONING_EFFORT, "deepseek"
+        )
 
     # Google GenAI: surface thinking traces
     if provider == "google-genai":
@@ -444,7 +494,13 @@ def get_chat_model(
             if name == model and p == provider:
                 model_id = mid
                 break
-    if model_id is None and model in MODELS:
+    # Routers keep to their own entries: another provider's id may name an
+    # older or different model there.
+    if (
+        model_id is None
+        and model in MODELS
+        and provider not in ("openrouter", "requesty")
+    ):
         model_id, default_provider = MODELS[model]
         provider = provider or default_provider
 
@@ -466,7 +522,7 @@ def get_chat_model(
                 provider = "anthropic"  # Default fallback
 
     # Routers address models as ``vendor/model``; a bare id here is a short
-    # name that is no longer in the registry (or another provider's id).
+    # name outside this router's list.
     if provider in ("openrouter", "requesty") and "/" not in model_id:
         raise UnknownModelError(
             f"Model {model!r} is not in EvoScientist's {provider} model list "
@@ -538,11 +594,11 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
-        # Moonshot: disable thinking for pre-K3 models to prevent LangChain from
-        # dropping reasoning_content, which causes multi-turn conversation errors
-        # (error 20015). Even native thinking models like kimi-k2-thinking operate
-        # in non-thinking mode. kimi-k3+ is exempt: always-thinking, and
-        # Moonshot's K3 guide forbids the K2.x `thinking` parameter for it.
+        # Moonshot: disable thinking for pre-K3 models (K2.x, still served to
+        # existing users until the end of 2026) so LangChain does not drop
+        # reasoning_content, which causes multi-turn errors (error 20015).
+        # kimi-k3+ is exempt: always-thinking, and Moonshot's K3 guide forbids
+        # the K2.x `thinking` parameter for it.
         if provider == "moonshot" and not model_id.startswith("kimi-k3"):
             kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
         provider = "openai"
@@ -554,15 +610,12 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
         # Reasoning via `effort` + `summary: "auto"` so a readable reasoning
-        # summary is returned for display. OpenAI-Responses also emits encrypted
-        # reasoning items (`rs_*` id) that can't be replayed on multi-turn
-        # passback (OpenRouter's `/responses` beta is stateless, store=false —
-        # "Item with id 'rs_...' not found"); the patch strips them on passback,
-        # so enabling `summary` is safe. See langchain-ai/langchain#37777.
+        # summary is returned for display; langchain-openrouter drops the
+        # ephemeral `rs_` ids before replaying encrypted reasoning items.
         # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
         # effort "none" with HTTP 400 — that error is surfaced to the user
         # as-is; pick a real effort (low+) for those models.
-        effort = _resolve_reasoning_effort("high", "openrouter")
+        effort = _resolve_reasoning_effort(DEFAULT_REASONING_EFFORT, "openrouter")
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
         # App attribution (issue #339): identify EvoScientist to OpenRouter so
         # usage is credited to the project (app rankings, model app tabs,
@@ -615,7 +668,6 @@ def get_chat_model(
             _app_categories = _app_categories[:_limit]
         if _app_categories:
             kwargs.setdefault("app_categories", _app_categories)
-        _patch_openrouter_strip_responses_reasoning()
         _patch_openrouter_structured_output()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
@@ -649,9 +701,9 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
-        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
-        # 4096; match the server's own default (131072) instead.
-        if provider in ("xiaomi", "xiaomi-token-plan"):
+        # MiMo and MiniMax ids have no langchain profile, so ChatAnthropic would
+        # fall back to 4096; use the 131072 both vendors document instead.
+        if provider in ("xiaomi", "xiaomi-token-plan", "minimax"):
             kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
@@ -741,7 +793,9 @@ def get_chat_model(
     if provider == "anthropic":
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
+        _patch_anthropic_thinking_binding()
         _fill_claude_structured_output(chat_model, model_id)
+        _fit_claude_effort(chat_model)
 
     apply_known_context_window(chat_model)
 

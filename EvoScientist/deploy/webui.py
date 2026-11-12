@@ -88,16 +88,16 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     tears down both subprocesses. Never returns a value.
     """
     from ..config import apply_config_to_env
-    from ..langgraph_dev.manager import (
-        RUNTIME,
-        _base_url,
-        _format_hostport,
-        _is_loopback_host,
-    )
+    from ..langgraph_dev.boundary import is_loopback_host
+    from ..langgraph_dev.manager import RUNTIME, _format_hostport
 
     apply_config_to_env(config)
 
-    cfg = build_launcher_config(config, workspace_dir)
+    try:
+        cfg = build_launcher_config(config, workspace_dir)
+    except LauncherError as exc:
+        _render_launcher_error(exc)
+        raise typer.Exit(1) from exc
 
     # Port sanity — a CLI concern, so it lives here rather than in the core.
     for label, p in (("langgraph dev", cfg.backend_port), ("WebUI", cfg.webui_port)):
@@ -119,7 +119,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         )
         raise typer.Exit(1)
 
-    webui_log = RUNTIME.log_file.parent / "webui.log"
+    webui_log = RUNTIME.webui_log
     starting = "[dim]Starting langgraph dev...[/dim]"
     status_box: dict[str, Any] = {}
 
@@ -134,21 +134,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         else:
             status.update(f"[dim]{escape(message)} ({int(fraction * 100)}%)...[/dim]")
 
-    def _lock_wait(waiting: bool) -> None:
-        # Another process holds the server start lock; say so, as deploy does.
-        status = status_box.get("status")
-        if status is None:
-            return
-        if waiting:
-            status.update(
-                "[dim]Waiting for another EvoSci process to start langgraph "
-                "dev...[/dim]"
-            )
-        else:
-            status.update(starting)
+    from .server import lock_wait_status
 
     runner = InstalledWebUIRunner(progress=_install_progress, log_path=webui_log)
-    launcher = WebUILauncher(config, cfg, runner, on_lock_wait=_lock_wait)
+    launcher = WebUILauncher(
+        config, cfg, runner, on_lock_wait=lock_wait_status(status_box, starting)
+    )
     try:
         with console.status(starting, spinner="dots") as status:
             status_box["status"] = status
@@ -160,23 +151,20 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         status_box.clear()
     # start() has already spawned the backend (unless reused) and the front-end;
     # register teardown now so a Ctrl+C while the output below renders still
-    # stops them. Idempotent, and honours keepalive inside launcher.stop().
+    # stops the front-end. Idempotent; the backend outlives the WebUI.
     atexit.register(launcher.stop)
 
     if result.backend_started:
         console.print("[green]✓[/green] langgraph dev ready")
-        if cfg.keepalive:
-            # Keepalive: the backend outlives this session so the
-            # next same-workspace launch reuses it instantly. The front-end
-            # below still stops on exit as usual.
-            console.print(
-                "[dim]keepalive: backend server stays up after exit — "
-                "stop it with [bold]EvoSci server stop[/bold].[/dim]"
-            )
+        console.print(
+            "[dim]The backend server keeps running after the WebUI closes, for "
+            "every EvoSci session — stop it with [bold]EvoSci server stop"
+            "[/bold].[/dim]"
+        )
     else:
         console.print(
             f"[green]✓[/green] Reusing langgraph dev already serving "
-            f"port {cfg.backend_port}"
+            f"port {launcher.backend_port}"
         )
     for warning in result.warnings:
         # Warnings can carry paths; a segment like "[lab]" is not markup.
@@ -203,24 +191,32 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # The UI reaches the backend from the BROWSER; when only the front-end is
     # exposed, remote pages load but every request fails — say so.
     remote_backend_hint = ""
-    if not _is_loopback_host(cfg.webui_host) and _is_loopback_host(cfg.backend_host):
+    backend_public = (
+        result.exposure is not None and result.exposure.public_host is not None
+    )
+    if not is_loopback_host(cfg.webui_host) and not backend_public:
         remote_backend_hint = (
             f"\n[yellow]Note:[/yellow] the UI connects to the backend from the "
             f"browser. Remote visitors cannot reach a loopback backend — run "
-            f"[bold]EvoSci config set langgraph_dev_host 0.0.0.0[/bold] and "
-            f"point the UI at [bold]http://<this-machine-ip>:{cfg.backend_port}"
-            f"[/bold].\n"
+            f"[bold]EvoSci config set langgraph_dev_host 0.0.0.0[/bold] (and "
+            f"[bold]EvoSci server stop[/bold] if a server already runs on "
+            f"loopback), then point the UI at "
+            f"[bold]http://<this-machine-ip>:{launcher.backend_port}[/bold].\n"
         )
+    from ..langgraph_dev.assistants import chat_assistant_id
+    from ..paths import Workspace
+
+    assistant_id = chat_assistant_id(Workspace(cfg.workspace_dir))
     console.print(
         Panel(
             Text.from_markup(
                 f"[bold]Backend:[/bold]  "
-                f"{_base_url(cfg.backend_port, cfg.backend_host)}  "
-                f"[dim](langgraph dev — Assistant: EvoScientist)[/dim]\n"
+                f"{result.backend_url}  "
+                f"[dim](langgraph dev — Assistant: {assistant_id})[/dim]\n"
                 f"[bold]WebUI:[/bold]    "
                 f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
                 f"[dim]({browser_note})[/dim]\n"
-                f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
+                f"[bold]Logs:[/bold]     {_shorten(str(result.log_file or RUNTIME.log_file))}\n"
                 f"          {_shorten(str(webui_log))}\n"
                 f"{remote_backend_hint}\n"
                 f"[dim]Press Ctrl+C to stop.[/dim]"
@@ -229,13 +225,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             border_style="green",
         )
     )
-    if not _is_loopback_host(cfg.backend_host):
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]Backend listening on {cfg.backend_host} — no auth, and "
-            f"the agent can run shell. Trusted networks only.[/bold red]"
-        )
-    if not _is_loopback_host(cfg.webui_host):
+    from ..cli.commands import print_exposure_warnings
+
+    # The backend as it answered the registration: it may be one another
+    # session started.
+    print_exposure_warnings(result.exposure, to=console)
+    if not is_loopback_host(cfg.webui_host):
         console.print(
             "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
             f"[bold red]WebUI listening on {cfg.webui_host} — its API reads, "

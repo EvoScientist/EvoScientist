@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import threading
-from collections.abc import Sequence
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -13,14 +12,12 @@ import pytest
 import yaml
 from blockbuster import BlockBuster
 from langchain.agents.middleware.types import AgentState
-from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
 from EvoScientist.gateway import background_runs
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.memory import (
     launch as memory_launch,
 )
@@ -52,10 +49,12 @@ from EvoScientist.memory.search import _tokens
 from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
 from tests.fakes.memory import (
-    fake_execution_info,
     fake_runtime,
     linker_context,
     memory_source_context,
+    record_observation_payload,
+    tool_by_name,
+    tool_runtime,
 )
 
 
@@ -83,27 +82,6 @@ def _markdown_sections(body: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         sections[match.group("title")] = body[start:end].strip()
     return sections
-
-
-def _tool_runtime(
-    tool: Any,
-    *,
-    config: RunnableConfig | None = None,
-    thread_id: str | None = None,
-    tool_call_id: str | None = None,
-) -> ToolRuntime:
-    runtime_config: RunnableConfig = config if config is not None else {}
-    return ToolRuntime(
-        state={},
-        context=None,
-        config=runtime_config,
-        stream_writer=lambda _chunk: None,
-        tool_call_id=tool_call_id,
-        store=None,
-        tools=[tool],
-        execution_info=fake_execution_info(thread_id),
-        server_info=None,
-    )
 
 
 def _memory_worker_run(
@@ -193,35 +171,6 @@ def _memory_relative_path(record: dict[str, Any]) -> str:
     return record["path"].removeprefix("/memories/")
 
 
-def _record_observation_payload(
-    tool: Any,
-    *,
-    runtime: ToolRuntime,
-    memory_type: MemoryType,
-    summary: str,
-    observation: str,
-    why_it_matters: str,
-    scope: MemoryScope,
-) -> dict[str, Any]:
-    payload = tool.run(
-        {
-            "memory_type": memory_type,
-            "summary": summary,
-            "observation": observation,
-            "why_it_matters": why_it_matters,
-            "scope": scope,
-            "runtime": runtime,
-        }
-    )
-    return json.loads(payload)
-
-
-def _tool_by_name(tools: Sequence[BaseTool], name: str) -> BaseTool:
-    matches = [tool for tool in tools if tool.name == name]
-    assert len(matches) == 1
-    return matches[0]
-
-
 def _fast_watcher_config(
     *, max_poll_failures: int = 3
 ) -> background_runs.BackgroundRunWatcherConfig:
@@ -276,7 +225,8 @@ def test_record_observation_file_writes_contract_and_dedupes(tmp_path):
     metadata, body = _read_memory_document(path)
 
     assert first["created"] is True
-    assert second == {**first, "created": False}
+    assert second == {**first, "created": False, "note": second["note"]}
+    assert "identical observation already exists" in second["note"]
     assert first["path"] == (
         f"/memories/observations/projects/P-project/{first['observation_id']}.md"
     )
@@ -633,6 +583,109 @@ def test_malformed_observation_frontmatter_is_skipped(tmp_path):
     assert worker_activity.snapshot_observation_relations(memories) == frozenset()
 
 
+def test_observation_with_an_empty_relation_list_still_reads(tmp_path):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    observation = global_dir / "O-empty-relations.md"
+    observation.write_text(
+        "---\n"
+        "id: O-empty-relations\n"
+        "summary: Redirect stray output to /dev/null instead of a workspace file.\n"
+        "memory_type: procedural\n"
+        "scope: global\n"
+        "related_observations:\n"
+        "---\n"
+        "Body\n",
+        encoding="utf-8",
+    )
+
+    document = read_observation_document(observation)
+    assert document is not None
+    metadata, _body = document
+    assert metadata.related_observations == []
+    hits = search_observation_files(
+        memory_dir=memories, project_id="P-project", query="stray output dev null"
+    )
+    assert [hit["observation_id"] for hit in hits] == ["O-empty-relations"]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "reason"),
+    [
+        (b"\xff\xfeSECRET-SENTINEL", b"\xff\xfdSECRET-SENTINEL", "not UTF-8"),
+        (b"SECRET-SENTINEL one", b"SECRET-SENTINEL two", "no frontmatter"),
+        (
+            b"---\nid: SECRET-SENTINEL\n",
+            b"---\nid: SECRET-SENTINEL2\n",
+            "frontmatter is not closed",
+        ),
+        (
+            b"---\nid: [SECRET-SENTINEL\n---\n",
+            b"---\nid: [SECRET-SENTINEL, 2\n---\n",
+            "invalid YAML at line 2",
+        ),
+        (
+            b"---\nid: O-x\nsummary: SECRET-SENTINEL\ncreated_at: 2024-13-45\n---\n",
+            b"---\nid: O-x\nsummary: SECRET-SENTINEL\ncreated_at: 2024-14-45\n---\n",
+            "invalid YAML (ValueError)",
+        ),
+        (
+            b"---\n\n---\nSECRET-SENTINEL\n",
+            b"---\n- SECRET-SENTINEL\n---\n",
+            "frontmatter: Input should be a valid dictionary",
+        ),
+        (
+            b"---\nid: O-x\nsummary: s\nmemory_type: SECRET-SENTINEL\nscope: global\n---\n",
+            b"---\nid: O-x\nsummary: s\nmemory_type: SECRET-SENTINEL2\nscope: global\n---\n",
+            "memory_type",
+        ),
+    ],
+    ids=[
+        "not-utf8",
+        "no-frontmatter",
+        "unclosed",
+        "yaml-error",
+        "bad-timestamp",
+        "no-mapping",
+        "validation-error",
+    ],
+)
+def test_each_kind_of_unreadable_observation_is_reported_per_version(
+    tmp_path, caplog, first, second, reason
+):
+    memories = tmp_path / "memories"
+    global_dir = memories / "observations" / "global"
+    global_dir.mkdir(parents=True)
+    broken = global_dir / "O-x.md"
+
+    def reported() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if "unreadable observation" in r.getMessage()
+        ]
+
+    with caplog.at_level("WARNING"):
+        broken.write_bytes(first)
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+        assert len(reported()) == 1
+        broken.write_bytes(second)
+        list_observation_documents(memory_dir=memories, project_id="P-project")
+
+    assert len(reported()) == 2
+    assert all(str(broken) in w and reason in w for w in reported())
+    assert not any("SECRET-SENTINEL" in w for w in reported())
+
+
+def test_missing_observation_file_is_not_reported(tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        assert read_observation_document(tmp_path / "O-gone.md") is None
+
+    assert not [r for r in caplog.records if "unreadable" in r.getMessage()]
+
+
 def test_legacy_observation_source_without_session_id_still_reads(tmp_path):
     memories = tmp_path / "memories"
     global_dir = memories / "observations" / "global"
@@ -822,7 +875,7 @@ def test_link_observations_tool_uses_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    runtime = _tool_runtime(
+    runtime = tool_runtime(
         tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -974,7 +1027,7 @@ def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    search_runtime = _tool_runtime(
+    search_runtime = tool_runtime(
         search_tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -995,7 +1048,7 @@ def test_read_and_search_observation_tools_use_runtime_project_id(tmp_path):
         memory_dir=memories,
         project_id="wrong-project",
     )
-    read_runtime = _tool_runtime(
+    read_runtime = tool_runtime(
         read_tool,
         config={"configurable": {"evomemory_project_id": "P-runtime"}},
     )
@@ -1547,10 +1600,10 @@ def test_record_observation_tool_can_use_worker_config_source(tmp_path):
         source_type=MemorySourceType.SUBAGENT,
         source_agent="evomemory-subagent-worker",
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
-    payload = _record_observation_payload(
+    tool = tool_by_name(middleware.tools, "record_observation")
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(
+        runtime=tool_runtime(
             tool,
             tool_call_id="tool-1",
             config={
@@ -1597,7 +1650,7 @@ def test_record_observation_tool_schema_hides_runtime(tmp_path):
         workspace_dir=workspace,
     )
 
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
     assert "runtime" in tool.get_input_schema().model_fields
     schema = tool.tool_call_schema
     assert isinstance(schema, type)
@@ -1623,10 +1676,10 @@ def test_record_observation_tool_keeps_injected_runtime_through_validation(tmp_p
         source_type=MemorySourceType.TURN,
         source_agent="EvoScientist",
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
-    payload = _record_observation_payload(
+    tool = tool_by_name(middleware.tools, "record_observation")
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(
+        runtime=tool_runtime(
             tool,
             config={"configurable": {"thread_id": "thread-from-runtime"}},
             tool_call_id="tool-1",
@@ -1666,11 +1719,11 @@ def test_record_observation_tool_skips_without_runtime_thread_id(tmp_path):
         workspace_dir=workspace,
         memory_scheduler=coordinator,
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
 
-    payload = _record_observation_payload(
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(tool),
+        runtime=tool_runtime(tool),
         memory_type=MemoryType.SEMANTIC,
         summary="Unthreaded observations are skipped.",
         observation="Observation recording needs source session provenance.",
@@ -1698,11 +1751,11 @@ def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
         workspace_dir=workspace,
         memory_scheduler=coordinator,
     )
-    tool = _tool_by_name(middleware.tools, "record_observation")
+    tool = tool_by_name(middleware.tools, "record_observation")
 
-    payload = _record_observation_payload(
+    payload = record_observation_payload(
         tool,
-        runtime=_tool_runtime(tool, thread_id="source-thread"),
+        runtime=tool_runtime(tool, thread_id="source-thread"),
         memory_type=MemoryType.PROCEDURAL,
         summary="Direct observations link after worker finish.",
         observation=(
@@ -1960,7 +2013,7 @@ def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monke
     )
 
 
-def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
+def test_execution_summary_tool_uses_worker_metadata(tmp_path, monkeypatch):
     summary = "Completed the analysis."
     monkeypatch.setattr(
         memory_worker,
@@ -1972,18 +2025,9 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
             "evomemory_trajectory_digest": "digest-1",
         },
     )
-    middleware = memory_worker._SubagentSummaryWriterMiddleware(
-        memory_dir=tmp_path / "memories"
-    )
+    tool = memory_worker._execution_summary_tool(tmp_path / "memories")
 
-    state: AgentState[object] = {
-        "messages": [],
-        "structured_response": memory_worker.SubagentMemoryDecision(summary=summary),
-    }
-    middleware.after_agent(
-        state,
-        fake_runtime(),
-    )
+    assert tool.invoke({"summary": summary}) == memory_worker._SUMMARY_SAVED
 
     paths = list((tmp_path / "memories" / "executions" / "thread-1").glob("*.md"))
     assert len(paths) == 1
@@ -2029,7 +2073,10 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
         thread_id="worker-thread",
     )
 
-    assert kwargs["assistant_id"] == memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID
+    # The run goes to the worker graph's assistant for the run's workspace.
+    assert kwargs["assistant_id"] == workspace_assistant_id(
+        memory_launch.SUBAGENT_MEMORY_WORKER_GRAPH_ID, "/tmp/ws"
+    )
     assert kwargs["metadata"] == {
         "run_kind": "evomemory_subagent_worker",
         "source_session_id": "thread-1",
@@ -2473,14 +2520,15 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch, worksp
     assert calls[0]["workspace_dir"] == workspace.root
 
 
-def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
+def test_subagent_worker_keeps_deepseek_thinking_and_forces_no_tool_choice(
     tmp_path, monkeypatch
 ):
-    """DeepSeek rejects json_schema response_format and, in thinking mode, forced tool_choice."""
+    """DeepSeek's thinking mode rejects a forced tool choice; the summary tool
+    needs none, so the worker keeps thinking on."""
     import httpx
 
     from EvoScientist.llm import get_chat_model
-    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+    from EvoScientist.paths import Workspace
     from tests.fakes.common import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
@@ -2488,12 +2536,17 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json=deepseek_tool_call_response(
-                "SubagentMemoryDecision", {"summary": "baseline trained"}
-            ),
-        )
+        if len(bodies) == 1:
+            return httpx.Response(
+                200,
+                json=deepseek_tool_call_response(
+                    "record_execution_summary", {"summary": "baseline trained"}
+                ),
+            )
+        closing = deepseek_tool_call_response("unused", {})
+        closing["choices"][0]["finish_reason"] = "stop"
+        closing["choices"][0]["message"] = {"role": "assistant", "content": "Done."}
+        return httpx.Response(200, json=closing)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
@@ -2502,52 +2555,28 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
         monkeypatch.setattr(
             "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
         )
-        graph = build_memory_agent_graph(
-            name="evomemory-subagent-worker",
-            system_prompt="Summarize the run.",
+        graph = memory_worker.build_memory_worker_graph(
+            MemorySourceType.SUBAGENT,
+            workspace=Workspace(tmp_path / "workspace"),
             memory_dir=tmp_path / "memories",
-            workspace_dir=tmp_path / "workspace",
-            tools=[],
-            middleware=[],
-            response_format=memory_worker.SubagentMemoryDecision,
         )
-        result = graph.invoke({"messages": [HumanMessage("summarize")]})
+        graph.invoke(
+            {"messages": [HumanMessage("summarize")]},
+            config={
+                "configurable": {
+                    "evomemory_source_session_id": "thread-1",
+                    "evomemory_source_agent": "writing-agent",
+                    "evomemory_trajectory_digest": "digest-1",
+                }
+            },
+        )
 
-    assert "response_format" not in bodies[0]
-    assert bodies[0]["tool_choice"] == "required"
-    assert bodies[0]["thinking"] == {"type": "disabled"}
-    assert result["structured_response"] == memory_worker.SubagentMemoryDecision(
-        summary="baseline trained"
-    )
-
-
-def test_memory_agent_graph_leaves_other_models_to_langchain(tmp_path, monkeypatch):
-    from langchain_anthropic import ChatAnthropic
-
-    from EvoScientist.memory.agents._factory import build_memory_agent_graph
-
-    model = ChatAnthropic(model="claude-haiku-4-5", api_key="k")
-    create = MagicMock()
-    monkeypatch.setattr("deepagents.create_deep_agent", create)
-    monkeypatch.setattr(
-        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
-    )
-
-    build_memory_agent_graph(
-        name="evomemory-subagent-worker",
-        system_prompt="Summarize the run.",
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        tools=[],
-        middleware=[],
-        response_format=memory_worker.SubagentMemoryDecision,
-    )
-
-    assert create.call_args.kwargs["model"] is model
-    assert (
-        create.call_args.kwargs["response_format"]
-        is memory_worker.SubagentMemoryDecision
-    )
+    assert len(bodies) == 2
+    assert all("response_format" not in body for body in bodies)
+    assert all(body.get("tool_choice") in (None, "auto") for body in bodies)
+    assert bodies[0].get("thinking") != {"type": "disabled"}
+    [path] = (tmp_path / "memories" / "executions").rglob("*.md")
+    assert path.read_text(encoding="utf-8").endswith("baseline trained\n")
 
 
 def test_memory_agent_graph_keeps_deepseek_thinking_without_response_format(
@@ -2625,11 +2654,12 @@ def test_memory_worker_observation_writer_modes(
         observation_writer=observation_writer,
     )
 
-    # ErrorNormalizationMiddleware wraps outermost so provider-SDK
-    # exceptions from the auxiliary model call get normalized before
-    # the tool-error handler sees them.
-    assert type(middleware[0]).__name__ == "ErrorNormalizationMiddleware"
-    assert type(middleware[1]).__name__ == "ToolErrorHandlerMiddleware"
+    # The retry layer wraps outermost; inside it, provider-SDK exceptions
+    # from the auxiliary model call are normalized before the tool-error
+    # handler sees them.
+    assert type(middleware[0]).__name__ == "ModelRetryMiddleware"
+    assert type(middleware[1]).__name__ == "ErrorNormalizationMiddleware"
+    assert type(middleware[2]).__name__ == "ToolErrorHandlerMiddleware"
     assert _memory_tool_names(middleware) == expected_tools
 
 

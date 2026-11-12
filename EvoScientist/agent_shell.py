@@ -339,8 +339,10 @@ class ShellLaunch:
     @property
     def text_options(self) -> dict[str, str]:
         """``Popen`` decoding options for piped output: UTF-8 under bash, else
-        the locale default as before."""
-        return {"encoding": "utf-8", "errors": "replace"} if self.bash else {}
+        the locale default; a byte that does not decode never fails the call."""
+        if self.bash:
+            return {"encoding": "utf-8", "errors": "replace"}
+        return {"errors": "replace"}
 
     def started(self, process: subprocess.Popen) -> None:
         """Put the suspended bash in a new job object, then let it run.

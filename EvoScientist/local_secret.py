@@ -73,12 +73,19 @@ def instance_id() -> str | None:
     The first 16 hex characters of ``sha256(INSTANCE_PREFIX + secret)``. A
     client that reads the secret file computes the same value, so it can tell
     whether a server it reaches over HTTP is the one it sends writes to,
-    without the secret leaving the machine. The WebUI derives it with the
-    same bytes; keep them in step.
+    without the secret leaving the machine. The value is public (``GET
+    /api/instance`` answers without the secret): it tells a different server
+    apart, not one that copies it. The WebUI derives it with the same bytes;
+    keep them in step.
     """
     if _value is None:
         return None
-    return hashlib.sha256(INSTANCE_PREFIX + _value.encode("ascii")).hexdigest()[:16]
+    return instance_of(_value)
+
+
+def instance_of(secret: str) -> str:
+    """The public name of *secret*; see :func:`instance_id`."""
+    return hashlib.sha256(INSTANCE_PREFIX + secret.encode("ascii")).hexdigest()[:16]
 
 
 def require_local_secret(request: Request) -> JSONResponse | None:
@@ -87,6 +94,15 @@ def require_local_secret(request: Request) -> JSONResponse | None:
     if _value is not None and hmac.compare_digest(sent.encode(), _value.encode()):
         return None
     return JSONResponse({"error": "local_secret_required"}, status_code=403)
+
+
+def read_local_secret() -> str | None:
+    """The secret, for a client on this machine; ``None`` when no server has
+    created it or it cannot be read. Never creates or changes the file."""
+    try:
+        return _parse((paths.SERVER_HOME / FILE_NAME).read_bytes())
+    except (OSError, ValueError):
+        return None
 
 
 def ensure_local_secret() -> str:
@@ -105,12 +121,20 @@ def ensure_local_secret() -> str:
         if value is not None:
             return value
     _keep_private(path)
-    raw = path.read_bytes().strip()
-    if not raw or not raw.isascii():
+    try:
+        return _parse(path.read_bytes())
+    except ValueError:
         raise OSError(
             f"{path} does not hold a local secret; delete it while no "
             "EvoScientist server runs."
-        )
+        ) from None
+
+
+def _parse(raw: bytes) -> str:
+    """The secret a file holds; ``ValueError`` when it holds none."""
+    raw = raw.strip()
+    if not raw or not raw.isascii():
+        raise ValueError("not a local secret")
     return raw.decode("ascii")
 
 

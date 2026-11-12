@@ -45,10 +45,10 @@ fields beyond `type` are listed below.
 | `thinking`             | `content`, `id`                                            | Model reasoning text |
 | `text`                 | `content`                                                 | Assistant output text |
 | `tool_call`            | `name`, `args`, `id`                                      | Tool invocation |
-| `tool_result`          | `name`, `content`, `success`, `id`                       | Tool result (`id` matches the `tool_call`) |
+| `tool_result`          | `name`, `content`, `success`, `id`                       | Tool result (`id` matches the `tool_call`); `success` is false when the tool reported an error, an `execute` command exited non-zero (even `grep` finding nothing), `code_interpreter` threw, or another tool's output (other than `write_todos`, which repeats the todo list) starts with `[FAILED]` / `[TOOL ERROR]` or shows an error in its first three lines; `content` is cut to about 2000 characters, keeping its start and end around a `... (truncated) ...` line |
 | `subagent_start`       | `name`, `description`                                     | Sub-agent delegation begins |
 | `subagent_tool_call`   | `subagent`, `name`, `args`, `id`                          | Tool call inside a sub-agent |
-| `subagent_tool_result` | `subagent`, `name`, `content`, `success`, `id`            | Tool result inside a sub-agent |
+| `subagent_tool_result` | `subagent`, `name`, `content`, `success`, `id`            | Tool result inside a sub-agent; `success` as for `tool_result` |
 | `subagent_text`        | `subagent`, `content`, `instance_id`                      | Text from a sub-agent |
 | `subagent_end`         | `name`, `paused` (only when true)                         | Sub-agent delegation completes; with `paused` it stopped at an approval or a question and goes on when that is answered |
 | `tool_selection`       | `tools`                                                   | Tool-selector middleware picked tools |
@@ -69,7 +69,7 @@ fields beyond `type` are listed below.
 
 ```jsonl
 {"type": "thinking", "content": "I should write the notes file.", "id": 0}
-{"type": "tool_call", "name": "write_file", "args": {"path": "notes.md", "content": "..."}, "id": "call_1"}
+{"type": "tool_call", "name": "write_file", "args": {"file_path": "notes.md", "content": "..."}, "id": "call_1"}
 {"type": "tool_result", "name": "write_file", "content": "wrote 412 bytes", "success": true, "id": "call_1"}
 {"type": "text", "content": "Done — notes.md now summarizes attention."}
 {"type": "usage_stats", "input_tokens": 5123, "output_tokens": 388}

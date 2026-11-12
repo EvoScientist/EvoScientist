@@ -21,6 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..langgraph_dev.assistants import launch_assistant_id
 from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
@@ -47,32 +48,19 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 _THREAD_SEARCH_LIMIT = 1000
-_RUN_SUBSCRIBE_CHANNELS = [
-    "messages",
-    "tools",
-    "updates",
-    "values",
-    "tasks",
-    "lifecycle",
-    "input",
-    "custom",
-]
 _RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
 _RUN_LOOKUP_PAGE_SIZE = 100
 _ACTIVE_RUN_STATUSES = ("pending", "running")
+_REPLAY_QUIET_SECONDS = 2.0
+_REPLAY_FIRST_EVENT_SECONDS = 5.0
+_REPLAY_MAX_SECONDS = 30.0
 
 
-def _run_matches_resume(
-    run: Mapping[str, Any], interrupt_id: str, response: object
-) -> bool:
-    """Return whether *run* was created for this exact interrupt response."""
-    kwargs = run.get("kwargs")
-    command = kwargs.get("command") if isinstance(kwargs, Mapping) else None
-    resume = command.get("resume") if isinstance(command, Mapping) else None
+def _run_has_request_id(run: Mapping[str, Any], request_id: str) -> bool:
+    metadata = run.get("metadata")
     return (
-        isinstance(resume, Mapping)
-        and interrupt_id in resume
-        and resume[interrupt_id] == response
+        isinstance(metadata, Mapping)
+        and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
     )
 
 
@@ -144,7 +132,7 @@ def _input_requested_event_from_interrupt(
                 "interrupt_id": interrupt.get("interrupt_id")
                 or interrupt.get("id")
                 or "default",
-                "value": interrupt.get("value"),
+                "payload": interrupt.get("value"),
             },
         },
     }
@@ -196,18 +184,44 @@ def _thread_state_as_snapshot(state: Mapping[str, Any]) -> SimpleNamespace:
     )
 
 
-def _is_id_keyed_hitl_resume(response: object) -> bool:
-    """True for a HITL resume payload keyed by interrupt id.
+class _PauseStateReadError(RuntimeError):
+    """``threads.get_state`` failed after a pause; leave the run paused."""
 
-    ``build_hitl_resume`` produces ``{interrupt_id: {"decisions": [...]}}``.
-    ask_user resumes (``{"status": "cancelled"}``,
-    ``{"answers": [...], "status": "answered"}``) are single-key too but key
-    by their own schema, not the interrupt id.
+
+class _ReplayCapError(RuntimeError):
+    """The thread SSE never went quiet within the replay cap."""
+
+
+def _resume_target(
+    thread_id: str, response: object, pending: list[str]
+) -> tuple[str, object]:
+    """The pending interrupt *response* answers, and the answer itself.
+
+    A single-key payload keyed by a pending id answers that interrupt
+    (``build_hitl_resume`` keys approvals that way). A single-key payload whose
+    value is a mapping, keyed by any other id, answers that id too, and the
+    server checks it: thread state lists a sub-graph's interrupt only once the
+    sub-graph's other tasks finish, while its prompt arrives at once, and the
+    server refuses a stale or hand-built id. Unwrapping it onto the pending
+    interrupt would pass the wrapper as the answer. Any other payload answers
+    the only pending interrupt: ask_user's ``{"status": "cancelled"}`` (a
+    string value) and ``{"answers": [...], "status": "answered"}`` (two keys)
+    are not keyed.
     """
-    if not isinstance(response, Mapping) or len(response) != 1:
-        return False
-    (value,) = response.values()
-    return isinstance(value, Mapping) and "decisions" in value
+    if isinstance(response, Mapping) and len(response) == 1:
+        (key,) = response
+        if str(key) in pending or isinstance(response[key], Mapping):
+            return str(key), response[key]
+    if not pending:
+        raise RuntimeError(
+            f"Thread {thread_id} has no pending interrupt; nothing to resume"
+        )
+    if len(pending) > 1:
+        raise RuntimeError(
+            f"Thread {thread_id} has {len(pending)} pending interrupts; "
+            "resume requires an id-keyed payload matching one of them"
+        )
+    return pending[0], response
 
 
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
@@ -229,6 +243,146 @@ def _root_run_failure(event: Mapping[str, Any]) -> str | None:
         return None
     error = data.get("error")
     return f"Run failed: {error}" if error else "Run failed"
+
+
+def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
+    """Return the run id in a synthetic ``synth:{run_id}:...`` event id, if any.
+
+    Plain stream-entry ids carry no run id; they belong to the run whose
+    synthetic lifecycle was seen last.
+    """
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id.startswith("synth:"):
+        return None
+    _, _, rest = event_id.partition(":")
+    run_id, sep, _ = rest.partition(":")
+    if not sep or not run_id:
+        return None
+    return run_id
+
+
+def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
+    """The phase of a root-namespace lifecycle envelope, else None."""
+    if event.get("method") != "lifecycle" or _event_namespace(event):
+        return None
+    params = _as_raw_map(event.get("params"))
+    data = _as_raw_map(params.get("data")) if params is not None else None
+    return data.get("event") if data is not None else None
+
+
+class _ThreadEvents:
+    """``stream.events`` read ahead into a queue, so the history replay can be skipped.
+
+    A fresh thread SSE replays every earlier run first, and the server sends a
+    run's envelopes only to connections that finished the replay before the
+    run published them, so a turn starts its run after the replay.
+    """
+
+    def __init__(
+        self,
+        events: AsyncIterator[Any],
+        *,
+        quiet_seconds: float | None = None,
+        first_event_seconds: float | None = None,
+        max_seconds: float | None = None,
+        clock: Callable[[], float] | None = None,
+        wait_for: Callable[..., Any] = asyncio.wait_for,
+    ) -> None:
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+        # None means "read the module constants when skip_replay runs" so
+        # tests can lower ``_REPLAY_*`` without reconstructing instances.
+        self._quiet_seconds = quiet_seconds
+        self._first_event_seconds = first_event_seconds
+        self._max_seconds = max_seconds
+        self._clock = clock or asyncio.get_running_loop().time
+        self._wait_for = wait_for
+        self._reader = asyncio.create_task(self._read(events))
+
+    async def __aenter__(self) -> _ThreadEvents:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self._reader.cancel()
+        try:
+            await self._reader
+        except asyncio.CancelledError:
+            pass
+
+    async def _read(self, events: AsyncIterator[Any]) -> None:
+        try:
+            async for event in events:
+                self._queue.put_nowait(event)
+        except Exception as exc:
+            self._queue.put_nowait(exc)
+        else:
+            self._queue.put_nowait(None)
+
+    async def skip_replay(self) -> int:
+        """Drop envelopes until none arrives for the quiet window; return the count.
+
+        The quiet window only starts after the first envelope. A fresh SSE can
+        take longer than the quiet window to deliver the first replayed event,
+        and treating that setup delay as the end of the replay would start the
+        run too early and lose its live envelopes.
+
+        Timeouts are read from the module ``_REPLAY_*`` constants when the
+        constructor left them unset, so tests can lower them for the suite.
+        """
+        quiet_seconds = (
+            _REPLAY_QUIET_SECONDS
+            if self._quiet_seconds is None
+            else self._quiet_seconds
+        )
+        first_event_seconds = (
+            _REPLAY_FIRST_EVENT_SECONDS
+            if self._first_event_seconds is None
+            else self._first_event_seconds
+        )
+        max_seconds = (
+            _REPLAY_MAX_SECONDS if self._max_seconds is None else self._max_seconds
+        )
+        deadline = self._clock() + max_seconds
+        skipped = 0
+        while (left := deadline - self._clock()) > 0:
+            # Wait longer for the first event than for later quiet gaps: a
+            # fresh SSE can take a moment to deliver the first replayed
+            # envelope. After that, a short quiet stretch means the replay
+            # is done.
+            timeout = (
+                min(first_event_seconds, left)
+                if skipped == 0
+                else min(quiet_seconds, left)
+            )
+            try:
+                event = await self._wait_for(self._queue.get(), timeout)
+            except TimeoutError:
+                # A wait shorter than the quiet window means the overall cap
+                # trimmed the timeout, so replay is still unfinished.
+                if skipped > 0 and timeout < quiet_seconds:
+                    raise _ReplayCapError(
+                        f"Thread history replay did not finish within {max_seconds:g}s"
+                    ) from None
+                return skipped
+            if event is None or isinstance(event, Exception):
+                self._queue.put_nowait(event)
+                return skipped
+            skipped += 1
+        # Hitting the cap means replay is still producing envelopes. Starting
+        # the run now would miss its live events on this connection.
+        raise _ReplayCapError(
+            f"Thread history replay did not finish within {max_seconds:g}s"
+        )
+
+    def __aiter__(self) -> _ThreadEvents:
+        return self
+
+    async def __anext__(self) -> Any:
+        event = await self._queue.get()
+        if event is None:
+            raise StopAsyncIteration
+        if isinstance(event, Exception):
+            raise event
+        return event
 
 
 def _messages_from_state(state: ThreadState) -> list[BaseMessage]:
@@ -574,7 +728,6 @@ class LangGraphServerGateway:
 
     thread_store: LangGraphServerThreadStore
     graph_id: str = DEFAULT_GRAPH_ID
-    interrupt_wait_seconds: float = 5.0
     events: SessionEvents | None = None
     """Frontend event sink — delivery point for middleware custom events.
 
@@ -590,6 +743,15 @@ class LangGraphServerGateway:
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
+
+    def _target_assistant_id(self, target: GraphTarget | None = None) -> str:
+        """The assistant a turn on *target* runs on: its graph's assistant for
+        the target's workspace, which names the project; the graph itself for
+        a target without a workspace."""
+        return launch_assistant_id(
+            self._target_graph_id(target),
+            target.workspace_dir if target is not None else None,
+        )
 
     async def create_thread(
         self,
@@ -681,8 +843,10 @@ class LangGraphServerGateway:
         """Assemble this run's config, reading the live session config here.
 
         The target's folders go in last and replace any a caller put in
-        ``configurable_extra``, so the server checks the run against the
-        folders the session works in and can refuse it when it serves others.
+        ``configurable_extra``. The server reads the run's project from its
+        assistant (or its thread's binding) and the run folder from
+        ``run_dir``, and refuses a run folder that is not one of that
+        project's.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -758,7 +922,7 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
         on_run_attempt: Callable[[], None],
-        on_resume_attempt: Callable[[str, object], None],
+        request_id: str,
         run_metadata: Mapping[str, object] | None = None,
     ) -> str | None:
         config = self._resolve_run_config(
@@ -799,23 +963,14 @@ class LangGraphServerGateway:
             )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
-                # Known divergence: the resume goes through run.respond,
-                # which takes no config, so the per-run overrides above
-                # (model / recursion_limit / the rubric marker / the
-                # model_retry tier) are NOT
-                # applied to a resumed turn - it runs with the thread's
-                # construction-time binding until the next fresh run
-                # re-applies them. The
-                # primitive that would carry config on a resume is
-                # run.start with Command(resume=...); switching to it needs
-                # live-server verification first.
-                await self._respond_to_interrupt(
-                    stream,
+                return await self._resume_interrupt(
                     request.thread_id,
                     request.message.resume,
-                    on_resume_attempt=on_resume_attempt,
+                    config=config,
+                    metadata=run_metadata,
+                    request_id=request_id,
+                    on_run_attempt=on_run_attempt,
                 )
-                return None
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -835,91 +990,105 @@ class LangGraphServerGateway:
         run_id = result.get("run_id") if isinstance(result, Mapping) else None
         return str(run_id) if run_id else None
 
-    async def _respond_to_interrupt(
+    async def _resume_interrupt(
         self,
-        stream: AsyncThreadStream,
         thread_id: str,
         response: object,
         *,
-        on_resume_attempt: Callable[[str, object], None],
-    ) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.interrupt_wait_seconds
-        while not stream.interrupts and loop.time() < deadline:
-            await asyncio.sleep(0.05)
+        config: dict[str, Any],
+        metadata: Mapping[str, object] | None,
+        request_id: str,
+        on_run_attempt: Callable[[], None],
+    ) -> str | None:
+        """Resume the thread's pending interrupt with this run's config.
 
-        # The server replays a parked thread's pending interrupts to a fresh
-        # stream within ~1s (verified against a live langgraph dev server),
-        # which is the only source for stream.interrupts. run.respond
-        # validates an explicit interrupt_id against stream.interrupts, so an
-        # id recovered from thread state would always be rejected - do not
-        # re-add a state lookup here. The one resume primitive that does not
-        # gate on stream.interrupts is run.start with Command(resume=...).
-        interrupts = list(stream.interrupts)
+        The answer goes out as an ``input.respond`` command, which always
+        resumes, also while another task of the paused run is still working.
+        ``run.start`` would not: it takes its input as a resume only once the
+        thread record lists the interrupt, which happens when the run stops,
+        and otherwise starts the graph over. ``run.respond`` sends no config
+        or metadata, so the command is posted directly. The pending ids are
+        read from thread state, since ``stream.interrupts`` cannot tell them
+        apart from answered ones, which a new stream replays too. The
+        command's result has no run id, so the run is found by its request id.
+        """
+        client = self.thread_store.client
+        # The prompt can reach the client before the state lists its
+        # interrupt. A root one is listed once the turn has waited out the
+        # replay's quiet window (``skip_replay``); a sub-graph's only once the
+        # sub-graph's other tasks finish, so a keyed answer is sent unlisted.
+        state = await client.threads.get_state(thread_id)
+        pending = [
+            str(interrupt_id)
+            for interrupt in _state_interrupts(state)
+            if (interrupt_id := interrupt.get("id"))
+        ]
+        interrupt_id, answer = _resume_target(thread_id, response, pending)
+        # The server checks the id; for a subgraph's interrupt it accepts an
+        # empty namespace, the only one thread state could give here.
+        try:
+            reply = await client.http.post(
+                f"/threads/{thread_id}/commands",
+                json={
+                    "id": 1,
+                    "method": "input.respond",
+                    "params": {
+                        "interrupt_id": interrupt_id,
+                        "namespace": [],
+                        "response": answer,
+                        "config": config,
+                        "metadata": (dict(metadata) if metadata is not None else None),
+                    },
+                },
+            )
+        except BaseException:
+            # A lost reply can still have started the run.
+            on_run_attempt()
+            raise
+        # A refused command comes back with a success status and starts no
+        # run, so it is no run attempt: an unlisted id is the server's to check.
+        if isinstance(reply, Mapping) and reply.get("type") == "error":
+            raise RuntimeError(
+                f"Thread {thread_id} refused the answer to interrupt "
+                f"{interrupt_id}: {reply.get('error')}: {reply.get('message')}"
+            )
+        on_run_attempt()
+        return await self._find_run_for_request(thread_id, request_id)
 
-        if len(interrupts) > 1:
-            # run.respond can target one of several outstanding interrupts by
-            # id, so an id-keyed build_hitl_resume payload whose key matches a
-            # replayed interrupt resumes that one (parallel sub-agent approvals
-            # arrive this way once #444 arms HITL on every run). An unmatched
-            # key is a client bug and still raises.
-            if _is_id_keyed_hitl_resume(response):
-                (key,) = response
-                ids = {
-                    str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
-                }
-                if str(key) in ids:
-                    on_resume_attempt(str(key), response[key])
-                    await stream.run.respond(response[key], interrupt_id=str(key))
-                    return
-            raise RuntimeError(
-                f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
-                "resume requires an id-keyed payload matching one of them"
-            )
-        if not interrupts:
-            raise RuntimeError(
-                f"No interrupt replayed to the stream on thread {thread_id} "
-                f"within {self.interrupt_wait_seconds}s; the thread may not "
-                "be in an interrupted state"
-            )
-
-        interrupt_id = str(
-            interrupts[0].get("interrupt_id") or interrupts[0].get("id") or ""
-        )
-        # build_hitl_resume produces Command(resume={interrupt_id: {decisions}}),
-        # keyed by id so the graph can route multi-interrupt resumes. The server's
-        # run.respond takes interrupt_id separately, so the id-keyed wrapper must
-        # be unwrapped to avoid double-wrapping the payload server-side (the
-        # input.respond handler re-wraps response into {interrupt_id: response}).
-        # A wrong-keyed id-keyed HITL resume is always a client bug (stale or
-        # hand-built interrupt id) and raises. Other single-key payloads are
-        # legitimate non-HITL resumes keyed by their own schema (ask_user's
-        # {"status": "cancelled"}), not the interrupt id - they forward unchanged.
-        resolved = response
-        if (
-            isinstance(response, Mapping)
-            and len(response) == 1
-            and interrupt_id
-            and interrupt_id in response
-        ):
-            resolved = response[interrupt_id]
-        elif _is_id_keyed_hitl_resume(response) and interrupt_id:
-            raise RuntimeError(
-                f"Resume payload key {next(iter(response))} does not match the "
-                f"pending interrupt {interrupt_id} on thread {thread_id}"
-            )
-        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
+    async def _thread_is_busy(self, thread_id: str) -> bool:
+        """Whether a run is in flight on the thread; ``False`` when unknown."""
+        try:
+            thread = await self.thread_store.client.threads.get(thread_id)
+        except Exception:
             logger.warning(
-                "Resume payload key %s does not match pending interrupt %s on "
-                "thread %s; forwarding payload unchanged",
-                next(iter(response)),
-                interrupt_id,
-                thread_id,
+                "Could not read the status of thread %s", thread_id, exc_info=True
             )
-        # Record the resume identity before respond: it may be accepted by the server
-        # even when this await raises or the consumer cancels the request.
-        on_resume_attempt(interrupt_id, resolved)
-        await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+            return False
+        return thread.get("status") == "busy"
+
+    async def _find_run_for_request(
+        self, thread_id: str, request_id: str
+    ) -> str | None:
+        """Find this request's run among all of the thread's runs.
+
+        Not only active ones: a short resume can finish before the lookup.
+        """
+        offset = 0
+        while True:
+            # Whole rows carry every run's input (attached images included).
+            page = await self.thread_store.client.runs.list(
+                thread_id,
+                limit=_RUN_LOOKUP_PAGE_SIZE,
+                offset=offset,
+                select=["run_id", "metadata"],
+            )
+            for run in page:
+                if _run_has_request_id(run, request_id):
+                    run_id = run.get("run_id")
+                    return str(run_id) if run_id else None
+            if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                return None
+            offset += _RUN_LOOKUP_PAGE_SIZE
 
     async def _list_active_runs(self, thread_id: str) -> list[Mapping[str, Any]] | None:
         """Return active runs on the thread, or ``None`` when listing fails."""
@@ -954,11 +1123,7 @@ class LangGraphServerGateway:
     ) -> str | None:
         """Recover a run accepted before ``run.start`` lost its response."""
         for run in await self._list_active_runs(thread_id) or []:
-            metadata = run.get("metadata")
-            if (
-                isinstance(metadata, Mapping)
-                and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
-            ):
+            if _run_has_request_id(run, request_id):
                 run_id = run.get("run_id")
                 return str(run_id) if run_id else None
         return None
@@ -968,18 +1133,12 @@ class LangGraphServerGateway:
         thread_id: str,
         run_id: str | None,
         request_id: str | None,
-        *,
-        resume_identity: tuple[str, object] | None = None,
     ) -> str | None:
         """Cancel an identified run, recovering a lost response conservatively."""
         resolved_run_id = run_id
         if resolved_run_id is None and request_id is not None:
             resolved_run_id = await self._find_active_run_for_request(
                 thread_id, request_id
-            )
-        if resolved_run_id is None and resume_identity is not None:
-            resolved_run_id = await self._find_active_run_for_resume(
-                thread_id, *resume_identity
             )
         if resolved_run_id is None:
             return None
@@ -997,34 +1156,6 @@ class LangGraphServerGateway:
             )
             return None
         return resolved_run_id
-
-    async def _find_active_run_for_resume(
-        self, thread_id: str, interrupt_id: str, response: object
-    ) -> str | None:
-        """Find a unique active run matching this interrupt response for cleanup.
-
-        Multiple matching IDs are ambiguous. Identical duplicate submissions
-        cannot be distinguished by this persisted resume identity alone.
-        """
-        runs = await self._list_active_runs(thread_id)
-        if runs is None:
-            return None
-        matching_ids = {
-            str(run_id)
-            for run in runs
-            if (run_id := run.get("run_id"))
-            and _run_matches_resume(run, interrupt_id, response)
-        }
-        if len(matching_ids) != 1:
-            logger.warning(
-                "Could not identify resumed run on thread %s: "
-                "expected one active run for interrupt %s, found %d",
-                thread_id,
-                interrupt_id,
-                len(matching_ids),
-            )
-            return None
-        return matching_ids.pop()
 
     async def _has_other_active_runs(self, thread_id: str, run_id: str) -> bool:
         """Conservatively protect another request before repairing thread state."""
@@ -1157,28 +1288,52 @@ class LangGraphServerGateway:
         )
         return data["status"]
 
-    async def _pending_interrupt_events(
+    async def _paused_interrupt_events(
         self,
-        stream: AsyncThreadStream,
         thread_id: str,
         processor: _V3EventProcessor,
+        *,
+        paused: bool,
+        prompted: bool,
+        run_id: str,
     ) -> list[GraphEvent]:
+        """The prompts of a turn that saw its own pause, read from thread state.
+
+        The ``input.requested`` envelope already gave a prompt when *prompted*;
+        the state adds the rest: the turn stops at the root ``interrupted`` that
+        follows the first interrupting task's envelopes, before another task's,
+        and a pause seen only as a root ``lifecycle: interrupted`` has none. The
+        processor drops a prompt it already emitted. ``stream.interrupts`` is no source: a new stream replays
+        interrupts that were already answered, the SDK leaves their value empty
+        (the server sends it as ``data.payload``), and ``stream.interrupted``
+        comes from a separate SSE that can lag this one.
+        """
+        if not paused:
+            return []
         events: list[GraphEvent] = []
-        for interrupt in stream.interrupts:
-            events.extend(
-                await processor.process(
-                    _input_requested_event_from_interrupt(interrupt)
-                )
-            )
-
-        if events or not stream.interrupted:
-            return events
-
         try:
             state = await self.thread_store.client.threads.get_state(thread_id)
         except NotFoundError:
             return events
-
+        except Exception as exc:
+            logger.warning(
+                "Pause state read failed for thread %s; leaving the pause",
+                thread_id,
+                exc_info=True,
+            )
+            if prompted:
+                # The turn already shows its prompt.
+                return events
+            # The run already paused. Propagate as _PauseStateReadError so the
+            # outer handler can emit error without cancelling the pause.
+            raise _PauseStateReadError(
+                f"Could not read the pause state for thread {thread_id}"
+            ) from exc
+        # Once the envelope gave the prompt, a checkpoint an earlier run wrote
+        # adds nothing: it can still list the interrupt just answered.
+        written_by = (state.get("metadata") or {}).get("run_id")
+        if prompted and written_by is not None and written_by != run_id:
+            return events
         for interrupt in _state_interrupts(state):
             events.extend(
                 await processor.process(
@@ -1295,19 +1450,16 @@ class LangGraphServerGateway:
         tracker = _ServerSubagentTracker(emitter, subagents)
         stream = self.thread_store.client.threads.stream(
             request.thread_id,
-            assistant_id=self._target_graph_id(request.target),
+            assistant_id=self._target_assistant_id(request.target),
         )
 
-        request_id = (
-            uuid.uuid4().hex if not isinstance(request.message, Command) else None
-        )
-        run_metadata: dict[str, object] | None = None
-        if request_id is not None:
-            run_metadata = dict(request.metadata or {})
-            run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
+        request_id = uuid.uuid4().hex
+        run_metadata: dict[str, object] = {
+            **(request.metadata or {}),
+            _RUN_REQUEST_ID_METADATA_KEY: request_id,
+        }
         run_attempted = False
         run_id: str | None = None
-        resume_identity: tuple[str, object] | None = None
         run_completed = False
         emitted_interrupt = False
         run_cleaned_up = False
@@ -1316,24 +1468,63 @@ class LangGraphServerGateway:
             nonlocal run_attempted
             run_attempted = True
 
-        def mark_resume_attempted(interrupt_id: str, response: object) -> None:
-            nonlocal resume_identity
-            resume_identity = interrupt_id, response
-            mark_run_attempted()
-
         try:
-            async with stream:
+            # Every turn reads ``stream.events`` and stops at its own run's end
+            # or pause. A fresh SSE replays the thread's history, so
+            # ``subscribe`` would end at an earlier run's root ``completed``
+            # (#558); and on a resume the replayed pause has already set the
+            # SDK's ``interrupted`` flag, so ``subscribe`` would never end at
+            # the resumed run's next pause (#738).
+            paused = False
+            # Past the replay cap the queue holds a busy run's live envelopes.
+            behind_busy_run = False
+            async with stream, _ThreadEvents(stream.events) as events:
+                # A thread without state has no earlier runs to replay.
+                # Skip also when the state read failed: an empty baseline
+                # would leave us draining history and risk losing live
+                # envelopes for the run we are about to start.
+                if state_values or not process_value_messages:
+                    try:
+                        await events.skip_replay()
+                    except _ReplayCapError:
+                        # Another task of the paused run can keep the SSE
+                        # from going quiet. The answer queues behind that
+                        # run, whose live envelopes mean this connection is
+                        # normally past the replay when the answer's run
+                        # starts.
+                        if not (
+                            isinstance(request.message, Command)
+                            and await self._thread_is_busy(request.thread_id)
+                        ):
+                            raise
+                        behind_busy_run = True
                 run_id = await self._start_or_resume(
                     stream,
                     request,
                     thread_ready=thread_ready,
                     on_run_attempt=mark_run_attempted,
-                    on_resume_attempt=mark_resume_attempted,
+                    request_id=request_id,
                     run_metadata=run_metadata,
                 )
-                async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
+                if run_id is None:
+                    # ``events`` stays open after the run; without its id
+                    # no stop condition below can fire.
+                    raise RuntimeError(
+                        f"Could not identify the run for thread {request.thread_id}"
+                    )
+                # Envelopes without a run id (model tokens) belong to the run
+                # of the last tagged one: behind a busy run, wait for this
+                # run's own.
+                accepting_run = not behind_busy_run
+                # See #709
+                async for event in events:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
+                        continue
+                    event_run_id = _synth_event_run_id(raw_event)
+                    if event_run_id is not None:
+                        accepting_run = event_run_id == run_id
+                    if not accepting_run:
                         continue
                     for selection_event in self._deliver_custom_middleware_events(
                         raw_event
@@ -1351,17 +1542,46 @@ class LangGraphServerGateway:
                     # error path below, like a local failure (#599).
                     if (failure := _root_run_failure(event_map)) is not None:
                         raise RuntimeError(failure)
+                    # Stop at this run's root completed/failed/interrupted.
+                    # The server sends the root interrupted right after the
+                    # pause's input.requested, also while another task of
+                    # the run still works.
+                    phase = _root_lifecycle_phase(event_map)
+                    if phase in {"completed", "failed"}:
+                        break
+                    if phase == "interrupted":
+                        paused = True
+                        break
+                else:
+                    raise RuntimeError(
+                        "Thread event stream ended before the run finished"
+                    )
                 run_completed = True
-                if not emitted_interrupt:
-                    for event in await self._pending_interrupt_events(
-                        stream,
-                        request.thread_id,
-                        processor,
-                    ):
-                        yield event
+                for event in await self._paused_interrupt_events(
+                    request.thread_id,
+                    processor,
+                    paused=paused,
+                    prompted=emitted_interrupt,
+                    run_id=run_id,
+                ):
+                    yield event
             for event in tracker.finish():
                 yield event
+        except _PauseStateReadError as exc:
+            # Pause already accepted; emit the gateway error shape and leave
+            # the run so a later turn can still show the prompt.
+            yield emitter.error(str(exc)).data
+            for event in tracker.finish():
+                yield event
+            raise
         except Exception as exc:
+            if emitted_interrupt:
+                # The turn already shows its prompt; cancel or repair could
+                # stop a task still working or clear the pause it answers.
+                yield emitter.error(str(exc)).data
+                for event in tracker.finish():
+                    yield event
+                raise
             # Cancel this request's run, then repair, both before the first yield:
             # a consumer that stops iterating after the error event (aclose /
             # abandon) triggers GeneratorExit at the yield, so nothing after it
@@ -1371,7 +1591,6 @@ class LangGraphServerGateway:
                 request.thread_id,
                 run_id,
                 request_id if run_attempted else None,
-                resume_identity=resume_identity,
             )
             run_cleaned_up = True
             can_repair = (
@@ -1381,7 +1600,7 @@ class LangGraphServerGateway:
                 )
             )
             if cancelled_run_id is None and run_attempted:
-                # A synchronous start/respond rejection creates no run to
+                # A synchronous start rejection creates no run to
                 # cancel. Preserve the existing repair in that safe case, but
                 # never clear state while any unidentified active run remains.
                 can_repair = await self._list_active_runs(request.thread_id) == []
@@ -1402,6 +1621,5 @@ class LangGraphServerGateway:
                     request.thread_id,
                     run_id,
                     request_id,
-                    resume_identity=resume_identity,
                 )
         yield emitter.done(processor.full_response).data

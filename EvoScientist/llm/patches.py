@@ -9,14 +9,14 @@ Patches:
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
-      encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
-      (store=false → "Item with id rs_... not found")
     - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
       ChatGPT Codex backend sends only in ``function_call_arguments.done``
       (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
+    - _patch_deepagents_bound_reasoning_claude_only: after a summary, drop
+      kept ``anthropic``-tagged thinking for Claude only (installed by
+      ``create_per_run_summarization_middleware``)
 
 Utilities:
     - _flatten_message_content: convert content blocks to plain string
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import sys
 from collections.abc import (
     AsyncIterator,
@@ -714,62 +715,8 @@ def _patch_anthropic_strip_foreign_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch (lazy, OpenRouter only): strip OpenAI-Responses encrypted reasoning
-# items from outgoing assistant messages.
-#
-# OpenRouter's `/responses` beta is stateless — it does not propagate
-# `store=true` / `previous_response_id` upstream. So when a prior turn's
-# assistant message carries a reasoning item with an `rs_*` id (the encrypted
-# Responses reasoning block), replaying it on the next turn fails with HTTP 400:
-#   "Item with id 'rs_...' not found. Items are not persisted when `store` is
-#    set to false. ... remove this item from your input."
-# (observed against both Azure and OpenAI upstreams — so deepagents'
-# azure-ignore is not sufficient). The only robust fix is to drop these items
-# on passback, exactly as the upstream error instructs. Reasoning DISPLAY is
-# unaffected: it happens when the item is generated, not on passback.
-# Related: langchain-ai/langchain#37777.
-# ---------------------------------------------------------------------------
-_openrouter_reasoning_strip_patched = False
-
-
-def _is_responses_reasoning_item(entry: Any) -> bool:
-    """True for an OpenAI-Responses encrypted reasoning item (`rs_` id / data)."""
-    if not isinstance(entry, dict):
-        return False
-    return str(entry.get("id") or "").startswith("rs_") or bool(entry.get("data"))
-
-
-def _patch_openrouter_strip_responses_reasoning() -> None:
-    global _openrouter_reasoning_strip_patched
-    if _openrouter_reasoning_strip_patched:
-        return
-    try:
-        import langchain_openrouter.chat_models as _mod
-
-        _orig = _mod._convert_message_to_dict
-
-        def _patched(message: Any) -> Any:
-            result = _orig(message)
-            details = (
-                result.get("reasoning_details") if isinstance(result, dict) else None
-            )
-            if isinstance(details, list):
-                kept = [e for e in details if not _is_responses_reasoning_item(e)]
-                if kept:
-                    result["reasoning_details"] = kept
-                else:
-                    result.pop("reasoning_details", None)
-            return result
-
-        _mod._convert_message_to_dict = _patched
-        _openrouter_reasoning_strip_patched = True
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): default structured output to json_schema for
-# Moonshot's always-thinking models (kimi-k3).
+# Moonshot's always-thinking models (the kimi-k3 family).
 #
 # Moonshot rejects a forced tool choice while thinking is enabled with HTTP 400:
 #   "tool_choice 'specified' is incompatible with thinking enabled"
@@ -801,9 +748,9 @@ def _patch_openrouter_structured_output() -> None:
             **kwargs: Any,
         ) -> Any:
             if method == "function_calling":
-                from .models import _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS
+                from .models import _openrouter_needs_json_schema
 
-                if self.model_name in _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS:
+                if _openrouter_needs_json_schema(self.model_name):
                     method = "json_schema"
             return _orig(self, schema, method=method, **kwargs)
 
@@ -856,6 +803,240 @@ def _patch_anthropic_structured_output() -> None:
 
         ChatAnthropic.with_structured_output = _patched
         _anthropic_structured_output_patched = True
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Patch (lazy, Anthropic protocol): replay thinking blocks the API no longer
+# accepts for this conversation.
+#
+# Claude models with preserved thinking sign each thinking block with the
+# conversation that produced it (system prompt, tools, every earlier message).
+# EvoScientist rewrites that prefix between calls (memory and runtime context
+# in the system prompt, context editing, summarization, tool selection), and
+# the API then answers 400 "bound to a different conversation": for every
+# account on Claude Fable 5.2, for newer accounts on earlier models. Such a
+# request is sent again. With adaptive thinking it first carries
+# ``prefix_mismatch_behavior: "drop_block"``, so the API drops the mismatched
+# blocks, along with the thinking blocks after them in that turn; once that
+# worked, later requests of that endpoint, key and model carry the setting from
+# the start. Any other thinking mode cannot take the setting, and an endpoint
+# may refuse it (it is then not asked again), so the last resort replays no
+# thinking block at all. Requests that never fail are untouched, so accounts
+# the API does not check keep their replayed thinking.
+# ---------------------------------------------------------------------------
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_THINKING_BINDING_SETTING = "prefix_mismatch_behavior"
+_THINKING_BLOCK_TYPES = ("thinking", "redacted_thinking")
+# What names the setting in an endpoint's answer to a request that carried it.
+_THINKING_SETTING_NAMES = ("block_binding", _THINKING_BINDING_BETA)
+# (endpoint, key hash, model id) where asking to drop stale blocks worked, and
+# where the endpoint refused the setting itself.
+_thinking_setting_accepted: set[tuple[Any, ...]] = set()
+_thinking_setting_refused: set[tuple[Any, ...]] = set()
+_logger = logging.getLogger(__name__)
+_anthropic_thinking_binding_patched = False
+
+
+def _is_thinking_prefix_mismatch(exc: BaseException) -> bool:
+    # The API names the setting that lets the request through.
+    return getattr(exc, "status_code", None) == 400 and (
+        _THINKING_BINDING_SETTING in str(exc)
+    )
+
+
+def _is_thinking_setting_refusal(exc: BaseException) -> bool:
+    """A 400 that names the setting's field or beta: the endpoint does not know
+    them, or dropped the field, so the API refused the replay once more."""
+    return getattr(exc, "status_code", None) == 400 and any(
+        name in str(exc) for name in _THINKING_SETTING_NAMES
+    )
+
+
+def _has_adaptive_thinking(payload: dict) -> bool:
+    thinking = payload.get("thinking")
+    return isinstance(thinking, dict) and thinking.get("type") == "adaptive"
+
+
+def _with_thinking_drop_block(payload: dict) -> dict:
+    """``payload`` (adaptive thinking) asking the API to drop stale thinking blocks."""
+    betas = list(payload.get("betas") or [])
+    if _THINKING_BINDING_BETA not in betas:
+        betas.append(_THINKING_BINDING_BETA)
+    return {
+        **payload,
+        "thinking": {
+            **payload["thinking"],
+            "block_binding": {_THINKING_BINDING_SETTING: "drop_block"},
+        },
+        "betas": betas,
+    }
+
+
+def _without_thinking_blocks(payload: dict) -> dict:
+    """``payload`` replaying no thinking block; a turn that held nothing else goes."""
+    messages = []
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            kept = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in _THINKING_BLOCK_TYPES
+                )
+            ]
+            if len(kept) != len(content):
+                if not kept:
+                    continue
+                message = {**message, "content": kept}
+        messages.append(message)
+    return {**payload, "messages": messages}
+
+
+def _thinking_binding_key(model: Any, payload: dict) -> tuple[Any, ...]:
+    key = getattr(model, "anthropic_api_key", None)
+    secret = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+    return (
+        getattr(model, "anthropic_api_url", None),
+        hash(secret),
+        payload.get("model"),
+    )
+
+
+def _with_known_thinking_setting(model: Any, payload: dict) -> dict:
+    if (
+        _has_adaptive_thinking(payload)
+        and _thinking_binding_key(model, payload) in _thinking_setting_accepted
+    ):
+        return _with_thinking_drop_block(payload)
+    return payload
+
+
+def _thinking_recoveries(model: Any, payload: dict) -> tuple[dict | None, dict | None]:
+    """How to resend a refused replay: asking the API to drop stale blocks
+    (adaptive thinking, unless the endpoint refused the setting before), then
+    replaying no thinking block at all."""
+    setting = None
+    if (
+        _has_adaptive_thinking(payload)
+        and "block_binding" not in payload["thinking"]
+        and _thinking_binding_key(model, payload) not in _thinking_setting_refused
+    ):
+        setting = _with_thinking_drop_block(payload)
+    stripped = _without_thinking_blocks(payload)
+    return setting, None if stripped == payload else stripped
+
+
+def _remember_thinking_setting(model: Any, payload: dict, *, accepted: bool) -> None:
+    key = _thinking_binding_key(model, payload)
+    known = _thinking_setting_accepted if accepted else _thinking_setting_refused
+    if key in known:
+        return
+    known.add(key)
+    if accepted:
+        _logger.info(
+            "anthropic: %s rejected replayed thinking blocks; "
+            "asking it to drop stale blocks from now on",
+            payload.get("model"),
+        )
+    else:
+        _logger.warning(
+            "anthropic: the endpoint of %s does not take the setting that drops "
+            "stale thinking blocks; from now on a request it refuses for them is "
+            "sent again without any replayed thinking",
+            payload.get("model"),
+        )
+
+
+def _note_refused_replay(exc: BaseException, refused: str) -> None:
+    # The failed resend is a request the caller never built.
+    exc.add_note(f"Raised while resending a request refused with: {refused}")
+
+
+def _patch_anthropic_thinking_binding() -> None:
+    global _anthropic_thinking_binding_patched
+    if _anthropic_thinking_binding_patched:
+        return
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        _orig_create = ChatAnthropic._create
+        _orig_acreate = ChatAnthropic._acreate
+
+        def _create(self: Any, payload: dict) -> Any:
+            payload = _with_known_thinking_setting(self, payload)
+            try:
+                return _orig_create(self, payload)
+            except Exception as exc:
+                if not _is_thinking_prefix_mismatch(exc):
+                    raise
+                setting, stripped = _thinking_recoveries(self, payload)
+                if setting is None and stripped is None:
+                    raise
+                refused = str(exc)
+                _logger.info(
+                    "anthropic: sending again a request refused with: %s", refused
+                )
+            if setting is not None:
+                try:
+                    response = _orig_create(self, setting)
+                except Exception as exc:
+                    if stripped is None or getattr(exc, "status_code", None) != 400:
+                        _note_refused_replay(exc, refused)
+                        raise
+                    # Another 400 says nothing about the setting, so it is asked again.
+                    if _is_thinking_setting_refusal(exc):
+                        _remember_thinking_setting(self, payload, accepted=False)
+                else:
+                    _remember_thinking_setting(self, payload, accepted=True)
+                    return response
+            _logger.info("anthropic: resending without replayed thinking blocks")
+            try:
+                return _orig_create(self, stripped)
+            except Exception as exc:
+                _note_refused_replay(exc, refused)
+                raise
+
+        async def _acreate(self: Any, payload: dict) -> Any:
+            payload = _with_known_thinking_setting(self, payload)
+            try:
+                return await _orig_acreate(self, payload)
+            except Exception as exc:
+                if not _is_thinking_prefix_mismatch(exc):
+                    raise
+                setting, stripped = _thinking_recoveries(self, payload)
+                if setting is None and stripped is None:
+                    raise
+                refused = str(exc)
+                _logger.info(
+                    "anthropic: sending again a request refused with: %s", refused
+                )
+            if setting is not None:
+                try:
+                    response = await _orig_acreate(self, setting)
+                except Exception as exc:
+                    if stripped is None or getattr(exc, "status_code", None) != 400:
+                        _note_refused_replay(exc, refused)
+                        raise
+                    # Another 400 says nothing about the setting, so it is asked again.
+                    if _is_thinking_setting_refusal(exc):
+                        _remember_thinking_setting(self, payload, accepted=False)
+                else:
+                    _remember_thinking_setting(self, payload, accepted=True)
+                    return response
+            _logger.info("anthropic: resending without replayed thinking blocks")
+            try:
+                return await _orig_acreate(self, stripped)
+            except Exception as exc:
+                _note_refused_replay(exc, refused)
+                raise
+
+        ChatAnthropic._create = _create
+        ChatAnthropic._acreate = _acreate
+        _anthropic_thinking_binding_patched = True
     except Exception:
         pass
 
@@ -934,8 +1115,9 @@ def _merge_runs_config_kwargs(
     """Merge the live model override into ``kwargs`` for ``runs.create``.
 
     ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
-    they replace any the caller passed, so the server can refuse a run meant
-    for other folders.
+    they replace any the caller passed. A run named by its graph goes to that
+    graph's assistant for the folders' workspace, which stands for the
+    project; the server reads the run folder from ``run_dir``.
 
     Model source, in increasing precedence:
 
@@ -975,6 +1157,12 @@ def _merge_runs_config_kwargs(
     merged_configurable = {**existing_configurable, **overrides}
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
+    if isinstance(kwargs.get("assistant_id"), str):
+        from EvoScientist.langgraph_dev.assistants import launch_assistant_id
+
+        kwargs["assistant_id"] = launch_assistant_id(
+            kwargs["assistant_id"], (folders or {}).get("workspace_dir")
+        )
     return kwargs
 
 
@@ -1232,6 +1420,43 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: deepagents (0.7.30+) drops the ``thinking`` blocks of messages kept
+# across a summary whenever they are tagged ``model_provider == "anthropic"``.
+# Only Claude binds them to the earlier history; every Anthropic-protocol reply
+# carries that tag, and Kimi backends reject a tool-call turn without thinking.
+# ---------------------------------------------------------------------------
+def _patch_deepagents_bound_reasoning_claude_only() -> None:
+    """Keep thinking of models named other than Claude (upstream's Bedrock rule).
+
+    A reply without a model name keeps upstream's drop.
+    """
+    try:
+        import deepagents.middleware.summarization as _summ_mod
+    except ImportError:
+        return
+
+    _orig = getattr(_summ_mod, "_bound_reasoning_types", None)
+    if _orig is None or hasattr(_orig, "_evosci_claude_only"):
+        return
+
+    @functools.wraps(_orig)
+    def _patched(message: AIMessage) -> frozenset[str]:
+        metadata = message.response_metadata
+        model = str(metadata.get("model_name") or "").lower()
+        if (
+            metadata.get("model_provider") == "anthropic"
+            and model
+            and "claude" not in model
+            and "anthropic" not in model
+        ):
+            return frozenset()
+        return _orig(message)
+
+    _patched._evosci_claude_only = True  # type: ignore[attr-defined]
+    _summ_mod._bound_reasoning_types = _patched
 
 
 # ---------------------------------------------------------------------------
