@@ -2115,8 +2115,8 @@ class TestFileToolsMatchCommands:
         assert backend.execute(f"cat /{folder}/new/a.txt").output.strip() == "hi"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
-    def test_quoted_command_reads_tmp_as_the_prompt_says(self, tmp_workspace):
-        """The sandbox prompt: inside quotes, write ``./tmp/...``."""
+    def test_quoted_relative_path_reads_what_a_file_tool_wrote(self, tmp_workspace):
+        """A quoted ``./tmp/...`` names the file ``write_file("/tmp/...")`` wrote."""
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         self._tool(backend, "write_file", file_path="/tmp/pool.jsonl", content="row")
         assert backend.execute('cat "./tmp/pool.jsonl"').output.strip() == "row"
