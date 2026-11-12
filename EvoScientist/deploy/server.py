@@ -134,16 +134,30 @@ def deploy(
 
 
 def _stop_signals() -> list[signal.Signals]:
-    """The signals that end ``EvoSci deploy``."""
-    return [signal.SIGINT, signal.SIGTERM]
+    """The signals that end ``EvoSci deploy``. On macOS and Linux that
+    includes SIGHUP: the terminal closed or the SSH session dropped. (On
+    Windows the server shares the terminal's console, so closing it ends the
+    server too.)"""
+    stops = [signal.SIGINT, signal.SIGTERM]
+    hangup = getattr(signal, "SIGHUP", None)
+    if hangup is not None:
+        stops.append(hangup)
+    return stops
+
+
+def _say(markup: str) -> None:
+    """Print a stop message; after a hang-up the terminal is gone, and
+    writing to it fails without stopping the stop."""
+    with contextlib.suppress(OSError):
+        console.print(markup)
 
 
 @contextlib.contextmanager
 def _stop_signals_interrupt() -> Iterator[None]:
     """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
-    does, so the stop in deploy's ``finally`` runs: SIGTERM would otherwise
-    end the process without it, and leave the server, which runs in its own
-    session or process group, running."""
+    does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
+    otherwise end the process without it, and leave the server, which runs
+    in its own session or process group, running."""
     previous = {
         sig: signal.signal(sig, signal.default_int_handler) for sig in _stop_signals()
     }
@@ -167,11 +181,11 @@ def _stop_own_server(proc: subprocess.Popen | None) -> None:
         return
     previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in _stop_signals()}
     try:
-        console.print("\n[dim]Stopping langgraph dev...[/dim]")
+        _say("\n[dim]Stopping langgraph dev...[/dim]")
         # A server that never became ready has no run to put back in the
         # queue, and on Windows would only finish loading first.
         lgm.stop_langgraph_dev(server, clean=proc is not None)
-        console.print("[dim]Stopped.[/dim]")
+        _say("[dim]Stopped.[/dim]")
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

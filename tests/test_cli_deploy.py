@@ -720,8 +720,9 @@ def test_deploy_stops_its_server_when_it_ends(monkeypatch, tmp_path):
 
 
 def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
-    """A second Ctrl+C (or a SIGTERM) during the stop must not cut it short;
-    the handlers are put back after it."""
+    """A second Ctrl+C, a SIGTERM or the hang-up of a closing terminal
+    during the stop must not cut it short; the handlers are put back after
+    it."""
     import signal
 
     captured = _run_deploy_once(
@@ -729,14 +730,13 @@ def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
     )
 
     during = captured["stops"][0]["handlers"]
-    assert during[signal.SIGINT] is signal.SIG_IGN
-    assert during[signal.SIGTERM] is signal.SIG_IGN
-    assert captured["signal_handlers"][signal.SIGINT] is signal.SIG_DFL
-    assert captured["signal_handlers"][signal.SIGTERM] is signal.SIG_DFL
+    for sig in deploy_server._stop_signals():
+        assert during[sig] is signal.SIG_IGN
+        assert captured["signal_handlers"][sig] is signal.SIG_DFL
 
 
 def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
-    """SIGTERM ends deploy as Ctrl+C does, so the stop runs."""
+    """SIGTERM and SIGHUP end deploy as Ctrl+C does, so the stop runs."""
     import signal
 
     captured = _run_deploy_once(
@@ -744,10 +744,39 @@ def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
     )
 
     serving = captured["handlers_while_serving"]
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in deploy_server._stop_signals():
         assert serving[sig] is signal.default_int_handler
         with pytest.raises(KeyboardInterrupt):
             serving[sig](sig, None)
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP on Windows"
+)
+def test_deploy_ends_when_its_terminal_closes():
+    import signal
+
+    assert signal.SIGHUP in deploy_server._stop_signals()
+
+
+def test_deploy_stops_its_server_when_the_terminal_is_gone(monkeypatch):
+    """After a hang-up, printing fails: the stop still runs."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    class _GoneTerminal:
+        def print(self, *_a, **_k):
+            raise OSError(5, "Input/output error")
+
+    proc = object()
+    stops: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda p, *, clean: stops.append((p, clean))
+    )
+    monkeypatch.setattr(deploy_server, "console", _GoneTerminal())
+
+    deploy_server._stop_own_server(proc)
+
+    assert stops == [(proc, True)]
 
 
 @pytest.mark.parametrize(
