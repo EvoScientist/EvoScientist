@@ -104,12 +104,60 @@ def test_execute_creates_workspace_tmp_and_file(tmp_path, spelling):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell assignments")
-def test_quoted_tmp_variables_are_not_frozen_after_cd(tmp_path):
+def test_quoted_tmp_variables_are_refused_instead_of_escaping_validation(tmp_path):
     from EvoScientist.backends import CustomSandboxBackend
 
     (tmp_path / "sub").mkdir()
     backend = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True)
     result = backend.execute('cd sub && FILE=out.txt; echo row > "/tmp/$FILE"')
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "tmp/out.txt").read_text().strip() == "row"
-    assert not (tmp_path / "sub/tmp").exists()
+    assert result.exit_code != 0
+    assert not (tmp_path / "tmp/out.txt").exists()
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quoted_host_workspace_path_is_not_virtual_tmp(tmp_path, quote):
+    path = str(tmp_path / "out.txt")
+    converted, uses_tmp = _convert_command_paths(
+        f"cat {quote}{path}{quote}", workspace_root=str(tmp_path)
+    )
+    assert not uses_tmp
+    assert shlex.split(converted) == ["cat", "./out.txt"]
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quoted_path_retains_literal_backslash(tmp_path, quote):
+    converted, _ = _convert_command_paths(
+        f"cat {quote}/tmp/a\\b{quote}", workspace_root=str(tmp_path)
+    )
+    assert shlex.split(converted) == ["cat", "./tmp/a\\b"]
+
+
+def test_quoted_path_search_list_is_untouched_and_valid(tmp_path):
+    command = 'export PATH="/usr/bin:/bin:$PATH"'
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == command
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+def test_wholly_quoted_option_path_is_mapped(tmp_path):
+    converted, uses_tmp = _convert_command_paths(
+        'echo "--output=/tmp/file"', workspace_root=str(tmp_path)
+    )
+    assert uses_tmp
+    assert shlex.split(converted) == ["echo", "--output=./tmp/file"]
+
+
+def test_quoted_null_device_is_not_shadowed(tmp_path):
+    (tmp_path / "dev").mkdir()
+    (tmp_path / "dev/null").touch()
+    converted, _ = _convert_command_paths(
+        'cat "/dev/null"', workspace_root=str(tmp_path)
+    )
+    assert shlex.split(converted) == ["cat", "/dev/null"]
+
+
+def test_expanding_tmp_path_is_not_rewritten_past_validation(tmp_path):
+    converted, _ = _convert_command_paths(
+        'cat "/tmp/$ESCAPE/file"', workspace_root=str(tmp_path)
+    )
+    assert validate_command(converted, workspace_root=str(tmp_path)) is not None
