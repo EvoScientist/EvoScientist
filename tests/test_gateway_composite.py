@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -452,14 +453,15 @@ async def test_delete_server_error_propagates_without_local_cleanup():
     execute.delete_raises = True
     with pytest.raises(RuntimeError, match="boom"):
         await _composite(read, execute).delete_thread(UUID)
+    assert not read.called("delete_thread")
 
 
-async def test_delete_server_error_after_a_missing_local_thread():
-    read = RecordingGateway("r", delete_result=False)
-    execute = RecordingGateway("e", delete_result=True)
-    execute.delete_raises = True
-    with pytest.raises(RuntimeError, match="boom"):
-        await _composite(read, execute).delete_thread(UUID)
+async def test_delete_missing_server_thread_still_deletes_local():
+    read = RecordingGateway("r", delete_result=True)
+    execute = RecordingGateway("e", delete_result=False)
+    assert await _composite(read, execute).delete_thread(UUID) is True
+    assert read.called("delete_thread")
+    assert execute.called("delete_thread")
 
 
 def test_execute_gateway_exposes_execution_side():
@@ -583,15 +585,6 @@ def test_gateways_for_config_backend_none_falls_back_to_global():
     assert isinstance(gws.graph_gateway, LocalGraphGateway)
 
 
-async def test_server_delete_failure_keeps_local_checkpoints():
-    read = RecordingGateway("r")
-    execute = RecordingGateway("e")
-    execute.delete_raises = True
-    with pytest.raises(RuntimeError):
-        await _composite(read, execute).delete_thread(UUID)
-    assert not read.called("delete_thread")
-
-
 async def test_server_delete_finishes_before_local_cleanup():
     order = []
     read = RecordingGateway("r", delete_result=False)
@@ -613,17 +606,18 @@ async def test_server_delete_finishes_before_local_cleanup():
     assert order == ["server", "local"]
 
 
-async def test_local_cleanup_error_reports_completed_server_delete():
+async def test_local_cleanup_error_after_server_delete_warns_and_returns_success(
+    caplog,
+):
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
     read.delete_raises = True
-    with pytest.raises(
-        RuntimeError, match=r"Server deletion completed.*local cleanup failed"
-    ) as error:
-        await _composite(read, execute).delete_thread(UUID)
-    assert isinstance(error.value.__cause__, RuntimeError)
-    assert "boom" in str(error.value)
-    assert "/delete" not in str(error.value)
+    with caplog.at_level(logging.WARNING):
+        assert await _composite(read, execute).delete_thread(UUID) is True
+    assert "Server deletion completed" in caplog.text
+    assert UUID in caplog.text
+    assert "local cleanup failed" in caplog.text
+    assert "boom" in caplog.text
 
 
 async def test_local_cleanup_error_without_server_delete_keeps_original_error():
