@@ -626,3 +626,44 @@ def test_warnings_with_brackets_print_as_they_are(monkeypatch):
     monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: warning)
     captured = _run_webui_once(monkeypatch, _make_config())
     assert any(warning in line for line in captured["printed"])
+
+
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("stage", ["message", "stop"])
+def test_first_stop_signal_during_error_cleanup(monkeypatch, signal_name, stage):
+    import signal
+
+    signum = getattr(signal, signal_name, None)
+    if signum is None:
+        pytest.skip(f"{signal_name} is unavailable on this platform")
+    stops = []
+    original_print = _RecordingConsole.print
+
+    def deliver():
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
+
+    def print_with_signal(self, *args, **kwargs):
+        if stage == "message" and any("Shutting down" in str(a) for a in args):
+            deliver()
+        return original_print(self, *args, **kwargs)
+
+    class BrokenLauncher(webui_mod.WebUILauncher):
+        def wait_ready(self, *args, **kwargs):
+            raise RuntimeError("readiness failed unexpectedly")
+
+        def stop(self):
+            if stage == "stop":
+                deliver()
+            super().stop()
+            stops.append(True)
+
+    monkeypatch.setattr(_RecordingConsole, "print", print_with_signal)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", BrokenLauncher)
+    try:
+        with pytest.raises(RuntimeError, match="readiness failed unexpectedly"):
+            _run_webui_once(monkeypatch, _make_config())
+    except KeyboardInterrupt:
+        pytest.fail("first shutdown signal interrupted error-driven cleanup")
+    assert stops == [True]
