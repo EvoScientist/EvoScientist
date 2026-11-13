@@ -975,6 +975,29 @@ def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
+    def _decode_shell_escapes(s: str) -> str:
+        """Decode shell backslash escapes outside single quotes, preserving single-quoted literal backslashes."""
+        parts: list[str] = []
+        in_single_quote = False
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == "'" and not in_single_quote:
+                in_single_quote = True
+                parts.append(c)
+                i += 1
+            elif c == "'" and in_single_quote:
+                in_single_quote = False
+                parts.append(c)
+                i += 1
+            elif c == "\\" and not in_single_quote and i + 1 < len(s):
+                parts.append(s[i + 1])
+                i += 2
+            else:
+                parts.append(c)
+                i += 1
+        return "".join(parts)
+
     def _check_candidate(s: str) -> bool:
         s = s.strip("'\"`")
         if not s:
@@ -986,26 +1009,34 @@ def _has_traversal_component(command: str) -> bool:
             unquoted = s.replace("'", "").replace('"', '').replace('`', '')
             if unquoted != s and ".." in PurePosixPath(unquoted).parts:
                 return True
-            # Also handle shell backslash escapes (e.g. \.\./out.txt or -o\.\./secret)
-            unescaped = re.sub(r"\\(.)", r"\1", unquoted, flags=re.DOTALL)
-            if unescaped != s and ".." in PurePosixPath(unescaped).parts:
-                return True
         except Exception:
             pass
         # Check attached short options like -o../x or -I..
-        # Require stripped != s to avoid infinite recursion on flags like '-' or '-10'
+        # unescaped_s handles escaped flags like -\o../out.txt
         if s.startswith("-") and not s.startswith("--"):
-            stripped = re.sub(r"^-[a-zA-Z]+", "", s)
-            if stripped and stripped != s and _check_candidate(stripped):
+            unescaped_s = re.sub(r"\\(.)", r"\1", s, flags=re.DOTALL)
+            stripped = re.sub(r"^-[a-zA-Z]+", "", unescaped_s)
+            if stripped and stripped != unescaped_s and _check_candidate(stripped):
                 return True
         return False
 
-    # Check both raw split words and shell-tokenized words (which normalizes shell escapes)
-    words = set(command.split())
+    # Collect tokens:
+    # 1. Shell-tokenized words (shlex handles POSIX quote and escape semantics)
+    # 2. Raw words decoded respecting single-quote context (for when shlex fails or misses)
+    words = set()
     try:
-        words.update(shlex.split(command))
+        words.update(shlex.split(command, comments=True))
     except ValueError:
         pass
+    try:
+        words.update(shlex.split(command, comments=False))
+    except ValueError:
+        pass
+
+    for raw_token in command.split():
+        words.add(raw_token)
+        decoded = _decode_shell_escapes(raw_token)
+        words.add(decoded)
 
     for token in words:
         if _check_candidate(token):

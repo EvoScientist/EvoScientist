@@ -2977,6 +2977,19 @@ class TestTraversalFalsePositiveFix:
 
         assert validate_command(r"cat foo\.\.bar.txt") is None
 
+    def test_single_quoted_search_pattern_allowed(self):
+        assert validate_command(r"grep '\.\./' file.txt") is None
+        assert validate_command("grep '\\.\\./' file.txt") is None
+
+    def test_escaped_attached_option_blocked_even_with_trailing_comment(self):
+        result = validate_command(r"python s.py -\o../out.txt # '")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"python s.py -o'.'./out.txt # '")
+        assert result is not None
+        assert "blocked" in result.lower()
+
 
 # === Pipeline command validation ===
 
