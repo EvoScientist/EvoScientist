@@ -278,6 +278,33 @@ def test_subagent_lists_get_the_boundary_inside_the_normalization_layer(workspac
     assert _retry_of(mw)._honor_run_key is False
 
 
+def test_default_middleware_checks_the_api_key_of_the_model_actually_called(
+    workspace,
+):
+    """Inside the override and the fallback chain, so a swapped-in model or a
+    fallback with a key still runs when the primary has none (#782)."""
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    mw = _get_default_middleware(workspace=workspace, cfg=EvoScientistConfig())
+    assert _mw_names(mw).count("missing_api_key") == 1
+    guard = _index_of(mw, "missing_api_key")
+    assert guard > _index_of(mw, "configurable_model")
+    assert guard > _index_of(mw, "model_fallback")
+    assert guard < _index_of(mw, "model_call_boundary")
+
+
+def test_subagent_lists_check_the_api_key_inside_the_model_override(workspace):
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    subs = [{"name": "research", "middleware": []}]
+    _inject_subagent_middleware(subs, workspace=workspace, cfg=EvoScientistConfig())
+    mw = subs[0]["middleware"]
+    assert _mw_names(mw).count("missing_api_key") == 1
+    guard = _index_of(mw, "missing_api_key")
+    assert guard > _index_of(mw, "configurable_model")
+    assert guard < _index_of(mw, "model_call_boundary")
+
+
 @pytest.mark.parametrize("auto_mode", [False, True])
 def test_memory_agents_mount_retry_then_normalization(tmp_path, monkeypatch, auto_mode):
     """Workers and the linker keep the short budget even under auto_mode, so a

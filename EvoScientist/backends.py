@@ -44,8 +44,9 @@ if TYPE_CHECKING:
 # SKILLS_DIR constant).
 _BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
 
-# System path prefixes that should never appear in virtual paths.
-# If the agent hallucinates an absolute system path, we block it.
+# Folder names that make a path look like a host path. Commands block such a
+# path unless it maps into the workspace; the file tools only cut it at the
+# workspace's folder name.
 _SYSTEM_PATH_PREFIXES = (
     "/Users/",
     "/home/",
@@ -2301,7 +2302,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Args:
             root_dir: File system root directory
-            virtual_mode: Whether to enable virtual path mode
+            virtual_mode: Whether to enable virtual path mode; ``False`` only
+                with ``dangerous=True`` (it raises ``ValueError`` otherwise)
             timeout: Command execution timeout in seconds
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
@@ -2346,6 +2348,10 @@ class CustomSandboxBackend(LocalShellBackend):
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
             virtual_mode = False
+        elif not virtual_mode:
+            # Non-virtual resolution passes absolute paths to the host as-is,
+            # which only dangerous mode allows.
+            raise ValueError("virtual_mode=False requires dangerous=True")
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,
@@ -2364,15 +2370,16 @@ class CustomSandboxBackend(LocalShellBackend):
         os.makedirs(str(self.cwd), exist_ok=True)
 
     def _resolve_path(self, key: str) -> Path:
-        """Resolve path with sanitization to prevent nested directories.
+        """Resolve a file-tool path to a path inside the workspace.
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
-        Auto-corrects common LLM path mistakes instead of crashing:
+        ``/`` is the workspace root, so any other path is the workspace path
+        as written (``/tmp/x`` is the workspace's ``tmp/x``, as in commands).
+        Paths that name the workspace itself are mapped into it:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
           2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> is a folder)
              /<ws_name>                    → /        (unless <cwd>/<ws_name> exists)
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
-          4. /Users/name/file.py           → /file.py (keep basename)
 
         On Windows a Git Bash path (``/c/...``) is read as the drive path it
         names when that lies in the working folder or the media folder;
@@ -2402,7 +2409,7 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
-        # confuse the basename-based fallback below.
+        # confuse the folder-name match below.
         key_path = Path(key)
         if key_path.is_absolute():
             try:
@@ -2440,21 +2447,18 @@ class CustomSandboxBackend(LocalShellBackend):
                 return super()._resolve_path(key)
             key = "/"
 
-        # Auto-correct system absolute paths
-        for prefix in _SYSTEM_PATH_PREFIXES:
-            if key.startswith(prefix):
-                # rfind, not find: the cwd's parent path may itself contain
-                # "/<ws_name>/" as a substring, and we want the boundary
-                # nearest the file — the workspace mount.
-                idx = key.rfind(ws_prefix)
-                if idx != -1:
-                    key = "/" + key[idx + len(ws_prefix) :]
-                elif key.endswith(f"/{ws_name}"):
-                    key = "/"
-                else:
-                    # Fall back to basename
-                    key = "/" + Path(key).name
-                break
+        # A host path that names the workspace by its folder name maps into it;
+        # any other path, system folder names included, is the workspace path
+        # as written.
+        if key.startswith(_SYSTEM_PATH_PREFIXES):
+            # rfind, not find: the cwd's parent path may itself contain
+            # "/<ws_name>/" as a substring, and we want the boundary
+            # nearest the file — the workspace mount.
+            idx = key.rfind(ws_prefix)
+            if idx != -1:
+                key = "/" + key[idx + len(ws_prefix) :]
+            elif key.endswith(f"/{ws_name}"):
+                key = "/"
 
         return super()._resolve_path(key)
 
@@ -2925,8 +2929,8 @@ def sandbox_file_path(
     file in that route's tier, found as the agent's composite backend routes
     it, or None when that tier keeps no file on disk. Any other path is
     mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
-    so a system path the sandbox reads as a workspace basename names that
-    workspace file, not the host file. Outside dangerous mode the result
+    so a host-looking path names the workspace file at that path as written,
+    not the host file. Outside dangerous mode the result
     lies inside *work_dir* or *media_dir* once resolved; anything else, or a
     path the sandbox refuses, gives None.
     """

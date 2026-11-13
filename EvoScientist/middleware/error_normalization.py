@@ -321,6 +321,63 @@ def _normalize(
     )
 
 
+class MissingApiKeyError(ValueError):
+    """The chat model has no API key, so the request cannot authenticate."""
+
+
+def _check_api_key(request: ModelRequest) -> None:
+    """Fail at once when an Anthropic model has no API key.
+
+    Without a key ``ChatAnthropic`` hands the SDK an empty one, which sends a
+    bare ``Authorization: Bearer`` header; the HTTP layer refuses it and the
+    SDK reports "Connection error." after its retries (#782). The check runs
+    at call time, not in ``get_chat_model``, so the model still builds before
+    a key is saved. Claude sign-in through ccproxy sets a placeholder key and
+    routed providers resolve their own, so neither is empty here.
+    """
+    model = getattr(request, "model", None)
+    if not any(
+        cls.__module__.startswith("langchain_anthropic") for cls in type(model).__mro__
+    ):
+        return
+    key = getattr(model, "anthropic_api_key", None)
+    value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+    if value:
+        return
+    raise MissingApiKeyError(
+        "No Anthropic API key is set. Save it with "
+        "`EvoSci config set anthropic_api_key <key>`, set the "
+        "ANTHROPIC_API_KEY environment variable, or run `EvoSci onboard`."
+    )
+
+
+class MissingApiKeyMiddleware(AgentMiddleware):
+    """Stop a model call that has no API key before it reaches the provider.
+
+    Mount it inside ``ConfigurableModelMiddleware`` and the fallback chain so
+    it checks the model that is actually called: a per-run override or a
+    fallback model with a key still runs when the primary has none.
+    """
+
+    name = "missing_api_key"
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        _check_api_key(request)
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        _check_api_key(request)
+        return await handler(request)
+
+
 class ErrorNormalizationMiddleware(AgentMiddleware):
     """Wrap the model call in try/except and normalize provider SDK
     exceptions into a non-dataclass envelope wrapper.
