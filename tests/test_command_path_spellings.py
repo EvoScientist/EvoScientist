@@ -603,6 +603,102 @@ def test_spaced_workspace_keeps_parent_components_refused(tmp_path, operand):
     assert prepare_sandbox_command(f"cd sub && cat {operand}", str(root))[1] is not None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv,/home/u/data.csv",
+        "cd sub && python x.py --files=/tmp/a.csv,/tmp/b.csv",
+        "cd sub && cat /tmp/{..,a}/{..,b}/{..,c}/{..,d}/etc/passwd",
+        "cd sub && eval \"/tmp/tool '/etc/passwd'\"",
+        "python x.py --files=/memories/a,/etc/passwd",
+        "cd sub && python x.py --files=/memories/a,/etc/passwd",
+    ],
+)
+def test_allowed_path_word_does_not_hide_a_later_system_path(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    error = prepare_sandbox_command(command, str(root))[1]
+    assert error is not None
+    assert "absolute system path" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv",
+        "cd sub && python x.py --files=/data/a.csv,/data/b.csv",
+        "cd sub && cat /tmp/{a,b}/x.csv",
+        "python x.py --files=/memories/a,/memories/b",
+    ],
+)
+def test_allowed_path_word_with_only_workspace_paths_still_runs(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    assert prepare_sandbox_command(command, str(root))[1] is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    ("files", "allowed"),
+    [
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv", True),
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv,/etc/passwd", False),
+        ("/tmp/my project/a.csv,/etc/passwd,/tmp/my project/b.csv", False),
+        ("/tmp/my project/a.csv,/tmp/my projectX/b.csv", False),
+        ("/tmp/my project/a.csv,/dev/null", True),
+        ("/tmp/my project/a.csv,/dev/null,/etc/passwd", False),
+        ('/tmp/my project/a.csv,/e""tc/passwd', False),
+        ('/tmp/my project/a.csv,/h""ome/u/b.csv', False),
+    ],
+)
+def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
+    from EvoScientist.backends import validate_command
+
+    error = validate_command(
+        f'python x.py --files="{files}"', allow_prefixes=("/tmp/my project",)
+    )
+    assert (error is None) is allowed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cmake -DCMAKE_PREFIX_PATH="/opt/ws/x;/usr/local" -S src',
+        'make "LIBDIR=/opt/ws/lib;/usr/lib"',
+    ],
+)
+def test_toolchain_setting_under_allowed_folder_keeps_later_entries(command):
+    from EvoScientist.backends import validate_command
+
+    assert validate_command(command, allow_prefixes=("/opt/ws",)) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("later", ['/e""tc/passwd', '/et""c/shadow', '/h""ome/u/b.csv'])
+def test_quote_split_system_path_after_allowed_folder_is_refused(later):
+    from EvoScientist.backends import validate_command
+
+    command = f'python x.py --files="/tmp/work/a.csv,{later}"'
+    assert validate_command(command, allow_prefixes=("/tmp/work",)) is not None
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
 def test_execute_mapped_path_after_cd_in_spaced_workspace(tmp_path):
     from EvoScientist.backends import CustomSandboxBackend
