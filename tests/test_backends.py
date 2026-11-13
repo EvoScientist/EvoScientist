@@ -2931,6 +2931,50 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
 
 
+# === '..' traversal through option and assignment spellings (issue #825) ===
+
+
+class TestTraversalOptionSpellings:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=../out.txt",
+            "python s.py -o../out.txt",
+            "OUT=../out.txt python s.py",
+            "python s.py '--output=../out.txt'",
+            "python s.py -o'../out.txt'",
+            "python s.py --output=..",
+            "bash -c 'python s.py --output=../out.txt'",
+            "bash -c 'python s.py -o\"../out.txt\"'",
+            "sh -c 'cat ../secret'",
+            'bash "-c" \'python s.py -o"../out.txt"\'',
+            "bash '-c' 'cat ../secret'",
+            "sh -\\c 'cat ../secret'",
+        ],
+    )
+    def test_glued_traversal_spellings_are_blocked(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=out.txt",
+            "python s.py -oout.txt",
+            "OUT=out.txt python s.py",
+            "python s.py --output=foo..bar.txt",
+            "python s.py -ofoo..bar.txt",
+            "echo foo..bar.txt",
+            "bash -c 'python s.py --output=out.txt'",
+            "bash -c 'echo hello'",
+            "bash \"-c\" 'echo hello'",
+        ],
+    )
+    def test_benign_glued_spellings_still_allowed(self, command):
+        assert validate_command(command) is None
+
+
 # === Pipeline command validation ===
 
 

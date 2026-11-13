@@ -975,16 +975,27 @@ def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    decoded = (
-        str(token["value"])
-        for token in shell_syntax.parse(command).tokens
-        if token["type"] == "word"
-    )
+    tokens = shell_syntax.parse(command).tokens
+    decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
+        # Option and assignment spellings glue the value to the word, so a
+        # bare split misses them: --output=../x, OUT=../x and -o../x.
+        if "=" in token and ".." in PurePosixPath(token.split("=", 1)[1]).parts:
+            return True
+        unglued = re.sub(r"^-[A-Za-z]+", "", token)
+        if unglued != token and ".." in PurePosixPath(unglued).parts:
+            return True
+    # A shell's script (bash -c '...') is a command line of its own: check
+    # inside it too, the way _extract_all_paths recurses into script words.
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) in scripts:
+            if _has_traversal_component(str(token["value"])):
+                return True
     return False
 
 
