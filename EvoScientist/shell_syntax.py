@@ -546,25 +546,100 @@ def _word_value(arg: str, token: dict[str, object] | None) -> str:
     return str(token["value"]) if token is not None else arg
 
 
+def _env_split_string(
+    value: str, args: list[tuple[str, dict[str, object] | None]], position: int
+) -> tuple[str, int] | None:
+    """The string an ``env`` option *value* splits into arguments (``-S``,
+    ``-iS'...'``, ``--split-string[=]`` or an unambiguous prefix of it), and
+    the position after it in *args*; ``None`` for any other word."""
+    if value.startswith("--"):
+        option, equals, attached = value.partition("=")
+        if len(option) < 3 or not "--split-string".startswith(option):
+            return None
+        if equals:
+            return attached, position
+    elif value.startswith("-") and len(value) > 1:
+        for index, letter in enumerate(value[1:], start=1):
+            if letter in "uC":  # the rest of the word is that option's value
+                return None
+            if letter == "S":
+                if value[index + 1 :]:
+                    return value[index + 1 :], position
+                break
+        else:
+            return None
+    else:
+        return None
+    if position >= len(args):
+        return None
+    return _word_value(*args[position]), position + 1
+
+
+def _env_words(text: str) -> list[tuple[str, dict[str, object] | None]]:
+    """The arguments ``env -S`` splits *text* into, with their tokens: words
+    as the shell splits them, after env's ``\\_`` (a space; between words
+    outside quotes, literal inside single quotes)."""
+    shell_text: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote != "'" and char == "\\" and index + 1 < len(text):
+            pair = text[index : index + 2]
+            shell_text.append(" " if pair == "\\_" else pair)
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote == char else char
+        shell_text.append(char)
+        index += 1
+    joined = "".join(shell_text)
+    # Tokens with nothing between them are one argument; env does not read
+    # shell operators, so `a;` is one too.
+    groups: list[list[dict[str, object]]] = []
+    for token in tokenize(joined):
+        if groups and int(token["start"]) == int(groups[-1][-1]["end"]):
+            groups[-1].append(token)
+        else:
+            groups.append([token])
+    return [
+        (
+            joined[int(group[0]["start"]) : int(group[-1]["end"])],
+            group[0] if len(group) == 1 and group[0]["type"] == "word" else None,
+        )
+        for group in groups
+    ]
+
+
 def _unwrap(
-    name: str, args: list[tuple[str, dict[str, object] | None]], via: tuple[str, ...]
+    name: str,
+    args: list[tuple[str, dict[str, object] | None]],
+    via: tuple[str, ...],
+    scripts: list[tuple[str, tuple[str, ...]]],
 ) -> list[SimpleCommand]:
     """The command and, through wrappers such as ``env`` or ``xargs``, the
-    commands it runs."""
+    commands it runs. Strings that ``env -S`` splits are read in place and
+    also go to *scripts*, with the wrappers they run under, to be read as
+    shell code."""
     found = [
         SimpleCommand(name, tuple(a for a, _ in args), tuple(t for _, t in args), via)
     ]
     if name not in WRAPPER_NAMES:
         return found
     takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
-    skip = False
-    for position, (arg, token) in enumerate(args):
-        value = _word_value(arg, token)
-        if skip:
-            skip = False
+    rest = list(args)
+    position = 0
+    while position < len(rest):
+        value = _word_value(*rest[position])
+        position += 1
+        split = _env_split_string(value, rest, position) if name == "env" else None
+        if split is not None:
+            text, position = split
+            scripts.append((text, (*via, name)))
+            rest[position:position] = _env_words(text)
             continue
         if value in takes_value:
-            skip = True
+            position += 1
             continue
         if name == "command" and value in ("-v", "-V"):
             return found  # only looks the name up
@@ -575,7 +650,7 @@ def _unwrap(
         ):
             continue
         inner = re.split(r"[\\/]", value)[-1]
-        return found + _unwrap(inner, args[position + 1 :], (*via, name))
+        return found + _unwrap(inner, rest[position:], (*via, name), scripts)
     return found
 
 
@@ -675,7 +750,7 @@ def _simple_commands(
                 assigned.append((_assigned_name(text), text[assignment.end() :]))
             continue
         args, heredocs = _command_arguments(command, words, index, in_backtick)
-        for each in _unwrap(re.split(r"[\\/]", value)[-1], args, ()):
+        for each in _unwrap(re.split(r"[\\/]", value)[-1], args, (), nested):
             found.append(each)
             if each.name not in SHELL_NAMES:
                 continue

@@ -3103,6 +3103,12 @@ class TestProcessKillByName:
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
             "env 'RUN_NAME=test train' pkill -f train",
+            "env -S 'pkill -f x'",
+            "env -S'pkill -f x'",
+            "env --split-string='pkill -f x'",
+            "env -iS 'pkill -f x'",
+            "env -S 'sh -c \"pkill x\"'",
+            "env -S 'a; pkill x'",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -3154,6 +3160,8 @@ class TestProcessKillByName:
             "read -a ids < <(lsof -t -i :8000); kill ${ids[@]}",
             "for p in $(ps aux | grep python | awk '{print $2}'); do kill $p; done",
             "for p in `lsof -t -i :8000`; do kill $p; done",
+            "env -S 'kill -9 -1'",
+            "env -S 'kill -9' -1",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -3209,6 +3217,10 @@ class TestProcessKillByName:
             "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
             "while read p; do kill $p; done < logs/pids",
             "PS1='$(ps)'; kill $PS1",
+            "env -S 'python -u x.py'",
+            "env -S 'cat \"name with space.txt\"'",
+            "env -S \"cat 'name with space.txt'\"",
+            "env -S 'cat name\\ with\\ space.txt'",
         ],
     )
     def test_kill_by_pid_and_mentions_stay_allowed(self, command):
