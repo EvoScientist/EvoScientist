@@ -583,10 +583,21 @@ def _env_split_string(
     return _word_value(*args[position]), position + 1
 
 
+# Escapes `env -S` turns into control characters, as GNU env documents.
+_ENV_CONTROL_ESCAPES = {
+    "\\n": "\n",
+    "\\t": "\t",
+    "\\r": "\r",
+    "\\f": "\f",
+    "\\v": "\v",
+}
+
+
 def _env_shell_text(text: str) -> str:
     """*text* as shell words that split like ``env -S`` splits it: env's
     ``\\_`` is a space (between words outside quotes, literal inside single
-    quotes), and an unquoted ``\\c`` ends the string."""
+    quotes), ``\\n``, ``\\t``, ``\\r``, ``\\f`` and ``\\v`` are those characters
+    inside the word, and an unquoted ``\\c`` ends the string."""
     shell_text: list[str] = []
     quote: str | None = None
     index = 0
@@ -596,7 +607,12 @@ def _env_shell_text(text: str) -> str:
             pair = text[index : index + 2]
             if pair == "\\c" and quote is None:
                 break
-            shell_text.append(" " if pair == "\\_" else pair)
+            control = _ENV_CONTROL_ESCAPES.get(pair)
+            if control is not None:
+                # Single-quoted outside quotes, so it stays in the word.
+                shell_text.append(control if quote else f"'{control}'")
+            else:
+                shell_text.append(" " if pair == "\\_" else pair)
             index += 2
             continue
         if char in "'\"" and quote in (None, char):

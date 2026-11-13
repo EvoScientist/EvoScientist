@@ -3162,6 +3162,7 @@ class TestProcessKillByName:
             "env -S 'sh -c \"pkill x\"'",
             "env -S 'a; pkill x'",
             "env -S 'pkill\\c' -f worker",
+            "env -S 'sh -c \"echo safe\\npkill x\"'",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])

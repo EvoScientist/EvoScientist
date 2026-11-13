@@ -176,6 +176,9 @@ class TestSimpleCommands:
             ("env -S 'pkill\\_-f x'", ("pkill", ("-f", "x"))),
             ("env -S 'pkill\\c' -f worker", ("pkill", ("-f", "worker"))),
             ("env -S 'kill -9\\c ignored' -1", ("kill", ("-9", "-1"))),
+            ("env -S 'sh -c \"echo safe\\npkill x\"'", ("pkill", ("x",))),
+            ("env -S 'echo a\\nb\\tc d'", ("echo", ("a'\n'b'\t'c", "d"))),
+            ("env -S \"echo 'a\\nb'\"", ("echo", ("'a\\nb'",))),
             ("env -S '-i -S \"pkill x\"'", ("pkill", ("x",))),
             (
                 "env -S 'cat \"name with space.txt\"'",
