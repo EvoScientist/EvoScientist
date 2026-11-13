@@ -4,13 +4,15 @@
 
 ## Settings
 
-Four settings per provider, saved with `EvoSci config set` (or the matching environment variable):
+Four settings per provider, saved with `EvoSci config set` (or the matching environment variable). An exported environment variable takes precedence over the value saved by `config set`: config values are only applied to the environment when the variable is unset, so an old value in your shell profile keeps being used and nothing reports it.
 
 | Setting | Env var | Required |
 |---|---|---|
 | `provider` | — | `custom-openai` or `custom-anthropic` |
 | `custom_openai_base_url` | `CUSTOM_OPENAI_BASE_URL` | yes (e.g. `https://example.com/v1`) |
 | `custom_openai_api_key` | `CUSTOM_OPENAI_API_KEY` | only if the endpoint checks keys |
+| `custom_anthropic_base_url` | `CUSTOM_ANTHROPIC_BASE_URL` | yes, for `custom-anthropic` (e.g. `https://example.com`) |
+| `custom_anthropic_api_key` | `CUSTOM_ANTHROPIC_API_KEY` | only if the endpoint checks keys |
 | `model` | — | yes (see below) |
 
 Replace the placeholder values below with your own before running:
@@ -22,11 +24,13 @@ EvoSci config set custom_openai_api_key YOUR_API_KEY
 EvoSci config set model YOUR_MODEL_ID
 ```
 
-The same with `custom-anthropic`, `custom_anthropic_base_url` (e.g. `https://example.com`, no `/v1` — the client appends it) and `custom_anthropic_api_key`. A trailing `/` on either base URL is stripped before use. A missing base URL fails with an error naming the setting; a missing key does not (see below).
+The same with `custom-anthropic`, `custom_anthropic_base_url` (e.g. `https://example.com`, no `/v1` — the client appends it) and `custom_anthropic_api_key`. A trailing `/` on either base URL is stripped before use. A missing base URL fails with an error naming `CUSTOM_OPENAI_BASE_URL` / `CUSTOM_ANTHROPIC_BASE_URL` (the environment variable, even if you configured everything with `config set`); a missing key does not (see below).
 
 ## Which model id is sent
 
-`get_chat_model` treats the configured `model` as EvoScientist's own short name first: a name that equals one of EvoScientist's short names (`claude-sonnet-5-5`, …) is replaced by that entry's model id. Any other name is sent to the endpoint exactly as typed, so a model only your endpoint knows is addressed by its own id verbatim. Until [#713](https://github.com/EvoScientist/EvoScientist/issues/713) lists a `custom-openai` endpoint's own models in the pickers, the id for such models has to be typed; `EvoSci config set model <id>` persists it.
+`get_chat_model` looks the configured `model` up as EvoScientist's own short name first, matching name **and** provider. A name that equals one of the same provider's short names (`gpt-6.1-sol`, `claude-sonnet-5-5`, …) is sent as written, because the exact-match entry keeps it verbatim. A name that equals one of **another** provider's short names is replaced by that entry's model id — for example `gpt-6.1-terra` is sent as `openai/gpt-6.1-terra` and `qwen3.5-27b` as `qwen/qwen3.5-27b`, which a LiteLLM-style proxy serving plain OpenAI names may not recognize. Any other name is sent to the endpoint exactly as typed, so a model only your endpoint knows is addressed by its own id verbatim.
+
+The pickers and `/model` accept only EvoScientist's defaults for these providers (listing an endpoint's own models is [#713](https://github.com/EvoScientist/EvoScientist/issues/713)), so any other id has to be typed in `EvoSci onboard` ("Type a model name…") or saved with `EvoSci config set model <id>`; this applies to `custom-anthropic` just as to `custom-openai`.
 
 ## Keys
 
