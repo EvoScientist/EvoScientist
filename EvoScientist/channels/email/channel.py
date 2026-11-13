@@ -21,7 +21,7 @@ from email.mime.text import MIMEText
 from email.utils import parseaddr
 from pathlib import Path
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..capabilities import EMAIL as EMAIL_CAPS
 from ..config import BaseChannelConfig
 from ..mixins import PollingMixin
@@ -157,7 +157,7 @@ class EmailChannel(Channel, PollingMixin):
                 # Extract attachments and inline images
                 attachments = []
                 if msg.is_multipart():
-                    for part in msg.walk():
+                    for index, part in enumerate(msg.walk()):
                         content_disp = part.get("Content-Disposition") or ""
                         content_type = part.get_content_type() or ""
                         is_attachment = "attachment" in content_disp.lower()
@@ -190,7 +190,7 @@ class EmailChannel(Channel, PollingMixin):
                                     )
                                 else:
                                     local_path = self._media_path(
-                                        f"email_{mid.decode()}_{filename}"
+                                        f"email_{attachment_filename(filename, msg.get('Message-ID') or '', index)}"
                                     )
                                     local_path.write_bytes(payload_data)
                                     label = (
