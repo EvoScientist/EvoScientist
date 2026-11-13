@@ -159,6 +159,10 @@ def media_path(media_dir: Path, filename: str) -> Path:
     return media_dir / filename
 
 
+# Fixed allowance for prefixes added by current and future channel callers.
+_CHANNEL_PREFIX_RESERVE = 32
+
+
 def attachment_filename(filename: str, message_id: str, index: int) -> str:
     """Keep attachments distinct across messages and within one message."""
     identity = (
@@ -168,8 +172,8 @@ def attachment_filename(filename: str, message_id: str, index: int) -> str:
     )
     safe_name = filename.replace("\\", "_").replace("/", "_")
     prefix = f"{identity}_{index}_"
-    # Leave room for the longest channel prefix ("dingtalk_") in NAME_MAX.
-    budget = 255 - len("dingtalk_") - len(prefix.encode())
+    # Reserve caller prefix space independently of the currently longest channel.
+    budget = 255 - _CHANNEL_PREFIX_RESERVE - len(prefix.encode())
     suffix = Path(safe_name).suffix
     stem = safe_name[: -len(suffix)] if suffix else safe_name
     suffix = suffix.encode()[:budget].decode(errors="ignore")
