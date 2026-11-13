@@ -214,7 +214,7 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
             att = payload.get(att_key)
             if att and isinstance(att, dict):
                 file_size = att.get("fileSize") or att.get("downloadSize") or 0
-                file_name = att.get("fileName", att_key)
+                file_name = att.get("fileName") or att_key
                 download_code = att.get("downloadCode") or ""
                 download_url = att.get("downloadUrl") or ""
                 # Resolve downloadCode via API if it's not a URL
