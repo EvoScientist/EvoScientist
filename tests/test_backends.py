@@ -3177,11 +3177,17 @@ class TestProcessKillByName:
             "for p in `lsof -t -i :8000`; do kill $p; done",
             "env -S 'kill -9 -1'",
             "env -S 'kill -9' -1",
+            "mapfile -t pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "readarray -t -d '' pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "lsof -t -i :8000 | { mapfile; kill ${MAPFILE[@]}; }",
+            "lsof -t -i :8000 | while read -- p; do kill $p; done",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
     def test_kills_of_looked_up_ids_are_blocked(self, command, dangerous):
-        assert "pgrep, ps, lsof" in validate_command(command, dangerous=dangerous)
+        error = validate_command(command, dangerous=dangerous)
+        assert "pgrep, pidof, ps, lsof, fuser" in error
+        assert "read loop as its own command" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -3231,6 +3237,7 @@ class TestProcessKillByName:
             "lsof -i :8000; PID=$(cat pid); kill $PID",
             "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
             "while read p; do kill $p; done < logs/pids",
+            "mapfile -t pids < logs/pids; kill ${pids[@]}",
             "PS1='$(ps)'; kill $PS1",
             "env -S 'python -u x.py'",
             "env -S 'cat \"name with space.txt\"'",

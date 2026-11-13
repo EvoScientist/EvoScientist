@@ -101,9 +101,10 @@ _BLOCKED_COMMAND_HINTS = dict.fromkeys(
 )
 _KILL_BY_LOOKUP_ERROR = (
     "Command blocked: kill takes only the id of a process you started (kill "
-    "12345, or stop_process with the id run_in_background returned). Ids looked "
-    "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
-    "itself."
+    "12345, or stop_process with the id run_in_background returned). Ids a "
+    "process lookup found (pgrep, pidof, ps, lsof, fuser), also through a "
+    "variable or a read loop beside one, and -1 / 0 can reach EvoScientist "
+    "itself. To kill ids listed in a file, run that read loop as its own command."
 )
 # The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
 # `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
@@ -1267,8 +1268,13 @@ def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
 
 # `$NAME` / `${NAME...}`: the variable a word expands.
 _VARIABLE_REFERENCE_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
-# `read` options whose value is the rest of the word or the next word.
-_READ_OPTIONS_WITH_VALUE = frozenset("adinNptu")
+# Commands that read lines into variables: their options whose value is the
+# rest of the word or the next word, and the variable set without operands.
+_READ_COMMANDS = {
+    "read": (frozenset("adinNptu"), "REPLY"),
+    "mapfile": (frozenset("dnOsuCc"), "MAPFILE"),
+    "readarray": (frozenset("dnOsuCc"), "MAPFILE"),
+}
 
 
 def _runs_lookup(text: str) -> bool:
@@ -1279,8 +1285,9 @@ def _runs_lookup(text: str) -> bool:
 
 
 def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
-    """The variables a ``read`` sets: its operands and a ``-a`` array, or
-    ``REPLY``."""
+    """The variables a ``read``, ``mapfile`` or ``readarray`` sets: its
+    operands and a ``read -a`` array, or ``REPLY`` / ``MAPFILE``."""
+    options_with_value, default = _READ_COMMANDS[found.name]
     values = [
         str(token["value"]) if token is not None else arg
         for arg, token in zip(found.args, found.tokens, strict=True)
@@ -1297,17 +1304,17 @@ def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
             names.append(value)
             continue
         for position, letter in enumerate(value[1:], start=1):
-            if letter not in _READ_OPTIONS_WITH_VALUE:
+            if letter not in options_with_value:
                 continue
             target = value[position + 1 :]
             if not target and index < len(values):
                 target = values[index]
                 index += 1
-            if letter == "a":
+            if letter == "a" and found.name == "read":
                 names.append(target)
             break
     names = [name for name in names if re.fullmatch(r"[A-Za-z_]\w*", name)]
-    return names or ["REPLY"]
+    return names or [default]
 
 
 def _looked_up_variables(
@@ -1324,7 +1331,7 @@ def _looked_up_variables(
         if found.name == "for" and found.args[1:2] == ("in",):
             if any(_runs_lookup(arg) for arg in found.args[2:]):
                 names.add(found.args[0])
-        elif found.name == "read" and looks_up:
+        elif found.name in _READ_COMMANDS and looks_up:
             names.update(_read_variables(found))
     return frozenset(names)
 
