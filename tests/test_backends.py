@@ -1017,7 +1017,10 @@ class TestWorkspaceRemovalAndComments:
             command, tmp_workspace, guard_dangerous=True
         ) == (command, None)
 
-    def test_an_escaped_dollar_keeps_the_mount_rewrite(self):
+    def test_an_escaped_dollar_keeps_the_mount_rewrite(self, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
         assert convert_virtual_paths_in_command('cat "/skills/\\$schema.json"') == (
             "cat './skills/$schema.json'"
         )
