@@ -603,6 +603,56 @@ def test_spaced_workspace_keeps_parent_components_refused(tmp_path, operand):
     assert prepare_sandbox_command(f"cd sub && cat {operand}", str(root))[1] is not None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv,/home/u/data.csv",
+        "cd sub && python x.py --files=/tmp/a.csv,/tmp/b.csv",
+        "cd sub && cat /tmp/{..,a}/{..,b}/{..,c}/{..,d}/etc/passwd",
+        "cd sub && eval \"/tmp/tool '/etc/passwd'\"",
+        "python x.py --files=/memories/a,/etc/passwd",
+        "cd sub && python x.py --files=/memories/a,/etc/passwd",
+    ],
+)
+def test_allowed_path_word_does_not_hide_a_later_system_path(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    error = prepare_sandbox_command(command, str(root))[1]
+    assert error is not None
+    assert "absolute system path" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv",
+        "cd sub && python x.py --files=/data/a.csv,/data/b.csv",
+        "cd sub && cat /tmp/{a,b}/x.csv",
+        "python x.py --files=/memories/a,/memories/b",
+    ],
+)
+def test_allowed_path_word_with_only_workspace_paths_still_runs(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    assert prepare_sandbox_command(command, str(root))[1] is None
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
 def test_execute_mapped_path_after_cd_in_spaced_workspace(tmp_path):
     from EvoScientist.backends import CustomSandboxBackend
