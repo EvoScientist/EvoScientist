@@ -1169,6 +1169,26 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
+# A word the shell may expand into other paths: a variable, a substitution,
+# a cmd.exe variable, a glob or a brace list.
+_EXPANDING_RE = re.compile(r"[$`%*?\[{]")
+
+
+def _changes_folder(found: shell_syntax.SimpleCommand) -> bool:
+    """Whether *found* moves the commands after it out of the starting
+    folder: ``cd``, ``pushd`` / ``popd``, or ``env -C`` / ``--chdir``."""
+    if found.name in ("cd", "pushd", "popd"):
+        return True
+    return found.name == "env" and any(
+        re.match(r"-[i0v]*C", value)
+        or (len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0]))
+        for value in (
+            str(token["value"]) if token is not None else arg
+            for arg, token in zip(found.args, found.tokens, strict=True)
+        )
+    )
+
+
 def _recursive_rm_operands(
     found: shell_syntax.SimpleCommand,
 ) -> list[tuple[str, dict[str, object] | None]]:
@@ -1340,16 +1360,26 @@ def validate_command(
                 f"All commands must operate within the workspace directory. "
                 f"Use relative paths (e.g., './file.py') instead."
             )
-    # Every absolute operand of a recursive rm, however it is spelled.
+    # Every absolute operand of a recursive rm, however it is spelled, and a
+    # literal relative one while the command still runs in the workspace root.
     if not dangerous and workspace_root:
+        moved = False
         for found in commands:
+            moved = moved or _changes_folder(found)
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
                 bare = path.lstrip("'\"")
                 if _is_home_word(operand):
                     problem = "outside"
                 elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
-                    continue
+                    # Only a protected folder: `rm -rf .` is refused by rm itself.
+                    if moved or token is None or _EXPANDING_RE.search(path):
+                        continue
+                    problem = _removal_problem(
+                        f"{workspace_root}/{path}", workspace_root, protected
+                    )
+                    if problem != "protected":
+                        continue
                 elif token is None:
                     problem = "outside"  # glued to a substitution
                 else:
