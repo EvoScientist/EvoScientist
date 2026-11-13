@@ -3977,8 +3977,8 @@ async def test_langgraph_server_gateway_recovery_after_a_discard_skips_streamed_
     )
 
     texts = [event["content"] for event in events if event["type"] == "text"]
-    assert texts == ["first", "WRO", "new"]
-    assert events[-1]["response"] == "firstnew"
+    assert texts == ["first", "\n\nWRO", "\n\nnew"]
+    assert events[-1]["response"] == "first\n\nnew"
 
 
 async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_duplicated():
