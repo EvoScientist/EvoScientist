@@ -1031,11 +1031,17 @@ def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool
     return False
 
 
+def _is_search_path_assignment(raw: str) -> bool:
+    """Search-list values are data; commands substituted into them are not."""
+    match = re.match(r"([A-Za-z_]\w*)=", raw)
+    return match is not None and match[1].endswith("PATH")
+
+
 def _attached_path_word(raw: str) -> tuple[str, str] | None:
     """Split a literal option/assignment prefix from its absolute path."""
     # PATH is an executable search list, not a file operand. Keep the
     # existing environment setup behavior rather than mapping its first entry.
-    if raw.startswith("PATH="):
+    if _is_search_path_assignment(raw):
         return None
     match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)(/.*)", raw)
     if match is None:
@@ -1068,7 +1074,7 @@ def _extract_all_paths(
     )
     path_assignments: list[tuple[int, int]] = []
     for token in shell_syntax.parse(command).tokens:
-        if token["type"] != "word" or not str(token["raw"]).startswith("PATH="):
+        if token["type"] != "word" or not _is_search_path_assignment(str(token["raw"])):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))
 
@@ -1677,6 +1683,7 @@ def _rewrite_path_word(
     skills_dir: str | Path | None,
     media_dirs: tuple[Path, ...],
     absolute: bool,
+    attached: bool = False,
 ) -> tuple[str | None, bool]:
     """Replacement for an unquoted path word (``None`` keeps it), and whether it
     maps to the workspace's ``tmp/``. After a ``cd`` (*absolute*) workspace
@@ -1752,6 +1759,12 @@ def _rewrite_path_word(
             return in_workspace(path), False
         return None, False
 
+    if attached and not (
+        path != "/" and workspace_root and Path(workspace_root + path).exists()
+    ):
+        # Attached slash values can be separators, routes or patterns.
+        # Only known workspace files get the bare-word fallback here.
+        return None, False
     return in_workspace("" if path == "/" else path), False
 
 
@@ -1803,7 +1816,7 @@ def _convert_command_paths(
                 if raw[0] == "'"
                 else '"' + converted + '"'
             )
-        elif quoted and raw.startswith("PATH="):
+        elif quoted and _is_search_path_assignment(raw):
             continue
         elif quoted:
             anchor = workspace_root if absolute else None
@@ -1856,7 +1869,10 @@ def _convert_command_paths(
             head = re.match(r"/[^'\"]*", path_word)
             if head is not None:
                 rewritten, tmp = _rewrite_path_word(
-                    head.group(0), **rules, absolute=absolute
+                    head.group(0),
+                    **rules,
+                    absolute=absolute,
+                    attached=attached is not None,
                 )
                 if rewritten is not None:
                     if head.group(0).endswith("/") and not rewritten.endswith("/"):
@@ -1874,7 +1890,9 @@ def _convert_command_paths(
             if attached is None:
                 continue
             prefix, path = attached
-            rewritten, tmp = _rewrite_path_word(path, **rules, absolute=absolute)
+            rewritten, tmp = _rewrite_path_word(
+                path, **rules, absolute=absolute, attached=True
+            )
             uses_tmp = uses_tmp or tmp
             replacement = prefix + rewritten if rewritten is not None else None
         if replacement is not None and replacement != raw:
