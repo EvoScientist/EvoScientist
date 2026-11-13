@@ -893,6 +893,10 @@ class TestWorkspaceRemovalAndComments:
             "rm --recursive --force /memories",
             "rm -rf -- /memories/profile",
             "cd . && rm -fr /",
+            "rm '-r' /skills/demo",
+            'rm "-rf" /skills/demo',
+            "rm -\\r /memories",
+            "rm --rec /memories",
         ],
     )
     def test_every_absolute_operand_of_a_recursive_rm_is_checked(
@@ -965,6 +969,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf ~",
             'rm -rf "$HOME"',
             "rm -r ${HOME}/*",
+            "rm '-r' ~",
+            'rm "-rf" /',
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(

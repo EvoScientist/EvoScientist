@@ -1163,18 +1163,21 @@ def _recursive_rm_operands(
     found: shell_syntax.SimpleCommand,
 ) -> list[tuple[str, dict[str, object] | None]]:
     """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
-    ``--recursive``, in any spelling), with their tokens."""
+    ``--recursive``, in any spelling), with their tokens. Options are read as
+    the shell passes them to rm, so a quoted ``'-r'`` counts too."""
     if found.name != "rm":
         return []
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
     for arg, token in zip(found.args, found.tokens, strict=True):
-        if not options_done and arg == "--":
+        value = str(token["value"]) if token is not None else arg
+        if not options_done and value == "--":
             options_done = True
-        elif not options_done and arg.startswith("-") and arg != "-":
+        elif not options_done and value.startswith("-") and value != "-":
             recursive = recursive or (
-                arg == "--recursive"
-                or (not arg.startswith("--") and bool({"r", "R"} & set(arg[1:])))
+                # GNU rm takes any unambiguous prefix of a long option.
+                (len(value) > 2 and "--recursive".startswith(value))
+                or (not value.startswith("--") and bool({"r", "R"} & set(value[1:])))
             )
         else:
             operands.append((arg, token))
