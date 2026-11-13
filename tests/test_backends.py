@@ -3033,7 +3033,7 @@ class TestAbsolutePathDetection:
         """Virtual paths like /main.py should still pass (not a system prefix)."""
         assert validate_command("python /main.py") is None
 
-    def test_safe_env_equals_dev(self):
+    def test_extract_all_paths_reports_attached_device_path(self):
         """Attached file operands no longer bypass system-path validation."""
         from EvoScientist.backends import _extract_all_paths
 
