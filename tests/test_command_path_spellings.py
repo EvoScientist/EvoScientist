@@ -544,3 +544,75 @@ def test_named_shell_options_do_not_hide_script_paths(tmp_path, options):
     assert error is None
     assert command == f'bash {options} -c "cat ./tmp/a.txt"'
     assert (tmp_path / "tmp").is_dir()
+
+
+@pytest.mark.parametrize(
+    "operand",
+    [
+        "/tmp/x",
+        '"/tmp/x"',
+        "--output=/tmp/x",
+        "-o/tmp/x",
+        "OUT=/tmp/x",
+        "/data.csv",
+        "/skills/demo/SKILL.md",
+    ],
+)
+def test_mapped_paths_after_cd_allow_a_spaced_workspace_root(tmp_path, operand):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "my project"
+    root.mkdir()
+    (root / "data.csv").write_text("row")
+    converted, error = prepare_sandbox_command(f"cd sub && cat {operand}", str(root))
+    assert error is None
+    assert str(root) in shlex.split(converted, posix=sys.platform != "win32")[
+        -1
+    ].replace('"', "")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_spaced_workspace_does_not_hide_later_system_paths(tmp_path, quote):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "my project"
+    root.mkdir()
+    command = f"eval {quote}{root}/ok; cat /etc/passwd{quote}"
+    assert prepare_sandbox_command(command, str(root))[1] is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
+def test_spaced_workspace_keeps_substitution_operands_checked(tmp_path):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "my project"
+    root.mkdir()
+    assert (
+        prepare_sandbox_command(f'cat "{root}/$(cat /etc/passwd)"', str(root))[1]
+        is not None
+    )
+
+
+@pytest.mark.parametrize("operand", ["/tmp/../outside", '"/tmp/../outside"'])
+def test_spaced_workspace_keeps_parent_components_refused(tmp_path, operand):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "my project"
+    root.mkdir()
+    assert prepare_sandbox_command(f"cd sub && cat {operand}", str(root))[1] is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
+def test_execute_mapped_path_after_cd_in_spaced_workspace(tmp_path):
+    from EvoScientist.backends import CustomSandboxBackend
+
+    root = tmp_path / "my project"
+    (root / "sub").mkdir(parents=True)
+    (root / "tmp").mkdir()
+    (root / "tmp" / "x").write_text("expected payload")
+    result = CustomSandboxBackend(root_dir=str(root), virtual_mode=True).execute(
+        "cd sub && cat /tmp/x"
+    )
+    assert result.exit_code == 0, result.output
+    assert "expected payload" in result.output
