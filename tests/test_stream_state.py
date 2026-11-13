@@ -979,6 +979,7 @@ class TestRubricState:
 
         state = StreamState()
         state.handle_event({"type": "text", "content": "First draft."})
+        state.handle_event({"type": "text", "content": "\n\n"})
         state.handle_event(
             {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
         )
@@ -1112,6 +1113,7 @@ def test_discard_keeps_the_clean_prefix_of_a_boundary_crossing_narration_segment
 
     state = StreamState()
     state.handle_event({"type": "text", "content": "DRAFT"})
+    state.handle_event({"type": "text", "content": "\n\n"})
     state.handle_event(
         {
             "type": "rubric_evaluation",

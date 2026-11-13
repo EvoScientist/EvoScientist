@@ -2681,6 +2681,128 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     ]
 
 
+def _run_lifecycle(phase: str, *, namespace=(), error=None) -> dict[str, Any]:
+    data: dict[str, Any] = {"event": phase}
+    if error is not None:
+        data["error"] = error
+    return {
+        "method": "lifecycle",
+        "params": {"namespace": list(namespace), "data": data},
+    }
+
+
+@pytest.mark.parametrize("hidden", [False, True], ids=["server-error", "hidden-error"])
+@pytest.mark.parametrize(
+    "other_run_active", [False, True], ids=["idle", "other-run-active"]
+)
+async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error(
+    hidden, other_run_active
+):
+    """A run that raises on the server ends the turn with an error, not done,
+    without cancelling the run that has already ended; the thread is repaired
+    unless another request's run is still active."""
+    from EvoScientist.langgraph_dev.manager import RUNTIME
+
+    server_error = "An internal error occurred" if hidden else "RuntimeError('boom')"
+    expected = (
+        f"Run failed on the server; the cause is in {RUNTIME.log_file}"
+        if hidden
+        else "Run failed: RuntimeError('boom')"
+    )
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+            _run_lifecycle("failed", error=server_error),
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("boom",)}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[list[str]] = []
+
+    class _EndedRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if other_run_active and status == "running" and offset == 0:
+                return [{"run_id": "other-run", "status": "running"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append(list(run_ids))
+
+    client.runs = _EndedRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events: list[dict[str, Any]] = []
+
+    async def collect() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError) as raised:
+        await collect()
+
+    assert str(raised.value) == expected
+    types = [event["type"] for event in events]
+    assert "done" not in types
+    (error,) = [event for event in events if event["type"] == "error"]
+    assert error["message"] == expected
+    assert cancel_calls == []
+    assert threads.state_updates == (
+        [] if other_run_active else [("abc12345", None, "__end__")]
+    )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _run_lifecycle("completed"),
+        _run_lifecycle("failed", namespace=["research-agent:tool-1"], error="x"),
+    ],
+    ids=["root-completed", "subagent-failed"],
+)
+async def test_langgraph_server_gateway_finishes_normally_without_a_root_failure(
+    event,
+):
+    """Only a root-namespace failure fails the turn: a completed run, or a
+    sub-agent whose own run failed, still ends with done."""
+    stream = FakeLangGraphThreadStream("abc12345", events=[event])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    types = [event["type"] for event in events]
+    assert types[-1] == "done"
+    assert "error" not in types
+    assert threads.state_updates == []
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -3978,8 +4100,8 @@ async def test_langgraph_server_gateway_recovery_after_a_discard_skips_streamed_
     )
 
     texts = [event["content"] for event in events if event["type"] == "text"]
-    assert texts == ["first", "WRO", "new"]
-    assert events[-1]["response"] == "firstnew"
+    assert texts == ["first", "\n\nWRO", "\n\nnew"]
+    assert events[-1]["response"] == "first\n\nnew"
 
 
 async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_duplicated():

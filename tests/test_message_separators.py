@@ -1,0 +1,435 @@
+"""Joined responses preserve assistant message boundaries across consumers."""
+
+import pytest
+from langchain_core.messages import AIMessage
+
+from EvoScientist.stream.state import StreamState
+from tests.fakes.stream_v3 import (
+    FakeV3Agent,
+    collect_events,
+    message_delta,
+    message_finish,
+    whole_message,
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events",
+    [
+        [
+            message_delta("Checking."),
+            message_finish(),
+            message_delta("Done."),
+            message_finish(),
+        ],
+        [
+            whole_message(AIMessage(content="Checking.")),
+            whole_message(AIMessage(content="Done.")),
+        ],
+    ],
+)
+async def test_joined_messages_have_blank_line_in_events_done_and_state(events):
+    out = await collect_events(FakeV3Agent(events))
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    state = StreamState()
+    for event in out:
+        state.handle_event(event)
+    assert text == "Checking.\n\nDone."
+    assert next(e for e in out if e["type"] == "done")["response"] == text
+    assert state.response_text == text
+
+
+@pytest.mark.asyncio
+async def test_deltas_within_a_message_are_not_separated():
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Hel"),
+                message_delta("lo"),
+                message_finish(),
+                message_finish(),
+                message_delta("World"),
+                message_finish(),
+            ]
+        )
+    )
+    assert next(e for e in out if e["type"] == "done")["response"] == "Hello\n\nWorld"
+
+
+@pytest.mark.asyncio
+async def test_retry_discards_separator_with_failed_text_in_every_buffer():
+    from EvoScientist.channels.consumer import apply_model_discard
+    from tests.fakes.stream_v3 import model_call_end, model_call_start, retry_event
+
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                model_call_start("1"),
+                message_delta("Kept."),
+                message_finish(),
+                model_call_end("1"),
+                model_call_start("2"),
+                message_delta("Failed."),
+                model_call_end("2", "failed"),
+                retry_event(),
+                model_call_start("3"),
+                message_delta("Good."),
+                message_finish(),
+                model_call_end("3"),
+            ]
+        )
+    )
+    state = StreamState()
+    reply = ""
+    for event in out:
+        state.handle_event(event)
+        if event["type"] == "text":
+            reply += event["content"]
+        elif event["type"] in ("model_retry", "model_output_discarded"):
+            reply = apply_model_discard(event, reply, {}, [])
+    retry = next(e for e in out if e["type"] == "model_retry")
+    assert retry["discarded"]["text_chars"] == len("\n\nFailed.")
+    assert reply == state.response_text == "Kept.\n\nGood."
+    assert next(e for e in out if e["type"] == "done")["response"] == reply
+
+
+@pytest.mark.asyncio
+async def test_whole_message_with_existing_blank_line_is_not_double_spaced():
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                whole_message(AIMessage(content="First.\n\n")),
+                whole_message(AIMessage(content="Second.")),
+            ]
+        )
+    )
+    assert (
+        next(e for e in out if e["type"] == "done")["response"] == "First.\n\nSecond."
+    )
+
+
+@pytest.mark.asyncio
+async def test_standalone_consumer_sends_separated_response(workspace):
+    from unittest.mock import MagicMock
+
+    from EvoScientist.channels.bus.events import InboundMessage
+    from EvoScientist.channels.bus.message_bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.channels.consumer import InboundConsumer
+    from tests.fakes.common import FakeGraphGateway, StubChannel
+
+    events = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Checking."),
+                message_finish(),
+                message_delta("Done."),
+                message_finish(),
+            ]
+        )
+    )
+    # Omit done.content so this also exercises the consumer's own text buffer.
+    events = [e for e in events if e["type"] != "done"]
+    bus = MessageBus()
+    manager = ChannelManager(bus, media_dir=workspace.root / "media")
+    manager.register(StubChannel())
+    consumer = InboundConsumer(
+        bus=bus,
+        manager=manager,
+        agent=MagicMock(),
+        thread_id="",
+        workspace=workspace,
+        graph_gateway=FakeGraphGateway(events=events),
+    )
+    msg = InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
+    await consumer._stream_with_hitl(msg, None, "t1", msg.session_key)
+    queued = []
+    while not bus.outbound.empty():
+        queued.append(bus.outbound.get_nowait().content)
+    assert "Checking.\n\nDone." in queued
+
+
+@pytest.mark.asyncio
+async def test_leading_newlines_in_whole_message_do_not_duplicate_separator():
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                whole_message(AIMessage(content="First.")),
+                whole_message(AIMessage(content="\n\nSecond.")),
+            ]
+        )
+    )
+    assert (
+        next(e for e in out if e["type"] == "done")["response"] == "First.\n\nSecond."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", [False, True])
+async def test_rubric_revision_separator_is_emitted_and_last_pass_stays_clean(finish):
+    from tests.fakes.stream_v3 import custom_subagent_event
+
+    events = [message_delta("Draft.")]
+    if finish:
+        events.append(message_finish())
+    events += [
+        custom_subagent_event(
+            {"type": "rubric_evaluation_end", "result": "needs_revision"}
+        ),
+        message_delta("Revision."),
+        message_finish(),
+    ]
+    out = await collect_events(FakeV3Agent(events))
+    done = next(e for e in out if e["type"] == "done")
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == done["response"] == "Draft.\n\nRevision."
+    assert done["last_pass_response"] == "Revision."
+
+
+@pytest.mark.asyncio
+async def test_discard_restores_message_boundary_before_another_delta():
+    from tests.fakes.stream_v3 import model_call_end, model_call_start, retry_event
+
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                model_call_start("1"),
+                message_delta("Kept."),
+                message_finish(),
+                model_call_end("1"),
+                model_call_start("2"),
+                message_delta("Failed."),
+                model_call_end("2", "failed"),
+                retry_event(),
+                message_delta("Good."),
+                message_finish(),
+            ]
+        )
+    )
+    assert next(e for e in out if e["type"] == "done")["response"] == "Kept.\n\nGood."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("Narration.", "Answer."),
+        ("Narration.\n", "\nAnswer."),
+        ("Narration.\n\n", "Answer."),
+        ("", "Answer."),
+    ],
+)
+async def test_state_joins_separate_processor_rounds(boundary, before, after):
+    state = StreamState()
+    for content in (before, after):
+        out = await collect_events(
+            FakeV3Agent([message_delta(content), message_finish()])
+        )
+        # Each round keeps its own emitted text and done.response unchanged.
+        assert "".join(e["content"] for e in out if e["type"] == "text") == content
+        assert next(e for e in out if e["type"] == "done")["response"] == content
+        for event in out:
+            state.handle_event(event)
+        if content == before:
+            state.handle_event({"type": boundary})
+    assert state.response_text == ("Narration.\n\nAnswer." if before else "Answer.")
+
+
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+def test_state_round_boundary_survives_empty_delta_and_other_events(boundary):
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Before."})
+    state.handle_event({"type": boundary})
+    state.handle_event({"type": "text", "content": ""})
+    state.handle_event({"type": "thinking", "content": "thinking"})
+    state.handle_event({"type": "text", "content": "After"})
+    state.handle_event({"type": "text", "content": "."})
+    assert state.response_text == "Before.\n\nAfter."
+    assert state.latest_text.endswith("After.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+async def test_state_resumed_round_retry_retains_one_boundary(boundary):
+    from tests.fakes.stream_v3 import model_call_end, model_call_start, retry_event
+
+    state = StreamState()
+    first = await collect_events(
+        FakeV3Agent([message_delta("Before."), message_finish()])
+    )
+    resumed = await collect_events(
+        FakeV3Agent(
+            [
+                model_call_start("1"),
+                message_delta("Failed."),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                message_delta("After."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+    )
+    for event in first:
+        state.handle_event(event)
+    state.handle_event({"type": boundary})
+    for event in resumed:
+        state.handle_event(event)
+    assert state.response_text == "Before.\n\nAfter."
+    assert next(e for e in resumed if e["type"] == "done")["response"] == "After."
+
+
+def test_state_does_not_invent_rubric_separator():
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Draft."})
+    state.handle_event({"type": "rubric_evaluation", "result": "needs_revision"})
+    assert state.response_text == state.latest_text == "Draft."
+
+
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+@pytest.mark.parametrize("discard", ["model_retry", "model_output_discarded"])
+@pytest.mark.parametrize("leading", ["", "\n", "\n\n"])
+@pytest.mark.parametrize("trailing", ["", "\n", "\n\n"])
+def test_state_round_boundary_survives_discarded_leading_newlines(
+    boundary, discard, leading, trailing
+):
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Draft." + trailing})
+    state.handle_event({"type": boundary})
+    failed = leading + "Bad"
+    state.handle_event({"type": "text", "content": failed})
+    state.handle_event({"type": discard, "discarded": {"text_chars": len(failed)}})
+    state.handle_event({"type": "text", "content": "Good"})
+    assert state.response_text == "Draft.\n\nGood"
+
+
+def test_state_partial_discard_preserves_contiguous_resumed_text():
+    state = StreamState()
+    for event in [
+        {"type": "text", "content": "Before."},
+        {"type": "interrupt"},
+        {"type": "text", "content": "Kept. Bad"},
+        {"type": "model_retry", "discarded": {"text_chars": 3}},
+        {"type": "text", "content": "Good"},
+    ]:
+        state.handle_event(event)
+    assert state.response_text == "Before.\n\nKept. Good"
+
+
+@pytest.mark.asyncio
+async def test_selector_finish_flush_keeps_text_in_its_original_message():
+    from EvoScientist.stream.sink import SessionEventSink
+
+    sink = SessionEventSink()
+    sink.on_tool_selection_started(30)
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Kept."),
+                message_finish(),
+                message_delta("Answer: "),
+                message_delta("{x"),
+                message_finish(),
+            ]
+        ),
+        events=sink,
+    )
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == next(e for e in out if e["type"] == "done")["response"]
+    assert text == "Kept.\n\nAnswer: {x"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_messages_keep_distinct_paragraphs():
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry, _V3EventProcessor
+    from tests.fakes.stream_v3 import protocol_event
+
+    processor = _V3EventProcessor(
+        StreamEventEmitter(),
+        _SubagentRegistry(),
+        None,
+        existing_messages=[],
+        process_value_messages=True,
+    )
+    out = await processor.process(
+        protocol_event(
+            "values",
+            {
+                "messages": [
+                    {"type": "ai", "id": "a1", "content": "Checking."},
+                    {"type": "ai", "id": "a2", "content": "Done."},
+                ]
+            },
+        )
+    )
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == processor.full_response == "Checking.\n\nDone."
+
+
+def test_rich_loop_reply_keeps_paragraph_between_approval_rounds(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from EvoScientist.stream import display as display_mod
+    from tests.fakes.common import FakeGraphGateway, interrupt_event
+
+    rounds = [
+        [{"type": "text", "content": "Let me check the logs."}, interrupt_event(1)],
+        [
+            {"type": "text", "content": "The run failed."},
+            {"type": "done", "content": "The run failed."},
+        ],
+    ]
+
+    async def stream(_request):
+        for event in rounds.pop(0):
+            yield event
+
+    monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+    reply = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="go",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        gateway=FakeGraphGateway(stream=stream),
+    )
+    assert reply == "Let me check the logs.\n\nThe run failed."
+
+
+@pytest.mark.asyncio
+async def test_root_rubric_separator_does_not_inflate_child_retry_discard():
+    from tests.fakes.stream_v3 import (
+        FakeSubagent,
+        custom_subagent_event,
+        model_call_end,
+        model_call_start,
+        retry_event,
+    )
+
+    child = ("tools:research",)
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Draft."),
+                message_finish(),
+                model_call_start("child-1", namespace=child),
+                message_delta("Child text.", namespace=child),
+                custom_subagent_event(
+                    {"type": "rubric_evaluation_end", "result": "needs_revision"},
+                    namespace=child,
+                ),
+                model_call_end("child-1", "failed", namespace=child),
+                retry_event(namespace=child),
+            ],
+            subagents=[FakeSubagent(child, "research")],
+        )
+    )
+    retry = next(event for event in out if event["type"] == "model_retry")
+    assert retry["discarded"]["text_chars"] == len("Child text.")
+    assert next(event for event in out if event["type"] == "done")["response"] == (
+        "Draft.\n\n"
+    )
