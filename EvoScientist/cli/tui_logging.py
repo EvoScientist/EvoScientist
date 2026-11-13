@@ -46,11 +46,16 @@ class TUIWarningHandler(logging.Handler):
             return False
         from textual.notifications import Notification, Notify
 
-        from .commands import _grader_failure_on_one_line
-
-        if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
-            record = _grader_failure_on_one_line(record)
         message = record.getMessage()
+        exc = record.exc_info[1] if record.exc_info else None
+        if exc is not None:
+            try:
+                text = str(exc)
+            except Exception:  # a broken __str__ must not break the log call
+                text = ""
+            message = f"{message}: {type(exc).__name__}"
+            if text and text not in message:
+                message = f"{message}: {text}"
         # Keyed by level too, so an earlier warning never hides the same error.
         key = (record.levelno, message)
         if key in self.seen:
@@ -133,6 +138,9 @@ def tui_warning_notifications(app: App) -> Iterator[None]:
             pending, handler._pending = handler._pending, []
         try:
             for record in pending:
-                handler._forward(record)
+                try:
+                    handler._forward(record)
+                except Exception:
+                    handler.handleError(record)
         finally:
             handler.close()
