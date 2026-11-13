@@ -29,7 +29,7 @@ reach users without an EvoScientist release.
 
 from __future__ import annotations
 
-import atexit
+import contextlib
 import os
 import signal
 import threading
@@ -84,8 +84,9 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         workspace_dir: Resolved workspace path; falls back to
             ``config.default_workdir`` then cwd.
 
-    Blocks until Ctrl+C / SIGTERM, or until the front-end process exits, then
-    tears down both subprocesses. Never returns a value.
+    Blocks until Ctrl+C / SIGTERM / SIGHUP, or the front-end exits, then stops
+    the front-end. The shared backend keeps running. An inherited ignored
+    SIGHUP stays ignored for nohup. Never returns a value.
     """
     from ..config import apply_config_to_env
     from ..langgraph_dev.boundary import is_loopback_host
@@ -134,134 +135,134 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         else:
             status.update(f"[dim]{escape(message)} ({int(fraction * 100)}%)...[/dim]")
 
-    from .server import lock_wait_status
+    from .server import (
+        _ignore,
+        _interrupt,
+        _stop_signals,
+        _stop_signals_interrupt,
+        lock_wait_status,
+    )
 
     runner = InstalledWebUIRunner(progress=_install_progress, log_path=webui_log)
     launcher = WebUILauncher(
         config, cfg, runner, on_lock_wait=lock_wait_status(status_box, starting)
     )
-    try:
-        with console.status(starting, spinner="dots") as status:
-            status_box["status"] = status
-            result = launcher.start()
-    except LauncherError as exc:
-        _render_launcher_error(exc)
-        raise typer.Exit(1) from exc
-    finally:
-        status_box.clear()
-    # start() has already spawned the backend (unless reused) and the front-end;
-    # register teardown now so a Ctrl+C while the output below renders still
-    # stops the front-end. Idempotent; the backend outlives the WebUI.
-    atexit.register(launcher.stop)
+    # Install before startup: a hang-up during readiness or banner rendering
+    # must reach cleanup too. The deploy guard preserves nohup and shields
+    # teardown from repeated stop signals.
+    with _stop_signals_interrupt():
+        try:
+            try:
+                with console.status(starting, spinner="dots") as status:
+                    status_box["status"] = status
+                    result = launcher.start()
+            except LauncherError as exc:
+                _render_launcher_error(exc)
+                raise typer.Exit(1) from exc
+            finally:
+                status_box.clear()
+            if result.backend_started:
+                console.print("[green]✓[/green] langgraph dev ready")
+                console.print(
+                    "[dim]The backend server keeps running after the WebUI closes, for "
+                    "every EvoSci session — stop it with [bold]EvoSci server stop"
+                    "[/bold].[/dim]"
+                )
+            else:
+                console.print(
+                    f"[green]✓[/green] Reusing langgraph dev already serving "
+                    f"port {launcher.backend_port}"
+                )
+            for warning in result.warnings:
+                # Warnings can carry paths; a segment like "[lab]" is not markup.
+                console.print(f"[yellow]⚠ {escape(warning)}[/yellow]")
 
-    if result.backend_started:
-        console.print("[green]✓[/green] langgraph dev ready")
-        console.print(
-            "[dim]The backend server keeps running after the WebUI closes, for "
-            "every EvoSci session — stop it with [bold]EvoSci server stop"
-            "[/bold].[/dim]"
-        )
-    else:
-        console.print(
-            f"[green]✓[/green] Reusing langgraph dev already serving "
-            f"port {launcher.backend_port}"
-        )
-    for warning in result.warnings:
-        # Warnings can carry paths; a segment like "[lab]" is not markup.
-        console.print(f"[yellow]⚠ {escape(warning)}[/yellow]")
+            # The launcher opens the browser once the WebUI answers.
+            try:
+                with console.status(
+                    f"[dim]Starting WebUI {escape(runner.version or '')}...[/dim]",
+                    spinner="dots",
+                ):
+                    ready = launcher.wait_ready()
+            except LauncherError as exc:
+                if exc.code == "webui_start_failed":
+                    log_hint = f"See {_shorten(str(webui_log))}."
+                    exc.detail = f"{exc.detail}\n{log_hint}" if exc.detail else log_hint
+                _render_launcher_error(exc)
+                raise typer.Exit(1) from exc
+            runner.start_update_check()
+            browser_note = (
+                "opened in your browser"
+                if ready.browser_opened
+                else "open it in your browser"
+            )
 
-    # The launcher opens the browser once the WebUI answers.
-    try:
-        with console.status(
-            f"[dim]Starting WebUI {escape(runner.version or '')}...[/dim]",
-            spinner="dots",
-        ):
-            ready = launcher.wait_ready()
-    except LauncherError as exc:
-        if exc.code == "webui_start_failed":
-            log_hint = f"See {_shorten(str(webui_log))}."
-            exc.detail = f"{exc.detail}\n{log_hint}" if exc.detail else log_hint
-        _render_launcher_error(exc)
-        raise typer.Exit(1) from exc
-    runner.start_update_check()
-    browser_note = (
-        "opened in your browser" if ready.browser_opened else "open it in your browser"
-    )
+            # The UI reaches the backend from the BROWSER; when only the front-end is
+            # exposed, remote pages load but every request fails — say so.
+            remote_backend_hint = ""
+            backend_public = (
+                result.exposure is not None and result.exposure.public_host is not None
+            )
+            if not is_loopback_host(cfg.webui_host) and not backend_public:
+                remote_backend_hint = (
+                    f"\n[yellow]Note:[/yellow] the UI connects to the backend from the "
+                    f"browser. Remote visitors cannot reach a loopback backend — run "
+                    f"[bold]EvoSci config set langgraph_dev_host 0.0.0.0[/bold] (and "
+                    f"[bold]EvoSci server stop[/bold] if a server already runs on "
+                    f"loopback), then point the UI at "
+                    f"[bold]http://<this-machine-ip>:{launcher.backend_port}[/bold].\n"
+                )
+            from ..langgraph_dev.assistants import chat_assistant_id
+            from ..paths import Workspace
 
-    # The UI reaches the backend from the BROWSER; when only the front-end is
-    # exposed, remote pages load but every request fails — say so.
-    remote_backend_hint = ""
-    backend_public = (
-        result.exposure is not None and result.exposure.public_host is not None
-    )
-    if not is_loopback_host(cfg.webui_host) and not backend_public:
-        remote_backend_hint = (
-            f"\n[yellow]Note:[/yellow] the UI connects to the backend from the "
-            f"browser. Remote visitors cannot reach a loopback backend — run "
-            f"[bold]EvoSci config set langgraph_dev_host 0.0.0.0[/bold] (and "
-            f"[bold]EvoSci server stop[/bold] if a server already runs on "
-            f"loopback), then point the UI at "
-            f"[bold]http://<this-machine-ip>:{launcher.backend_port}[/bold].\n"
-        )
-    from ..langgraph_dev.assistants import chat_assistant_id
-    from ..paths import Workspace
+            assistant_id = chat_assistant_id(Workspace(cfg.workspace_dir))
+            console.print(
+                Panel(
+                    Text.from_markup(
+                        f"[bold]Backend:[/bold]  "
+                        f"{result.backend_url}  "
+                        f"[dim](langgraph dev — Assistant: {assistant_id})[/dim]\n"
+                        f"[bold]WebUI:[/bold]    "
+                        f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
+                        f"[dim]({browser_note})[/dim]\n"
+                        f"[bold]Logs:[/bold]     {_shorten(str(result.log_file or RUNTIME.log_file))}\n"
+                        f"          {_shorten(str(webui_log))}\n"
+                        f"{remote_backend_hint}\n"
+                        f"[dim]Press Ctrl+C to stop.[/dim]"
+                    ),
+                    title="[bold green]✓ EvoScientist WebUI[/bold green]",
+                    border_style="green",
+                )
+            )
+            from ..cli.commands import print_exposure_warnings
 
-    assistant_id = chat_assistant_id(Workspace(cfg.workspace_dir))
-    console.print(
-        Panel(
-            Text.from_markup(
-                f"[bold]Backend:[/bold]  "
-                f"{result.backend_url}  "
-                f"[dim](langgraph dev — Assistant: {assistant_id})[/dim]\n"
-                f"[bold]WebUI:[/bold]    "
-                f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
-                f"[dim]({browser_note})[/dim]\n"
-                f"[bold]Logs:[/bold]     {_shorten(str(result.log_file or RUNTIME.log_file))}\n"
-                f"          {_shorten(str(webui_log))}\n"
-                f"{remote_backend_hint}\n"
-                f"[dim]Press Ctrl+C to stop.[/dim]"
-            ),
-            title="[bold green]✓ EvoScientist WebUI[/bold green]",
-            border_style="green",
-        )
-    )
-    from ..cli.commands import print_exposure_warnings
+            # The backend as it answered the registration: it may be one another
+            # session started.
+            print_exposure_warnings(result.exposure, to=console)
+            if not is_loopback_host(cfg.webui_host):
+                console.print(
+                    "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+                    f"[bold red]WebUI listening on {cfg.webui_host} — its API reads, "
+                    f"writes and uploads workspace files and installs skills, with no "
+                    f"auth. Trusted networks only.[/bold red]"
+                )
 
-    # The backend as it answered the registration: it may be one another
-    # session started.
-    print_exposure_warnings(result.exposure, to=console)
-    if not is_loopback_host(cfg.webui_host):
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]WebUI listening on {cfg.webui_host} — its API reads, "
-            f"writes and uploads workspace files and installs skills, with no "
-            f"auth. Trusted networks only.[/bold red]"
-        )
-
-    # Block on signal — exit also if the front-end dies on its own (e.g. the
-    # user closes it), so we don't leave the backend orphaned.
-    shutdown_event = threading.Event()
-
-    def _handle_shutdown(signum: int, _frame: Any) -> None:
-        shutdown_event.set()
-        if signum == signal.SIGINT:
-            signal.default_int_handler(signum, _frame)
-
-    _orig_sigint = signal.signal(signal.SIGINT, _handle_shutdown)
-    _orig_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown)
-
-    try:
-        while not shutdown_event.is_set():
-            if not launcher.poll():
-                console.print("\n[dim]WebUI server exited.[/dim]")
-                break
-            shutdown_event.wait(timeout=0.5)
-    except KeyboardInterrupt:
-        shutdown_event.set()
-    finally:
-        signal.signal(signal.SIGINT, _orig_sigint)
-        signal.signal(signal.SIGTERM, _orig_sigterm)
-        console.print(
-            "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
-        )
-        launcher.stop()
+            # Poll the front-end so an exit also ends the terminal adapter.
+            shutdown_event = threading.Event()
+            while not shutdown_event.is_set():
+                if not launcher.poll():
+                    console.print("\n[dim]WebUI server exited.[/dim]")
+                    break
+                shutdown_event.wait(timeout=0.5)
+        finally:
+            # Error-driven cleanup may begin before the first signal. Shield
+            # it too, without changing inherited ignored HUP or other handlers.
+            for sig in _stop_signals():
+                if signal.getsignal(sig) is _interrupt:
+                    signal.signal(sig, _ignore)
+            # A closed terminal may reject output; that must not skip stop().
+            with contextlib.suppress(OSError):
+                console.print(
+                    "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
+                )
+            launcher.stop()
