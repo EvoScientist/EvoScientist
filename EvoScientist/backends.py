@@ -1061,7 +1061,13 @@ def _is_toolchain_path_assignment(raw: str) -> bool:
         return False
     if len(words) != 1:
         return False
-    match = re.fullmatch(r"(?:-D)?[A-Za-z_]\w*=(/.*)", words[0])
+    # A quoted setting may contain path-list separators and compiler flags,
+    # but must not swallow a command list supplied to eval or another shell.
+    match = re.fullmatch(
+        r"(?:-D)?[A-Za-z_]\w*=(/[^\s;:|&<>]*(?:[;:]/[^\s;:|&<>]*)*)"
+        r"(?:\s+-[^\s;|&<>]+)*",
+        words[0],
+    )
     return match is not None and _is_under_allowed_prefix(
         match[1], ("/usr", "/opt", "/bin", "/sbin")
     )
