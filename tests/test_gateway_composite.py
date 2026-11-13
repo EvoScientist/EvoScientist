@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -447,20 +446,20 @@ async def test_delete_legacy_local_only():
     assert not execute.called("delete_thread")
 
 
-async def test_delete_server_error_is_non_fatal():
+async def test_delete_server_error_reports_partial_cleanup():
     read = RecordingGateway("r", delete_result=True)
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
-    assert await _composite(read, execute).delete_thread(UUID) is True
+    with pytest.raises(RuntimeError, match=r"Local deletion succeeded.*boom"):
+        await _composite(read, execute).delete_thread(UUID)
 
 
-async def test_delete_server_error_after_a_failed_local_delete(caplog):
+async def test_delete_server_error_after_a_missing_local_thread():
     read = RecordingGateway("r", delete_result=False)
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
-    with caplog.at_level(logging.WARNING):
-        assert await _composite(read, execute).delete_thread(UUID) is False
-    assert "local delete failed" in caplog.text
+    with pytest.raises(RuntimeError, match=r"found no local session.*boom"):
+        await _composite(read, execute).delete_thread(UUID)
 
 
 def test_execute_gateway_exposes_execution_side():
