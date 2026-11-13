@@ -572,10 +572,10 @@ class LangGraphServerThreadStore(ThreadStore):
         # Interrupt live runs first: the server's cascade delete clears
         # queued runs from the registry but does not stop a run that is
         # already executing (issue #358).
+        await _acancel_thread_runs(
+            self.client, thread_id, name="thread delete", strict=True
+        )
         try:
-            await _acancel_thread_runs(
-                self.client, thread_id, name="thread delete", strict=True
-            )
             await self.client.threads.delete(thread_id)
         except NotFoundError:
             return False
@@ -803,7 +803,12 @@ class LangGraphServerGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        return await self.thread_store.delete_thread(thread_id)
+        resolved, _ = await self.thread_store.resolve_thread_id_prefix(
+            thread_id, graph_id=self._target_graph_id(target)
+        )
+        if resolved is None:
+            return False
+        return await self.thread_store.delete_thread(resolved)
 
     async def clone_thread(
         self,
