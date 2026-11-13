@@ -36,12 +36,12 @@ Routing table (read = local, execute = langgraph server):
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
   go to the server, where runs and background processes live.
-- ``delete_thread`` deletes UUIDs on the server before local cleanup so live
-  writers stop before checkpoints are removed. Server errors leave local state
-  available for resolution and retry. If server deletion succeeds but local
-  cleanup fails, a warning records the redundant cleanup failure and deletion
-  still succeeds. Legacy ids
-  remain local-only.
+- ``delete_thread`` deletes a UUID on the server first (it asks the thread's
+  runs to stop, then deletes the thread), then removes the local rows. A server
+  error propagates and leaves the local rows for a plain retry; a thread the
+  server does not have is still removed locally. A local failure after a server
+  delete is only logged, since the server's delete already removed the thread's
+  checkpoints from the shared database. Legacy ids are local-only.
 
 **Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
 ids, so a legacy thread can never be registered or executed server-side. Reads
@@ -187,8 +187,7 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        # Stop server writers before removing checkpoints from the shared DB.
-        # On server failure leave local state available for a normal retry.
+        # Server first, so a server error leaves the local rows for a retry.
         exec_ok = False
         if _is_uuid(thread_id):
             exec_ok = await self._execute.delete_thread(thread_id, target)
