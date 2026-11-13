@@ -1951,6 +1951,95 @@ class TestDeleteBlocked:
         assert result.error is None
         assert not (tmp_path / "f.txt").exists()
 
+    @pytest.mark.parametrize("path", ["/", "/myproj"])
+    def test_sandbox_backend_refuses_deleting_the_workspace_root(self, tmp_path, path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (ws / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        result = backend.delete(path)
+        assert "workspace root" in result.error
+        assert (ws / "f.txt").exists()
+
+    def test_sandbox_backend_deletes_folder_named_like_the_workspace(self, tmp_path):
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "myproj" / "core.py").write_text("x = 1\n")
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        result = backend.delete("/myproj")
+        assert result.error is None
+        assert not (ws / "myproj").exists()
+        assert (ws / "README.md").exists()
+
+    def test_dangerous_backend_refuses_deleting_the_workspace_root(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(
+            root_dir=str(tmp_path), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(str(tmp_path))
+        assert "workspace root" in result.error
+        assert (tmp_path / "f.txt").exists()
+
+    def test_sandbox_backend_deletes_the_path_it_checked(self, tmp_path, monkeypatch):
+        """A folder named like the workspace that goes away while the delete
+        runs does not turn the delete into one of the workspace root."""
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolve = backend._resolve_path
+
+        def resolve_then_remove(key):
+            resolved = resolve(key)
+            if (ws / "myproj").exists():
+                (ws / "myproj").rmdir()
+            return resolved
+
+        monkeypatch.setattr(backend, "_resolve_path", resolve_then_remove)
+        result = backend.delete("/myproj")
+        assert "not found" in result.error
+        assert (ws / "README.md").exists()
+
+    @pytest.mark.parametrize("path", ["sub/..", ".."])
+    def test_dangerous_backend_refuses_deleting_the_workspace_or_above(
+        self, tmp_path, path
+    ):
+        ws = tmp_path / "parent" / "ws"
+        (ws / "sub").mkdir(parents=True)
+        (ws / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(
+            root_dir=str(ws), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(f"{ws.as_posix()}/{path}")
+        assert "workspace root" in result.error
+        assert (ws / "f.txt").exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_dangerous_backend_refuses_deleting_the_workspace_through_a_symlink(
+        self, tmp_path
+    ):
+        real = tmp_path / "real"
+        (real / "ws").mkdir(parents=True)
+        (real / "ws" / "f.txt").write_text("x")
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(real / "ws"), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(str(link / "ws"))
+        assert "workspace root" in result.error
+        assert (real / "ws" / "f.txt").exists()
+
+    def test_sandbox_backend_raises_on_traversal_like_the_parent(self, tmp_path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (tmp_path / "outside.txt").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        with pytest.raises(ValueError, match="traversal"):
+            backend.delete("/../outside.txt")
+        assert (tmp_path / "outside.txt").exists()
+
 
 # === CustomSandboxBackend._resolve_path ===
 
@@ -2010,6 +2099,50 @@ class TestResolvePath:
         resolved = backend._resolve_path("/my-project/main.py")
         assert Path(resolved).parts[-1] == "main.py"
         assert "my-project/my-project" not in str(resolved)
+
+    def test_workspace_name_prefix_stripped_without_such_folder(self, tmp_path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path("/myproj/core.py") == (ws / "core.py").resolve()
+        assert backend._resolve_path("/myproj") == backend._resolve_path("/")
+
+    def test_folder_named_like_the_workspace_is_kept(self, tmp_path):
+        """A workspace folder named like the workspace is that folder (#809).
+
+        The file tools pass a relative ``myproj/core.py`` as ``/myproj/core.py``.
+        """
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "myproj" / "core.py").write_text("x = 1\n")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolved = backend._resolve_path("/myproj/core.py")
+        assert resolved == (ws / "myproj" / "core.py").resolve()
+        assert backend.read("/myproj/core.py").error is None
+        listed = [entry["path"] for entry in backend.ls("/myproj").entries]
+        assert listed == ["/myproj/core.py"]
+
+    def test_folder_named_like_a_system_workspace_is_kept(self, tmp_path):
+        ws = tmp_path / "tmp"
+        (ws / "tmp").mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolved = backend._resolve_path("/tmp/core.py")
+        assert resolved == (ws / "tmp" / "core.py").resolve()
+
+    def test_file_named_like_the_workspace_is_reached_by_its_bare_name(self, tmp_path):
+        """``/myproj/...`` is still stripped, but a bare ``/myproj`` is now the
+        file: on main it was the workspace root, so deleting it wiped the
+        workspace."""
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (ws / "myproj").write_text("x")
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path("/myproj/core.py") == (ws / "core.py").resolve()
+        assert backend._resolve_path("/myproj") == (ws / "myproj").resolve()
+        assert backend.delete("/myproj").error is None
+        assert not (ws / "myproj").exists()
+        assert (ws / "README.md").exists()
 
     def test_custom_workspace_name_system_path(self, tmp_path):
         ws = tmp_path / "experiment-1"

@@ -175,12 +175,13 @@ def create_runtime_gateways_for_config(
     return create_runtime_gateways(events=events)
 
 
-def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any = None) -> bool:
+def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any) -> bool:
     """Whether the sandbox running this session's turns is in dangerous mode.
 
-    Only an in-process agent is built from this session's *config* (the
-    effective config when ``None``). Turns on the langgraph server run in the
-    server's sandbox, which keeps the mode it was launched with, and this
+    Only an in-process agent is built from this session's captured *config*.
+    An unknown config never grants host access: reading current config.yaml
+    could disagree with the already-built sandbox. Turns on the langgraph
+    server run in the server's sandbox, which keeps its launch mode, and this
     session cannot tell what that is (``--dangerous`` never reaches it, and
     config.yaml may have changed since). So for any gateway that does not
     execute in process the answer is ``False``: file tool paths are then read
@@ -188,8 +189,4 @@ def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any = None) -> b
     """
     if not runs_in_process(graph_gateway):
         return False
-    if config is None:
-        from ..config import get_effective_config
-
-        config = get_effective_config()
-    return bool(config.dangerous_mode)
+    return config is not None and bool(config.dangerous_mode)
