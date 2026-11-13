@@ -2926,6 +2926,79 @@ class TestTraversalFalsePositiveFix:
         result = validate_command("cat foo/../../etc/passwd")
         assert result is not None
 
+    def test_dotdot_attached_short_option_blocked(self):
+        result = validate_command("python s.py -o../out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_equals_option_blocked(self):
+        result = validate_command("python s.py --output=../out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_env_assignment_blocked(self):
+        result = validate_command("OUT=../out.txt python s.py")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_in_filename_with_equals_allowed(self):
+        assert validate_command("python s.py --output=foo..bar.txt") is None
+
+    def test_dotdot_in_filename_attached_allowed(self):
+        assert validate_command("python s.py -ofoo..bar.txt") is None
+
+    def test_stdin_dash_and_numeric_flags_do_not_recurse(self):
+        assert validate_command("cat -") is None
+        assert validate_command("head -10 file.txt") is None
+        assert validate_command("tar -xzf file.tar.gz -") is None
+        assert validate_command("python s.py -o-") is None
+
+    def test_quoted_dotdot_traversal_blocked(self):
+        result = validate_command("python s.py -o'.'./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command("cat foo/'..'/bar")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_escaped_dotdot_traversal_blocked(self):
+        result = validate_command(r"python s.py --output=\.\./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"cat foo/\.\./bar")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"cat -o\.\./secret")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        assert validate_command(r"cat foo\.\.bar.txt") is None
+
+    def test_single_quoted_search_pattern_allowed(self):
+        assert validate_command(r"grep '\.\./' file.txt") is None
+        assert validate_command("grep '\\.\\./' file.txt") is None
+
+    def test_escaped_attached_option_blocked_even_with_trailing_comment(self):
+        result = validate_command(r"python s.py -\o../out.txt # '")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"python s.py -o'.'./out.txt # '")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_backslash_newline_line_continuation_traversal_blocked(self):
+        result = validate_command("python s.py --output=.\\\n./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command("python s.py --output=.\\\r\n./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
 
 # === Pipeline command validation ===
 
