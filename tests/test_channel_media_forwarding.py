@@ -500,8 +500,9 @@ class TestRoutedPaths:
         )
 
     @pytest.mark.parametrize("subagent", [False, True])
-    async def test_skill_write_collision_forwards_primary_not_global(
-        self, workspace, subagent
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    async def test_skill_collision_forwards_primary_not_global(
+        self, workspace, subagent, tool_name
     ):
         from EvoScientist import paths
 
@@ -511,17 +512,17 @@ class TestRoutedPaths:
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(payload)
         events = (
-            _subagent_turn("write_file", "/skills/demo/assets/logo.svg", workspace.root)
+            _subagent_turn(tool_name, "/skills/demo/assets/logo.svg", workspace.root)
             if subagent
             else _file_tool_turn(
-                "write_file", {"file_path": "/skills/demo/assets/logo.svg"}
+                tool_name, {"file_path": "/skills/demo/assets/logo.svg"}
             )
         )
         consumer = _consumer(workspace, FakeGraphGateway(events=events))
         assert _queued_media(await _consumer_turn(consumer)) == [str(primary.resolve())]
 
     @pytest.mark.parametrize("fallback", [False, True])
-    def test_colliding_skill_tiers_are_not_guessed(
+    def test_colliding_skill_tiers_forward_the_tier_read_served(
         self, tmp_path, monkeypatch, fallback
     ):
         from EvoScientist.backends import MergedSkillsBackend
@@ -532,12 +533,15 @@ class TestRoutedPaths:
             (folder / "result.txt").write_text(text)
         backend = MergedSkillsBackend(str(primary), str(secondary))
         if fallback:
-            monkeypatch.setattr(backend._primary, "read", lambda *_: "Error: too large")
+            from deepagents.backends.protocol import ReadResult
+
+            monkeypatch.setattr(
+                backend._primary, "read", lambda *_: ReadResult(error="too large")
+            )
         result = backend.read("/result.txt")
         assert ("builtin" if fallback else "workspace") in str(result)
-        # Forwarding builds its routes separately, so it cannot know which read
-        # succeeded. Returning nothing is safer than forwarding the wrong file.
-        assert backend.file_path("/result.txt") is None
+        served = secondary if fallback else primary
+        assert backend.file_path("/result.txt") == served / "result.txt"
 
     def test_single_skill_tier_still_resolves(self, tmp_path):
         from EvoScientist.backends import MergedSkillsBackend
@@ -547,6 +551,59 @@ class TestRoutedPaths:
         file = secondary / "result.txt"
         file.write_text("builtin")
         backend = MergedSkillsBackend(str(primary), str(secondary))
+        assert backend.file_path("/result.txt") == file
+
+    @pytest.mark.parametrize("outcome", ["error", "legacy", "exception"])
+    def test_colliding_skill_tiers_fall_back_to_global(
+        self, tmp_path, monkeypatch, outcome
+    ):
+        from deepagents.backends.protocol import ReadResult
+
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        for folder in (primary, global_dir, secondary):
+            folder.mkdir()
+            (folder / "result.txt").write_text(folder.name)
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+
+        def fail(*args):
+            if outcome == "exception":
+                raise OSError("unreadable")
+            return (
+                "Error: unreadable"
+                if outcome == "legacy"
+                else ReadResult(error="unreadable")
+            )
+
+        monkeypatch.setattr(backend._primary, "read", fail)
+        assert backend.file_path("/result.txt") == global_dir / "result.txt"
+        monkeypatch.setattr(backend._global, "read", fail)
+        assert backend.file_path("/result.txt") == secondary / "result.txt"
+        monkeypatch.setattr(backend._secondary, "read", fail)
+        assert backend.file_path("/result.txt") is None
+        # Writes still name primary, without consulting its read result.
+        assert (
+            backend.file_path("/result.txt", tool_name="write_file")
+            == primary / "result.txt"
+        )
+
+    def test_single_skill_tier_does_not_read_again(self, tmp_path, monkeypatch):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        primary.mkdir()
+        file = primary / "result.txt"
+        file.write_text("workspace")
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+
+        def unexpected_read(*args):
+            pytest.fail("single-tier forwarding should not re-read the file")
+
+        for tier in backend._backends():
+            monkeypatch.setattr(tier, "read", unexpected_read)
         assert backend.file_path("/result.txt") == file
 
     LOGO = "/skills/demo/assets/logo.svg"
