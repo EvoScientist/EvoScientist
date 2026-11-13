@@ -20,6 +20,18 @@ import httpx
 from ..paths import Workspace
 from .boundary import is_loopback_host
 
+
+def running_server_url() -> str:
+    """The URL of the running server: its record when one exists, else the
+    configured ``langgraph_dev_port``."""
+    from ..config import get_config_value
+    from . import manager
+
+    record = manager.read_record()
+    if record is not None:
+        return record.url
+    return f"http://127.0.0.1:{get_config_value('langgraph_dev_port')}"
+
 # Seconds a registration may take: it restores the project's threads, which
 # reads every checkpoint in sessions.db.
 REGISTRATION_TIMEOUT = 120.0
@@ -303,12 +315,25 @@ def ensure_ccproxy(*, url: str) -> str | None:
     )
 
 
+def running_server_url(fallback: str) -> str:
+    """The URL of the running server: the one its record names when there is
+    a record, else *fallback* (the configured ``langgraph_dev_port``)."""
+    from .manager import manager
+
+    try:
+        record = manager.read_record()
+    except Exception:
+        record = None
+    url = getattr(record, "url", None) if record is not None else None
+    return str(url or fallback)
+
+
 def reconcile_autoskills(*, url: str) -> list[str]:
     """Ask the server at *url* to reconcile every served project's AutoSkills
     cron with its configuration (after ``/autoskills`` changed it); why each
     project that failed did. ``RegistrationError`` (or ``OlderServerError``)
     when it could not ask."""
-    url = url.rstrip("/")
+    url = running_server_url(url).rstrip("/")
     response = _post_with_secret(url, "/api/autoskills/reconcile", {}, what="reach")
     if response.status_code == 404:
         raise OlderServerError()
