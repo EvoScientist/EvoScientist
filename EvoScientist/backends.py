@@ -1176,6 +1176,17 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
 _FOLDER_COMMANDS = ("cd", "pushd")
 
 
+def _literal_folder(operand: str) -> str | None:
+    """The folder an operand names before its first expansion (``$`` or a
+    backtick), without quotes: ``skills`` for ``skills/$(printf demo)``;
+    ``None`` when no whole folder name comes first."""
+    prefix = re.split(r"[$`]", operand, maxsplit=1)[0]
+    if "/" not in prefix:
+        return None
+    folder = re.sub(r"[\"']", "", prefix.rsplit("/", 1)[0])
+    return folder or None
+
+
 def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:
     """Whether an ``env`` runs its command in another folder: ``-C`` (also
     clustered, ``-iC``) or ``--chdir`` among env's own options."""
@@ -1509,8 +1520,14 @@ def validate_command(
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
                 bare = path.lstrip("'\"")
-                if token is None or bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
+                if bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
                     continue
+                if token is None:
+                    # Glued to a substitution: whatever it expands to stays
+                    # under the literal folder written before it.
+                    path = _literal_folder(operand)
+                    if path is None:
+                        continue
                 problem = _removal_problem(
                     f"{workspace_root}/{path}", workspace_root, protected
                 )

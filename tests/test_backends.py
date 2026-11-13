@@ -964,6 +964,9 @@ class TestWorkspaceRemovalAndComments:
             "env -iC build make; rm -rf skills",
             "env make -C build; rm -rf skills",
             "env FOO=1 tar -C out -xf a.tar; rm -rf skills",
+            "rm -rf skills/$(printf demo)",
+            "rm -rf skills/`printf demo`",
+            'rm -rf "media"/$(date +%F)',
         ],
     )
     @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
@@ -994,6 +997,8 @@ class TestWorkspaceRemovalAndComments:
             "env --ch build rm -rf skills",
             "(cd build; rm -rf skills)",
             "rm -rf skill* {build,dist}",
+            "rm -rf build/$(date +%F)",
+            "rm -rf ./$(printf build)",
         ],
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
