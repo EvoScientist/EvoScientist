@@ -779,7 +779,9 @@ def _simple_commands(
     tokens = words.tokens
     found: list[SimpleCommand] = []
     nested: list[tuple[str, tuple[str, ...]]] = []  # text, wrappers it runs under
-    script_tokens: set[int] = set()  # read as scripts, not again as quoted words
+    # Tokens read as scripts, not again as quoted words; by identity, as an
+    # `env -S` string's words carry offsets into that string, not *command*.
+    script_tokens: set[int] = set()
     code_bodies: set[int] = set()  # read as code, not again for substitutions
     in_backtick = False
     for index, (token, is_name) in enumerate(
@@ -808,7 +810,7 @@ def _simple_commands(
                     (_word_value(each.args[script], each.tokens[script]), each.via)
                 )
                 if each.tokens[script] is not None:
-                    script_tokens.add(int(each.tokens[script]["start"]))
+                    script_tokens.add(id(each.tokens[script]))
             if reads_stdin:
                 code_bodies.update(heredocs)
                 for body in heredocs:
@@ -825,7 +827,7 @@ def _simple_commands(
         if (
             token["type"] == "word"
             and token["quoted"]
-            and int(token["start"]) not in script_tokens
+            and id(token) not in script_tokens
         ):
             rewrite_substitutions(str(token["raw"]), collect)
     for body, (start, end, expands) in enumerate(words.bodies):

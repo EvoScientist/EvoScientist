@@ -3173,6 +3173,8 @@ class TestProcessKillByName:
             "env -S 'a; pkill x'",
             "env -S 'pkill\\c' -f worker",
             "env -S 'sh -c \"echo safe\\npkill x\"'",
+            # The env string's words must not hide an outer word at the same offset.
+            'echo  "$(pkill x)"; env -S \'sh -c "echo hi"\'',
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
