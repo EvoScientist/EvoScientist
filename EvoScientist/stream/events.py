@@ -24,6 +24,7 @@ from ..middleware.tool_history_repair import (
 )
 from ..paths import file_tool_path
 from .emitter import StreamEventEmitter
+from .state import paragraph_break
 from .summarization import (
     _extract_summary_message_text,
     _find_summarization_event_payload,
@@ -739,7 +740,6 @@ class _V3EventProcessor:
             if self.full_response.strip() and not self.full_response.endswith("\n\n"):
                 # Keep the draft; the revision starts on its own paragraph.
                 self.full_response += "\n\n"
-                self._count_text(2)
                 events.append(self.emitter.text("\n\n").data)
             self._last_pass_start = len(self.full_response)
         return [
@@ -1334,12 +1334,8 @@ class _V3EventProcessor:
     def _append_main_text(self, text: str) -> str:
         # Put the separator in the emitted delta too: stateful frontends and
         # standalone channels concatenate these deltas, independently of done.
-        if not self._main_message_has_text and self.full_response.strip():
-            trailing_newlines = len(self.full_response) - len(
-                self.full_response.rstrip("\n")
-            )
-            leading_newlines = len(text) - len(text.lstrip("\n"))
-            text = "\n" * max(0, 2 - trailing_newlines - leading_newlines) + text
+        if not self._main_message_has_text:
+            text = paragraph_break(self.full_response, text) + text
         self._main_message_has_text = True
         self.full_response += text
         return text
