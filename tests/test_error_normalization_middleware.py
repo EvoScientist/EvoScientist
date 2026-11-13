@@ -589,3 +589,105 @@ def test_check_truncated_output_keeps_the_truncation_rule_and_normal_completion(
         _check_truncated_output(_response(truncated))
     fine = AIMessage(content="ok", response_metadata={"finish_reason": "stop"})
     assert _check_truncated_output(_response(fine)).result[0] is fine
+
+
+# ---------------------------------------------------------------------------
+# MissingApiKeyMiddleware (#782)
+# ---------------------------------------------------------------------------
+
+
+def _chat_anthropic(api_key: str):
+    from langchain_anthropic import ChatAnthropic
+
+    return ChatAnthropic(model="claude-sonnet-5-5", api_key=api_key)
+
+
+def _ok_handler(calls: list):
+    def handler(request):
+        calls.append(request)
+        return _response(AIMessage(content="ok"))
+
+    return handler
+
+
+def test_missing_anthropic_key_fails_before_the_request(monkeypatch):
+    from EvoScientist.middleware.error_normalization import (
+        MissingApiKeyError,
+        MissingApiKeyMiddleware,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calls: list = []
+    with pytest.raises(MissingApiKeyError) as info:
+        MissingApiKeyMiddleware().wrap_model_call(
+            _request(_chat_anthropic("")), _ok_handler(calls)
+        )
+    assert calls == []
+    message = str(info.value)
+    assert "No Anthropic API key is set" in message
+    assert "EvoSci config set anthropic_api_key <key>" in message
+    assert "ANTHROPIC_API_KEY" in message
+    assert "EvoSci onboard" in message
+
+
+def test_missing_anthropic_key_fails_before_the_request_async(monkeypatch):
+    from EvoScientist.middleware.error_normalization import (
+        MissingApiKeyError,
+        MissingApiKeyMiddleware,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calls: list = []
+
+    async def handler(request):
+        calls.append(request)
+        return _response(AIMessage(content="ok"))
+
+    with pytest.raises(MissingApiKeyError, match="No Anthropic API key is set"):
+        asyncio.run(
+            MissingApiKeyMiddleware().awrap_model_call(
+                _request(_chat_anthropic("")), handler
+            )
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "api_key",
+    [
+        "sk-ant-test",
+        # Claude sign-in through ccproxy sets this placeholder key.
+        "ccproxy-oauth",
+    ],
+)
+def test_anthropic_model_with_a_key_is_called(api_key):
+    from EvoScientist.middleware.error_normalization import MissingApiKeyMiddleware
+
+    calls: list = []
+    request = _request(_chat_anthropic(api_key))
+    response = MissingApiKeyMiddleware().wrap_model_call(request, _ok_handler(calls))
+    assert calls == [request]
+    assert response.result[0].content == "ok"
+
+
+def test_other_providers_are_not_checked():
+    from EvoScientist.middleware.error_normalization import MissingApiKeyMiddleware
+
+    calls: list = []
+    for model in (_openai_model(), _google_model(), None):
+        MissingApiKeyMiddleware().wrap_model_call(_request(model), _ok_handler(calls))
+    assert len(calls) == 3
+
+
+def test_missing_key_error_is_normalized_with_its_message():
+    from EvoScientist.middleware.error_normalization import MissingApiKeyMiddleware
+
+    request = _request(_chat_anthropic(""))
+
+    def inner(req):
+        return MissingApiKeyMiddleware().wrap_model_call(req, _ok_handler([]))
+
+    with pytest.raises(ProviderStreamError) as info:
+        ErrorNormalizationMiddleware().wrap_model_call(request, inner)
+    assert info.value.provider == "anthropic"
+    assert "EvoSci config set anthropic_api_key <key>" in str(info.value)
