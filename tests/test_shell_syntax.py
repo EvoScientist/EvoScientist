@@ -125,6 +125,8 @@ class TestWordsAndScripts:
             "bash -co pipefail 'ls /x'",
             "zsh -O -c 'ls /x'",
             "zsh -eo pipefail -c 'ls /x'",
+            "zsh -opipefail -c 'ls /x'",
+            "zsh -eonomatch -c 'ls /x'",
         ],
     )
     def test_the_script_after_any_options_is_found(self, command):

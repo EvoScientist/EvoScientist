@@ -1291,6 +1291,7 @@ class TestWorkspaceRemovalAndComments:
                 'bash -euo pipefail -c "cat ./tmp/x"',
             ),
             ('bash -O extglob -c "cat /tmp/x"', 'bash -O extglob -c "cat ./tmp/x"'),
+            ('zsh -opipefail -c "cat /tmp/x"', 'zsh -opipefail -c "cat ./tmp/x"'),
             ('bash -c -e "cat /tmp/x"', 'bash -c -e "cat ./tmp/x"'),
             (
                 'bash --rcfile ./rc -lc "cat /tmp/x"',
@@ -3342,6 +3343,8 @@ class TestProcessKillByName:
             "bash -o pipefail -c 'pkill -f x'",
             "bash -c -e 'pkill -f x'",
             "zsh -O -c 'pkill -f x'",
+            "zsh -opipefail -c 'pkill -f x'",
+            "zsh -onomatch -c 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
             "env -S 'pkill -f x'",
             "env -S'pkill -f x'",
