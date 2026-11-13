@@ -1137,13 +1137,17 @@ def _extract_all_paths(
             )
             and _under_any(path, allow_prefixes)
             and not re.search(r"[$`;\n|&<>]|\s/", path)
-            and not any(path_re.match(path, i) for i in range(1, len(path)))
+            and not any(
+                path_re.match(path, i) and not _under_any(path[i:], allow_prefixes)
+                for i in range(1, len(path))
+            )
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths,
             # nor a word with a second system path later in it
             # (`<root>/a.csv,/home/u/b.csv`, `<root>/{..,a}/etc/passwd`).
+            # A later path that is itself allowed (`<root>/a,<root>/b`) is fine.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
