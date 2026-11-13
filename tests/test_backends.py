@@ -2961,6 +2961,21 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
         assert "blocked" in result.lower()
 
+    def test_escaped_dotdot_traversal_blocked(self):
+        result = validate_command(r"python s.py --output=\.\./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"cat foo/\.\./bar")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command(r"cat -o\.\./secret")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        assert validate_command(r"cat foo\.\.bar.txt") is None
+
 
 # === Pipeline command validation ===
 

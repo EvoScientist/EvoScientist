@@ -986,6 +986,10 @@ def _has_traversal_component(command: str) -> bool:
             unquoted = s.replace("'", "").replace('"', '').replace('`', '')
             if unquoted != s and ".." in PurePosixPath(unquoted).parts:
                 return True
+            # Also handle shell backslash escapes (e.g. \.\./out.txt or -o\.\./secret)
+            unescaped = re.sub(r"\\(.)", r"\1", unquoted, flags=re.DOTALL)
+            if unescaped != s and ".." in PurePosixPath(unescaped).parts:
+                return True
         except Exception:
             pass
         # Check attached short options like -o../x or -I..
