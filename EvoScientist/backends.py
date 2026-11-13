@@ -980,7 +980,7 @@ def _has_traversal_component(command: str) -> bool:
         if token["type"] == "word"
     )
     # Quotes and escapes can split a literal path component as written.
-    # Inspect shell-decoded words too, including attached option/assignment paths.
+    # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
@@ -1049,10 +1049,9 @@ _SEARCH_LIST_VARIABLES = frozenset(
 
 
 def _is_toolchain_path_assignment(raw: str) -> bool:
-    """Preserve literal toolchain locations in assignments, not file operands.
+    """A literal toolchain location in an assignment is a setting, not an operand.
 
-    This retains main's environment/build-tool compatibility. It is not a
-    read-only guarantee: later variable expansion may use the value for writes.
+    Not a read-only guarantee: a later ``$NAME`` can still write there.
     """
     if re.search(r"(?<!\\)[$`]", raw):
         return False
@@ -1076,8 +1075,6 @@ def _is_search_path_assignment(raw: str) -> bool:
 
 def _attached_path_word(raw: str) -> tuple[str, str] | None:
     """Split a literal option/assignment prefix from its absolute path."""
-    # PATH is an executable search list, not a file operand. Keep the
-    # existing environment setup behavior rather than mapping its first entry.
     if _is_search_path_assignment(raw):
         return None
     match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)(/.*)", raw)
@@ -1110,8 +1107,15 @@ def _extract_all_paths(
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
     path_assignments: list[tuple[int, int]] = []
-    for token in shell_syntax.parse(command).tokens:
+    tokens = shell_syntax.parse(command).tokens
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
         if token["type"] != "word":
+            continue
+        if int(token["start"]) in scripts:
+            # A shell's script is a command line, not one assignment value.
+            paths.extend(_extract_all_paths(str(token["value"]), allow_prefixes))
+            path_assignments.append((int(token["start"]), int(token["end"])))
             continue
         raw = str(token["raw"])
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
@@ -1139,8 +1143,8 @@ def _extract_all_paths(
         paths.append(extracted)
     # Attached option and assignment values have no whitespace before the
     # slash, so the general literal scan deliberately does not match them.
-    for token in shell_syntax.parse(command).tokens:
-        if token["type"] != "word":
+    for token in tokens:
+        if token["type"] != "word" or int(token["start"]) in scripts:
             continue
         if _is_toolchain_path_assignment(str(token["raw"])):
             continue
@@ -1859,7 +1863,13 @@ def _convert_command_paths(
                 else '"' + converted + '"'
             )
         elif quoted and _is_search_path_assignment(raw):
-            continue
+            replacement, tmp = shell_syntax.rewrite_substitutions(
+                raw,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
         elif quoted:
             anchor = workspace_root if absolute else None
 
@@ -1870,6 +1880,9 @@ def _convert_command_paths(
                 # Expansion can introduce traversal not visible to validation.
                 # Leave dynamic absolute paths intact so validation refuses them.
                 if match[1] == '"' and re.search(r"(?<!\\)[$`]", match[2]):
+                    return match[0]
+                # A span after host: or pod: is a remote path, not a local one.
+                if match.string[: match.start()].endswith(":"):
                     return match[0]
                 path = match[2]
                 if match[1] == '"':
@@ -1970,9 +1983,11 @@ def convert_virtual_paths_in_command(
 ) -> str:
     """Map virtual paths in a shell command into the workspace.
 
-    Only unquoted words starting with ``/`` are paths; quoted text and
-    here-document bodies are data (``print(6 / 3)``), except a quoted whole
-    mount path and commands substituted inside double quotes.
+    Words starting with ``/`` are paths. A quoted whole path, or an option
+    or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
+    mapped when it names ``/tmp``, a mount or a workspace file. Search lists
+    such as ``PATH``, other quoted text and here-document bodies are data
+    (``print(6 / 3)``), except commands substituted inside double quotes.
     """
     return _convert_command_paths(
         command, workspace_name, skills_dir, media_dirs, workspace_root
