@@ -1178,13 +1178,16 @@ _FOLDER_COMMANDS = ("cd", "pushd")
 
 def _literal_folder(operand: str) -> str | None:
     """The folder an operand names before its first expansion (``$`` or a
-    backtick), without quotes: ``skills`` for ``skills/$(printf demo)``;
-    ``None`` when no whole folder name comes first."""
+    backtick), as the agent's shell reads it: ``skills`` for
+    ``skills/$(printf demo)`` and ``sk\\ills/$(printf demo)``; ``None`` when
+    no whole folder name comes first."""
     prefix = re.split(r"[$`]", operand, maxsplit=1)[0]
     if "/" not in prefix:
         return None
-    folder = re.sub(r"[\"']", "", prefix.rsplit("/", 1)[0])
-    return folder or None
+    tokens = shell_syntax.tokenize(prefix.rsplit("/", 1)[0])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return _removal_target(tokens[0]) or None
 
 
 def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:

@@ -967,6 +967,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf skills/$(printf demo)",
             "rm -rf skills/`printf demo`",
             'rm -rf "media"/$(date +%F)',
+            "rm -rf sk\\ills/$(printf demo)",
+            "rm -rf 'sk'ills/$(printf demo)",
         ],
     )
     @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
