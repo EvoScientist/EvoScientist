@@ -2038,16 +2038,23 @@ class MergedSkillsBackend(BackendProtocol):
         yield self._secondary
 
     def file_path(self, file_path: str) -> Path | None:
-        """The tier file *file_path* names: the first tier that has it, as
-        :meth:`read` picks it, or None when no tier does."""
+        """The file to forward, only when its tier is unambiguous.
+
+        ``read`` may fall through a tier whose file exists but cannot be
+        read. Forwarding constructs its routes separately and cannot know
+        which read succeeded, so never guess between same-named tier files.
+        """
+        found: Path | None = None
         for backend in self._backends():
             try:
                 path = backend._resolve_path(file_path)
             except (ValueError, OSError):
                 continue
             if path.is_file():
-                return path
-        return None
+                if found is not None:
+                    return None
+                found = path
+        return found
 
     # -- read: try each tier in priority order --
 
