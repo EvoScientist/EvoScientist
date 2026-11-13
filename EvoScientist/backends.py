@@ -1169,24 +1169,58 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
-# A word the shell may expand into other paths: a variable, a substitution,
-# a cmd.exe variable, a glob or a brace list.
-_EXPANDING_RE = re.compile(r"[$`%*?\[{]")
+# Commands that change the folder the commands after them run in; `popd`
+# cannot before a `pushd`, as each command starts with an empty stack.
+_FOLDER_COMMANDS = ("cd", "pushd")
 
 
-def _changes_folder(found: shell_syntax.SimpleCommand) -> bool:
-    """Whether *found* moves the commands after it out of the starting
-    folder: ``cd``, ``pushd`` / ``popd``, or ``env -C`` / ``--chdir``."""
-    if found.name in ("cd", "pushd", "popd"):
-        return True
-    return found.name == "env" and any(
-        re.match(r"-[i0v]*C", value)
-        or (len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0]))
-        for value in (
-            str(token["value"]) if token is not None else arg
-            for arg, token in zip(found.args, found.tokens, strict=True)
-        )
+def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:
+    """Whether an ``env`` runs its command in another folder: ``-C`` (also
+    clustered, ``-iC``) or ``--chdir`` among env's own options."""
+    skip = False
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if skip:
+            skip = False
+        elif re.match(r"-[i0v]*C", value) or (
+            len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0])
+        ):
+            return True
+        elif value in ("-u", "--unset", "-S", "--split-string"):
+            skip = True
+        elif not (value.startswith("-") or shell_syntax.ASSIGNMENT_RE.match(value)):
+            return False  # env's command: its options are its own
+    return False
+
+
+def _commands_in_starting_folder(command: str) -> list[shell_syntax.SimpleCommand]:
+    """The commands of *command* that run in the folder it starts in: the
+    ones written before its first ``cd`` or ``pushd`` in
+    command-name position (with the code they run), less the commands an
+    ``env -C`` runs. A folder change inside a substitution or a subshell
+    also ends them, which misses a removal rather than refusing one."""
+    words = shell_syntax.parse(command)
+    cut = next(
+        (
+            int(token["start"])
+            for token, is_name in zip(words.tokens, words.name_flags, strict=True)
+            if is_name
+            and re.split(r"[\\/]", str(token["value"]))[-1] in _FOLDER_COMMANDS
+        ),
+        len(command),
     )
+    found: list[shell_syntax.SimpleCommand] = []
+    elsewhere: tuple[str, ...] | None = None  # the wrappers of an `env -C`'s command
+    for each in shell_syntax.simple_commands(command[:cut]):
+        if elsewhere is not None and each.via[: len(elsewhere)] == elsewhere:
+            continue
+        elsewhere = (
+            (*each.via, "env")
+            if each.name == "env" and _env_changes_folder(each)
+            else None
+        )
+        found.append(each)
+    return found
 
 
 def _recursive_rm_operands(
@@ -1363,8 +1397,10 @@ def validate_command(
             absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
             and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
             enforced.
-        workspace_root: The workspace; ``cd`` may enter it, and a destructive
-            pattern whose target lies strictly inside it is allowed.
+        workspace_root: The workspace; ``cd`` may enter it, a destructive
+            pattern whose target lies strictly inside it is allowed, and the
+            relative operands of a recursive rm that runs before any ``cd``
+            are resolved against it.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1429,26 +1465,16 @@ def validate_command(
                 f"All commands must operate within the workspace directory. "
                 f"Use relative paths (e.g., './file.py') instead."
             )
-    # Every absolute operand of a recursive rm, however it is spelled, and a
-    # literal relative one while the command still runs in the workspace root.
+    # Every absolute operand of a recursive rm, however it is spelled.
     if not dangerous and workspace_root:
-        moved = False
         for found in commands:
-            moved = moved or _changes_folder(found)
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
                 bare = path.lstrip("'\"")
                 if _is_home_word(operand):
                     problem = "outside"
                 elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
-                    # Only a protected folder: `rm -rf .` is refused by rm itself.
-                    if moved or token is None or _EXPANDING_RE.search(path):
-                        continue
-                    problem = _removal_problem(
-                        f"{workspace_root}/{path}", workspace_root, protected
-                    )
-                    if problem != "protected":
-                        continue
+                    continue
                 elif token is None:
                     problem = "outside"  # glued to a substitution
                 else:
@@ -1461,6 +1487,20 @@ def validate_command(
                         f"outside the workspace or may expand there. Remove a "
                         f"path inside the workspace (e.g., './build')."
                     )
+        # A relative operand of an rm that runs in the workspace root: only a
+        # protected folder is refused (rm itself refuses `.`), and a first
+        # segment that expands may be anything, so it is left alone.
+        for found in _commands_in_starting_folder(command):
+            for operand, token in _recursive_rm_operands(found):
+                path = _removal_target(token) if token is not None else operand
+                bare = path.lstrip("'\"")
+                if token is None or bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
+                    continue
+                problem = _removal_problem(
+                    f"{workspace_root}/{path}", workspace_root, protected
+                )
+                if problem == "protected":
+                    return _protected_removal_error(operand)
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:

@@ -940,6 +940,17 @@ class TestWorkspaceRemovalAndComments:
             "echo hi; rm -rf skills",
             "rm '-r' skills",
             "bash -c 'rm -rf skills'",
+            "rm -rf skills/*",
+            "rm -rf 'skills/*'",
+            "rm -rf media/$X",
+            "rm -rf skills/{a,b}",
+            "bash -c 'rm -rf skills'; cd build",
+            'echo "$(rm -rf skills)"; cd build',
+            "bash -c 'cd build'; rm -rf skills",
+            "env -C build make; rm -rf skills",
+            "env -iC build make; rm -rf skills",
+            "env make -C build; rm -rf skills",
+            "env FOO=1 tar -C out -xf a.tar; rm -rf skills",
         ],
     )
     @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
@@ -965,7 +976,11 @@ class TestWorkspaceRemovalAndComments:
             "cd build && rm -rf skills",
             "pushd build && rm -rf skills",
             "env -C build rm -rf skills",
+            "env -iC build rm -rf skills",
             "env --chdir=build rm -rf skills",
+            "env --ch build rm -rf skills",
+            "(cd build; rm -rf skills)",
+            "rm -rf skill* {build,dist}",
         ],
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
