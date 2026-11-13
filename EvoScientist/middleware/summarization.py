@@ -40,7 +40,9 @@ from deepagents.middleware.summarization import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables.retry import RunnableRetry
+from langgraph.constants import TAG_NOSTREAM
 
+from .. import paths
 from ..llm.context_window import get_context_window, resolve_context_window
 from ..llm.registry import UnknownModelError
 from .configurable_model import _read_model_override
@@ -98,6 +100,21 @@ class _ProfileWindowShim:
         return getattr(target, name)
 
 
+def _streamed(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop langchain's ``nostream`` tag so a summary shows while it is written.
+
+    The server keeps the tag: its clients would read the summary as reply text.
+    """
+    if paths.SERVER_PROCESS:
+        return kwargs
+    config = kwargs.get("config")
+    tags = config.get("tags") if isinstance(config, dict) else None
+    if not tags or TAG_NOSTREAM not in tags:
+        return kwargs
+    kept = [tag for tag in tags if tag != TAG_NOSTREAM]
+    return {**kwargs, "config": {**config, "tags": kept}}
+
+
 class _SummaryModelShim:
     """Invoke the synced run model for summaries, else the construction model.
 
@@ -127,10 +144,10 @@ class _SummaryModelShim:
         return state[0].with_retry()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        return self._target().invoke(*args, **kwargs)
+        return self._target().invoke(*args, **_streamed(kwargs))
 
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._target().ainvoke(*args, **kwargs)
+        return await self._target().ainvoke(*args, **_streamed(kwargs))
 
 
 class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
@@ -220,15 +237,21 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             truncate_args_settings=defaults["truncate_args_settings"],
         )
         self._construction_model: Any = construction_model
-        # Captured before any shim wraps it, so racing installers never nest shims.
+        # Upstream's summary model: the construction model under its retry policy.
         self._upstream_summary_model: Any = self._lc_helper._summary_model
         # Per-task synced state: ``(target_model, resolved_window)`` or None.
         # The default is None and __init__ never sets it — "no override synced
         # in this task" means stock delegation semantics (see
         # ``_get_profile_limits`` / ``_input_budget``), so middleware
-        # instances that never see an override behave exactly like stock.
+        # instances that never see an override keep the stock limits.
         self._synced_state: contextvars.ContextVar[tuple[Any, int] | None] = (
             contextvars.ContextVar("evo_summarization_synced_state", default=None)
+        )
+        # In place from the start, so a run without an override streams its
+        # summary too; until a run syncs a model it calls the one above.
+        self._lc_helper._summary_model = _SummaryModelShim(
+            self._synced_state,
+            self._upstream_summary_model,
         )
         # Keyed by the resolved context window, not the model object: real
         # chat models are unhashable pydantic objects, and the limits are a
@@ -283,10 +306,6 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             window_shim = _ProfileWindowShim(
                 self._synced_state,
                 self._construction_model,
-            )
-            self._lc_helper._summary_model = _SummaryModelShim(
-                self._synced_state,
-                self._upstream_summary_model,
             )
             # langchain sizes the summary call's overflow retry from this model's profile.
             self._lc_helper._summary_chat_model = window_shim

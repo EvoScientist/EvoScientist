@@ -408,6 +408,7 @@ def test_auto_approve_still_includes_ask_user_middleware(
     mock_config, mock_model, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = True
     cfg.auto_approve = True
     cfg.auto_mode = False
@@ -431,6 +432,7 @@ def test_auto_mode_disables_ask_user_middleware(
     mock_config, mock_model, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = True
     cfg.auto_approve = True
     cfg.auto_mode = True
@@ -463,6 +465,7 @@ def test_for_async_subagent_omits_ask_user_middleware(
     has globally enabled ``ask_user``.
     """
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = True
     cfg.auto_approve = False
     cfg.auto_mode = False

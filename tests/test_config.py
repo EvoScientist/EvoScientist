@@ -808,6 +808,25 @@ class TestPriorityChain:
             == 300
         )
 
+    def test_code_interpreter_timeout_invalid_falls_back(self):
+        """A non-positive value would stop every agent build."""
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=0).code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=-5).code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout="abc").code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=2.5).code_interpreter_timeout
+            == 2.5
+        )
+
     def test_backend_allowed_origins_yaml_list_normalized_to_csv(self):
         config = EvoScientistConfig(
             backend_allowed_origins=["https://a.example", "https://b.example"]
