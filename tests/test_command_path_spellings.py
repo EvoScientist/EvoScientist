@@ -661,6 +661,10 @@ def test_allowed_path_word_with_only_workspace_paths_still_runs(
         ("/tmp/my project/a.csv,/tmp/my project/b.csv,/etc/passwd", False),
         ("/tmp/my project/a.csv,/etc/passwd,/tmp/my project/b.csv", False),
         ("/tmp/my project/a.csv,/tmp/my projectX/b.csv", False),
+        ("/tmp/my project/a.csv,/dev/null", True),
+        ("/tmp/my project/a.csv,/dev/null,/etc/passwd", False),
+        ('/tmp/my project/a.csv,/e""tc/passwd', False),
+        ('/tmp/my project/a.csv,/h""ome/u/b.csv', False),
     ],
 )
 def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
@@ -670,6 +674,15 @@ def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
         f'python x.py --files="{files}"', allow_prefixes=("/tmp/my project",)
     )
     assert (error is None) is allowed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("later", ['/e""tc/passwd', '/et""c/shadow', '/h""ome/u/b.csv'])
+def test_quote_split_system_path_after_allowed_folder_is_refused(later):
+    from EvoScientist.backends import validate_command
+
+    command = f'python x.py --files="/tmp/work/a.csv,{later}"'
+    assert validate_command(command, allow_prefixes=("/tmp/work",)) is not None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")

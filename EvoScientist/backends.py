@@ -1130,25 +1130,38 @@ def _extract_all_paths(
         value = str(token["value"])
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
-        if (
+        # A system path later in the word, outside the allowed folders. Read
+        # from the decoded value, so quote-split spellings (`/e""tc`) count.
+        later_system_path = next(
             (
-                path.startswith("/")
-                or (_is_windows() and PureWindowsPath(path).is_absolute())
-            )
-            and _under_any(path, allow_prefixes)
-            and not re.search(r"[$`;\n|&<>]|\s/", path)
-            and not any(
-                path_re.match(path, i) and not _under_any(path[i:], allow_prefixes)
+                found[1]
                 for i in range(1, len(path))
-            )
+                if (found := path_re.match(path, i))
+                and not _under_any(path[i:], allow_prefixes)
+                and found[1] not in _PASSTHROUGH_DEVICE_PATHS
+            ),
+            None,
+        )
+        starts_allowed = (
+            path.startswith("/")
+            or (_is_windows() and PureWindowsPath(path).is_absolute())
+        ) and _under_any(path, allow_prefixes)
+        if (
+            starts_allowed
+            and not re.search(r"[$`;\n|&<>]|\s/", path)
+            and later_system_path is None
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths,
             # nor a word with a second system path later in it
             # (`<root>/a.csv,/home/u/b.csv`, `<root>/{..,a}/etc/passwd`).
-            # A later path that is itself allowed (`<root>/a,<root>/b`) is fine.
+            # A later path that is itself allowed (`<root>/a,<root>/b`) or a
+            # passthrough device (`<root>/a,/dev/null`) is fine.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
+        elif starts_allowed and later_system_path is not None:
+            # The raw scan below misses it when quotes split it.
+            paths.append(later_system_path)
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))
