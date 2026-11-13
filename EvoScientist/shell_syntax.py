@@ -36,7 +36,7 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
 # Long shell options whose value is the next word.
 _SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file"})
 # Short option letters that take the next word, also inside a cluster
-# (``-euo pipefail``). Only bash's ``-O`` takes a shopt name: zsh's is a flag,
+# (``-euo pipefail``); zsh's -o takes the rest of its word when there is one. Only bash's ``-O`` takes a shopt name: zsh's is a flag,
 # so ``zsh -O -c 'x'`` runs ``x``.
 _SHELL_LETTERS_WITH_VALUE = {"bash": "oO", "sh": "oO"}
 
@@ -596,12 +596,19 @@ def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
         elif value.startswith("--"):
             skip = int(value in _SHELL_LONG_OPTIONS_WITH_VALUE)
         elif value[:1] in ("-", "+") and len(value) > 1:
+            cluster = value[1:]
+            if shell == "zsh" and "o" in cluster[:-1]:
+                # zsh takes the rest of the word as the -o value
+                # (``-opipefail``) and the next word only after a bare o
+                cluster = cluster[: cluster.index("o") + 1]
+                skip = 0
+            else:
+                skip = sum(c in with_value for c in cluster)
             if value[0] == "+":
                 # +n undoes -n
-                letters = "".join(c for c in letters if c not in value[1:])
+                letters = "".join(c for c in letters if c not in cluster)
             else:
-                letters += value[1:]
-            skip = sum(c in with_value for c in value[1:])
+                letters += cluster
         else:
             return position, letters
     return None, letters
