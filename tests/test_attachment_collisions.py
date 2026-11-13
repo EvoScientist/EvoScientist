@@ -22,7 +22,11 @@ async def receive_signal(
                         "attachments": [
                             {
                                 "file": str(sources[i]),
-                                **({"filename": "image.jpeg"} if named else {}),
+                                **(
+                                    {"filename": "image.jpeg"}
+                                    if named
+                                    else ({}, {"filename": None})[i]
+                                ),
                             }
                             for i in attachment_indexes
                         ],
@@ -62,13 +66,13 @@ async def receive_qq(channel, message_index, attachment_indexes, sources):
 
 
 async def receive_dingtalk(
-    channel, message_index, attachment_indexes, sources, content_only=False
+    channel, message_index, attachment_indexes, sources, content_only=False, named=True
 ):
     keys = ["content"] if content_only else ["imageContent", "fileContent"]
     payload = {"senderStaffId": "sender", "msgtype": "image"}
     for key, i in zip(keys, attachment_indexes, strict=False):
         payload[key] = {
-            "fileName": "image.jpeg",
+            "fileName": "image.jpeg" if named else None,
             "downloadUrl": f"https://example.com/{i}",
         }
     await channel._on_ws_message(
@@ -82,6 +86,12 @@ async def receive_dingtalk(
 
 async def receive_signal_unnamed(channel, message_index, attachment_indexes, sources):
     await receive_signal(
+        channel, message_index, attachment_indexes, sources, named=False
+    )
+
+
+async def receive_dingtalk_unnamed(channel, message_index, attachment_indexes, sources):
+    await receive_dingtalk(
         channel, message_index, attachment_indexes, sources, named=False
     )
 
@@ -107,6 +117,7 @@ async def receive_dingtalk_content(channel, message_index, attachment_indexes, s
             ("imessage", receive_imessage),
             ("qq", receive_qq),
             ("dingtalk", receive_dingtalk),
+            ("dingtalk_unnamed", receive_dingtalk_unnamed),
             ("dingtalk_content", receive_dingtalk_content),
         )
         for same_message in (False, True)
@@ -132,6 +143,7 @@ async def test_same_named_attachments_keep_their_bytes(
         ),
         "qq": lambda: QQChannel(QQConfig()),
         "dingtalk": lambda: DingTalkChannel(DingTalkConfig()),
+        "dingtalk_unnamed": lambda: DingTalkChannel(DingTalkConfig()),
         "dingtalk_content": lambda: DingTalkChannel(DingTalkConfig()),
     }
     channel = channels[channel_name]()
@@ -180,7 +192,7 @@ async def test_same_named_attachments_keep_their_bytes(
         p.name.startswith(prefix) and not p.name.startswith(prefix * 2) for p in paths
     )
     assert all(p.parent == media_dir for p in paths)
-    if channel_name != "signal_unnamed":
+    if channel_name not in {"signal_unnamed", "dingtalk_unnamed"}:
         assert all(p.suffix == ".jpeg" for p in paths)
 
 
