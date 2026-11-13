@@ -3234,6 +3234,8 @@ class TestProcessKillByName:
             "lsof -t -i :8000 | while read -- p; do kill $p; done",
             'export "PID=$(lsof -t -i :8000)"; kill "$PID"',
             "declare 'PID'=$(lsof -t -i :8000); kill $PID",
+            "read 'p[0]' < <(lsof -t -i :8000); kill \"${p[0]}\"",
+            "read p[i] < <(lsof -t -i :8000); kill ${p[i]}",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])

@@ -1335,7 +1335,12 @@ def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
             if letter == "a" and found.name == "read":
                 names.append(target)
             break
-    names = [name for name in names if re.fullmatch(r"[A-Za-z_]\w*", name)]
+    # `read 'p[0]'` sets an element of the array `p`.
+    names = [
+        match[1]
+        for match in (re.fullmatch(r"([A-Za-z_]\w*)(?:\[[^\]]*\])?", n) for n in names)
+        if match is not None
+    ]
     return names or [default]
 
 
