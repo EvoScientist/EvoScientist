@@ -317,3 +317,119 @@ def test_state_partial_discard_preserves_contiguous_resumed_text():
     ]:
         state.handle_event(event)
     assert state.response_text == "Before.\n\nKept. Good"
+
+
+@pytest.mark.asyncio
+async def test_selector_finish_flush_keeps_text_in_its_original_message():
+    from EvoScientist.stream.sink import SessionEventSink
+
+    sink = SessionEventSink()
+    sink.on_tool_selection_started(30)
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Kept."),
+                message_finish(),
+                message_delta("Answer: "),
+                message_delta("{x"),
+                message_finish(),
+            ]
+        ),
+        events=sink,
+    )
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == next(e for e in out if e["type"] == "done")["response"]
+    assert text == "Kept.\n\nAnswer: {x"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_messages_keep_distinct_paragraphs():
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry, _V3EventProcessor
+    from tests.fakes.stream_v3 import protocol_event
+
+    processor = _V3EventProcessor(
+        StreamEventEmitter(),
+        _SubagentRegistry(),
+        None,
+        existing_messages=[],
+        process_value_messages=True,
+    )
+    out = await processor.process(
+        protocol_event(
+            "values",
+            {
+                "messages": [
+                    {"type": "ai", "id": "a1", "content": "Checking."},
+                    {"type": "ai", "id": "a2", "content": "Done."},
+                ]
+            },
+        )
+    )
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == processor.full_response == "Checking.\n\nDone."
+
+
+def test_rich_loop_reply_keeps_paragraph_between_approval_rounds(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from EvoScientist.stream import display as display_mod
+    from tests.fakes.common import FakeGraphGateway, interrupt_event
+
+    rounds = [
+        [{"type": "text", "content": "Let me check the logs."}, interrupt_event(1)],
+        [
+            {"type": "text", "content": "The run failed."},
+            {"type": "done", "content": "The run failed."},
+        ],
+    ]
+
+    async def stream(_request):
+        for event in rounds.pop(0):
+            yield event
+
+    monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+    reply = display_mod._run_streaming(
+        agent=MagicMock(),
+        message="go",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        gateway=FakeGraphGateway(stream=stream),
+    )
+    assert reply == "Let me check the logs.\n\nThe run failed."
+
+
+@pytest.mark.asyncio
+async def test_root_rubric_separator_does_not_inflate_child_retry_discard():
+    from tests.fakes.stream_v3 import (
+        FakeSubagent,
+        custom_subagent_event,
+        model_call_end,
+        model_call_start,
+        retry_event,
+    )
+
+    child = ("tools:research",)
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                message_delta("Draft."),
+                message_finish(),
+                model_call_start("child-1", namespace=child),
+                message_delta("Child text.", namespace=child),
+                custom_subagent_event(
+                    {"type": "rubric_evaluation_end", "result": "needs_revision"},
+                    namespace=child,
+                ),
+                model_call_end("child-1", "failed", namespace=child),
+                retry_event(namespace=child),
+            ],
+            subagents=[FakeSubagent(child, "research")],
+        )
+    )
+    retry = next(event for event in out if event["type"] == "model_retry")
+    assert retry["discarded"]["text_chars"] == len("Child text.")
+    assert next(event for event in out if event["type"] == "done")["response"] == (
+        "Draft.\n\n"
+    )
