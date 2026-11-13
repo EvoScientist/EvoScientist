@@ -653,6 +653,25 @@ def test_allowed_path_word_with_only_workspace_paths_still_runs(
     assert prepare_sandbox_command(command, str(root))[1] is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    ("files", "allowed"),
+    [
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv", True),
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv,/etc/passwd", False),
+        ("/tmp/my project/a.csv,/etc/passwd,/tmp/my project/b.csv", False),
+        ("/tmp/my project/a.csv,/tmp/my projectX/b.csv", False),
+    ],
+)
+def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
+    from EvoScientist.backends import validate_command
+
+    error = validate_command(
+        f'python x.py --files="{files}"', allow_prefixes=("/tmp/my project",)
+    )
+    assert (error is None) is allowed
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
 def test_execute_mapped_path_after_cd_in_spaced_workspace(tmp_path):
     from EvoScientist.backends import CustomSandboxBackend
