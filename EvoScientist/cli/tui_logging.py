@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-import threading
 import warnings
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from time import monotonic
 from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
@@ -17,53 +17,90 @@ if TYPE_CHECKING:
 
 
 class TUIWarningHandler(logging.Handler):
-    """Notify on the app thread, remembering only the last 256 distinct messages."""
+    """Notify from any thread, remembering only the last 256 distinct messages."""
 
-    def __init__(self, app: App, handlers: list[logging.Handler]) -> None:
+    def __init__(
+        self,
+        app: App,
+        handlers: list[logging.Handler],
+        *,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
         super().__init__()
         self.app = app
         self.handlers = handlers
-        self.app_thread = threading.get_ident()
-        self.seen: OrderedDict[str, None] = OrderedDict()
+        self.clock = clock
+        self.seen: OrderedDict[tuple[int, str], None] = OrderedDict()
+        self._last_toast: dict[str, float] = {}
+        self._pending: list[logging.LogRecord] = []
         self.active = True
-
-    def createLock(self) -> None:
-        # call_from_thread waits for the UI. Holding a handler lock here would
-        # deadlock if the UI logs too; deduplication happens only on the UI.
-        self.lock = None
 
     def _forward(self, record: logging.LogRecord) -> None:
         for handler in self.handlers:
             if record.levelno >= handler.level:
                 handler.handle(record)
 
-    def _notify(self, record: logging.LogRecord) -> None:
+    def _notify(self, record: logging.LogRecord) -> bool:
+        """Post the warning to the app; False if the app refused it."""
         if not self.active:
-            self._forward(record)
-            return
+            return False
+        from textual.notifications import Notification, Notify
+
         from .commands import _grader_failure_on_one_line
 
         if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
             record = _grader_failure_on_one_line(record)
         message = record.getMessage()
-        if message in self.seen:
-            return
-        self.seen[message] = None
+        # Keyed by level too, so an earlier warning never hides the same error.
+        key = (record.levelno, message)
+        if key in self.seen:
+            return True
+        throttle = getattr(record, "notify_throttle", None)
+        if throttle is not None and record.levelno < logging.ERROR:
+            # Records that opt in (a retry loop) toast once per key every 20 s;
+            # errors and every other warning are never throttled.
+            now = self.clock()
+            last = self._last_toast.get(throttle)
+            if last is not None and now - last < 20:
+                # Throttled records are neither toasted nor forwarded into TUI stdout.
+                return True
+            self._last_toast[throttle] = now
+        self.seen[key] = None
         if len(self.seen) > 256:
             self.seen.popitem(last=False)
-        self.app.notify(message, severity="warning", timeout=20, markup=False)
+        # App.notify drops post_message's result; a closing app refuses the post.
+        severity = "error" if record.levelno >= logging.ERROR else "warning"
+        notification = Notification(message, severity=severity, timeout=20)
+        return self.app.post_message(Notify(notification))
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.levelno != logging.WARNING or not self.active:
-            self._forward(record)
-        elif threading.get_ident() == self.app_thread:
-            self._notify(record)
-        else:
-            try:
-                self.app.call_from_thread(self._notify, record)
-            except RuntimeError:
-                # Textual rejects the hop once its event loop has stopped.
+        with self.lock:
+            if not self.active:
                 self._forward(record)
+            elif self._stopping():
+                self._pending.append(record)
+            elif record.levelno < logging.WARNING:
+                self._forward(record)
+            else:
+                try:
+                    posted = self._notify(record)
+                except RuntimeError:
+                    # The event loop closed between the check and the post.
+                    posted = False
+                if not posted:
+                    self._pending.append(record)
+
+    def _stopping(self) -> bool:
+        # Once exit() has queued its stop marker, a posted notification is
+        # never shown, though is_running stays true until the loop ends.
+        # Relies on Textual's private App._exit (pinned textual<8.2.7); recheck on bump.
+        # _exiting is set by the TUI before it stops channels.
+        app = self.app
+        return (
+            not app.is_running
+            or getattr(app, "_exit", False)
+            or getattr(app, "_exiting", False)
+        )
 
 
 @contextmanager
@@ -89,7 +126,13 @@ def tui_warning_notifications(app: App) -> Iterator[None]:
         warnings.showwarning = show_warning
         yield
     finally:
-        handler.active = False
-        warnings.showwarning = showwarning
-        root.handlers = handlers
-        handler.close()
+        with handler.lock:
+            handler.active = False
+            warnings.showwarning = showwarning
+            root.handlers = handlers
+            pending, handler._pending = handler._pending, []
+        try:
+            for record in pending:
+                handler._forward(record)
+        finally:
+            handler.close()

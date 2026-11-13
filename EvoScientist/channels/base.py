@@ -925,7 +925,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             )
             _logger.warning(
                 f"{self.name} send retry {info.attempt}/{info.max_attempts} "
-                f"in {info.delay_s:.2f}s: {info.error}"
+                f"in {info.delay_s:.2f}s: {info.error}",
+                extra={"notify_throttle": f"{self.name}.send"},
             )
 
         return await retry_async(
