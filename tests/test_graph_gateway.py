@@ -4066,24 +4066,54 @@ async def test_cancel_many_failure_keeps_server_registry_for_retry():
     client.threads.delete.assert_not_awaited()
 
 
-async def test_cancel_not_found_is_not_reported_as_missing_thread():
-
-    error = NotFoundError(
-        "run gone",
+def _cancel_not_found():
+    return NotFoundError(
+        "not found",
         response=httpx.Response(
             404, request=httpx.Request("GET", "http://localhost/runs")
         ),
         body=None,
     )
+
+
+async def test_runs_ending_before_cancel_still_delete_the_thread():
     client = SimpleNamespace(
-        runs=SimpleNamespace(list=AsyncMock(side_effect=error)),
+        runs=SimpleNamespace(
+            list=AsyncMock(return_value=[{"run_id": "r1"}]),
+            cancel_many=AsyncMock(side_effect=_cancel_not_found()),
+        ),
         threads=SimpleNamespace(delete=AsyncMock()),
     )
-    with pytest.raises(NotFoundError):
+    assert await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.runs.cancel_many.assert_awaited_once()
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_thread_gone_before_cancel_still_attempts_delete_and_returns_false():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=_cancel_not_found())),
+    )
+    assert not await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_cancel_list_not_found_does_not_hide_later_server_delete_error():
+    error = RuntimeError("delete unavailable")
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=error)),
+    )
+    with pytest.raises(RuntimeError) as raised:
         await LangGraphServerThreadStore(client=client).delete_thread(
             "11111111-1111-1111-1111-111111111111"
         )
-    client.threads.delete.assert_not_awaited()
+    assert raised.value is error
+    client.threads.delete.assert_awaited_once()
 
 
 async def test_server_gateway_delete_rejects_other_graph_before_cancellation():
