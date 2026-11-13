@@ -37,7 +37,6 @@ def _config(**overrides):
         "openai_auth_mode": "api_key",
         "log_level": "warning",
         "langgraph_dev_jobs_per_worker": 10,
-        "langgraph_dev_file_persistence": True,
         "dangerous_mode": False,
     }
     base.update(overrides)
