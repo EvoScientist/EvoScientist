@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -1083,9 +1083,10 @@ def _attached_path_word(raw: str) -> tuple[str, str] | None:
     """Split a literal option/assignment prefix from its absolute path."""
     if _is_search_path_assignment(raw):
         return None
-    match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)(/.*)", raw)
+    path_pattern = r"((?:/|[A-Za-z]:[\\/]).*)" if _is_windows() else r"(/.*)"
+    match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)" + path_pattern, raw)
     if match is None:
-        match = re.fullmatch(r"(-[A-Za-z])(/.*)", raw)
+        match = re.fullmatch(r"(-[A-Za-z])" + path_pattern, raw)
     return (match[1], match[2]) if match is not None else None
 
 
@@ -1129,8 +1130,11 @@ def _extract_all_paths(
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
         if (
-            path.startswith("/")
-            and _is_under_allowed_prefix(path, allow_prefixes)
+            (
+                path.startswith("/")
+                or (_is_windows() and PureWindowsPath(path).is_absolute())
+            )
+            and _under_any(path, allow_prefixes)
             and not re.search(r"[$`;\n|&<>]|\s/", path)
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
