@@ -36,8 +36,9 @@ Routing table (read = local, execute = langgraph server):
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
   go to the server, where runs and background processes live.
-- ``delete_thread`` fans out to both stores; success if either deleted, so a
-  thread that only exists in one store is still removed without error.
+- ``delete_thread`` fans out to both stores; success if either deleted and
+  neither raised. Partial cleanup is reported to the caller with a full-id
+  retry command, rather than hidden behind a successful local deletion.
 
 **Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
 ids, so a legacy thread can never be registered or executed server-side. Reads
@@ -188,16 +189,13 @@ class CompositeGraphGateway:
         if _is_uuid(thread_id):
             try:
                 exec_ok = await self._execute.delete_thread(thread_id, target)
-            except Exception:  # a server error must not override the local result
-                # WARNING: a successful local delete still returns True although
-                # the server may keep the thread.
-                logger.warning(
-                    "composite: server-side delete failed for thread %s; "
-                    "local delete %s",
-                    thread_id,
-                    "succeeded" if read_ok else "failed",
-                    exc_info=True,
-                )
+            except Exception as exc:
+                local_status = "succeeded" if read_ok else "found no local session"
+                raise RuntimeError(
+                    f"Local deletion {local_status}; server-side cleanup failed: "
+                    f"{exc}. The server may still have the thread or active runs. "
+                    f"Retry /delete {thread_id}."
+                ) from exc
         return read_ok or exec_ok
 
     # --- Execution ------------------------------------------------------------
