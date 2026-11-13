@@ -152,11 +152,17 @@ def _say(markup: str) -> None:
         console.print(markup)
 
 
+def _ignore(signum: int, frame: Any) -> None:
+    """A stop signal after the first: the stop is already under way."""
+
+
 def _interrupt(signum: int, frame: Any) -> None:
     """End deploy as Ctrl+C does, with the signals that end it ignored from
-    now on, so a second one cannot cut the stop short."""
+    now on, so a second one cannot cut the stop short. Ignored by a no-op:
+    with ``SIG_IGN``, a second signal already pending prints an error."""
     for sig in _stop_signals():
-        signal.signal(sig, signal.SIG_IGN)
+        if signal.getsignal(sig) is _interrupt:
+            signal.signal(sig, _ignore)
     signal.default_int_handler(signum, frame)
 
 
@@ -199,7 +205,7 @@ def _stop_own_server(proc: subprocess.Popen | None) -> None:
     server = proc if proc is not None else lgm._PROCESS
     if server is None:
         return
-    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in _stop_signals()}
+    previous = {sig: signal.signal(sig, _ignore) for sig in _stop_signals()}
     try:
         _say("\n[dim]Stopping langgraph dev...[/dim]")
         # A server that never became ready has no run to put back in the

@@ -771,7 +771,7 @@ def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
 
     during = captured["stops"][0]["handlers"]
     for sig in deploy_server._stop_signals():
-        assert during[sig] is signal.SIG_IGN
+        assert during[sig] is deploy_server._ignore
         assert captured["signal_handlers"][sig] is signal.SIG_DFL
 
 
@@ -794,13 +794,58 @@ def test_deploy_interrupt_ignores_the_signals_that_follow(monkeypatch):
     ``ensure_server`` makes of a server it was starting."""
     import signal
 
-    handlers: dict = {}
+    stops = deploy_server._stop_signals()
+    handlers = dict.fromkeys(stops, deploy_server._interrupt)
     monkeypatch.setattr(signal, "signal", lambda sig, h: handlers.__setitem__(sig, h))
+    monkeypatch.setattr(signal, "getsignal", handlers.get)
 
     with pytest.raises(KeyboardInterrupt):
         deploy_server._interrupt(signal.SIGTERM, None)
 
-    assert handlers == dict.fromkeys(deploy_server._stop_signals(), signal.SIG_IGN)
+    assert handlers == dict.fromkeys(stops, deploy_server._ignore)
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("signal"), "SIGHUP"), reason="no SIGHUP on Windows"
+)
+def test_deploy_takes_two_stop_signals_at_once_quietly():
+    """A service manager's SIGTERM and SIGHUP land together: the second is
+    ignored without an error on stderr."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    # The child waits on stdin until both signals are sent.
+    script = (
+        "import sys\n"
+        "from EvoScientist.deploy import server\n"
+        "with server._stop_signals_interrupt():\n"
+        "    try:\n"
+        "        print('ready', flush=True)\n"
+        "        sys.stdin.readline()\n"
+        "    except KeyboardInterrupt:\n"
+        "        sys.stdin.readline()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout.readline() == "ready\n"
+        os.kill(proc.pid, signal.SIGTERM)
+        os.kill(proc.pid, signal.SIGHUP)
+        _, err = proc.communicate("\n", timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    assert proc.returncode == 0, err
+    assert err == ""
 
 
 def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path):
@@ -888,6 +933,8 @@ def test_deploy_stops_its_server_when_it_ends_before_serving(
 
     captured = _run_deploy_once.captured
     assert [s["proc"] for s in captured["stops"]] == captured["server"].procs
+    for sig in deploy_server._stop_signals():
+        assert captured["stops"][0]["handlers"][sig] is deploy_server._ignore
 
 
 def test_deploy_stops_the_server_a_start_left_when_interrupted(monkeypatch, tmp_path):
