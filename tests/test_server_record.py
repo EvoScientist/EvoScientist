@@ -126,17 +126,13 @@ def test_write_record_names_owner_of_server_it_does_not_outlive(
 
     server_record.write_record()
 
-    record = _read()
-    assert record[server_record.OWNER_PID_KEY] == 10
-    assert record[server_record.OWNER_CREATE_TIME_KEY] == 100.0
+    assert _read()[server_record.OWNER_PID_KEY] == 10
 
 
 def test_write_record_names_no_owner_of_lasting_server(server_env):
     server_record.write_record()
 
-    record = _read()
-    assert server_record.OWNER_PID_KEY not in record
-    assert server_record.OWNER_CREATE_TIME_KEY not in record
+    assert server_record.OWNER_PID_KEY not in _read()
 
 
 def test_write_record_names_no_owner_it_cannot_find(server_env, monkeypatch):

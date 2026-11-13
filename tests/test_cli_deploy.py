@@ -619,17 +619,8 @@ def test_deploy_points_to_server_stop_for_a_server_its_owner_left(
     from EvoScientist.langgraph_dev import server_record
 
     server = Server(monkeypatch, pid=99999)
-    server.run(
-        4242,
-        lasting=False,
-        **{
-            server_record.OWNER_PID_KEY: 77,
-            server_record.OWNER_CREATE_TIME_KEY: 50.0,
-        },
-    )
-    monkeypatch.setattr(
-        lgm.psutil, "pid_exists", lambda pid: pid in server.processes.live
-    )
+    server.run(4242, lasting=False, **{server_record.OWNER_PID_KEY: 77})
+    monkeypatch.setattr(lgm, "_parent_pid", lambda pid: None)
     printed: list = []
     with pytest.raises(typer.Exit):
         _run_deploy_once(

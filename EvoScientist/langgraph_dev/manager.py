@@ -808,31 +808,30 @@ def owned_by_its_starter(record: ServerRecord | None) -> bool:
 
 def owner_running(record: ServerRecord) -> bool:
     """Whether the process the record names as the server's owner still
-    runs: its PID is alive with the creation time recorded, or one that
-    cannot be read, or, since a clock step moves the creation time psutil
-    reports, another one while it still runs ``deploy``
-    (:func:`_runs_deploy`). A record that names no owner (an older release,
-    or an owner that could not be read) counts as running."""
-    pid = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
-    created = record.fields.get(server_record.OWNER_CREATE_TIME_KEY)
-    if pid is None or isinstance(created, bool) or not isinstance(created, int | float):
+    runs: it is still the parent of the process it started. A record that
+    names no owner (an older release), or a parent that cannot be read,
+    counts as running; a server that is gone, as not."""
+    owner = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
+    if owner is None:
         return True
-    if not psutil.pid_exists(pid):
-        return False
-    now = _create_time(pid)
-    if now is None or abs(now - created) <= _CREATE_TIME_TOLERANCE:
-        return True
-    return _runs_deploy(pid)
-
-
-def _runs_deploy(pid: int) -> bool:
-    """Whether *pid* runs ``EvoSci deploy`` (``--json`` for the desktop app
-    too); a command line that cannot be read counts as one."""
     try:
-        cmdline = _process_cmdline(pid)
+        return _parent_pid(record.pid) == owner
+    except psutil.NoSuchProcess:
+        return False
     except psutil.Error:
         return True
-    return cmdline is not None and "deploy" in cmdline
+
+
+def _parent_pid(pid: int) -> int | None:
+    """The PID of ``pid``'s parent. POSIX hands an orphan to another parent
+    at once; Windows keeps the PID of one that exited, so there None once
+    it did, even when its PID was reused since. Lets ``psutil.Error``
+    through."""
+    process = psutil.Process(pid)
+    if os.name != "nt":
+        return process.ppid()
+    parent = process.parent()
+    return parent.pid if parent is not None else None
 
 
 def _request_clean_stop(pid: int) -> bool:

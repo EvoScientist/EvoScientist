@@ -693,53 +693,31 @@ def test_stop_server_keep_owned_leaves_server_its_starter_owns(
     assert manager.owned_by_its_starter(manager.read_record()) is True
 
 
-def _owned_record(monkeypatch, *, owner_created: float) -> Processes:
-    """A server that ``EvoSci deploy`` (pid 77, created at 50) owns; the
-    owner runs only once the test adds it."""
-    processes = Processes(monkeypatch)
-    processes.add(4242)
-    monkeypatch.setattr(manager.psutil, "pid_exists", lambda pid: pid in processes.live)
-    write_record(
-        4242,
-        lasting=False,
-        **{
-            server_record.OWNER_PID_KEY: 77,
-            server_record.OWNER_CREATE_TIME_KEY: owner_created,
-        },
-    )
-    return processes
+def _owned_record(monkeypatch, *, parent: int | None) -> None:
+    """A server that ``EvoSci deploy`` (pid 77) started; *parent* is the
+    process psutil reports as the server's parent now."""
+    Processes(monkeypatch).add(4242)
+    monkeypatch.setattr(manager, "_parent_pid", lambda pid: parent)
+    write_record(4242, lasting=False, **{server_record.OWNER_PID_KEY: 77})
 
 
-@pytest.mark.parametrize(
-    "owner_now",
-    [
-        50.0,
-        # A clock step moved the creation time psutil reports; it still
-        # runs deploy.
-        55.0,
-    ],
-    ids=["same", "clock step"],
-)
 def test_stop_server_keep_owned_leaves_server_while_its_owner_runs(
-    monkeypatch, runtime_paths, owner_now
+    monkeypatch, runtime_paths
 ):
-    processes = _owned_record(monkeypatch, owner_created=50.0)
-    processes.add(77, created=owner_now, cmdline=["EvoSci", "deploy"])
+    _owned_record(monkeypatch, parent=77)
     monkeypatch.setattr(manager, "_end_server_tree", lambda *a, **k: None)
 
     with pytest.raises(manager.ServerKeptError):
         manager.stop_server(keep_owned=True)
 
 
-@pytest.mark.parametrize("owner", ["gone", "pid reused"])
+@pytest.mark.parametrize("parent", [None, 1], ids=["gone", "adopted"])
 def test_stop_server_keep_owned_stops_server_its_owner_left(
-    monkeypatch, runtime_paths, owner
+    monkeypatch, runtime_paths, parent
 ):
     """``EvoSci deploy`` was killed and left its server: nothing else would
     stop it."""
-    processes = _owned_record(monkeypatch, owner_created=50.0)
-    if owner == "pid reused":
-        processes.add(77, created=900.0, cmdline=["bash"])
+    _owned_record(monkeypatch, parent=parent)
     ended: list = []
     monkeypatch.setattr(
         manager, "_end_server_tree", lambda pid, *a, **k: ended.append(pid)
@@ -750,15 +728,52 @@ def test_stop_server_keep_owned_stops_server_its_owner_left(
     assert ended == [4242]
 
 
-def test_owner_running_when_its_creation_time_cannot_be_read(
-    monkeypatch, runtime_paths
+@pytest.mark.parametrize(
+    ("error", "running"),
+    [(psutil.AccessDenied, True), (psutil.NoSuchProcess, False)],
+    ids=["refused", "server gone"],
+)
+def test_owner_running_when_the_parent_cannot_be_read(
+    monkeypatch, runtime_paths, error, running
 ):
-    """A live owner PID whose creation time is unreadable counts as the owner."""
-    _owned_record(monkeypatch, owner_created=50.0)
-    monkeypatch.setattr(manager.psutil, "pid_exists", lambda pid: True)
-    monkeypatch.setattr(manager, "_create_time", lambda pid: None)
+    _owned_record(monkeypatch, parent=None)
+    record = manager.read_record()
 
-    assert manager.owner_running(manager.read_record()) is True
+    def unreadable(pid):
+        raise error(pid)
+
+    monkeypatch.setattr(manager, "_parent_pid", unreadable)
+
+    assert manager.owner_running(record) is running
+
+
+def test_parent_pid_is_the_owner_only_while_it_runs():
+    """A child outlives the process that started it: its parent is then the
+    process that adopted it, or none, never that PID."""
+    owner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            "print(os.getpid(), p.pid, flush=True); "
+            "sys.stdin.readline()",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    with owner:
+        creator, pid = map(int, owner.stdout.readline().split())
+        child = psutil.Process(pid)
+        try:
+            assert manager._parent_pid(child.pid) == creator
+            owner.stdin.close()
+            owner.wait(10)
+            assert manager._parent_pid(child.pid) != creator
+        finally:
+            with contextlib.suppress(psutil.Error):
+                child.kill()
 
 
 def test_stop_server_reaps_server_this_process_started(monkeypatch, runtime_paths):

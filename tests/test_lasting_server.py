@@ -466,7 +466,7 @@ def test_server_stop_points_to_itself_while_named_owner_runs(monkeypatch):
     from EvoScientist.langgraph_dev import server_record
 
     stopped = []
-    owner = {server_record.OWNER_PID_KEY: 77, server_record.OWNER_CREATE_TIME_KEY: 50.0}
+    owner = {server_record.OWNER_PID_KEY: 77}
     _recorded_server(monkeypatch, _record(lasting=False, fields=owner), stopped)
     monkeypatch.setattr(manager, "owner_running", lambda _record: True)
 
@@ -938,11 +938,11 @@ def test_server_stop_asks_before_stopping_busy_server_its_owner_left(
     the background server, so its work is asked about first."""
     from EvoScientist.langgraph_dev import server_record
 
-    owner = {server_record.OWNER_PID_KEY: 77, server_record.OWNER_CREATE_TIME_KEY: 50.0}
+    owner = {server_record.OWNER_PID_KEY: 77}
     monkeypatch.setattr(
         manager, "read_record", lambda **_k: _record(lasting=False, fields=owner)
     )
-    monkeypatch.setattr(manager.psutil, "pid_exists", lambda pid: pid != 77)
+    monkeypatch.setattr(manager, "_parent_pid", lambda pid: 1)
 
     result = CliRunner().invoke(app, ["server", "stop", *(["--yes"] if yes else [])])
 
