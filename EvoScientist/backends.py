@@ -1113,6 +1113,7 @@ def _extract_all_paths(
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
     path_assignments: list[tuple[int, int]] = []
+    allowed_path_words: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
     scripts = shell_syntax.shell_script_words(tokens)
     for token in tokens:
@@ -1124,6 +1125,18 @@ def _extract_all_paths(
             path_assignments.append((int(token["start"]), int(token["end"])))
             continue
         raw = str(token["raw"])
+        value = str(token["value"])
+        attached = _attached_path_word(value)
+        path = attached[1] if attached is not None else value
+        if (
+            path.startswith("/")
+            and _is_under_allowed_prefix(path, allow_prefixes)
+            and not re.search(r"[$`;\n|&<>]|\s/", path)
+        ):
+            # The raw regex splits spaced roots and quoted-root + /tmp
+            # concatenations. Keep a literal allowed path together, but do
+            # not exempt code or substitutions that can name other paths.
+            allowed_path_words.append((int(token["start"]), int(token["end"])))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))
@@ -1136,6 +1149,8 @@ def _extract_all_paths(
 
         shell_syntax.rewrite_substitutions(str(token["raw"]), collect_substitution)
     for m in path_re.finditer(command):
+        if any(start <= m.start(1) < end for start, end in allowed_path_words):
+            continue
         if any(start <= m.start() < end for start, end in path_assignments):
             continue
         # Skip paths that land at an executable-position offset
