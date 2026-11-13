@@ -136,3 +136,133 @@ def test_build_failure_names_the_graph(monkeypatch, tmp_path):
     monkeypatch.setitem(factories.BUILDERS, "scheduler", fail)
     with pytest.raises(RuntimeError, match=r"'scheduler' failed to build.*bad yaml"):
         factories._build("scheduler", SessionDirs(Workspace(tmp_path)))
+
+
+def test_graph_cache_rebuilds_when_the_mcp_generation_changes(
+    builds, monkeypatch, tmp_path
+):
+    """A graph built from a failed MCP load is rebuilt once the failed
+    server recovers and the tool cache bumps its generation (#696)."""
+    generation = {"value": 3}
+    monkeypatch.setattr(factories, "_mcp_tools_generation", lambda: generation["value"])
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+
+    first = graphs.get("EvoScientist", dirs)
+    assert graphs.get("EvoScientist", dirs) is first
+
+    generation["value"] = 4
+    rebuilt = graphs.get("EvoScientist", dirs)
+
+    assert rebuilt is not first
+    assert len(builds) == 2
+    assert graphs.get("EvoScientist", dirs) is rebuilt
+    assert len(builds) == 2
+
+
+def test_graph_cache_keeps_non_mcp_graphs_when_the_mcp_generation_changes(
+    builds, monkeypatch, tmp_path
+):
+    """Graphs that never read MCP tools are not rebuilt when the MCP
+    generation moves (a recovery only invalidates the MCP graphs)."""
+    generation = {"value": 3}
+    monkeypatch.setattr(factories, "_mcp_tools_generation", lambda: generation["value"])
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+
+    first = graphs.get("evomemory-observation-linker", dirs)
+    assert graphs.get("evomemory-observation-linker", dirs) is first
+
+    generation["value"] = 4
+    assert graphs.get("evomemory-observation-linker", dirs) is first
+    assert len(builds) == 1
+
+
+def _reset_mcp_cache_state() -> None:
+    """Reset the process-wide MCP cache state (also used as teardown)."""
+    import EvoScientist.EvoScientist as agent_module
+
+    agent_module._MCP_TOOLS_CACHE_KEY = None
+    agent_module._MCP_TOOLS_CACHE_VALUE = None
+    agent_module._MCP_TOOLS_CACHE_FAILED = set()
+    agent_module._MCP_TOOLS_CACHE_LAST_ATTEMPT = {}
+    agent_module._MCP_FAILED_SERVER_RETRY_DELAY = {}
+    agent_module._MCP_TOOLS_CACHE_GENERATION = 0
+
+
+def test_graph_for_retries_failed_mcp_servers_on_run_access(monkeypatch, tmp_path):
+    """A cache hit in ``GraphCache.get`` never reaches the MCP loader, so
+    the retry is triggered from ``_graph_for`` on a run access, using the
+    real loader and the real generation (#696).
+
+    First access builds the graph while ``flaky`` is down; a read access
+    must not retry; once ``flaky`` recovers, the next run access retries
+    it and the graph is rebuilt with its tools.
+    """
+    import EvoScientist.EvoScientist as agent_module
+
+    _reset_mcp_cache_state()
+    monkeypatch.setattr(agent_module, "_MCP_FAILED_SERVER_RETRY_SECONDS", 0.0)
+
+    behavior = {"good": "ok", "flaky": "fail"}
+    config = {
+        name: {"transport": "stdio", "command": f"demo-{name}"} for name in behavior
+    }
+    monkeypatch.setattr("EvoScientist.mcp.client.load_mcp_config", lambda: dict(config))
+    calls: list[dict] = []
+
+    def fake_load_mcp_tools(config=None, on_progress=None, **_kwargs):
+        calls.append(dict(config or {}))
+        routed: dict[str, list] = {}
+        for name in config or {}:
+            if behavior[name] == "fail":
+                if on_progress is not None:
+                    on_progress("error", name, "timed out")
+                continue
+            if on_progress is not None:
+                on_progress("success", name, "1")
+            routed.setdefault("main", []).append(f"tool-from-{name}")
+        return routed
+
+    monkeypatch.setattr("EvoScientist.mcp.load_mcp_tools", fake_load_mcp_tools)
+
+    builds: list[tuple[str, SessionDirs]] = []
+
+    def build(graph_id, dirs):
+        # Like the real main-graph build, loading MCP tools is part of
+        # building the graph.
+        agent_module._load_mcp_tools_cached()
+        builds.append((graph_id, dirs))
+        return object()
+
+    monkeypatch.setattr(factories, "_build", build)
+    graphs = GraphCache()
+    monkeypatch.setattr(factories, "GRAPHS", graphs)
+    dirs = SessionDirs(Workspace(tmp_path))
+    monkeypatch.setattr(factories, "resolve_folders", lambda *args: (dirs, None))
+
+    first, _stamp = factories._graph_for(
+        "EvoScientist", {"configurable": {}}, "threads.create_run"
+    )
+    assert agent_module._MCP_TOOLS_CACHE_FAILED == {"flaky"}
+    assert len(builds) == 1
+
+    # A read access must not wait on the network.
+    read, _stamp = factories._graph_for(
+        "EvoScientist", {"configurable": {}}, "threads.read"
+    )
+    assert read is first
+    assert agent_module._MCP_TOOLS_CACHE_FAILED == {"flaky"}
+    assert len(builds) == 1
+    assert len(calls) == 1
+
+    # The server recovers; the next run access retries it and rebuilds.
+    behavior["flaky"] = "ok"
+    second, _stamp = factories._graph_for(
+        "EvoScientist", {"configurable": {}}, "threads.create_run"
+    )
+    assert second is not first
+    assert len(builds) == 2
+    assert agent_module._MCP_TOOLS_CACHE_FAILED == set()
+    assert [sorted(c) for c in calls] == [["flaky", "good"], ["flaky"]]
+    _reset_mcp_cache_state()
