@@ -207,3 +207,33 @@ def test_literal_path_search_text_is_not_a_substitution(tmp_path, command):
     converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
     assert converted == command
     assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("prefix", ["", "--output=", "-o", "OUT="])
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_mixed_quoted_traversal_cannot_bypass_confinement(tmp_path, prefix, quote):
+    command = f"echo {prefix}/tmp/{quote}..{quote}/{quote}..{quote}/canary"
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert validate_command(converted, workspace_root=str(tmp_path)) is not None
+    assert validate_command(command, workspace_root=str(tmp_path)) is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell assignment")
+def test_mixed_quoted_assignment_cannot_read_outside_workspace(tmp_path):
+    from EvoScientist.backends import CustomSandboxBackend
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "canary").write_text("outside-workspace-canary")
+    backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+    result = backend.execute('F=/tmp/".."/".."/canary; cat "$F"')
+    assert result.exit_code != 0
+    assert "outside-workspace-canary" not in result.output
+    assert not (workspace / "tmp").exists()
+
+
+@pytest.mark.parametrize("component", [r"\.\.", "'.'.", '."."', "..''"])
+def test_shell_escaped_traversal_components_are_blocked(tmp_path, component):
+    command = f"OUT=/tmp/{component}/{component}/canary"
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert validate_command(converted, workspace_root=str(tmp_path)) is not None
