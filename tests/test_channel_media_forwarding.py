@@ -482,9 +482,26 @@ class TestOnlySandboxFilesAreSent:
 
 
 class TestRoutedPaths:
+    """A path under one of the agent's routes names that tier's file."""
+
+    def test_skill_write_never_falls_back_to_global_media(self, tmp_path):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        global_dir.mkdir()
+        (global_dir / "image.svg").write_text("global")
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+        assert backend.file_path("/image.svg", tool_name="write_file") is None
+        assert (
+            backend.file_path("/image.svg", tool_name="read_file")
+            == global_dir / "image.svg"
+        )
+
     @pytest.mark.parametrize("subagent", [False, True])
     async def test_skill_write_collision_forwards_primary_not_global(
-        self, workspace, monkeypatch, subagent
+        self, workspace, subagent
     ):
         from EvoScientist import paths
 
@@ -531,8 +548,6 @@ class TestRoutedPaths:
         file.write_text("builtin")
         backend = MergedSkillsBackend(str(primary), str(secondary))
         assert backend.file_path("/result.txt") == file
-
-    """A path under one of the agent's routes names that tier's file."""
 
     LOGO = "/skills/demo/assets/logo.svg"
 
@@ -614,12 +629,36 @@ class TestRoutedPaths:
 
 
 class TestSandboxDangerousMode:
-    def test_sandbox_mode_requires_explicit_captured_config(self):
-        from EvoScientist.gateway.local import LocalGraphGateway
-        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+    """Host paths are read as given only for a sandbox this session built."""
 
-        with pytest.raises(TypeError):
-            sandbox_dangerous_mode(LocalGraphGateway(thread_store=MagicMock()))
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_classic_cli_captures_config_before_building_gateway(
+        self, monkeypatch, workspace, explicit
+    ):
+        from EvoScientist.cli.interactive import cmd_interactive
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.paths import SessionDirs
+
+        snapshot = EvoScientistConfig(dangerous_mode=True)
+        effective = MagicMock(return_value=snapshot)
+        monkeypatch.setattr("EvoScientist.config.get_effective_config", effective)
+        monkeypatch.setattr(
+            "EvoScientist.cli.interactive.resolve_ui_backend", lambda *a, **kw: "cli"
+        )
+
+        class GatewayReached(Exception):
+            pass
+
+        def capture(config, surface):
+            assert config is snapshot
+            raise GatewayReached()
+
+        monkeypatch.setattr("EvoScientist.config.resolve_gateway_backend", capture)
+        with pytest.raises(GatewayReached):
+            cmd_interactive(
+                dirs=SessionDirs(workspace), config=snapshot if explicit else None
+            )
+        assert effective.call_count == (0 if explicit else 1)
 
     @pytest.mark.parametrize("dangerous", [False, True])
     def test_serve_uses_the_config_that_built_its_agent(self, monkeypatch, dangerous):
@@ -627,14 +666,14 @@ class TestSandboxDangerousMode:
         from EvoScientist.cli.commands import _serve_process_message
         from EvoScientist.config import EvoScientistConfig
         from EvoScientist.runtime import AsyncRuntime
-        from tests.fakes.serve import _runtime_state
+        from tests.fakes.serve import runtime_state
 
         config = EvoScientistConfig(dangerous_mode=dangerous)
         monkeypatch.setattr(
             "EvoScientist.config.get_effective_config",
             lambda: EvoScientistConfig(dangerous_mode=not dangerous),
         )
-        state = _runtime_state(config=config)
+        state = runtime_state(config=config)
         msg = ChannelMessage(
             msg_id="mode-change",
             content="hello",
@@ -714,8 +753,6 @@ class TestSandboxDangerousMode:
         )
         assert sent == []
 
-    """Host paths are read as given only for a sandbox this session built."""
-
     @staticmethod
     def _config(dangerous: bool):
         from types import SimpleNamespace
@@ -765,49 +802,3 @@ class TestSandboxDangerousMode:
             ),
         )
         assert _queued_media(await _consumer_turn(consumer)) == []
-
-
-@pytest.mark.parametrize("explicit", [False, True])
-def test_classic_cli_captures_config_before_building_gateway(
-    monkeypatch, workspace, explicit
-):
-    from EvoScientist.cli.interactive import cmd_interactive
-    from EvoScientist.config import EvoScientistConfig
-    from EvoScientist.paths import SessionDirs
-
-    snapshot = EvoScientistConfig(dangerous_mode=True)
-    effective = MagicMock(return_value=snapshot)
-    monkeypatch.setattr("EvoScientist.config.get_effective_config", effective)
-    monkeypatch.setattr(
-        "EvoScientist.cli.interactive.resolve_ui_backend", lambda *a, **kw: "cli"
-    )
-
-    class GatewayReached(Exception):
-        pass
-
-    def capture(config, surface):
-        assert config is snapshot
-        raise GatewayReached()
-
-    monkeypatch.setattr("EvoScientist.config.resolve_gateway_backend", capture)
-    with pytest.raises(GatewayReached):
-        cmd_interactive(
-            dirs=SessionDirs(workspace), config=snapshot if explicit else None
-        )
-    assert effective.call_count == (0 if explicit else 1)
-
-
-def test_skill_write_never_falls_back_to_global_media(tmp_path):
-    from EvoScientist.backends import MergedSkillsBackend
-
-    primary, global_dir, secondary = [
-        tmp_path / name for name in ("primary", "global", "builtin")
-    ]
-    global_dir.mkdir()
-    (global_dir / "image.svg").write_text("global")
-    backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
-    assert backend.file_path("/image.svg", tool_name="write_file") is None
-    assert (
-        backend.file_path("/image.svg", tool_name="read_file")
-        == global_dir / "image.svg"
-    )
