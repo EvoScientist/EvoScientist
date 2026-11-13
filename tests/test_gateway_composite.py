@@ -446,11 +446,11 @@ async def test_delete_legacy_local_only():
     assert not execute.called("delete_thread")
 
 
-async def test_delete_server_error_reports_partial_cleanup():
+async def test_delete_server_error_propagates_without_local_cleanup():
     read = RecordingGateway("r", delete_result=True)
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
-    with pytest.raises(RuntimeError, match=r"Local deletion succeeded.*boom"):
+    with pytest.raises(RuntimeError, match="boom"):
         await _composite(read, execute).delete_thread(UUID)
 
 
@@ -458,7 +458,7 @@ async def test_delete_server_error_after_a_missing_local_thread():
     read = RecordingGateway("r", delete_result=False)
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
-    with pytest.raises(RuntimeError, match=r"found no local session.*boom"):
+    with pytest.raises(RuntimeError, match="boom"):
         await _composite(read, execute).delete_thread(UUID)
 
 
@@ -581,3 +581,33 @@ def test_gateways_for_config_backend_none_falls_back_to_global():
         SimpleNamespace(gateway_backend="local"), backend=None
     )
     assert isinstance(gws.graph_gateway, LocalGraphGateway)
+
+
+async def test_server_delete_failure_keeps_local_checkpoints():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    execute.delete_raises = True
+    with pytest.raises(RuntimeError):
+        await _composite(read, execute).delete_thread(UUID)
+    assert not read.called("delete_thread")
+
+
+async def test_server_delete_finishes_before_local_cleanup():
+    order = []
+    read = RecordingGateway("r", delete_result=False)
+    execute = RecordingGateway("e", delete_result=True)
+    original_read = read.delete_thread
+    original_execute = execute.delete_thread
+
+    async def local_delete(*args):
+        order.append("local")
+        return await original_read(*args)
+
+    async def server_delete(*args):
+        order.append("server")
+        return await original_execute(*args)
+
+    read.delete_thread = local_delete
+    execute.delete_thread = server_delete
+    assert await _composite(read, execute).delete_thread(UUID)
+    assert order == ["server", "local"]
