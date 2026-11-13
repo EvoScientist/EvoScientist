@@ -55,6 +55,10 @@ SERVING = "serving"
 # end when this one is killed and leaves it running.
 CCPROXY_PID_KEY = "ccproxy_pid"
 CCPROXY_CREATE_TIME_KEY = "ccproxy_create_time"
+# The process that started a server which does not outlive it (``EvoSci
+# deploy``, the desktop app) and stops it: once that is gone, the server is
+# its leftover, which ``EvoSci server stop`` may stop.
+OWNER_PID_KEY = "owner_pid"
 
 # How far up from itself the server looks for the process its starter
 # started: on Windows ``langgraph.exe`` is a launcher whose child runs Python,
@@ -167,7 +171,7 @@ def _build() -> dict:
     lasting = os.environ.pop(LASTING_VAR, None)
     fingerprint = os.environ.pop(FINGERPRINT_VAR, None)
     process, found = _started_process()
-    os.environ.pop(SPAWNER_PID_VAR, None)
+    spawner = os.environ.pop(SPAWNER_PID_VAR, None)
     port, host = _address()
     record: dict = {
         "pid": process.pid,
@@ -183,6 +187,8 @@ def _build() -> dict:
     }
     if lasting is not None:
         record["lasting"] = lasting == "1"
+    if found and lasting == "0":
+        record[OWNER_PID_KEY] = int(spawner)
     if fingerprint:
         record["config_fingerprint"] = fingerprint
     return record

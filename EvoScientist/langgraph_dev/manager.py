@@ -800,8 +800,38 @@ def _refused_cause() -> str:
 def owned_by_its_starter(record: ServerRecord | None) -> bool:
     """Whether the recorded server is one that ``EvoSci deploy`` or the
     desktop app owns, not the background server: ``EvoSci server stop``
-    leaves it running. A record that does not say counts as not."""
-    return record is not None and record.lasting is False
+    leaves it running. A record that does not say counts as not. Once its
+    owner is gone (killed, or crashed) it is that owner's leftover, which
+    nothing else would stop (:func:`owner_running`)."""
+    return record is not None and record.lasting is False and owner_running(record)
+
+
+def owner_running(record: ServerRecord) -> bool:
+    """Whether the process the record names as the server's owner still
+    runs: it is still the parent of the process it started. A record that
+    names no owner (an older release), or a parent that cannot be read,
+    counts as running; a server that is gone, as not."""
+    owner = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
+    if owner is None:
+        return True
+    try:
+        return _parent_pid(record.pid) == owner
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
+
+
+def _parent_pid(pid: int) -> int | None:
+    """The PID of ``pid``'s parent. POSIX hands an orphan to another parent
+    at once; Windows keeps the PID of one that exited, so there None once
+    it did, even when its PID was reused since. Lets ``psutil.Error``
+    through."""
+    process = psutil.Process(pid)
+    if os.name != "nt":
+        return process.ppid()
+    parent = process.parent()
+    return parent.pid if parent is not None else None
 
 
 def _request_clean_stop(pid: int) -> bool:
@@ -1052,9 +1082,10 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
 
     *record* is what the caller read (``read_record(older=True)``); read here
     when not given. With *keep_owned* (``EvoSci server stop``), a server
-    that ``EvoSci deploy`` or the desktop app owns is left running:
-    :class:`ServerKeptError`. One the stop may not end (access refused) or
-    could not open is left running too: :class:`ServerStopFailedError`.
+    that ``EvoSci deploy`` or the desktop app owns is left running while
+    that owner runs (:func:`owned_by_its_starter`): :class:`ServerKeptError`.
+    One the stop may not end (access refused) or could not open is left
+    running too: :class:`ServerStopFailedError`.
     """
     if record is _UNREAD:
         record = read_record(older=True)
