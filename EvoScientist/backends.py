@@ -43,8 +43,9 @@ if TYPE_CHECKING:
 # SKILLS_DIR constant).
 _BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
 
-# System path prefixes that should never appear in virtual paths.
-# If the agent hallucinates an absolute system path, we block it.
+# Folder names that make a path look like a host path. Commands block such a
+# path unless it maps into the workspace; the file tools only cut it at the
+# workspace's folder name.
 _SYSTEM_PATH_PREFIXES = (
     "/Users/",
     "/home/",
@@ -2036,6 +2037,18 @@ class MergedSkillsBackend(BackendProtocol):
             yield self._global
         yield self._secondary
 
+    def file_path(self, file_path: str) -> Path | None:
+        """The tier file *file_path* names: the first tier that has it, as
+        :meth:`read` picks it, or None when no tier does."""
+        for backend in self._backends():
+            try:
+                path = backend._resolve_path(file_path)
+            except (ValueError, OSError):
+                continue
+            if path.is_file():
+                return path
+        return None
+
     # -- read: try each tier in priority order --
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
@@ -2288,7 +2301,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Args:
             root_dir: File system root directory
-            virtual_mode: Whether to enable virtual path mode
+            virtual_mode: Whether to enable virtual path mode; ``False`` only
+                with ``dangerous=True`` (it raises ``ValueError`` otherwise)
             timeout: Command execution timeout in seconds
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
@@ -2333,6 +2347,10 @@ class CustomSandboxBackend(LocalShellBackend):
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
             virtual_mode = False
+        elif not virtual_mode:
+            # Non-virtual resolution passes absolute paths to the host as-is,
+            # which only dangerous mode allows.
+            raise ValueError("virtual_mode=False requires dangerous=True")
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,
@@ -2351,21 +2369,34 @@ class CustomSandboxBackend(LocalShellBackend):
         os.makedirs(str(self.cwd), exist_ok=True)
 
     def _resolve_path(self, key: str) -> Path:
-        """Resolve path with sanitization to prevent nested directories.
+        """Resolve a file-tool path to a path inside the workspace.
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
-        Auto-corrects common LLM path mistakes instead of crashing:
+        ``/`` is the workspace root, so any other path is the workspace path
+        as written (``/tmp/x`` is the workspace's ``tmp/x``, as in commands).
+        Paths that name the workspace itself are mapped into it:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
           2. /<ws_name>/file.py            → /file.py
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
-          4. /Users/name/file.py           → /file.py (keep basename)
+
+        On Windows a Git Bash path (``/c/...``) is read as the drive path it
+        names when that lies in the working folder or the media folder;
+        otherwise it stays a workspace path, so a workspace folder named with
+        one letter is still reached. A drive path that reaches the working
+        folder under another name (a junction, a ``subst`` drive, an 8.3 short
+        name) is mapped into it once resolved; one anywhere else is refused.
 
         In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
-        alias and let the parent resolve real absolute paths as-is.
+        alias or Git Bash path and let the parent resolve real absolute paths
+        as-is.
         """
         key = paths.host_file_tool_path(key)
+        drive_path = paths.git_bash_drive_path(key)
         if self._dangerous:
-            return super()._resolve_path(key)
+            return super()._resolve_path(drive_path or key)
+
+        if drive_path is not None and self._working_relative(drive_path) is not None:
+            key = drive_path
 
         media_path = self._media_path(key)
         if media_path is not None:
@@ -2376,7 +2407,7 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
-        # confuse the basename-based fallback below.
+        # confuse the folder-name match below.
         key_path = Path(key)
         if key_path.is_absolute():
             try:
@@ -2387,6 +2418,20 @@ class CustomSandboxBackend(LocalShellBackend):
                 virtual = relative.as_posix()
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
+        if _is_windows() and _DRIVE_PATH_RE.match(key):
+            relative = self._working_relative(key)
+            if relative is None:
+                # An OSError, so the file tools report it as an error message
+                # rather than raising.
+                raise PermissionError(
+                    errno.EACCES,
+                    "Path is outside the workspace; file tools reach only paths "
+                    "inside it, and '/' is its root",
+                    key,
+                )
+            virtual = relative.as_posix()
+            return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
         if key.startswith(ws_prefix):
@@ -2394,23 +2439,37 @@ class CustomSandboxBackend(LocalShellBackend):
         elif key == f"/{ws_name}":
             key = "/"
 
-        # Auto-correct system absolute paths
-        for prefix in _SYSTEM_PATH_PREFIXES:
-            if key.startswith(prefix):
-                # rfind, not find: the cwd's parent path may itself contain
-                # "/<ws_name>/" as a substring, and we want the boundary
-                # nearest the file — the workspace mount.
-                idx = key.rfind(ws_prefix)
-                if idx != -1:
-                    key = "/" + key[idx + len(ws_prefix) :]
-                elif key.endswith(f"/{ws_name}"):
-                    key = "/"
-                else:
-                    # Fall back to basename
-                    key = "/" + Path(key).name
-                break
+        # A host path that names the workspace by its folder name maps into it;
+        # any other path, system folder names included, is the workspace path
+        # as written.
+        if key.startswith(_SYSTEM_PATH_PREFIXES):
+            # rfind, not find: the cwd's parent path may itself contain
+            # "/<ws_name>/" as a substring, and we want the boundary
+            # nearest the file — the workspace mount.
+            idx = key.rfind(ws_prefix)
+            if idx != -1:
+                key = "/" + key[idx + len(ws_prefix) :]
+            elif key.endswith(f"/{ws_name}"):
+                key = "/"
 
         return super()._resolve_path(key)
+
+    def _working_relative(self, drive_path: str) -> Path | None:
+        """A Windows *drive_path* relative to the working folder, or None.
+
+        Compared as written, then resolved: the working folder is the resolved
+        one, so a junction, a ``subst`` drive or an 8.3 short name of it only
+        matches once resolved.
+        """
+        path = Path(drive_path)
+        try:
+            return path.relative_to(self.cwd)
+        except ValueError:
+            pass
+        try:
+            return path.resolve().relative_to(self.cwd)
+        except (ValueError, OSError, RuntimeError):
+            return None
 
     # Windows attachment references use a /C:/... file-tool alias so they
     # pass deepagents' validation before reaching this backend.
@@ -2418,11 +2477,16 @@ class CustomSandboxBackend(LocalShellBackend):
         """*key* relative to the media folder, if it names a path inside it.
 
         Compared as paths, not strings, so Windows keys with backslashes or
-        another drive-letter case match too.
+        another drive-letter case match too, and a Git Bash key (``/c/...``)
+        is read as the drive path it names, as ``_resolve_path`` reads it. A
+        Windows drive path that names the folder under another name (a
+        junction, a ``subst`` drive, an 8.3 short name) matches once resolved,
+        as the working folder does.
         """
         if self._media_dir is None:
             return None
-        path = Path(paths.host_file_tool_path(key))
+        key = paths.host_file_tool_path(key)
+        path = Path(paths.git_bash_drive_path(key) or key)
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):
@@ -2430,6 +2494,11 @@ class CustomSandboxBackend(LocalShellBackend):
                 return path.relative_to(base)
             except ValueError:
                 continue
+        if _is_windows() and _DRIVE_PATH_RE.match(str(path)):
+            try:
+                return path.resolve().relative_to(self._media_real)
+            except (ValueError, OSError, RuntimeError):
+                return None
         return None
 
     def _media_path(self, key: str) -> Path | None:
@@ -2777,6 +2846,70 @@ class CustomSandboxBackend(LocalShellBackend):
             )
 
         return response
+
+
+def _routed_file_path(backend: BackendProtocol, key: str) -> Path | None:
+    """The file *key* names in a routed tier *backend*, or None if unknown."""
+    if isinstance(backend, MergedSkillsBackend):
+        return backend.file_path(key)
+    if not isinstance(backend, FilesystemBackend):
+        return None
+    try:
+        path = backend._resolve_path(key)
+    except (ValueError, OSError):
+        return None
+    return path if path.is_file() else None
+
+
+def sandbox_file_path(
+    path: str,
+    work_dir: str | Path,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
+    routes: dict[str, BackendProtocol] | None = None,
+) -> Path | None:
+    """The host file a file tool's *path* reached, or None outside the sandbox.
+
+    *routes* are the agent's file tool routes (see
+    ``EvoScientist.file_tool_routes``): a path under one of them names the
+    file in that route's tier, found as the agent's composite backend routes
+    it, or None when that tier keeps no file on disk. Any other path is
+    mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
+    so a host-looking path names the workspace file at that path as written,
+    not the host file. Outside dangerous mode the result
+    lies inside *work_dir* or *media_dir* once resolved; anything else, or a
+    path the sandbox refuses, gives None.
+    """
+    from deepagents.backends import CompositeBackend
+    from deepagents.backends.utils import validate_path
+
+    backend = CustomSandboxBackend(
+        root_dir=str(work_dir),
+        inherit_env=False,
+        dangerous=dangerous,
+        media_dir=media_dir,
+    )
+    if routes:
+        try:
+            routed, key = CompositeBackend(
+                default=backend, routes=routes
+            )._get_backend_and_key(validate_path(paths.file_tool_path(path)))
+        except ValueError:
+            return None
+        if routed is not backend:
+            return _routed_file_path(routed, key)
+    try:
+        resolved = backend._resolve_path(path)
+    except (ValueError, OSError):
+        return None
+    if dangerous:
+        return resolved
+    roots = [backend.cwd]
+    if media_dir is not None:
+        roots.append(Path(media_dir).resolve())
+    real = resolved.resolve()
+    return real if any(real.is_relative_to(root) for root in roots) else None
 
 
 class AutoskillProposalSandboxBackend(CustomSandboxBackend):

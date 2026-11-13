@@ -284,6 +284,65 @@ def test_supported_grader_never_warns(tmp_path, caplog, model_id):
     assert "rubric" not in caplog.text.lower()
 
 
+def _anthropic_reply():
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "plan", "signature": "sig"},
+            {"type": "text", "text": "The file says hello."},
+            {"type": "tool_use", "id": "toolu_1", "name": "ls", "input": {}},
+        ],
+        tool_calls=[{"name": "ls", "args": {}, "id": "toolu_1", "type": "tool_call"}],
+        response_metadata={"model_provider": "anthropic"},
+    )
+
+
+def _openrouter_reply():
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="The file says hello.",
+        additional_kwargs={"reasoning_content": "plan"},
+        tool_calls=[{"name": "ls", "args": {}, "id": "call_1", "type": "tool_call"}],
+        response_metadata={"model_provider": "openrouter"},
+    )
+
+
+@pytest.mark.parametrize("reply", [_anthropic_reply, _openrouter_reply])
+def test_grader_transcript_leaves_out_reasoning(tmp_path, reply):
+    from deepagents.middleware.rubric import _build_grader_transcript
+    from langchain_core.messages import HumanMessage
+
+    rubric = create_rubric_middleware(
+        model=_openrouter("anthropic/claude-haiku-5.5"),
+        backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
+        max_iterations=3,
+    )
+    message = reply()
+    stored = message.model_copy(deep=True)
+    # Upstream renders this reply's reasoning as a bare marker line.
+    assert "(reasoning)" in _build_grader_transcript([message])
+    state = {"messages": [HumanMessage("do it"), message], "rubric": "- x"}
+
+    transcript = rubric._grader_input(state, 0)["messages"][0].content
+
+    assert "(reasoning)" not in transcript
+    assert "The file says hello." in transcript
+    assert "<tool_call name='ls'" in transcript
+    assert message == stored  # the thread's message is untouched
+
+
+def test_a_reply_without_reasoning_reaches_the_grader_as_it_is():
+    from langchain_core.messages import AIMessage
+
+    from EvoScientist.middleware.rubric import _without_reasoning
+
+    reply = AIMessage(content="The file says hello.")
+
+    assert _without_reasoning([reply])[0] is reply
+
+
 def test_main_agent_grades_a_marked_run(tmp_path):
     agent, grader, _other, _rubric = _agent(
         tmp_path, [PASS], ["a"], require_run_marker=True

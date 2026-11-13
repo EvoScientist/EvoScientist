@@ -189,6 +189,10 @@ class TestDangerousShellGuidelines:
         assert "sudo" in result
         assert "rm -rf /" in result
 
+    def test_only_the_sandbox_names_the_workspace_root(self):
+        assert "`/` is the workspace root" in get_system_prompt()
+        assert "`/` is the workspace root" not in get_system_prompt(dangerous=True)
+
     def test_dangerous_without_cwd_falls_back(self):
         result = get_system_prompt(dangerous=True)
         assert "DANGEROUS MODE" in result

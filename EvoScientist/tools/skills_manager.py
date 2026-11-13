@@ -254,7 +254,7 @@ def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
         return {}
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, RecursionError, yaml.YAMLError) as exc:
         _logger.warning("Failed to read skills manifest at %s: %s", path, exc)
         return {}
     if not isinstance(data, dict):

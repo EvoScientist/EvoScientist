@@ -391,6 +391,7 @@ class GoalDrafter:
         from .model_retry import ModelCallBoundaryMiddleware
         from .rubric import _GraderCallBudget
         from .tool_error_handler import ToolErrorHandlerMiddleware
+        from .windows_paths import WindowsFilePathMiddleware
 
         retry = self._model_retry
         self._agent = create_agent(
@@ -406,6 +407,8 @@ class GoalDrafter:
                     tool_token_limit_before_evict=None,
                     human_message_token_limit_before_evict=None,
                 ),
+                # The user's request can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 # A file tool that raises costs the draft one tool result, not
                 # the whole draft: the drafter reads the error and drafts from
                 # what it could read, as the main agent and sub-agents do.

@@ -85,6 +85,19 @@ def host_file_tool_path(path: str) -> str:
     return path
 
 
+def git_bash_drive_path(path: str) -> str | None:
+    """On Windows, the drive path Git Bash means by ``/c/rest`` (``c:/rest``).
+
+    ``None`` on other platforms and for paths without a one-letter first part.
+    """
+    if os.name != "nt":
+        return None
+    match = re.match(r"^/([A-Za-z])(/|$)", path)
+    if match is None:
+        return None
+    return f"{match[1]}:/{path[3:]}"
+
+
 def command_arg(path: str | Path) -> str:
     """*path* as one argument of a command printed for the user to copy:
     quoted for a POSIX shell (``shlex.quote``), or on Windows in double quotes
@@ -201,6 +214,17 @@ class SessionDirs:
     def work_dir(self) -> Path:
         """The folder the agent works in."""
         return self.run_dir or self.workspace.root
+
+    @property
+    def sandbox_media_dir(self) -> Path | None:
+        """The workspace's media folder, when the agent works outside the root.
+
+        Channel attachments land in ``<root>/media`` and are referenced by their
+        real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
+        told about the folder to reach them; in the root it is already inside
+        the sandbox.
+        """
+        return None if self.run_dir is None else self.workspace.media_dir
 
     def metadata(self) -> dict[str, str]:
         """Thread metadata and ``configurable`` keys for this session.

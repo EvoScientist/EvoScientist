@@ -373,7 +373,11 @@ def test_autoskills_setting_reports_projects_not_rescheduled(monkeypatch):
 @pytest.mark.parametrize(
     ("body", "reconciles"),
     [
+        ({"memory_skill_synthesis_enabled": False}, True),
+        ({"memory_skill_synthesis_mode": "auto"}, True),
+        ({"memory_skill_synthesis_cadence": "nightly"}, True),
         ({"memory_skill_synthesis_time": "04:30"}, True),
+        ({"scheduler_default_timezone": "Asia/Tokyo"}, True),
         ({"show_thinking": False}, False),
     ],
 )

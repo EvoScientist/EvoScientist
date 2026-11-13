@@ -1172,6 +1172,9 @@ def cmd_interactive(
                         sys.stdout.flush()
                         return
 
+                    from ..EvoScientist import file_tool_routes
+                    from ..gateway.runtime import sandbox_dangerous_mode
+
                     try:
                         ready_agent = await _await_agent_ready()
                         meta = build_metadata(state["dirs"], model)
@@ -1192,6 +1195,11 @@ def cmd_interactive(
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
                             work_dir=str(state["dirs"].work_dir),
+                            media_dir=state["dirs"].sandbox_media_dir,
+                            routes=file_tool_routes(state["dirs"].workspace),
+                            dangerous=sandbox_dangerous_mode(
+                                runtime_gateways.graph_gateway
+                            ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
@@ -1783,8 +1791,19 @@ def cmd_interactive(
             _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
 
+# A single-shot prompt longer than this is echoed cut, with its length.
+_PROMPT_ECHO_LIMIT = 500
+
+
+def _prompt_echo(prompt: str) -> str:
+    """The prompt as shown before a single-shot run."""
+    if len(prompt) <= _PROMPT_ECHO_LIMIT:
+        return prompt
+    return f"{prompt[:_PROMPT_ECHO_LIMIT]}\u2026 ({len(prompt)} chars total)"
+
+
 def cmd_run(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     prompt: str,
     thread_id: str,
     show_thinking: bool = True,
@@ -1799,7 +1818,7 @@ def cmd_run(
     """Single-shot execution with streaming display.
 
     Args:
-        agent: Compiled agent graph
+        agent: Compiled agent graph; None when the langgraph server runs it
         prompt: User prompt
         thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels
@@ -1814,7 +1833,7 @@ def cmd_run(
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
     console.print(sep)
-    console.print(Text(f"> {prompt}"))
+    console.print(Text(f"> {_prompt_echo(prompt)}"))
     console.print(sep)
     console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(str(dirs.work_dir))}[/dim]")

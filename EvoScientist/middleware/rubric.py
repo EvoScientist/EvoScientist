@@ -172,14 +172,15 @@ GRADER_FILE_CHECK_PROMPT = (
 )
 
 # OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22,
-# sonnet-5.5 probed 2026-09-29, qwen3.8-flash and muse-wonder 2026-10-16): these
-# Claude routes reject forced ``tool_choice`` and their JSON mode rejects the
-# grader schema's ``oneOf``; qwen3.8-flash returns no parsable verdict either way,
-# and muse-wonder's JSON mode often runs away into an unparsable reply hundreds of
-# thousands of tokens long. Exact ids, not families:
-# ``anthropic/claude-fable-5`` and the native ``claude-fable-5-1`` /
+# sonnet-5.5 probed 2026-09-29, qwen3.8-flash and muse-wonder 2026-10-16,
+# fable-5.2 2026-11-09): these Claude routes reject forced ``tool_choice`` and
+# their JSON mode rejects the grader schema's ``oneOf``; qwen3.8-flash returns
+# no parsable verdict either way, and muse-wonder's JSON mode often runs away
+# into an unparsable reply hundreds of thousands of tokens long. Exact ids, not
+# families: ``anthropic/claude-fable-5`` and the native ``claude-fable-5-1`` /
 # ``claude-opus-5-5`` grade fine.
 _OPENROUTER_UNGRADABLE_IDS = (
+    "anthropic/claude-fable-5.2",
     "anthropic/claude-fable-5.1",
     "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-5.5",
@@ -203,6 +204,26 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
             "it has one.",
             model_id,
         )
+
+
+def _without_reasoning(messages: list) -> list:
+    """Drop reasoning: the transcript shows each block only as a ``(reasoning)``
+    marker, which a grader can take for the label of the reply under it."""
+    cleaned = []
+    for message in messages:
+        if isinstance(message, AIMessage):
+            # Normalized blocks: providers keep reasoning in different places.
+            blocks = message.content_blocks
+            kept = [block for block in blocks if block.get("type") != "reasoning"]
+            if len(kept) != len(blocks):
+                message = AIMessage(
+                    content=kept,
+                    response_metadata={"output_version": "v1"},
+                    id=message.id,
+                    name=message.name,
+                )
+        cleaned.append(message)
+    return cleaned
 
 
 def _grader_strategy(model: BaseChatModel) -> ProviderStrategy | ToolStrategy | None:
@@ -711,7 +732,7 @@ class EvoRubricMiddleware(RubricMiddleware):
         elif self._prepare_run_messages is not None:
             messages = self._prepare_run_messages(messages)
         return super()._grader_input(
-            {**state, "messages": messages}, iteration, correction
+            {**state, "messages": _without_reasoning(messages)}, iteration, correction
         )
 
     def _final_cleanup(self, state: Any) -> dict[str, Any]:
@@ -904,6 +925,7 @@ def create_rubric_middleware(
 
     from .model_retry import ModelCallBoundaryMiddleware
     from .tool_error_handler import ToolErrorHandlerMiddleware
+    from .windows_paths import WindowsFilePathMiddleware
 
     # Eviction thresholds off: both eviction paths write files through the
     # backend, which would let the grader touch the shared workspace.
@@ -922,10 +944,11 @@ def create_rubric_middleware(
             grader_middleware=[
                 *([model_retry] if model_retry is not None else []),
                 grader_fs,
-                # A file tool that raises — a symlink out of the workspace (the
-                # backend's ValueError escapes the tool), a backend bug — costs
-                # the criterion it concerns, not the whole grading: the grader
-                # reads the error and still decides the rest.
+                # The transcript can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
+                # A file tool that raises costs the criterion it concerns, not
+                # the whole grading: the grader reads the error and still
+                # decides the rest.
                 ToolErrorHandlerMiddleware(),
                 _GraderCallBudget(max_calls=GRADER_MAX_CALLS),
                 # create_agent does not add it; after every middleware that

@@ -18,7 +18,7 @@ import copy
 import logging
 import signal
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..paths import Workspace
 from .base import Channel
@@ -27,20 +27,33 @@ from .bus.events import OutboundMessage
 from .consumer import InboundConsumer
 from .debug import emit_debug_event
 
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
 logger = logging.getLogger(__name__)
 
 
 async def _create_standalone_agent(
-    workspace: Workspace, config: Any = None, backend: str | None = None
-):
-    """Construct the synchronous agent without blocking the channel loop."""
-    from ..EvoScientist import create_cli_agent
+    workspace: Workspace,
+    config: Any = None,
+    backend: str | None = None,
+    graph_gateway: Any = None,
+) -> "CompiledStateGraph | None":
+    """Construct the synchronous agent without blocking the channel loop.
+
+    ``None`` when *graph_gateway* executes on the langgraph server.
+    """
+    from ..cli.agent import _load_agent
 
     if config is None or backend == "langgraph_server":
-        return await asyncio.to_thread(create_cli_agent, workspace=workspace)
+        return await asyncio.to_thread(
+            _load_agent, workspace=workspace, graph_gateway=graph_gateway
+        )
     config = copy.copy(config)
     config.enable_async_subagents = False
-    return await asyncio.to_thread(create_cli_agent, workspace=workspace, config=config)
+    return await asyncio.to_thread(
+        _load_agent, workspace=workspace, config=config, graph_gateway=graph_gateway
+    )
 
 
 def _channel_trace_enabled(channel: Channel) -> bool:
@@ -138,15 +151,22 @@ async def _async_main(
 
     consumer: InboundConsumer | None = None
     if use_agent:
-        logger.info("Loading EvoScientist agent...")
         from ..gateway import create_runtime_gateways_for_config
+        from ..gateway.runtime import sandbox_dangerous_mode
+        from ..gateway.types import runs_in_process
 
+        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
+        builds = runs_in_process(runtime_gateways.graph_gateway)
+        if builds:
+            logger.info("Loading EvoScientist agent...")
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
-        agent = await _create_standalone_agent(workspace, config, backend)
-        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
-        logger.info("Agent loaded")
+        agent = await _create_standalone_agent(
+            workspace, config, backend, runtime_gateways.graph_gateway
+        )
+        if builds:
+            logger.info("Agent loaded")
 
         consumer = InboundConsumer(
             bus=bus,
@@ -156,6 +176,7 @@ async def _async_main(
             workspace=workspace,
             graph_gateway=runtime_gateways.graph_gateway,
             send_thinking=send_thinking,
+            dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway, config),
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
 
