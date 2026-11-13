@@ -1000,7 +1000,14 @@ def _has_traversal_component(command: str) -> bool:
                 return True
         return False
 
-    for token in command.split():
+    # Check both raw split words and shell-tokenized words (which normalizes shell escapes)
+    words = set(command.split())
+    try:
+        words.update(shlex.split(command))
+    except ValueError:
+        pass
+
+    for token in words:
         if _check_candidate(token):
             return True
         if "=" in token:
