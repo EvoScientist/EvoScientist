@@ -2,6 +2,7 @@
 
 import shlex
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -51,7 +52,10 @@ def test_quoted_tmp_after_cd_uses_workspace_root(tmp_path):
         'cd sub && cat "/tmp/out.txt"', workspace_root=str(tmp_path)
     )
     assert uses_tmp
-    assert str(tmp_path / "tmp/out.txt") in shlex.split(command)
+    tokens = shlex.split(command, posix=sys.platform != "win32")
+    assert any(
+        Path(token.strip('"')) == tmp_path / "tmp" / "out.txt" for token in tokens
+    )
 
 
 @pytest.mark.parametrize(
