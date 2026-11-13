@@ -2951,6 +2951,7 @@ class TestTraversalFalsePositiveFix:
         assert validate_command("cat -") is None
         assert validate_command("head -10 file.txt") is None
         assert validate_command("tar -xzf file.tar.gz -") is None
+        assert validate_command("python s.py -o-") is None
 
     def test_quoted_dotdot_traversal_blocked(self):
         result = validate_command("python s.py -o'.'./out.txt")
