@@ -611,3 +611,25 @@ async def test_server_delete_finishes_before_local_cleanup():
     execute.delete_thread = server_delete
     assert await _composite(read, execute).delete_thread(UUID)
     assert order == ["server", "local"]
+
+
+async def test_local_cleanup_error_reports_completed_server_delete():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    read.delete_raises = True
+    with pytest.raises(
+        RuntimeError, match=r"Server deletion completed.*local cleanup failed"
+    ) as error:
+        await _composite(read, execute).delete_thread(UUID)
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert "boom" in str(error.value)
+    assert "/delete" not in str(error.value)
+
+
+async def test_local_cleanup_error_without_server_delete_keeps_original_error():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e", delete_result=False)
+    read.delete_raises = True
+    with pytest.raises(RuntimeError, match=r"^boom$") as error:
+        await _composite(read, execute).delete_thread(UUID)
+    assert error.value.__cause__ is None
