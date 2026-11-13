@@ -1041,6 +1041,18 @@ class TestWorkspaceRemovalAndComments:
                 'nohup sh -c "python3 ./src/train.py > ./logs/t.log" &',
             ),
             ('cd src && bash -c "ls /results"', 'cd src && bash -c "ls /W/results"'),
+            ('bash -o pipefail -c "cat /tmp/x"', 'bash -o pipefail -c "cat ./tmp/x"'),
+            (
+                'bash -euo pipefail -c "cat /tmp/x"',
+                'bash -euo pipefail -c "cat ./tmp/x"',
+            ),
+            ('bash -O extglob -c "cat /tmp/x"', 'bash -O extglob -c "cat ./tmp/x"'),
+            ('zsh -opipefail -c "cat /tmp/x"', 'zsh -opipefail -c "cat ./tmp/x"'),
+            ('bash -c -e "cat /tmp/x"', 'bash -c -e "cat ./tmp/x"'),
+            (
+                'bash --rcfile ./rc -lc "cat /tmp/x"',
+                'bash --rcfile ./rc -lc "cat ./tmp/x"',
+            ),
         ],
     )
     def test_shell_c_scripts_are_rewritten(self, command, expected):
@@ -2999,6 +3011,12 @@ class TestProcessKillByName:
             "timeout 30 sh <<'EOF'\npkill -f train\nEOF",
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
+            "bash -euo pipefail -c 'pkill -f x'",
+            "bash -o pipefail -c 'pkill -f x'",
+            "bash -c -e 'pkill -f x'",
+            "zsh -O -c 'pkill -f x'",
+            "zsh -opipefail -c 'pkill -f x'",
+            "zsh -onomatch -c 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
         ],
     )

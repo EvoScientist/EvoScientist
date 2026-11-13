@@ -118,6 +118,25 @@ class TestWordsAndScripts:
     @pytest.mark.parametrize(
         "command",
         [
+            "bash -o pipefail -c 'ls /x'",
+            "bash -euo pipefail -c 'ls /x'",
+            "bash -O extglob -c 'ls /x'",
+            "bash -c -e 'ls /x'",
+            "bash -co pipefail 'ls /x'",
+            "zsh -O -c 'ls /x'",
+            "zsh -eo pipefail -c 'ls /x'",
+            "zsh -opipefail -c 'ls /x'",
+            "zsh -eonomatch -c 'ls /x'",
+        ],
+    )
+    def test_the_script_after_any_options_is_found(self, command):
+        assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
+            command.index("'")
+        }
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "bash -o",
             "bash -O; echo x",
             "bash -o pipefail",
@@ -129,6 +148,14 @@ class TestWordsAndScripts:
         self, command
     ):
         assert not shell_syntax.shell_script_words(shell_syntax.parse(command).tokens)
+
+    @pytest.mark.parametrize(
+        "command", ["bash -o pipefail ./run.sh -c", "bash -o -c 'ls /x'"]
+    )
+    def test_an_option_value_or_script_file_is_no_script(self, command):
+        assert (
+            shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == set()
+        )
 
     def test_substitutions_in_double_quotes_are_converted(self):
         assert shell_syntax.rewrite_substitutions(
