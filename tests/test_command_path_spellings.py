@@ -566,9 +566,9 @@ def test_mapped_paths_after_cd_allow_a_spaced_workspace_root(tmp_path, operand):
     (root / "data.csv").write_text("row")
     converted, error = prepare_sandbox_command(f"cd sub && cat {operand}", str(root))
     assert error is None
-    assert str(root) in shlex.split(converted, posix=sys.platform != "win32")[
-        -1
-    ].replace('"', "")
+    assert str(root).replace("\\", "/") in converted.replace('"', "").replace(
+        "'", ""
+    ).replace("\\", "/")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
@@ -616,3 +616,67 @@ def test_execute_mapped_path_after_cd_in_spaced_workspace(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "expected payload" in result.output
+
+
+@pytest.mark.parametrize("uses_bash", [False, True])
+@pytest.mark.parametrize(
+    "operand", ["/tmp/x", '"/tmp/x"', "--output=/tmp/x", "-o/tmp/x", "OUT=/tmp/x"]
+)
+def test_windows_spaced_root_mapped_words_are_allowed(monkeypatch, uses_bash, operand):
+    from EvoScientist import agent_shell, backends
+
+    root = r"C:\Users\me\my project"
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(agent_shell, "uses_bash", lambda: uses_bash)
+    converted, uses_tmp = backends._convert_command_paths(
+        f"cd sub && cat {operand}", workspace_root=root
+    )
+    assert uses_tmp
+    assert backends.validate_command(converted, (root,), workspace_root=root) is None
+    assert "C:/Users/me/my project" in converted.replace("\\", "/")
+
+
+@pytest.mark.parametrize("uses_bash", [False, True])
+@pytest.mark.parametrize(
+    "suffix", ["/../outside", "; cat /etc/passwd", "$(cat /etc/passwd)"]
+)
+def test_windows_spaced_root_does_not_hide_unsafe_words(monkeypatch, uses_bash, suffix):
+    from EvoScientist import agent_shell, backends
+
+    root = r"C:\Users\me\my project"
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(agent_shell, "uses_bash", lambda: uses_bash)
+    command = f'cat "C:/Users/me/my project{suffix}"'
+    assert backends.validate_command(command, (root,), workspace_root=root) is not None
+
+
+@pytest.mark.parametrize(
+    "root", [r"C:\Users\me\my project_evil", r"D:\Users\me\my project"]
+)
+def test_windows_workspace_exemption_keeps_drive_and_component_boundaries(
+    monkeypatch, root
+):
+    from EvoScientist import backends
+
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    allowed = r"C:\Users\me\my project"
+    assert (
+        backends.validate_command(
+            f'cat "{root}"/tmp/x', (allowed,), workspace_root=allowed
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("uses_bash", [False, True])
+@pytest.mark.parametrize("prefix", ["", "--output=", "-o", "OUT="])
+def test_windows_spaced_root_normalizes_case_and_separators(
+    monkeypatch, uses_bash, prefix
+):
+    from EvoScientist import agent_shell, backends
+
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(agent_shell, "uses_bash", lambda: uses_bash)
+    root = r"C:\Users\me\my project"
+    command = f'cat {prefix}"c:/users/ME/my project"/tmp/x'
+    assert backends.validate_command(command, (root,), workspace_root=root) is None
