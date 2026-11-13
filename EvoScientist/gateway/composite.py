@@ -184,18 +184,12 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        read_ok = await self._read.delete_thread(thread_id, target)
+        # Stop server writers before removing checkpoints from the shared DB.
+        # On server failure leave local state available for a normal retry.
         exec_ok = False
         if _is_uuid(thread_id):
-            try:
-                exec_ok = await self._execute.delete_thread(thread_id, target)
-            except Exception as exc:
-                local_status = "succeeded" if read_ok else "found no local session"
-                raise RuntimeError(
-                    f"Local deletion {local_status}; server-side cleanup failed: "
-                    f"{exc}. The server may still have the thread or active runs. "
-                    f"Retry /delete {thread_id}."
-                ) from exc
+            exec_ok = await self._execute.delete_thread(thread_id, target)
+        read_ok = await self._read.delete_thread(thread_id, target)
         return read_ok or exec_ok
 
     # --- Execution ------------------------------------------------------------
