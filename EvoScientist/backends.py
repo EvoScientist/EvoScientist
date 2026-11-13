@@ -2038,16 +2038,38 @@ class MergedSkillsBackend(BackendProtocol):
             yield self._global
         yield self._secondary
 
-    def file_path(self, file_path: str) -> Path | None:
-        """The tier file *file_path* names: the first tier that has it, as
-        :meth:`read` picks it, or None when no tier does."""
+    def file_path(self, file_path: str, *, tool_name: str | None = None) -> Path | None:
+        """The write's primary file, otherwise the tier that ``read`` serves.
+
+        Re-read only when multiple tiers hold the file to preserve fallback
+        behavior without adding a second read in the single-tier case.
+        """
+        if tool_name == "write_file":
+            try:
+                path = self._primary._resolve_path(file_path)
+            except (ValueError, OSError):
+                return None
+            return path if path.is_file() else None
+        found = []
         for backend in self._backends():
             try:
                 path = backend._resolve_path(file_path)
             except (ValueError, OSError):
                 continue
             if path.is_file():
-                return path
+                found.append((backend, path))
+        if len(found) == 1:
+            return found[0][1]
+        for backend, path in found:
+            try:
+                result = backend.read(file_path)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return path
+                elif not str(result).startswith("Error:"):
+                    return path
+            except (ValueError, OSError):
+                continue
         return None
 
     # -- read: try each tier in priority order --
@@ -2901,10 +2923,12 @@ class CustomSandboxBackend(LocalShellBackend):
         return response
 
 
-def _routed_file_path(backend: BackendProtocol, key: str) -> Path | None:
+def _routed_file_path(
+    backend: BackendProtocol, key: str, *, tool_name: str | None = None
+) -> Path | None:
     """The file *key* names in a routed tier *backend*, or None if unknown."""
     if isinstance(backend, MergedSkillsBackend):
-        return backend.file_path(key)
+        return backend.file_path(key, tool_name=tool_name)
     if not isinstance(backend, FilesystemBackend):
         return None
     try:
@@ -2921,6 +2945,7 @@ def sandbox_file_path(
     media_dir: str | Path | None = None,
     dangerous: bool = False,
     routes: dict[str, BackendProtocol] | None = None,
+    tool_name: str | None = None,
 ) -> Path | None:
     """The host file a file tool's *path* reached, or None outside the sandbox.
 
@@ -2951,7 +2976,7 @@ def sandbox_file_path(
         except ValueError:
             return None
         if routed is not backend:
-            return _routed_file_path(routed, key)
+            return _routed_file_path(routed, key, tool_name=tool_name)
     try:
         resolved = backend._resolve_path(path)
     except (ValueError, OSError):

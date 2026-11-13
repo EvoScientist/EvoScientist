@@ -116,6 +116,7 @@ def resolve_media_path(
     media_dir: str | Path | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
+    tool_name: str | None = None,
 ) -> str:
     """The file on disk a file tool's *path* names, or ``""`` if there is none.
 
@@ -131,7 +132,12 @@ def resolve_media_path(
     from ..backends import sandbox_file_path
 
     real_path = sandbox_file_path(
-        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
+        path,
+        work_dir,
+        media_dir=media_dir,
+        dangerous=dangerous,
+        routes=routes,
+        tool_name=tool_name,
     )
     return str(real_path) if real_path is not None and real_path.is_file() else ""
 
@@ -169,7 +175,12 @@ def forward_media_result(
     if os.path.splitext(path)[1].lower() not in _MEDIA_EXTENSIONS:
         return
     real_path = resolve_media_path(
-        path, work_dir, media_dir=media_dir, dangerous=dangerous, routes=routes
+        path,
+        work_dir,
+        media_dir=media_dir,
+        dangerous=dangerous,
+        routes=routes,
+        tool_name=event.get("name"),
     )
     if real_path:
         media_sent.add(path)
