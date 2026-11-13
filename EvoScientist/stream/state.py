@@ -99,6 +99,8 @@ class StreamState:
         self._subagent_map: dict[str, SubAgentState] = {}
         # Todo list tracking
         self.todo_items: list[dict] = []
+        # Pending write_todos args, committed only on a successful result.
+        self._pending_todos: dict[str, list[dict]] = {}
         # Latest text segment (reset on each tool_call)
         self.latest_text = ""
         self.narrated_response_end = 0
@@ -213,11 +215,11 @@ class StreamState:
 
             self.latest_text = ""  # Reset -- next text segment is a new message
 
-            # Capture todo items from write_todos args (most reliable source)
+            # Hold write_todos args until the call succeeds.
             if tool_name == "write_todos":
                 todos = tool_args.get("todos", [])
                 if isinstance(todos, list) and todos:
-                    self.todo_items = todos
+                    self._pending_todos[tool_id] = todos
 
         elif event_type == "tool_result":
             result_name = event.get("name", "unknown")
@@ -231,11 +233,21 @@ class StreamState:
                     "success": event.get("success", True),
                 }
             )
-            # Update todo list from write_todos / read_todos tool results.
-            if result_name in ("write_todos", "read_todos"):
-                parsed = _parse_todo_items(result_content)
-                if parsed:
-                    self.todo_items = parsed
+            # Commit a successful write_todos; a failure keeps the old list.
+            if result_name == "write_todos":
+                pending = self._pending_todos.pop(event["id"], None)
+                if event.get("success", True):
+                    if pending is not None:
+                        self.todo_items = pending
+                    else:
+                        parsed = _parse_todo_items(result_content)
+                        if parsed:
+                            self.todo_items = parsed
+            elif result_name == "read_todos":
+                if event.get("success", True):
+                    parsed = _parse_todo_items(result_content)
+                    if parsed:
+                        self.todo_items = parsed
 
         elif event_type == "subagent_start":
             name = event["name"]
