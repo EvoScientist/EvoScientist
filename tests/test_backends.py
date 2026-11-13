@@ -767,7 +767,8 @@ class TestWorkspaceRemovalAndComments:
         self, command, tmp_workspace
     ):
         _command, error = prepare_sandbox_command(command, tmp_workspace)
-        assert "forbidden pattern" in error
+        expected = "path traversal" if "..''" in command else "forbidden pattern"
+        assert expected in error
 
     def test_memories_and_installed_skills_stay_protected(
         self, tmp_workspace, tmp_path, monkeypatch
@@ -1016,7 +1017,10 @@ class TestWorkspaceRemovalAndComments:
             command, tmp_workspace, guard_dangerous=True
         ) == (command, None)
 
-    def test_an_escaped_dollar_keeps_the_mount_rewrite(self):
+    def test_an_escaped_dollar_keeps_the_mount_rewrite(self, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
         assert convert_virtual_paths_in_command('cat "/skills/\\$schema.json"') == (
             "cat './skills/$schema.json'"
         )
@@ -3165,13 +3169,11 @@ class TestAbsolutePathDetection:
         """Virtual paths like /main.py should still pass (not a system prefix)."""
         assert validate_command("python /main.py") is None
 
-    def test_safe_env_equals_dev(self):
-        """dd-style if=/dev/zero — the = prevents matching."""
-        # dd itself is blocked by BLOCKED_COMMANDS, but the /dev path
-        # should not trigger the absolute-path check due to = prefix
+    def test_extract_all_paths_reports_attached_device_path(self):
+        """Attached file operands no longer bypass system-path validation."""
         from EvoScientist.backends import _extract_all_paths
 
-        assert _extract_all_paths("if=/dev/zero") == []
+        assert _extract_all_paths("if=/dev/zero") == ["/dev/zero"]
 
     def test_safe_system_executable(self):
         """Running a system binary by absolute path should pass."""
