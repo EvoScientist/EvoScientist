@@ -677,6 +677,20 @@ def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cmake -DCMAKE_PREFIX_PATH="/opt/ws/x;/usr/local" -S src',
+        'make "LIBDIR=/opt/ws/lib;/usr/lib"',
+    ],
+)
+def test_toolchain_setting_under_allowed_folder_keeps_later_entries(command):
+    from EvoScientist.backends import validate_command
+
+    assert validate_command(command, allow_prefixes=("/opt/ws",)) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
 @pytest.mark.parametrize("later", ['/e""tc/passwd', '/et""c/shadow', '/h""ome/u/b.csv'])
 def test_quote_split_system_path_after_allowed_folder_is_refused(later):
     from EvoScientist.backends import validate_command
