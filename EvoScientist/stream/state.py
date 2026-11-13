@@ -114,6 +114,8 @@ class StreamState:
         self.pending_interrupt: dict | None = None
         # ask_user interrupt tracking
         self.pending_ask_user: dict | None = None
+        # A resumed gateway stream has a fresh processor but shares this state.
+        self._round_boundary_pending = False
         # Acceptance grading: a pass in progress and the verdicts so far
         self.rubric_checking = False
         self.rubric_evaluations: list[dict] = []
@@ -180,6 +182,14 @@ class StreamState:
             self.is_responding = True
             self.is_processing = False
             text_content = event.get("content", "")
+            if text_content and self._round_boundary_pending:
+                if self.response_text.strip():
+                    trailing = len(self.response_text) - len(
+                        self.response_text.rstrip("\n")
+                    )
+                    leading = len(text_content) - len(text_content.lstrip("\n"))
+                    text_content = "\n" * max(0, 2 - trailing - leading) + text_content
+                self._round_boundary_pending = False
             self.response_text += text_content
             self.latest_text += text_content
 
@@ -277,9 +287,11 @@ class StreamState:
 
         elif event_type == "interrupt":
             self.pending_interrupt = event
+            self._round_boundary_pending = True
 
         elif event_type == "ask_user":
             self.pending_ask_user = event
+            self._round_boundary_pending = True
 
         elif event_type == "tool_selection":
             self.selected_tools = event.get("tools", [])
@@ -343,16 +355,6 @@ class StreamState:
         elif event_type == "rubric_evaluation":
             self.rubric_checking = False
             self.rubric_evaluations.append(event)
-            if (
-                event.get("result") == "needs_revision"
-                and self.response_text.strip()
-                and not self.response_text.endswith("\n\n")
-            ):
-                # A revision is often a short addendum: keep the draft and
-                # start what follows on its own paragraph.
-                self.response_text += "\n\n"
-                if self.latest_text:
-                    self.latest_text += "\n\n"
 
         return event_type
 
