@@ -80,25 +80,15 @@ def test_urls_code_and_path_search_list_keep_their_spelling(tmp_path, command):
     assert validate_command(converted, workspace_root=str(tmp_path)) is None
 
 
-@pytest.mark.parametrize(
-    "spelling",
-    ['"/tmp/out.txt"', "--output=/tmp/out.txt", "-o/tmp/out.txt", "OUT=/tmp/out.txt"],
-)
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell assignments")
-def test_execute_creates_workspace_tmp_and_file(tmp_path, spelling):
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell quoting")
+def test_execute_creates_workspace_tmp_and_file(tmp_path):
     from EvoScientist.backends import CustomSandboxBackend
 
     (tmp_path / "writer.py").write_text(
-        "import os, sys\n"
-        'arg = sys.argv[1] if len(sys.argv) > 1 else os.environ["OUT"]\n'
-        'path = arg.split("=", 1)[-1] if "=" in arg else arg[2:] if arg.startswith("-o/") or arg.startswith("-o.") else arg\n'
-        'open(path, "w").write("row")\n'
+        'import sys\nopen(sys.argv[1], "w").write("row")\n'
     )
-    command = "python writer.py " + spelling
-    if spelling.startswith("OUT="):
-        command = spelling + " python writer.py"
     backend = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True)
-    result = backend.execute(command)
+    result = backend.execute('python writer.py "/tmp/out.txt"')
     assert result.exit_code == 0, result.output
     assert (tmp_path / "tmp/out.txt").read_text() == "row"
 
@@ -218,17 +208,15 @@ def test_mixed_quoted_traversal_cannot_bypass_confinement(tmp_path, prefix, quot
     assert validate_command(command, workspace_root=str(tmp_path)) is not None
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell assignment")
 def test_mixed_quoted_assignment_cannot_read_outside_workspace(tmp_path):
-    from EvoScientist.backends import CustomSandboxBackend
+    from EvoScientist.backends import prepare_sandbox_command
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (tmp_path / "canary").write_text("outside-workspace-canary")
-    backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
-    result = backend.execute('F=/tmp/".."/".."/canary; cat "$F"')
-    assert result.exit_code != 0
-    assert "outside-workspace-canary" not in result.output
+    _command, error = prepare_sandbox_command(
+        'F=/tmp/".."/".."/canary; cat "$F"', str(workspace)
+    )
+    assert error is not None
     assert not (workspace / "tmp").exists()
 
 
@@ -237,3 +225,54 @@ def test_shell_escaped_traversal_components_are_blocked(tmp_path, component):
     command = f"OUT=/tmp/{component}/{component}/canary"
     converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
     assert validate_command(converted, workspace_root=str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "awk -F/ '{print $1}' f",
+        "cut -d/ -f2 paths.txt",
+        'IFS=/ read -r a b <<< "$p"',
+        "SEP=/ python x.py",
+        "sed -e/foo/d f",
+        "uvicorn app:app --root-path=/api",
+        "rsync -a --exclude=/build src/ dst/",
+        'ENDPOINT=/api/v1; curl "localhost:8000$ENDPOINT"',
+        'uvicorn app:app --root-path=/api/"v1"',
+    ],
+)
+def test_attached_non_file_values_are_not_rewritten(tmp_path, command):
+    converted, uses_tmp = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == command
+    assert not uses_tmp
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize(
+    "name", ["PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "CPATH", "PKG_CONFIG_PATH"]
+)
+@pytest.mark.parametrize("quote", ["", '"', "'"])
+def test_search_list_assignments_remain_literal(tmp_path, name, quote):
+    command = f"export {name}={quote}/tmp/a:/usr/lib/x{quote}"
+    converted, uses_tmp = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == command
+    assert not uses_tmp
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("name", ["PYTHONPATH", "LD_LIBRARY_PATH"])
+@pytest.mark.parametrize("syntax", ['"$(cat /etc/passwd)"', '"`cat /etc/passwd`"'])
+def test_search_list_substitutions_do_not_hide_paths(tmp_path, name, syntax):
+    command = f"export {name}={syntax}"
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert validate_command(converted, workspace_root=str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("prefix", ["--out=", "OUT=", "-o"])
+def test_attached_existing_non_system_workspace_file_is_mapped(tmp_path, prefix):
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results/x.csv").touch()
+    converted, _ = _convert_command_paths(
+        f"echo {prefix}/results/x.csv", workspace_root=str(tmp_path)
+    )
+    assert shlex.split(converted) == ["echo", prefix + "./results/x.csv"]
