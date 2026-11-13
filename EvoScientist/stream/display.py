@@ -272,6 +272,11 @@ def _response_markdown_for_display(
 formatter = ToolResultFormatter()
 
 
+class _StreamCancelEvent(threading.Event):
+    # Count requests so a close started by a stop can still honor a later stop.
+    request_count: int = 0
+
+
 # Stream-cancel events keyed by logical stream scope. Channel messages pass a
 # per-message scope so `/stop` only affects that message's run; scope-less
 # callers retain the legacy process-wide default event.
@@ -280,8 +285,8 @@ _DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
 # scoped cancellation lookup.  Re-entrancy prevents the Python signal callback
 # from deadlocking if it interrupts one of these short registry sections.
 _stream_cancel_lock = threading.RLock()
-_stream_cancel_events: dict[str, threading.Event] = {
-    _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
+_stream_cancel_events: dict[str, _StreamCancelEvent] = {
+    _DEFAULT_STREAM_CANCEL_SCOPE: _StreamCancelEvent()
 }
 # The flag remains useful for cancellation requested before a stream starts and
 # at synchronous HITL boundaries.  Active Rich streams additionally register
@@ -300,12 +305,12 @@ def _get_stream_cancel_event(
     cancel_scope: str | None,
     *,
     create: bool = False,
-) -> threading.Event | None:
+) -> _StreamCancelEvent | None:
     scope_key = _stream_cancel_scope_key(cancel_scope)
     with _stream_cancel_lock:
         event = _stream_cancel_events.get(scope_key)
         if event is None and create:
-            event = threading.Event()
+            event = _StreamCancelEvent()
             _stream_cancel_events[scope_key] = event
         return event
 
@@ -316,9 +321,10 @@ def request_stream_cancel(cancel_scope: str | None = None) -> bool:
     with _stream_cancel_lock:
         event = _stream_cancel_events.get(scope_key)
         if event is None:
-            event = threading.Event()
+            event = _StreamCancelEvent()
             _stream_cancel_events[scope_key] = event
         already_requested = event.is_set()
+        event.request_count += 1
         event.set()
         handles = tuple(_stream_cancel_handles.get(scope_key, ()))
 
@@ -337,6 +343,8 @@ def request_stream_cancel(cancel_scope: str | None = None) -> bool:
 def _register_stream_cancel_handle(
     cancel_scope: str | None,
     handle: RuntimeHandle[Any],
+    *,
+    ignored_request: int | None = None,
 ) -> None:
     """Register an active owned task, honoring a pre-start stop request."""
     scope_key = _stream_cancel_scope_key(cancel_scope)
@@ -344,7 +352,11 @@ def _register_stream_cancel_handle(
         handles = _stream_cancel_handles.setdefault(scope_key, set())
         handles.add(handle)
         event = _stream_cancel_events.get(scope_key)
-        cancel_now = event is not None and event.is_set()
+        cancel_now = (
+            event is not None
+            and event.is_set()
+            and event.request_count != ignored_request
+        )
     if cancel_now:
         handle.cancel()
 
@@ -2035,10 +2047,15 @@ def _run_streaming(
 
         Such a stop is a refusal, as Ctrl+C on the prompt is: the next message must not land on it.
         """
-        _close_parked_turn("rejected")
+        with _stream_cancel_lock:
+            event = _get_stream_cancel_event(cancel_scope)
+            ignored_request = event.request_count if event is not None else None
+        _close_parked_turn("rejected", ignored_request=ignored_request)
         return _stopped_response()
 
-    def _close_parked_turn(reason: "ParkedCloseReason") -> str:
+    def _close_parked_turn(
+        reason: "ParkedCloseReason", *, ignored_request: int | None = None
+    ) -> str:
         """End the turn at a pause that will not be answered.
 
         Closes the parked interrupt without resuming the agent (a rejecting
@@ -2075,8 +2092,17 @@ def _run_streaming(
                 reason=reason,
             )
 
+        close_handle: RuntimeHandle[None] | None = None
+
+        def _register_close(handle: RuntimeHandle[None]) -> None:
+            nonlocal close_handle
+            close_handle = handle
+            _register_stream_cancel_handle(
+                cancel_scope, handle, ignored_request=ignored_request
+            )
+
         try:
-            runtime.run_sync(_run_close)
+            runtime.run_sync(_run_close, on_submitted=_register_close)
         except concurrent.futures.CancelledError:
             if not is_stream_cancel_requested(cancel_scope):
                 raise
@@ -2088,6 +2114,9 @@ def _run_streaming(
                 thread_id,
                 exc_info=True,
             )
+        finally:
+            if close_handle is not None:
+                _unregister_stream_cancel_handle(cancel_scope, close_handle)
         text = (state.response_text or "").strip()
         if not at_limit or hitl_outcome_fn is None:
             return text
