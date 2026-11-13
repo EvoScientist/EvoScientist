@@ -433,7 +433,7 @@ class _CallRecord:
     thinking_chars: int = 0
     tool_call_ids: list[str] = field(default_factory=list)
     full_response_len: int = 0
-    selector_snapshot: tuple[bool, str, bool] | None = None
+    selector_snapshot: tuple[bool, str] | None = None
 
     def discard_payload(self) -> dict[str, Any]:
         return {
@@ -1093,6 +1093,8 @@ class _V3EventProcessor:
         if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
             self._end_text_message(subagent)
 
+        if msg.tool_calls:
+            events.extend(self._selector.flush_selection())
         for raw_tool_call_block in msg.tool_calls:
             tool_call_block = _as_raw_map(raw_tool_call_block)
             if tool_call_block is None:
@@ -1506,6 +1508,8 @@ async def stream_agent_events(
         from .sink import SessionEventSink
 
         events = SessionEventSink()
+    # A run that ended before its first output leaves its selection behind.
+    events.discard_tool_selection()
 
     # Single assembly point for the run config (see gateway.types). No
     # per-run model/limit overrides on the local path: the local agent is

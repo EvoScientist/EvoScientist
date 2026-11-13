@@ -477,7 +477,7 @@ export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 ```
 
-Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yaml`.
+Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yaml`. OpenAI- and Anthropic-compatible endpoints (vLLM, LM Studio, a gateway) are configured with the `custom-openai` / `custom-anthropic` providers — see the [custom endpoints guide](docs/guides/custom-endpoints.md).
 
 Every agent takes its keys from `config.yaml` or the environment. A project `.env` holds only settings of the `EvoSci` command started in that folder, such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`; `EvoSci` warns about, and ignores, any key or other setting EvoScientist reads in it. Other variables in it, such as `HF_TOKEN`, are ignored too: export them in your shell before starting EvoSci.
 
