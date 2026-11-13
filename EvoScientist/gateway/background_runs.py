@@ -319,7 +319,7 @@ async def _acancel_thread_runs(
     name: str,
     strict: bool = False,
 ) -> None:
-    """Cancel runs; strict callers must not delete a thread after a failed cancel."""
+    """Async variant of :func:`_cancel_thread_runs`; ``strict`` re-raises failures."""
     try:
         run_ids: list[str] = []
         for status in _CANCELABLE_RUN_STATUSES:
