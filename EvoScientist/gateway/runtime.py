@@ -175,7 +175,7 @@ def create_runtime_gateways_for_config(
     return create_runtime_gateways(events=events)
 
 
-def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any = None) -> bool:
+def sandbox_dangerous_mode(graph_gateway: GraphGateway, config: Any) -> bool:
     """Whether the sandbox running this session's turns is in dangerous mode.
 
     Only an in-process agent is built from this session's captured *config*.
