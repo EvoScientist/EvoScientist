@@ -1167,6 +1167,7 @@ class TestExplicitSeeding:
         from EvoScientist.middleware.model_fallback import get_fallback_chain
 
         cfg = MagicMock()
+        cfg.code_interpreter_timeout = 60
         cfg.model_fallbacks = "factory-a:prov-a, factory-b:prov-b"
         cfg.auxiliary_model = ""
         cfg.auxiliary_provider = ""
@@ -1202,6 +1203,7 @@ class TestExplicitSeeding:
         for cfg in (cfg_v1, cfg_v2):
             cfg.auxiliary_model = ""
             cfg.auxiliary_provider = ""
+            cfg.code_interpreter_timeout = 60
         _reset_chain_initialization()
         with patch(
             "EvoScientist.EvoScientist._ensure_chat_model",

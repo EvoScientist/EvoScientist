@@ -1485,6 +1485,7 @@ def test_bootstrap_ignores_post_summarization_synthetic_human_message(
 
 def _assembly_cfg(*, auto_mode: bool):
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = True
     cfg.auto_mode = auto_mode

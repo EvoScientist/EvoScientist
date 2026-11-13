@@ -200,6 +200,7 @@ def test_default_middleware_includes_context_editing(
 ):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     cfg.auxiliary_model = ""
@@ -251,6 +252,7 @@ def test_context_editing_before_overflow_mapper(
 ):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     cfg.auxiliary_model = ""
