@@ -1870,7 +1870,17 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._dirs, self._current_model)
             response = ""
-            agent = await self._await_agent_ready()
+            try:
+                agent = await self._await_agent_ready()
+            except (Exception, asyncio.CancelledError):
+                # Error or cancellation before the run starts: remove the spinner.
+                if not loading_removed:
+                    try:
+                        await loading.cleanup()
+                    except Exception:
+                        pass
+                    loading_removed = True
+                raise
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -2100,6 +2110,12 @@ def run_textual_interactive(
             _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
+                    if not loading_removed:
+                        try:
+                            await loading.cleanup()
+                        except Exception:
+                            pass
+                        loading_removed = True
                     response = await _mark_cancelled_response()
                     break
                 # Loop-level total cap on the *completed* round count,
