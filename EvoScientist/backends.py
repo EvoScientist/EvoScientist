@@ -1132,15 +1132,21 @@ def _extract_all_paths(
         path = attached[1] if attached is not None else value
         # A system path later in the word, outside the allowed folders. Read
         # from the decoded value, so quote-split spellings (`/e""tc`) count.
-        later_system_path = next(
-            (
-                found[1]
-                for i in range(1, len(path))
-                if (found := path_re.match(path, i))
-                and not _under_any(path[i:], allow_prefixes)
-                and found[1] not in _PASSTHROUGH_DEVICE_PATHS
-            ),
-            None,
+        # A toolchain setting (`-DCMAKE_PREFIX_PATH=<root>/x;/usr/local`) is
+        # skipped as a whole below, so its later entries are not operands.
+        later_system_path = (
+            None
+            if _is_toolchain_path_assignment(raw)
+            else next(
+                (
+                    found[1]
+                    for i in range(1, len(path))
+                    if (found := path_re.match(path, i))
+                    and not _under_any(path[i:], allow_prefixes)
+                    and found[1] not in _PASSTHROUGH_DEVICE_PATHS
+                ),
+                None,
+            )
         )
         starts_allowed = (
             path.startswith("/")
