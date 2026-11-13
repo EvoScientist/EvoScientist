@@ -119,14 +119,14 @@ def _shorten_path(path: str) -> str:
 
 
 def _agent_shell_notices(backend: str | None = None) -> list[str]:
-    """The agent shell's setup hint, the server's ccproxy missing, the
-    server's drift warnings, a server unavailable for this project, one reachable from other machines and where
+    """The server's ccproxy missing, the server's drift warnings, a server
+    unavailable for this project, one reachable from other machines and where
     a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
-    They also go to the terminal or the log, which Textual hides while the
-    app runs, so the TUI shows them as notifications.
+    They also go to the terminal, which Textual hides while the app runs, so
+    the TUI shows them as notifications. The agent shell's setup hint is
+    logged when the agent is built, and the TUI shows logged warnings.
     """
-    from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
     from ..langgraph_dev.registration import exposure_messages
     from .commands import dangerous_flag_note
@@ -148,7 +148,6 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     )
     older = lg_manager.OLDER_SERVER
     notices = [
-        setup_hint(),
         lg_manager.CCPROXY_MISSING,
         older,
         drift,
@@ -4591,8 +4590,13 @@ def run_textual_interactive(
                 resumed=resumed,
                 resume_warning=resume_warning,
             )
+            from .tui_logging import tui_warning_notifications
+
             try:
-                await app.run_async()
+                # Around run_async: only after _shutdown closes the driver is the
+                # alternate screen surely left, and buffered records print after that.
+                with tui_warning_notifications(app):
+                    await app.run_async()
             finally:
                 from .resume_hint import print_resume_hint
 
