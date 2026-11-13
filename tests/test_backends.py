@@ -1073,6 +1073,9 @@ class TestWorkspaceRemovalAndComments:
             'rm -rf "${USERPROFILE}"/',
             "rm -rf %USERPROFILE%",
             "rm -rf %userprofile%\\",
+            'rm -rf ~/""',
+            "rm -rf ~/''",
+            "rm -rf ~root/'.'",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(
@@ -1095,6 +1098,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf $USERPROFILE/AppData/Local/x",
             "rm -rf $USERPROFILE_BACKUP",
             "rm -rf ~-",
+            'rm -rf "~"',
+            'rm -rf ~"root"',
         ],
     )
     def test_dangerous_mode_removes_deeper_paths(self, command, tmp_workspace):
