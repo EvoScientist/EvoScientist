@@ -2947,6 +2947,20 @@ class TestTraversalFalsePositiveFix:
     def test_dotdot_in_filename_attached_allowed(self):
         assert validate_command("python s.py -ofoo..bar.txt") is None
 
+    def test_stdin_dash_and_numeric_flags_do_not_recurse(self):
+        assert validate_command("cat -") is None
+        assert validate_command("head -10 file.txt") is None
+        assert validate_command("tar -xzf file.tar.gz -") is None
+
+    def test_quoted_dotdot_traversal_blocked(self):
+        result = validate_command("python s.py -o'.'./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command("cat foo/'..'/bar")
+        assert result is not None
+        assert "blocked" in result.lower()
+
 
 # === Pipeline command validation ===
 

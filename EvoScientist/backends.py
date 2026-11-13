@@ -982,12 +982,17 @@ def _has_traversal_component(command: str) -> bool:
         try:
             if ".." in PurePosixPath(s).parts:
                 return True
+            # Also check unquoted version to prevent bypasses like '..'/'..' or -o'.'./path
+            unquoted = s.replace("'", "").replace('"', '').replace('`', '')
+            if unquoted != s and ".." in PurePosixPath(unquoted).parts:
+                return True
         except Exception:
             pass
         # Check attached short options like -o../x or -I..
+        # Require stripped != s to avoid infinite recursion on flags like '-' or '-10'
         if s.startswith("-") and not s.startswith("--"):
             stripped = re.sub(r"^-[a-zA-Z]+", "", s)
-            if stripped and _check_candidate(stripped):
+            if stripped and stripped != s and _check_candidate(stripped):
                 return True
         return False
 
