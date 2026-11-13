@@ -198,6 +198,8 @@ class TestSimpleCommands:
     def test_env_split_strings_are_also_read_as_code(self):
         assert ("pkill", ("env",)) in self._found("env -S 'a; pkill x'")
         assert ("pkill", ("env",)) in self._found("env -S 'sh -c \"pkill x\"'")
+        # A bare `--` ends env's options; it is no `--split-string` prefix.
+        assert self._found("env -- pkill x") == [("env", ()), ("pkill", ("env",))]
         assert self._found("env -u S python x.py") == [
             ("env", ()),
             ("python", ("env",)),
