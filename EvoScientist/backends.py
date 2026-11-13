@@ -2038,12 +2038,10 @@ class MergedSkillsBackend(BackendProtocol):
         yield self._secondary
 
     def file_path(self, file_path: str, *, tool_name: str | None = None) -> Path | None:
-        """The file to forward, only when its tier is unambiguous.
+        """The write's primary file, otherwise the tier that ``read`` serves.
 
-        ``read`` may fall through a tier whose file exists but cannot be
-        read. Forwarding constructs its routes separately and cannot know
-        which read succeeded, so never guess between same-named tier files.
-        Successful writes always name the primary tier, even with a collision.
+        Re-read only when multiple tiers hold the file to preserve fallback
+        behavior without adding a second read in the single-tier case.
         """
         if tool_name == "write_file":
             try:
@@ -2051,17 +2049,27 @@ class MergedSkillsBackend(BackendProtocol):
             except (ValueError, OSError):
                 return None
             return path if path.is_file() else None
-        found: Path | None = None
+        found = []
         for backend in self._backends():
             try:
                 path = backend._resolve_path(file_path)
             except (ValueError, OSError):
                 continue
             if path.is_file():
-                if found is not None:
-                    return None
-                found = path
-        return found
+                found.append((backend, path))
+        if len(found) == 1:
+            return found[0][1]
+        for backend, path in found:
+            try:
+                result = backend.read(file_path)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return path
+                elif not str(result).startswith("Error:"):
+                    return path
+            except (ValueError, OSError):
+                continue
+        return None
 
     # -- read: try each tier in priority order --
 
