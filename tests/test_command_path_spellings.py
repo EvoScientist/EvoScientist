@@ -393,3 +393,120 @@ def test_toolchain_assignment_exemption_is_boundary_aware(raw):
     from EvoScientist.backends import _is_toolchain_path_assignment
 
     assert not _is_toolchain_path_assignment(raw)
+
+
+@pytest.mark.parametrize("prefix", ["--output=", "-o", "OUT="])
+def test_attached_tmp_after_cd_uses_workspace_root(tmp_path, prefix):
+    from EvoScientist.backends import _platform_quote
+
+    command, uses_tmp = _convert_command_paths(
+        f"cd sub && echo {prefix}/tmp/out.txt", workspace_root=str(tmp_path)
+    )
+    assert uses_tmp
+    assert command == (
+        f"cd sub && echo {prefix}{_platform_quote(str(tmp_path))}/tmp/out.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bash -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
+        'bash -c "PATH=/usr/bin:/bin; cat /etc/passwd"',
+        "sh -c 'X=/usr/x; cat /etc/passwd'",
+        'bash -lc "PATH=/usr/bin:/bin; python train.py --config=/etc/x"',
+        'bash -c "python x.py --config=/etc/x"',
+        'bash -c "./configure --prefix=/opt/x && make"',
+        "bash -c 'sh -c \"X=/usr/x; cat /etc/passwd\"'",
+    ],
+)
+def test_shell_script_assignments_do_not_hide_file_operands(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    assert prepare_sandbox_command(command, str(tmp_path))[1] is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'make "CC=/usr/bin/clang -O3"',
+        'CC="/usr/bin/clang -O3" make',
+        'cmake -DCMAKE_PREFIX_PATH="/opt/a;/opt/b" .',
+        'bash -c "CUDA_HOME=/usr/local/cuda python setup.py build"',
+        'bash -c "CUDA_HOME=/usr/local/cuda; ls $CUDA_HOME/bin"',
+        'bash -c "CUDA_HOME=/usr/local/cuda; export PATH=$CUDA_HOME/bin:$PATH; python setup.py install"',
+    ],
+)
+def test_shell_script_toolchain_settings_remain_supported(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    converted, error = prepare_sandbox_command(command, str(tmp_path))
+    assert error is None
+    assert converted == command
+
+
+@pytest.mark.parametrize("quote", ["", '"'])
+def test_search_list_substitution_tmp_paths_are_mapped(tmp_path, quote):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    command, error = prepare_sandbox_command(
+        f"export PYTHONPATH={quote}$(cat /tmp/paths.txt){quote}", str(tmp_path)
+    )
+    assert error is None
+    assert command == f"export PYTHONPATH={quote}$(cat ./tmp/paths.txt){quote}"
+    assert (tmp_path / "tmp").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('scp user@host:"/tmp/log.txt" .', 'scp user@host:"/tmp/log.txt" .'),
+        ('kubectl cp pod:"/tmp/a.csv" a.csv', 'kubectl cp pod:"/tmp/a.csv" a.csv'),
+        ('curl -F file=@"/tmp/plot.png" host', "curl -F file=@./tmp/plot.png host"),
+    ],
+)
+def test_only_a_quoted_span_after_a_colon_is_kept(tmp_path, command, expected):
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path spelling")
+def test_quoted_host_path_into_workspace_skills_stays_protected(tmp_path):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    (tmp_path / "skills/demo").mkdir(parents=True)
+    _command, error = prepare_sandbox_command(
+        f'rm -rf "{tmp_path}/skills/demo"', tmp_path, skills_dir=tmp_path / "skills"
+    )
+    assert error is not None
+
+
+@pytest.mark.parametrize(
+    "syntax", ['"$(cat /tmp/paths.txt)"', '"`cat /tmp/paths.txt`"']
+)
+def test_quoted_search_list_substitution_after_cd_uses_workspace_root(tmp_path, syntax):
+    from EvoScientist.backends import _platform_quote, prepare_sandbox_command
+
+    converted, error = prepare_sandbox_command(
+        f"cd sub && export PYTHONPATH={syntax}", str(tmp_path)
+    )
+    assert error is None
+    expected = syntax.replace(
+        "/tmp/paths.txt", _platform_quote(str(tmp_path)) + "/tmp/paths.txt"
+    )
+    assert converted == f"cd sub && export PYTHONPATH={expected}"
+
+
+def test_quoted_search_list_keeps_literal_entries_while_rewriting_substitution(
+    tmp_path,
+):
+    from EvoScientist.backends import _platform_quote, prepare_sandbox_command
+
+    converted, error = prepare_sandbox_command(
+        'PATH="$(cd /tmp/x && pwd):$PATH" tool', str(tmp_path)
+    )
+    assert error is None
+    assert (
+        converted
+        == f'PATH="$(cd {_platform_quote(str(tmp_path))}/tmp/x && pwd):$PATH" tool'
+    )
