@@ -838,7 +838,7 @@ def _ssh_invocations(
 
     prev_end = 0
     for token in tokens:
-        ends_command = shell_syntax.COMMAND_NEWLINE_RE.search(
+        ends_command = shell_syntax.command_newline(
             command, prev_end, int(token["start"])
         )
         if token.get("type") == "op" or ends_command is not None:

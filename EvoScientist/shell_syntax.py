@@ -15,8 +15,18 @@ COMMAND_START_OPS = frozenset({";", "&&", "||", "|", "&", "(", ")", "`"})
 COMMAND_PREFIX_WORDS = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "time", "{"}
 )
-# A newline that ends a command, not a backslash line continuation.
-COMMAND_NEWLINE_RE = re.compile(r"(?<!\\)\n")
+_NEWLINE_RE = re.compile(r"(?<!\\)\n")
+
+
+def command_newline(command: str, start: int, end: int) -> int | None:
+    """The end of the first newline between two tokens (*start* to *end*)
+    that ends a command, not a backslash line continuation. A backslash
+    before *start* belongs to the word before it, as in ``x\\\\``, so it
+    continues nothing."""
+    match = _NEWLINE_RE.search(command[start:end])
+    return None if match is None else start + match.end()
+
+
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
 HEREDOC_OP_RE = re.compile(r"\d*<<")
 SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
@@ -251,9 +261,9 @@ def parse(command: str) -> ShellWords:
     while True:
         token = next(stream, None)
         token_start = len(command) if token is None else int(token["start"])
-        newline = COMMAND_NEWLINE_RE.search(command, prev_end, token_start)
+        newline = command_newline(command, prev_end, token_start)
         if pending and newline is not None:
-            spans = _heredoc_spans(command, newline.end(), pending)
+            spans = _heredoc_spans(command, newline, pending)
             starts, pending, pending_starts = pending_starts, [], []
             if spans is not None:
                 bodies.extend(spans)
@@ -318,9 +328,7 @@ def command_name_flags(command: str, tokens: Sequence[dict[str, object]]) -> lis
             carried
             or previous is None
             or (previous["type"] == "op" and previous["value"] in COMMAND_START_OPS)
-            or COMMAND_NEWLINE_RE.search(
-                command, int(previous["end"]), int(token["start"])
-            )
+            or command_newline(command, int(previous["end"]), int(token["start"]))
             is not None
         )
         value = str(token["value"])
@@ -517,7 +525,7 @@ def _command_arguments(
     index += 1
     while index < len(tokens):
         token = tokens[index]
-        if COMMAND_NEWLINE_RE.search(command, previous_end, int(token["start"])):
+        if command_newline(command, previous_end, int(token["start"])) is not None:
             break
         value = str(token["value"])
         if token["type"] == "op" and (value != "`" or in_backtick):

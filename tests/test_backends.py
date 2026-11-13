@@ -860,6 +860,19 @@ class TestWorkspaceRemovalAndComments:
     def test_glued_hashes_and_line_continuations_hide_nothing(self, command):
         assert "'sudo' is not allowed" in validate_command(command)
 
+    @pytest.mark.parametrize("backslashes", [2, 4])
+    def test_a_newline_after_escaped_backslashes_ends_the_command(self, backslashes):
+        command = "echo x" + "\\" * backslashes + "\npkill x"
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo x\\\npkill x", "echo x\\\\\\\npkill x", "echo x\\\\ \\\n pkill x"],
+    )
+    def test_an_odd_backslash_before_a_newline_continues_the_line(self, command):
+        # The next line's words are arguments of echo, not a command.
+        assert validate_command(command) is None
+
     def test_cd_after_a_glued_hash_is_still_checked(self):
         assert "leaves the workspace" in validate_command(
             "echo $(date)#; cd /etc; ls", workspace_root="/W"
