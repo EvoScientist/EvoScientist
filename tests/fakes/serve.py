@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from langgraph_sdk.errors import NotFoundError
@@ -12,6 +13,14 @@ from langgraph_sdk.errors import NotFoundError
 from EvoScientist.cli import commands
 from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.runtime import AsyncRuntime
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
+    from EvoScientist.cli.commands import ServeRuntimeState
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.gateway import RuntimeGateways, ThreadStore
+    from EvoScientist.paths import SessionDirs
 
 
 def serve_config(
@@ -289,3 +298,36 @@ def seed_source_thread(client, tid="t1", *, head="h1", status="idle", interrupts
         "next": [],
         "interrupts": list(interrupts),
     }
+
+
+def _runtime_state(
+    *,
+    agent: CompiledStateGraph | None = None,
+    thread_id: str = "tid",
+    dirs: SessionDirs | None = None,
+    config: EvoScientistConfig | None = None,
+    thread_store: ThreadStore | None = None,
+    runtime_gateways: RuntimeGateways | None = None,
+    async_runtime: AsyncRuntime | None = None,
+    gateway_backend: str | None = None,
+) -> ServeRuntimeState:
+    from langgraph.graph.state import CompiledStateGraph
+
+    from EvoScientist.cli.commands import ServeRuntimeState
+    from EvoScientist.gateway import RuntimeGateways
+    from EvoScientist.paths import SessionDirs, Workspace
+    from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+
+    store = thread_store or FakeThreadStore(generated_thread_id="unused")
+    return ServeRuntimeState(
+        agent=agent if agent is not None else MagicMock(spec=CompiledStateGraph),
+        thread_id=thread_id,
+        dirs=dirs or SessionDirs(Workspace("/startup-ws")),
+        config=config,
+        runtime_gateways=runtime_gateways
+        or RuntimeGateways(
+            thread_store=store, graph_gateway=FakeGraphGateway(thread_store=store)
+        ),
+        async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
+        gateway_backend=gateway_backend,
+    )
