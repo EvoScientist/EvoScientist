@@ -8,13 +8,113 @@ import httpx
 import pytest
 
 
+async def receive_signal(
+    channel, message_index, attachment_indexes, sources, named=True
+):
+    await channel._handle_rpc(
+        {
+            "method": "receive",
+            "params": {
+                "envelope": {
+                    "source": "sender",
+                    "dataMessage": {
+                        "timestamp": 1000 + message_index,
+                        "attachments": [
+                            {
+                                "file": str(sources[i]),
+                                **({"filename": "image.jpeg"} if named else {}),
+                            }
+                            for i in attachment_indexes
+                        ],
+                    },
+                }
+            },
+        }
+    )
+
+
+async def receive_imessage(channel, message_index, attachment_indexes, sources):
+    await channel._handle_message(
+        {
+            "message": {
+                "id": message_index + 1,
+                "sender": "sender",
+                "chat_id": 1,
+                "attachments": [str(sources[i]) for i in attachment_indexes],
+            }
+        }
+    )
+
+
+async def receive_qq(channel, message_index, attachment_indexes, sources):
+    await channel._on_msg(
+        SimpleNamespace(
+            id=str(message_index),
+            content="",
+            author=SimpleNamespace(user_openid="sender"),
+            attachments=[
+                SimpleNamespace(filename="image.jpeg", url=f"https://example.com/{i}")
+                for i in attachment_indexes
+            ],
+        ),
+        "c2c",
+    )
+
+
+async def receive_dingtalk(
+    channel, message_index, attachment_indexes, sources, content_only=False
+):
+    keys = ["content"] if content_only else ["imageContent", "fileContent"]
+    payload = {"senderStaffId": "sender", "msgtype": "image"}
+    for key, i in zip(keys, attachment_indexes, strict=False):
+        payload[key] = {
+            "fileName": "image.jpeg",
+            "downloadUrl": f"https://example.com/{i}",
+        }
+    await channel._on_ws_message(
+        {
+            "type": "CALLBACK",
+            "headers": {"messageId": str(message_index)},
+            "data": payload,
+        }
+    )
+
+
+async def receive_signal_unnamed(channel, message_index, attachment_indexes, sources):
+    await receive_signal(
+        channel, message_index, attachment_indexes, sources, named=False
+    )
+
+
+async def receive_dingtalk_content(channel, message_index, attachment_indexes, sources):
+    await receive_dingtalk(
+        channel, message_index, attachment_indexes, sources, content_only=True
+    )
+
+
 @pytest.mark.parametrize(
-    "channel_name",
-    ["signal", "signal_unnamed", "imessage", "qq", "dingtalk", "dingtalk_content"],
+    ("channel_name", "receiver", "same_message"),
+    [
+        pytest.param(
+            channel_name,
+            receiver,
+            same_message,
+            id=f"{channel_name}-{'within' if same_message else 'across'}",
+        )
+        for channel_name, receiver in (
+            ("signal", receive_signal),
+            ("signal_unnamed", receive_signal_unnamed),
+            ("imessage", receive_imessage),
+            ("qq", receive_qq),
+            ("dingtalk", receive_dingtalk),
+            ("dingtalk_content", receive_dingtalk_content),
+        )
+        for same_message in (False, True)
+        if not (channel_name == "dingtalk_content" and same_message)
+    ],
 )
-@pytest.mark.parametrize("same_message", [False, True])
 async def test_same_named_attachments_keep_their_bytes(
-    tmp_path, monkeypatch, channel_name, same_message
+    tmp_path, monkeypatch, channel_name, receiver, same_message
 ):
     from EvoScientist.channels.dingtalk.channel import DingTalkChannel, DingTalkConfig
     from EvoScientist.channels.imessage.channel_rpc import (
@@ -57,83 +157,11 @@ async def test_same_named_attachments_keep_their_bytes(
         source.write_bytes(f"/{index}".encode())
         sources.append(source)
 
-    async def receive(message_index, attachment_indexes):
-        if channel_name.startswith("signal"):
-            await channel._handle_rpc(
-                {
-                    "method": "receive",
-                    "params": {
-                        "envelope": {
-                            "source": "sender",
-                            "dataMessage": {
-                                "timestamp": 1000 + message_index,
-                                "attachments": [
-                                    {
-                                        "file": str(sources[i]),
-                                        **(
-                                            {"filename": "image.jpeg"}
-                                            if channel_name == "signal"
-                                            else {}
-                                        ),
-                                    }
-                                    for i in attachment_indexes
-                                ],
-                            },
-                        }
-                    },
-                }
-            )
-        elif channel_name == "imessage":
-            await channel._handle_message(
-                {
-                    "message": {
-                        "id": message_index + 1,
-                        "sender": "sender",
-                        "chat_id": 1,
-                        "attachments": [str(sources[i]) for i in attachment_indexes],
-                    }
-                }
-            )
-        elif channel_name == "qq":
-            await channel._on_msg(
-                SimpleNamespace(
-                    id=str(message_index),
-                    content="",
-                    author=SimpleNamespace(user_openid="sender"),
-                    attachments=[
-                        SimpleNamespace(
-                            filename="image.jpeg", url=f"https://example.com/{i}"
-                        )
-                        for i in attachment_indexes
-                    ],
-                ),
-                "c2c",
-            )
-        else:
-            keys = (
-                ["content"]
-                if channel_name == "dingtalk_content"
-                else ["imageContent", "fileContent"]
-            )
-            payload = {"senderStaffId": "sender", "msgtype": "image"}
-            for key, i in zip(keys, attachment_indexes, strict=False):
-                payload[key] = {
-                    "fileName": "image.jpeg",
-                    "downloadUrl": f"https://example.com/{i}",
-                }
-            await channel._on_ws_message(
-                {
-                    "type": "CALLBACK",
-                    "headers": {"messageId": str(message_index)},
-                    "data": payload,
-                }
-            )
-
-    if same_message and channel_name != "dingtalk_content":
-        await receive(0, [0, 1])
+    if same_message:
+        await receiver(channel, 0, [0, 1], sources)
     else:
-        await receive(0, [0])
-        await receive(1, [1])
+        await receiver(channel, 0, [0], sources)
+        await receiver(channel, 1, [1], sources)
     paths = [
         Path(p)
         for call in channel._enqueue_raw.await_args_list
@@ -182,7 +210,13 @@ def test_long_attachment_filename_fits_filesystem(tmp_path, message_id, filename
     from EvoScientist.channels.base import attachment_filename
 
     name = attachment_filename(filename, message_id, 0)
-    for prefix in ("signal_", "imsg_", "qq_", "dingtalk_"):
+    for prefix in (
+        "signal_",
+        "imsg_",
+        "qq_",
+        "dingtalk_",
+        "future_channel_with_long_prefix_",
+    ):
         path = tmp_path / (prefix + name)
         assert len(path.name.encode()) <= 255
         assert path.suffix == ".jpeg"
