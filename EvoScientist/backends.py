@@ -975,9 +975,33 @@ def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
+    def _check_candidate(s: str) -> bool:
+        s = s.strip("'\"`")
+        if not s:
+            return False
+        try:
+            if ".." in PurePosixPath(s).parts:
+                return True
+        except Exception:
+            pass
+        # Check attached short options like -o../x or -I..
+        if s.startswith("-") and not s.startswith("--"):
+            stripped = re.sub(r"^-[a-zA-Z]+", "", s)
+            if stripped and _check_candidate(stripped):
+                return True
+        return False
+
     for token in command.split():
-        if ".." in PurePosixPath(token).parts:
+        if _check_candidate(token):
             return True
+        if "=" in token:
+            for part in token.split("="):
+                if _check_candidate(part):
+                    return True
+        if ":" in token:
+            for part in token.split(":"):
+                if _check_candidate(part):
+                    return True
     return False
 
 

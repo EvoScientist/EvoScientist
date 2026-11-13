@@ -2926,6 +2926,27 @@ class TestTraversalFalsePositiveFix:
         result = validate_command("cat foo/../../etc/passwd")
         assert result is not None
 
+    def test_dotdot_attached_short_option_blocked(self):
+        result = validate_command("python s.py -o../out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_equals_option_blocked(self):
+        result = validate_command("python s.py --output=../out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_env_assignment_blocked(self):
+        result = validate_command("OUT=../out.txt python s.py")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+    def test_dotdot_in_filename_with_equals_allowed(self):
+        assert validate_command("python s.py --output=foo..bar.txt") is None
+
+    def test_dotdot_in_filename_attached_allowed(self):
+        assert validate_command("python s.py -ofoo..bar.txt") is None
+
 
 # === Pipeline command validation ===
 
