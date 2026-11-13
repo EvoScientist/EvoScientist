@@ -20,7 +20,6 @@ COMMAND_NEWLINE_RE = re.compile(r"(?<!\\)\n")
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
 HEREDOC_OP_RE = re.compile(r"\d*<<")
 SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
-SHELL_C_OPTION_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # Commands that run the command named by their first operand.
 WRAPPER_NAMES = frozenset(
     {"env", "nohup", "timeout", "xargs", "exec", "command", "nice", "setsid"}
@@ -34,10 +33,12 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
     "nice": frozenset({"-n", "--adjustment"}),
     "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
 }
-# Shell options whose value is the next word.
-_SHELL_OPTIONS_WITH_VALUE = frozenset(
-    {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
-)
+# Long shell options whose value is the next word.
+_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file"})
+# Short option letters that take the next word, also inside a cluster
+# (``-euo pipefail``). Only bash's ``-O`` takes a shopt name: zsh's is a flag,
+# so ``zsh -O -c 'x'`` runs ``x``.
+_SHELL_LETTERS_WITH_VALUE = {"bash": "oO", "sh": "oO"}
 
 
 def tokenize(command: str) -> list[dict[str, object]]:
@@ -404,23 +405,14 @@ def shell_script_words(tokens: Sequence[dict[str, object]]) -> set[int]:
         name = re.split(r"[\\/]", str(token["value"]))[-1]
         if token["type"] != "word" or name not in SHELL_NAMES:
             continue
-        options = iter(tokens[index + 1 :])
-        for option in options:
-            if option["type"] != "word":
+        words: list[dict[str, object]] = []
+        for word in tokens[index + 1 :]:
+            if word["type"] != "word":
                 break
-            raw = str(option["raw"])
-            if not raw.startswith(("-", "+")):
-                break
-            if SHELL_C_OPTION_RE.fullmatch(raw):
-                script = next(options, None)
-                if script is not None and script["type"] == "word":
-                    starts.add(int(script["start"]))
-                break
-            # -o/-O consume a separate option name, including in -euo.
-            if re.fullmatch(r"[-+][A-Za-z]*[oO]", raw):
-                name = next(options, None)
-                if name is None or name["type"] != "word":
-                    break
+            words.append(word)
+        first, letters = _shell_operand(name, [str(word["value"]) for word in words])
+        if first is not None and "c" in letters:
+            starts.add(int(words[first]["start"]))
     return starts
 
 
@@ -587,32 +579,46 @@ def _unwrap(
     return found
 
 
+def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
+    """For the words after the name of *shell*: the index of the first operand
+    (``None`` when there is none) and the option letters turned on before it.
+    The ``-c`` script is that operand, wherever ``-c`` stands among the options
+    (``bash -c -e 'x'``), and an option value is not an operand
+    (``bash -euo pipefail -c 'x'``)."""
+    with_value = _SHELL_LETTERS_WITH_VALUE.get(shell, "o")
+    letters = ""
+    skip = 0
+    for position, value in enumerate(values):
+        if skip:
+            skip -= 1
+        elif value in ("-", "--"):
+            return (position + 1 if position + 1 < len(values) else None), letters
+        elif value.startswith("--"):
+            skip = int(value in _SHELL_LONG_OPTIONS_WITH_VALUE)
+        elif value[:1] in ("-", "+") and len(value) > 1:
+            if value[0] == "+":
+                # +n undoes -n
+                letters = "".join(c for c in letters if c not in value[1:])
+            else:
+                letters += value[1:]
+            skip = sum(c in with_value for c in value[1:])
+        else:
+            return position, letters
+    return None, letters
+
+
 def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
     """The argument index of the script a shell runs from ``-c``, and whether
     it runs code from stdin (no ``-c`` and no script file, or ``-s``). Only
     the options before the first operand count; with ``-n`` the shell checks
     the syntax and runs neither."""
-    letters = ""
-    skip = False
-    first: int | None = None
-    for position, (arg, token) in enumerate(zip(shell.args, shell.tokens, strict=True)):
-        value = _word_value(arg, token)
-        if skip:
-            skip = False
-        elif value in _SHELL_OPTIONS_WITH_VALUE:
-            skip = True
-        elif value in ("-", "--"):
-            first = position + 1 if position + 1 < len(shell.args) else None
-            break
-        elif value.startswith("--"):
-            continue
-        elif value.startswith("+") and len(value) > 1:
-            letters = "".join(c for c in letters if c not in value[1:])  # +n undoes -n
-        elif value.startswith("-") and len(value) > 1:
-            letters += value[1:]
-        else:
-            first = position
-            break
+    first, letters = _shell_operand(
+        shell.name,
+        [
+            _word_value(arg, token)
+            for arg, token in zip(shell.args, shell.tokens, strict=True)
+        ],
+    )
     if "n" in letters:
         return None, False
     if "c" in letters:
