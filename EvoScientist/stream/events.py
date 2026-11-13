@@ -434,7 +434,6 @@ class _CallRecord:
     tool_call_ids: list[str] = field(default_factory=list)
     full_response_len: int = 0
     selector_snapshot: tuple[bool, str] | None = None
-    main_message_has_text: bool = False
 
     def discard_payload(self) -> dict[str, Any]:
         return {
@@ -583,7 +582,7 @@ class _V3EventProcessor:
                 0, len(self.full_response) - record.full_response_len
             )
             self.full_response = self.full_response[: record.full_response_len]
-            self._main_message_has_text = record.main_message_has_text
+            self._main_message_has_text = False
             if record.selector_snapshot is not None:
                 self._selector.restore(record.selector_snapshot)
             self._process_value_message_snapshots = self._value_recovery
@@ -626,7 +625,6 @@ class _V3EventProcessor:
         self._records[self._namespace] = _CallRecord(
             call=call,
             full_response_len=len(self.full_response),
-            main_message_has_text=self._main_message_has_text,
             selector_snapshot=self._selector.snapshot()
             if not self._namespace
             else None,
