@@ -39,7 +39,8 @@ Routing table (read = local, execute = langgraph server):
 - ``delete_thread`` deletes UUIDs on the server before local cleanup so live
   writers stop before checkpoints are removed. Server errors leave local state
   available for resolution and retry. If server deletion succeeds but local
-  cleanup fails, the error identifies the completed server step. Legacy ids
+  cleanup fails, a warning records the redundant cleanup failure and deletion
+  still succeeds. Legacy ids
   remain local-only.
 
 **Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
@@ -195,10 +196,12 @@ class CompositeGraphGateway:
             read_ok = await self._read.delete_thread(thread_id, target)
         except Exception as exc:
             if exec_ok:
-                raise RuntimeError(
-                    f"Server deletion completed for thread {thread_id!r}, "
-                    f"but local cleanup failed: {exc!r}"
-                ) from exc
+                logger.warning(
+                    "Server deletion completed for thread %r, but local cleanup failed: %r",
+                    thread_id,
+                    exc,
+                )
+                return True
             raise
         return read_ok or exec_ok
 
