@@ -106,3 +106,52 @@ async def test_uuid_retry_compares_current_session_canonically():
     )
     await DeleteCommand().execute(ctx, [str(UUID(current))])
     gateway.delete_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_server_gateway_rejects_uuid_from_another_graph_before_delete():
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    store = SimpleNamespace(
+        resolve_thread_id_prefix=AsyncMock(return_value=(None, [])),
+        delete_thread=AsyncMock(),
+    )
+    gateway = LangGraphServerGateway(thread_store=store)
+    assert not await gateway.delete_thread(THREAD)
+    store.delete_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_not_found_is_not_reported_as_missing_thread():
+    import httpx
+    from langgraph_sdk.errors import NotFoundError
+
+    error = NotFoundError(
+        "run gone",
+        response=httpx.Response(
+            404, request=httpx.Request("GET", "http://localhost/runs")
+        ),
+        body=None,
+    )
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=error)),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    with pytest.raises(NotFoundError):
+        await LangGraphServerThreadStore(client=client).delete_thread(THREAD)
+    client.threads.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_server_gateway_retry_uses_configured_graph_resolution():
+    from EvoScientist.gateway import GraphTarget
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    store = SimpleNamespace(
+        resolve_thread_id_prefix=AsyncMock(return_value=(THREAD, [])),
+        delete_thread=AsyncMock(return_value=True),
+    )
+    gateway = LangGraphServerGateway(thread_store=store)
+    assert await gateway.delete_thread(THREAD, GraphTarget(graph_id="custom"))
+    store.resolve_thread_id_prefix.assert_awaited_once_with(THREAD, graph_id="custom")
+    store.delete_thread.assert_awaited_once_with(THREAD)
