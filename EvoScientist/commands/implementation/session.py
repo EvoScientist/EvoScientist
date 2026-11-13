@@ -4,7 +4,6 @@ import asyncio
 import inspect
 from pathlib import PurePath
 from typing import ClassVar
-from uuid import UUID
 
 from rich.table import Table
 
@@ -339,20 +338,10 @@ class DeleteCommand(Command):
 
         resolved = resolution.thread_id
         if not resolved:
-            # A previous partial delete may have removed the local checkpoint.
-            # Only a complete UUID can bypass the local prefix resolver.
-            try:
-                resolved = str(UUID(arg))
-            except ValueError:
-                ctx.ui.append_system(f"Session '{arg}' not found.", style="red")
-                return
+            ctx.ui.append_system(f"Session '{arg}' not found.", style="red")
+            return
 
-        current_thread = ctx.thread_id
-        try:
-            current_thread = str(UUID(current_thread))
-        except ValueError:
-            pass
-        if resolved == ctx.thread_id or resolved == current_thread:
+        if resolved == ctx.thread_id:
             ctx.ui.append_system(
                 "Cannot delete the current session.",
                 style="yellow",
@@ -363,7 +352,7 @@ class DeleteCommand(Command):
             deleted = await gateway.delete_thread(resolved)
         except Exception as exc:
             ctx.ui.append_system(
-                f"Could not fully delete session {resolved}: {exc}", style="red"
+                f"Could not delete session {resolved}: {exc!r}", style="red"
             )
             return
         if deleted:
