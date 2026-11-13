@@ -20,6 +20,18 @@ import httpx
 from ..paths import Workspace
 from .boundary import is_loopback_host
 
+
+def running_server_url() -> str:
+    """The URL of the running server: its record when one exists, else the
+    configured ``langgraph_dev_port``."""
+    from ..config import get_config_value
+    from . import manager
+
+    record = manager.read_record()
+    if record is not None:
+        return record.url
+    return f"http://127.0.0.1:{get_config_value('langgraph_dev_port')}"
+
 # Seconds a registration may take: it restores the project's threads, which
 # reads every checkpoint in sessions.db.
 REGISTRATION_TIMEOUT = 120.0
