@@ -1064,6 +1064,18 @@ class TestWorkspaceRemovalAndComments:
     def test_a_refusal_shows_the_matched_text(self):
         assert "'rm -rf /'" in validate_command("rm -rf /")
 
+    def test_a_long_run_of_slashes_after_home_is_checked_quickly(self, tmp_workspace):
+        started = time.monotonic()
+        for home in ("~", "$HOME"):
+            command = f"rm -rf {home}{'/' * 200}cache"
+            assert (
+                prepare_sandbox_command(
+                    command, tmp_workspace, virtual_mode=False, dangerous=True
+                )[1]
+                is None
+            )
+        assert time.monotonic() - started < 2
+
     @pytest.mark.parametrize(
         "command",
         [
