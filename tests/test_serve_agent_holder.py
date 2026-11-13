@@ -32,6 +32,7 @@ from EvoScientist.gateway import RuntimeGateways, ThreadStore
 from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.runtime import AsyncRuntime
 from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+from tests.fakes.serve import _runtime_state
 
 
 @pytest.fixture(autouse=True)
@@ -61,29 +62,6 @@ def _runtime_gateways(thread_store: ThreadStore | None = None) -> RuntimeGateway
     return RuntimeGateways(
         thread_store=store,
         graph_gateway=FakeGraphGateway(thread_store=store),
-    )
-
-
-def _runtime_state(
-    *,
-    agent: CompiledStateGraph | None = None,
-    thread_id: str = "tid",
-    dirs: SessionDirs | None = None,
-    config: EvoScientistConfig | None = None,
-    thread_store: ThreadStore | None = None,
-    runtime_gateways: RuntimeGateways | None = None,
-    async_runtime: AsyncRuntime | None = None,
-    gateway_backend: str | None = None,
-) -> ServeRuntimeState:
-    store = thread_store or _thread_store()
-    return ServeRuntimeState(
-        agent=agent if agent is not None else _agent(),
-        thread_id=thread_id,
-        dirs=dirs or SessionDirs(Workspace("/startup-ws")),
-        config=config,
-        runtime_gateways=runtime_gateways or _runtime_gateways(store),
-        async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
-        gateway_backend=gateway_backend,
     )
 
 
