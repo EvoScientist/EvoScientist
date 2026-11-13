@@ -300,7 +300,7 @@ def seed_source_thread(client, tid="t1", *, head="h1", status="idle", interrupts
     }
 
 
-def _runtime_state(
+def runtime_state(
     *,
     agent: CompiledStateGraph | None = None,
     thread_id: str = "tid",
