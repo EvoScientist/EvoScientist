@@ -208,3 +208,112 @@ async def test_discard_restores_message_boundary_before_another_delta():
         )
     )
     assert next(e for e in out if e["type"] == "done")["response"] == "Kept.\n\nGood."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("Narration.", "Answer."),
+        ("Narration.\n", "\nAnswer."),
+        ("Narration.\n\n", "Answer."),
+        ("", "Answer."),
+    ],
+)
+async def test_state_joins_separate_processor_rounds(boundary, before, after):
+    state = StreamState()
+    for content in (before, after):
+        out = await collect_events(
+            FakeV3Agent([message_delta(content), message_finish()])
+        )
+        # Each round keeps its own emitted text and done.response unchanged.
+        assert "".join(e["content"] for e in out if e["type"] == "text") == content
+        assert next(e for e in out if e["type"] == "done")["response"] == content
+        for event in out:
+            state.handle_event(event)
+        if content == before:
+            state.handle_event({"type": boundary})
+    assert state.response_text == ("Narration.\n\nAnswer." if before else "Answer.")
+
+
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+def test_state_round_boundary_survives_empty_delta_and_other_events(boundary):
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Before."})
+    state.handle_event({"type": boundary})
+    state.handle_event({"type": "text", "content": ""})
+    state.handle_event({"type": "thinking", "content": "thinking"})
+    state.handle_event({"type": "text", "content": "After"})
+    state.handle_event({"type": "text", "content": "."})
+    assert state.response_text == "Before.\n\nAfter."
+    assert state.latest_text.endswith("After.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+async def test_state_resumed_round_retry_retains_one_boundary(boundary):
+    from tests.fakes.stream_v3 import model_call_end, model_call_start, retry_event
+
+    state = StreamState()
+    first = await collect_events(
+        FakeV3Agent([message_delta("Before."), message_finish()])
+    )
+    resumed = await collect_events(
+        FakeV3Agent(
+            [
+                model_call_start("1"),
+                message_delta("Failed."),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                message_delta("After."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+    )
+    for event in first:
+        state.handle_event(event)
+    state.handle_event({"type": boundary})
+    for event in resumed:
+        state.handle_event(event)
+    assert state.response_text == "Before.\n\nAfter."
+    assert next(e for e in resumed if e["type"] == "done")["response"] == "After."
+
+
+def test_state_does_not_invent_rubric_separator():
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Draft."})
+    state.handle_event({"type": "rubric_evaluation", "result": "needs_revision"})
+    assert state.response_text == state.latest_text == "Draft."
+
+
+@pytest.mark.parametrize("boundary", ["interrupt", "ask_user"])
+@pytest.mark.parametrize("discard", ["model_retry", "model_output_discarded"])
+@pytest.mark.parametrize("leading", ["", "\n", "\n\n"])
+@pytest.mark.parametrize("trailing", ["", "\n", "\n\n"])
+def test_state_round_boundary_survives_discarded_leading_newlines(
+    boundary, discard, leading, trailing
+):
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "Draft." + trailing})
+    state.handle_event({"type": boundary})
+    failed = leading + "Bad"
+    state.handle_event({"type": "text", "content": failed})
+    state.handle_event({"type": discard, "discarded": {"text_chars": len(failed)}})
+    state.handle_event({"type": "text", "content": "Good"})
+    assert state.response_text == "Draft.\n\nGood"
+
+
+def test_state_partial_discard_preserves_contiguous_resumed_text():
+    state = StreamState()
+    for event in [
+        {"type": "text", "content": "Before."},
+        {"type": "interrupt"},
+        {"type": "text", "content": "Kept. Bad"},
+        {"type": "model_retry", "discarded": {"text_chars": 3}},
+        {"type": "text", "content": "Good"},
+    ]:
+        state.handle_event(event)
+    assert state.response_text == "Before.\n\nKept. Good"
