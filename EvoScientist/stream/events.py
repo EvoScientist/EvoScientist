@@ -528,6 +528,7 @@ class _V3EventProcessor:
         self._value_recovery = process_value_messages
         self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
+        self._main_message_has_text = False
         # Where the pass a graded run's last verdict applies to starts in
         # ``full_response``; ``None`` until a verdict arrives.
         self._last_pass_start: int | None = None
@@ -971,7 +972,6 @@ class _V3EventProcessor:
             return []
 
         if event_type == "message-finish":
-            self._end_text_message(subagent)
             events: list[dict[str, Any]] = []
             pending = self._selector.flush_pending_text()
             if pending and not pending.isspace():
@@ -984,9 +984,10 @@ class _V3EventProcessor:
                         ).data
                     )
                 else:
-                    self.full_response += pending
+                    pending = self._append_main_text(pending)
                     events.append(self.emitter.text(pending).data)
                 self._count_text(len(pending))
+            self._end_text_message(subagent)
             if subagent is None:
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
@@ -1321,6 +1322,21 @@ class _V3EventProcessor:
 
     def _end_text_message(self, subagent: _SubagentInfo | None) -> None:
         self._held_space.pop(subagent.instance_id if subagent else None, None)
+        if subagent is None:
+            self._main_message_has_text = False
+
+    def _append_main_text(self, text: str) -> str:
+        # Put the separator in the emitted delta too: stateful frontends and
+        # standalone channels concatenate these deltas, independently of done.
+        if not self._main_message_has_text and self.full_response.strip():
+            trailing_newlines = len(self.full_response) - len(
+                self.full_response.rstrip("\n")
+            )
+            leading_newlines = len(text) - len(text.lstrip("\n"))
+            text = "\n" * max(0, 2 - trailing_newlines - leading_newlines) + text
+        self._main_message_has_text = True
+        self.full_response += text
+        return text
 
     def _emit_text(
         self, text: str, subagent: _SubagentInfo | None
@@ -1344,15 +1360,16 @@ class _V3EventProcessor:
             return events
         if not emit_text or emit_text.isspace():
             return events
-        self._count_text(len(emit_text))
         if subagent is not None:
+            self._count_text(len(emit_text))
             events.append(
                 self.emitter.subagent_text(
                     subagent.name, emit_text, instance_id=subagent.instance_id
                 ).data
             )
             return events
-        self.full_response += emit_text
+        emit_text = self._append_main_text(emit_text)
+        self._count_text(len(emit_text))
         events.append(self.emitter.text(emit_text).data)
         return events
 
