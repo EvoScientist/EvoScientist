@@ -967,7 +967,6 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf skills/$(printf demo)",
             "rm -rf skills/`printf demo`",
             'rm -rf "media"/$(date +%F)',
-            "rm -rf sk\\ills/$(printf demo)",
             "rm -rf 'sk'ills/$(printf demo)",
         ],
     )
@@ -1016,11 +1015,22 @@ class TestWorkspaceRemovalAndComments:
         )
         ws = r"C:\Users\me\proj"
         commands = ["rm -rf Skills", "rm -r -f ./SKILLS/demo"]
-        if not bash:  # cmd.exe keeps backslashes
+        if bash:  # bash reads `sk\ills` as `skills`
+            commands.append("rm -rf sk\\ills/$(printf demo)")
+        else:  # cmd.exe keeps backslashes
             commands.append("rm -r -f .\\skills\\demo")
         for command in commands:
             error = prepare_sandbox_command(command, ws, skills_dir=ws + r"\skills")[1]
             assert "protected folder" in error, command
+
+    def test_an_escaped_folder_before_a_substitution_on_posix(
+        self, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        error = self._prepare_with_workspace_folders(
+            "rm -rf sk\\ills/$(printf demo)", tmp_workspace
+        )
+        assert "protected folder" in error
 
     @pytest.mark.parametrize(
         "command",
