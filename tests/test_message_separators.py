@@ -163,3 +163,48 @@ async def test_leading_newlines_in_whole_message_do_not_duplicate_separator():
     assert (
         next(e for e in out if e["type"] == "done")["response"] == "First.\n\nSecond."
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", [False, True])
+async def test_rubric_revision_separator_is_emitted_and_last_pass_stays_clean(finish):
+    from tests.fakes.stream_v3 import custom_subagent_event
+
+    events = [message_delta("Draft.")]
+    if finish:
+        events.append(message_finish())
+    events += [
+        custom_subagent_event(
+            {"type": "rubric_evaluation_end", "result": "needs_revision"}
+        ),
+        message_delta("Revision."),
+        message_finish(),
+    ]
+    out = await collect_events(FakeV3Agent(events))
+    done = next(e for e in out if e["type"] == "done")
+    text = "".join(e["content"] for e in out if e["type"] == "text")
+    assert text == done["response"] == "Draft.\n\nRevision."
+    assert done["last_pass_response"] == "Revision."
+
+
+@pytest.mark.asyncio
+async def test_discard_restores_message_boundary_before_another_delta():
+    from tests.fakes.stream_v3 import model_call_end, model_call_start, retry_event
+
+    out = await collect_events(
+        FakeV3Agent(
+            [
+                model_call_start("1"),
+                message_delta("Kept."),
+                message_finish(),
+                model_call_end("1"),
+                model_call_start("2"),
+                message_delta("Failed."),
+                model_call_end("2", "failed"),
+                retry_event(),
+                message_delta("Good."),
+                message_finish(),
+            ]
+        )
+    )
+    assert next(e for e in out if e["type"] == "done")["response"] == "Kept.\n\nGood."
