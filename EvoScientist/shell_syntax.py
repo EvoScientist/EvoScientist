@@ -722,11 +722,27 @@ def assignments(command: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for each in _simple_commands(command, set(), (), found):
         if each.name in DECLARATION_NAMES:
-            for arg in each.args:
-                match = ASSIGNMENT_RE.match(arg)
-                if match is not None:
-                    found.append((_assigned_name(arg), arg[match.end() :]))
+            found.extend(
+                declared
+                for declared in map(_declared_assignment, each.args)
+                if declared is not None
+            )
     return found
+
+
+def _declared_assignment(arg: str) -> tuple[str, str] | None:
+    """``(name, value as written)`` of a ``NAME=value`` argument of a
+    declaration builtin, quoted or not (``"PID=$(lsof -t)"``, ``'PID'=x``).
+    The quotes opened before the ``=`` stay on the value, so a substitution
+    in it still runs exactly when the shell would run it."""
+    equals = arg.find("=")
+    if equals <= 0:
+        return None
+    head = arg[:equals]
+    name = re.sub(r"[\"'\\]", "", head)
+    if ASSIGNMENT_RE.fullmatch(f"{name}=") is None:
+        return None
+    return _assigned_name(name), re.sub(r"[^\"']", "", head) + arg[equals + 1 :]
 
 
 def _assigned_name(word: str) -> str:

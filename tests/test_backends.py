@@ -3217,6 +3217,8 @@ class TestProcessKillByName:
             "readarray -t -d '' pids < <(lsof -t -i :8000); kill ${pids[@]}",
             "lsof -t -i :8000 | { mapfile; kill ${MAPFILE[@]}; }",
             "lsof -t -i :8000 | while read -- p; do kill $p; done",
+            'export "PID=$(lsof -t -i :8000)"; kill "$PID"',
+            "declare 'PID'=$(lsof -t -i :8000); kill $PID",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -3274,6 +3276,7 @@ class TestProcessKillByName:
             "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
             "while read p; do kill $p; done < logs/pids",
             "mapfile -t pids < logs/pids; kill ${pids[@]}",
+            "export 'PID=$(lsof -t)'; kill $OTHER_PID",
             "PS1='$(ps)'; kill $PS1",
             "env -S 'python -u x.py'",
             "env -S 'cat \"name with space.txt\"'",

@@ -224,6 +224,10 @@ class TestSimpleCommands:
             shell_syntax.assignments("bash -c 'P=$(pgrep x)'; echo $(Q=1)")
         ) == [("P", "$(pgrep x)"), ("Q", "1")]
         assert shell_syntax.assignments("echo A=1; FOO='x=1'") == [("FOO", "'x=1'")]
+        # Quoted names; the value keeps the quotes opened before the `=`.
+        assert shell_syntax.assignments(
+            "export \"P=$(lsof -t)\" 'Q'=$(ps) 'R=$(ps)' -x=1 \"$X\"=1"
+        ) == [("P", '"$(lsof -t)"'), ("Q", "''$(ps)"), ("R", "'$(ps)'")]
 
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")
