@@ -1198,7 +1198,7 @@ def cmd_interactive(
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),
                             dangerous=sandbox_dangerous_mode(
-                                runtime_gateways.graph_gateway
+                                runtime_gateways.graph_gateway, config
                             ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
