@@ -583,10 +583,10 @@ def _env_split_string(
     return _word_value(*args[position]), position + 1
 
 
-def _env_words(text: str) -> list[tuple[str, dict[str, object] | None]]:
-    """The arguments ``env -S`` splits *text* into, with their tokens: words
-    as the shell splits them, after env's ``\\_`` (a space; between words
-    outside quotes, literal inside single quotes)."""
+def _env_shell_text(text: str) -> str:
+    """*text* as shell words that split like ``env -S`` splits it: env's
+    ``\\_`` is a space (between words outside quotes, literal inside single
+    quotes), and an unquoted ``\\c`` ends the string."""
     shell_text: list[str] = []
     quote: str | None = None
     index = 0
@@ -594,6 +594,8 @@ def _env_words(text: str) -> list[tuple[str, dict[str, object] | None]]:
         char = text[index]
         if quote != "'" and char == "\\" and index + 1 < len(text):
             pair = text[index : index + 2]
+            if pair == "\\c" and quote is None:
+                break
             shell_text.append(" " if pair == "\\_" else pair)
             index += 2
             continue
@@ -601,7 +603,13 @@ def _env_words(text: str) -> list[tuple[str, dict[str, object] | None]]:
             quote = None if quote == char else char
         shell_text.append(char)
         index += 1
-    joined = "".join(shell_text)
+    return "".join(shell_text)
+
+
+def _env_words(text: str) -> list[tuple[str, dict[str, object] | None]]:
+    """The arguments ``env -S`` splits *text* into, with their tokens (see
+    :func:`_env_shell_text`)."""
+    joined = _env_shell_text(text)
     # Tokens with nothing between them are one argument; env does not read
     # shell operators, so `a;` is one too.
     groups: list[list[dict[str, object]]] = []
@@ -643,7 +651,7 @@ def _unwrap(
         split = _env_split_string(value, rest, position) if name == "env" else None
         if split is not None:
             text, position = split
-            scripts.append((text, (*via, name)))
+            scripts.append((_env_shell_text(text), (*via, name)))
             rest[position:position] = _env_words(text)
             continue
         if value in takes_value:
