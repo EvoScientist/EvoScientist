@@ -101,12 +101,23 @@ _BLOCKED_COMMAND_HINTS = dict.fromkeys(
 )
 _KILL_BY_LOOKUP_ERROR = (
     "Command blocked: kill takes only the id of a process you started (kill "
-    "12345, or stop_process with the id run_in_background returned). Ids looked "
-    "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
-    "itself."
+    "12345, or stop_process with the id run_in_background returned). Ids a "
+    "process lookup found (pgrep, pidof, ps, lsof, fuser), also through a "
+    "variable or a read loop beside one, and -1 / 0 can reach EvoScientist "
+    "itself. To kill ids listed in a file, run that read loop as its own command."
 )
-# `$HOME` / `${HOME}` at the start of a path.
-_HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
+# The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
+# `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
+_HOME_VARIABLE_RE = re.compile(r"\$\{?(?:HOME|USERPROFILE)\b|(?i:%USERPROFILE%)")
+# The home folder itself as an rm target: `~` or `~user` as written, or one
+# of the variables above, then only `/`, `/.` or `/*` steps. Each step takes
+# one slash, so a long run of slashes splits one way only (no backtracking).
+_HOME_STEPS = r"(?:/[.*]?)*"
+_HOME_TILDE_TARGET_RE = re.compile(rf"~(?:\w[\w.-]*)?{_HOME_STEPS}")
+_HOME_VARIABLE_TARGET_RE = re.compile(
+    rf"(?:\$(?:HOME|USERPROFILE)|\$\{{(?:HOME|USERPROFILE)\}}|(?i:%USERPROFILE%))"
+    rf"{_HOME_STEPS}"
+)
 # Commands that find processes by name, pattern or resource.
 _PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
 # Of those, the ones whose only job is matching names.
@@ -828,7 +839,7 @@ def _ssh_invocations(
 
     prev_end = 0
     for token in tokens:
-        ends_command = shell_syntax.COMMAND_NEWLINE_RE.search(
+        ends_command = shell_syntax.command_newline(
             command, prev_end, int(token["start"])
         )
         if token.get("type") == "op" or ends_command is not None:
@@ -1118,8 +1129,9 @@ def _protected_removal_error(target: str) -> str:
 
 
 def _is_home_word(raw: str) -> bool:
-    """Whether a word as written starts in the home folder: ``~`` or
-    ``$HOME`` that the shell expands (not inside single quotes)."""
+    """Whether a word as written starts in the home folder: ``~``, ``$HOME``
+    or ``$USERPROFILE`` that the shell expands (not inside single quotes), or
+    cmd.exe's ``%USERPROFILE%``."""
     return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
 
 
@@ -1159,22 +1171,93 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
+# Commands that change the folder the commands after them run in; `popd`
+# cannot before a `pushd`, as each command starts with an empty stack.
+_FOLDER_COMMANDS = ("cd", "pushd")
+
+
+def _literal_folder(operand: str) -> str | None:
+    """The folder an operand names before its first expansion (``$`` or a
+    backtick), as the agent's shell reads it: ``skills`` for
+    ``skills/$(printf demo)`` and ``sk\\ills/$(printf demo)``; ``None`` when
+    no whole folder name comes first."""
+    prefix = re.split(r"[$`]", operand, maxsplit=1)[0]
+    if "/" not in prefix:
+        return None
+    tokens = shell_syntax.tokenize(prefix.rsplit("/", 1)[0])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return _removal_target(tokens[0]) or None
+
+
+def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:
+    """Whether an ``env`` runs its command in another folder: ``-C`` (also
+    clustered, ``-iC``) or ``--chdir`` among env's own options."""
+    skip = False
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if skip:
+            skip = False
+        elif re.match(r"-[i0v]*C", value) or (
+            len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0])
+        ):
+            return True
+        elif value in ("-u", "--unset", "-S", "--split-string"):
+            skip = True
+        elif not (value.startswith("-") or shell_syntax.ASSIGNMENT_RE.match(value)):
+            return False  # env's command: its options are its own
+    return False
+
+
+def _commands_in_starting_folder(command: str) -> list[shell_syntax.SimpleCommand]:
+    """The commands of *command* that run in the folder it starts in: the
+    ones written before its first ``cd`` or ``pushd`` in
+    command-name position (with the code they run), less the commands an
+    ``env -C`` runs. A folder change inside a substitution or a subshell
+    also ends them, which misses a removal rather than refusing one."""
+    words = shell_syntax.parse(command)
+    cut = next(
+        (
+            int(token["start"])
+            for token, is_name in zip(words.tokens, words.name_flags, strict=True)
+            if is_name
+            and re.split(r"[\\/]", str(token["value"]))[-1] in _FOLDER_COMMANDS
+        ),
+        len(command),
+    )
+    found: list[shell_syntax.SimpleCommand] = []
+    elsewhere: tuple[str, ...] | None = None  # the wrappers of an `env -C`'s command
+    for each in shell_syntax.simple_commands(command[:cut]):
+        if elsewhere is not None and each.via[: len(elsewhere)] == elsewhere:
+            continue
+        elsewhere = (
+            (*each.via, "env")
+            if each.name == "env" and _env_changes_folder(each)
+            else None
+        )
+        found.append(each)
+    return found
+
+
 def _recursive_rm_operands(
     found: shell_syntax.SimpleCommand,
 ) -> list[tuple[str, dict[str, object] | None]]:
     """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
-    ``--recursive``, in any spelling), with their tokens."""
+    ``--recursive``, in any spelling), with their tokens. Options are read as
+    the shell passes them to rm, so a quoted ``'-r'`` counts too."""
     if found.name != "rm":
         return []
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
     for arg, token in zip(found.args, found.tokens, strict=True):
-        if not options_done and arg == "--":
+        value = str(token["value"]) if token is not None else arg
+        if not options_done and value == "--":
             options_done = True
-        elif not options_done and arg.startswith("-") and arg != "-":
+        elif not options_done and value.startswith("-") and value != "-":
             recursive = recursive or (
-                arg == "--recursive"
-                or (not arg.startswith("--") and bool({"r", "R"} & set(arg[1:])))
+                # GNU rm takes any unambiguous prefix of a long option.
+                (len(value) > 2 and "--recursive".startswith(value))
+                or (not value.startswith("--") and bool({"r", "R"} & set(value[1:])))
             )
         else:
             operands.append((arg, token))
@@ -1183,24 +1266,113 @@ def _recursive_rm_operands(
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     """Whether an rm operand is the file system root, a drive root or the home
-    folder itself (optionally followed by ``/`` or ``/*``)."""
+    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.`` or
+    ``/*``; rm itself refuses a ``.`` operand, but not every rm is checked)."""
     path = _removal_target(token) if token is not None else operand
     if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
         return True
     value = str(token["value"]) if token is not None else operand
-    home = r"(\$HOME|\$\{HOME\})(/\*?)?"
+    # The shell expands a tilde only while its prefix is unquoted; the steps
+    # after it are read as the shell passes them (`~/""` is `~/`).
+    tilde_prefix = operand.split("/", 1)[0]
     return bool(
-        (operand.startswith("~") and re.fullmatch(r"~(/\*?)?", operand))
-        or (_is_home_word(operand) and re.fullmatch(home, value))
+        (
+            operand.startswith("~")
+            and not re.search(r"[\"'\\]", tilde_prefix)
+            and _HOME_TILDE_TARGET_RE.fullmatch(value.replace("\\", "/"))
+        )
+        or (
+            _is_home_word(operand)
+            and _HOME_VARIABLE_TARGET_RE.fullmatch(value.replace("\\", "/"))
+        )
     )
 
 
+# `$NAME` / `${NAME...}`: the variable a word expands.
+_VARIABLE_REFERENCE_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+# Commands that read lines into variables: their options whose value is the
+# rest of the word or the next word, and the variable set without operands.
+_READ_COMMANDS = {
+    "read": (frozenset("adinNptu"), "REPLY"),
+    "mapfile": (frozenset("dnOsuCc"), "MAPFILE"),
+    "readarray": (frozenset("dnOsuCc"), "MAPFILE"),
+}
+
+
+def _runs_lookup(text: str) -> bool:
+    """Whether a word runs a process lookup in a ``$(...)`` or backticks."""
+    return ("$(" in text or "`" in text) and bool(
+        _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(text))
+    )
+
+
+def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
+    """The variables a ``read``, ``mapfile`` or ``readarray`` sets: its
+    operands and a ``read -a`` array, or ``REPLY`` / ``MAPFILE``."""
+    options_with_value, default = _READ_COMMANDS[found.name]
+    values = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    names: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        index += 1
+        if value == "--":
+            names.extend(values[index:])
+            break
+        if not value.startswith("-") or value == "-":
+            names.append(value)
+            continue
+        for position, letter in enumerate(value[1:], start=1):
+            if letter not in options_with_value:
+                continue
+            target = value[position + 1 :]
+            if not target and index < len(values):
+                target = values[index]
+                index += 1
+            if letter == "a" and found.name == "read":
+                names.append(target)
+            break
+    # `read 'p[0]'` sets an element of the array `p`.
+    names = [
+        match[1]
+        for match in (re.fullmatch(r"([A-Za-z_]\w*)(?:\[[^\]]*\])?", n) for n in names)
+        if match is not None
+    ]
+    return names or [default]
+
+
+def _looked_up_variables(
+    command: str, commands: list[shell_syntax.SimpleCommand], looks_up: bool
+) -> frozenset[str]:
+    """The variables that may hold ids a process lookup found: set from a
+    substitution that runs one, looped over one in ``for``, or set by a
+    ``read`` in a command that runs one (*looks_up*), wherever its input
+    comes from."""
+    names = {
+        name for name, value in shell_syntax.assignments(command) if _runs_lookup(value)
+    }
+    for found in commands:
+        if found.name == "for" and found.args[1:2] == ("in",):
+            if any(_runs_lookup(arg) for arg in found.args[2:]):
+                names.add(found.args[0])
+        elif found.name in _READ_COMMANDS and looks_up:
+            names.update(_read_variables(found))
+    return frozenset(names)
+
+
 def _kill_by_lookup(
-    found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
+    found: shell_syntax.SimpleCommand,
+    looks_up: bool,
+    by_name: bool,
+    looked_up: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether a kill reaches processes found by name or pattern, or -1, 0 or
     a process group. *looks_up*: the command runs a process lookup; *by_name*:
-    one that matches names (pgrep, pidof), so a variable holds its ids."""
+    one that matches names (pgrep, pidof), so a variable holds its ids;
+    *looked_up*: the variables that hold ids a lookup found."""
     if found.name == "fuser":
         return any(
             arg in ("-k", "--kill")
@@ -1231,6 +1403,7 @@ def _kill_by_lookup(
     return any(
         re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
         or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
+        or not looked_up.isdisjoint(_VARIABLE_REFERENCE_RE.findall(arg))
         or (
             ("$(" in arg or "`" in arg)
             and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
@@ -1258,8 +1431,10 @@ def validate_command(
             absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
             and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
             enforced.
-        workspace_root: The workspace; ``cd`` may enter it, and a destructive
-            pattern whose target lies strictly inside it is allowed.
+        workspace_root: The workspace; ``cd`` may enter it, a destructive
+            pattern whose target lies strictly inside it is allowed, and the
+            relative operands of a recursive rm that runs before any ``cd``
+            are resolved against it.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1346,6 +1521,26 @@ def validate_command(
                         f"outside the workspace or may expand there. Remove a "
                         f"path inside the workspace (e.g., './build')."
                     )
+        # A relative operand of an rm that runs in the workspace root: only a
+        # protected folder is refused (rm itself refuses `.`), and a first
+        # segment that expands may be anything, so it is left alone.
+        for found in _commands_in_starting_folder(command):
+            for operand, token in _recursive_rm_operands(found):
+                path = _removal_target(token) if token is not None else operand
+                bare = path.lstrip("'\"")
+                if bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
+                    continue
+                if token is None:
+                    # Glued to a substitution: whatever it expands to stays
+                    # under the literal folder written before it.
+                    path = _literal_folder(operand)
+                    if path is None:
+                        continue
+                problem = _removal_problem(
+                    f"{workspace_root}/{path}", workspace_root, protected
+                )
+                if problem == "protected":
+                    return _protected_removal_error(operand)
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:
@@ -1360,6 +1555,7 @@ def validate_command(
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
     by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
+    looked_up = _looked_up_variables(command, commands, looks_up)
     for found in commands:
         if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
@@ -1369,7 +1565,9 @@ def validate_command(
                 f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
                 f"{hint}"
             )
-        if found.name in _KILL_COMMANDS and _kill_by_lookup(found, looks_up, by_name):
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(
+            found, looks_up, by_name, looked_up
+        ):
             return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.

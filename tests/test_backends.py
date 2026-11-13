@@ -860,6 +860,19 @@ class TestWorkspaceRemovalAndComments:
     def test_glued_hashes_and_line_continuations_hide_nothing(self, command):
         assert "'sudo' is not allowed" in validate_command(command)
 
+    @pytest.mark.parametrize("backslashes", [2, 4])
+    def test_a_newline_after_escaped_backslashes_ends_the_command(self, backslashes):
+        command = "echo x" + "\\" * backslashes + "\npkill x"
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo x\\\npkill x", "echo x\\\\\\\npkill x", "echo x\\\\ \\\n pkill x"],
+    )
+    def test_an_odd_backslash_before_a_newline_continues_the_line(self, command):
+        # The next line's words are arguments of echo, not a command.
+        assert validate_command(command) is None
+
     def test_cd_after_a_glued_hash_is_still_checked(self):
         assert "leaves the workspace" in validate_command(
             "echo $(date)#; cd /etc; ls", workspace_root="/W"
@@ -893,6 +906,10 @@ class TestWorkspaceRemovalAndComments:
             "rm --recursive --force /memories",
             "rm -rf -- /memories/profile",
             "cd . && rm -fr /",
+            "rm '-r' /skills/demo",
+            'rm "-rf" /skills/demo',
+            "rm -\\r /memories",
+            "rm --rec /memories",
         ],
     )
     def test_every_absolute_operand_of_a_recursive_rm_is_checked(
@@ -915,9 +932,117 @@ class TestWorkspaceRemovalAndComments:
     def test_recursive_removals_inside_the_workspace_pass(self, command, tmp_workspace):
         assert prepare_sandbox_command(command, tmp_workspace)[1] is None
 
+    @staticmethod
+    def _prepare_with_workspace_folders(command: str, workspace: str):
+        root = Path(workspace)
+        (root / "skills" / "demo").mkdir(parents=True, exist_ok=True)
+        (root / "media").mkdir(exist_ok=True)
+        return prepare_sandbox_command(
+            command, workspace, skills_dir=root / "skills", media_dir=root / "media"
+        )[1]
+
     @pytest.mark.parametrize(
         "command",
-        ["rm -rf ~", "rm -rf $HOME/.cache/huggingface", 'rm -rf "${HOME}/.cache/pip"'],
+        [
+            "rm -rf skills",
+            "rm -rf ./skills/",
+            "rm -rf skills/demo",
+            "rm -r media",
+            'rm -rf "media"',
+            "rm -rf build skills",
+            "echo hi; rm -rf skills",
+            "rm '-r' skills",
+            "bash -c 'rm -rf skills'",
+            "rm -rf skills/*",
+            "rm -rf 'skills/*'",
+            "rm -rf media/$X",
+            "rm -rf skills/{a,b}",
+            "bash -c 'rm -rf skills'; cd build",
+            'echo "$(rm -rf skills)"; cd build',
+            "bash -c 'cd build'; rm -rf skills",
+            "env -C build make; rm -rf skills",
+            "env -iC build make; rm -rf skills",
+            "env make -C build; rm -rf skills",
+            "env FOO=1 tar -C out -xf a.tar; rm -rf skills",
+            "rm -rf skills/$(printf demo)",
+            "rm -rf skills/`printf demo`",
+            'rm -rf "media"/$(date +%F)',
+            "rm -rf 'sk'ills/$(printf demo)",
+        ],
+    )
+    @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
+    def test_relative_removals_of_protected_folders_are_refused(
+        self, command, folder, tmp_path
+    ):
+        workspace = tmp_path / folder
+        workspace.mkdir()
+        error = self._prepare_with_workspace_folders(command, str(workspace))
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf build",
+            "rm -rf .",
+            "rm -rf skills2 skillset",
+            "rm -rf my\\ skills/x",
+            'rm -rf "my skills"',
+            "rm -rf $OUT",
+            'rm -rf "$OUT"/skills',
+            "rm skills/demo/x.py",
+            "cd build && rm -rf skills",
+            "pushd build && rm -rf skills",
+            "env -C build rm -rf skills",
+            "env -iC build rm -rf skills",
+            "env --chdir=build rm -rf skills",
+            "env --ch build rm -rf skills",
+            "(cd build; rm -rf skills)",
+            "rm -rf skill* {build,dist}",
+            "rm -rf build/$(date +%F)",
+            "rm -rf ./$(printf build)",
+        ],
+    )
+    def test_other_relative_removals_pass(self, command, tmp_workspace):
+        assert self._prepare_with_workspace_folders(command, tmp_workspace) is None
+
+    @pytest.mark.parametrize("bash", [False, True])
+    def test_relative_protected_removals_on_windows(self, monkeypatch, bash):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            agent_shell, "agent_bash", lambda: object() if bash else None
+        )
+        ws = r"C:\Users\me\proj"
+        commands = ["rm -rf Skills", "rm -r -f ./SKILLS/demo"]
+        if bash:  # bash reads `sk\ills` as `skills`
+            commands.append("rm -rf sk\\ills/$(printf demo)")
+        else:  # cmd.exe keeps backslashes
+            commands.append("rm -r -f .\\skills\\demo")
+        for command in commands:
+            error = prepare_sandbox_command(command, ws, skills_dir=ws + r"\skills")[1]
+            assert "protected folder" in error, command
+
+    def test_an_escaped_folder_before_a_substitution_on_posix(
+        self, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        error = self._prepare_with_workspace_folders(
+            "rm -rf sk\\ills/$(printf demo)", tmp_workspace
+        )
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf ~",
+            "rm -rf $HOME/.cache/huggingface",
+            'rm -rf "${HOME}/.cache/pip"',
+            "rm -rf $USERPROFILE/x",
+            "rm -rf ${USERPROFILE}",
+            "rm -rf %USERPROFILE%",
+            'rm -rf "%USERPROFILE%\\Documents"',
+        ],
     )
     def test_removing_from_the_home_folder_is_refused(self, command, tmp_workspace):
         assert (
@@ -956,6 +1081,18 @@ class TestWorkspaceRemovalAndComments:
     def test_a_refusal_shows_the_matched_text(self):
         assert "'rm -rf /'" in validate_command("rm -rf /")
 
+    def test_a_long_run_of_slashes_after_home_is_checked_quickly(self, tmp_workspace):
+        started = time.monotonic()
+        for home in ("~", "$HOME"):
+            command = f"rm -rf {home}{'/' * 200}cache"
+            assert (
+                prepare_sandbox_command(
+                    command, tmp_workspace, virtual_mode=False, dangerous=True
+                )[1]
+                is None
+            )
+        assert time.monotonic() - started < 2
+
     @pytest.mark.parametrize(
         "command",
         [
@@ -965,6 +1102,22 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf ~",
             'rm -rf "$HOME"',
             "rm -r ${HOME}/*",
+            "rm '-r' ~",
+            'rm "-rf" /',
+            "rm -rf ~/.",
+            "rm -rf ~/./",
+            'rm -rf "$HOME"/.',
+            "rm -rf $HOME/.",
+            "rm -rf ~root",
+            "rm -rf ~root/",
+            "rm -rf ~john.doe-2/*",
+            "rm -rf $USERPROFILE",
+            'rm -rf "${USERPROFILE}"/',
+            "rm -rf %USERPROFILE%",
+            "rm -rf %userprofile%\\",
+            'rm -rf ~/""',
+            "rm -rf ~/''",
+            "rm -rf ~root/'.'",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(
@@ -977,7 +1130,19 @@ class TestWorkspaceRemovalAndComments:
 
     @pytest.mark.parametrize(
         "command",
-        ["rm -fr /tmp/x", "rm -rf ~/build/cache", "rm -r '$HOME'", 'rm -rf "\\$HOME"'],
+        [
+            "rm -fr /tmp/x",
+            "rm -rf ~/build/cache",
+            "rm -r '$HOME'",
+            'rm -rf "\\$HOME"',
+            "rm -rf ~/project",
+            "rm -rf ~root/project",
+            "rm -rf $USERPROFILE/AppData/Local/x",
+            "rm -rf $USERPROFILE_BACKUP",
+            "rm -rf ~-",
+            'rm -rf "~"',
+            'rm -rf ~"root"',
+        ],
     )
     def test_dangerous_mode_removes_deeper_paths(self, command, tmp_workspace):
         assert (
@@ -1141,6 +1306,9 @@ class TestSandboxCommandChecks:
             ("pushd ~", "'pushd ~'"),
             ("pushd /usr", "'pushd /usr'"),
             ("bash -c 'cd ~ && ls'", "'cd ~'"),
+            ("cd $USERPROFILE && ls", "'cd $USERPROFILE'"),
+            ('cd "${USERPROFILE}/x"', "'cd \"${USERPROFILE}/x\"'"),
+            ("cd %USERPROFILE%", "'cd %USERPROFILE%'"),
         ],
     )
     def test_cd_home_leaves_the_workspace(self, command, shown, monkeypatch):
@@ -1157,6 +1325,7 @@ class TestSandboxCommandChecks:
             "cd ./src && cd -",
             "cd -P src",
             "cd $HOMEDIR",
+            "cd $USERPROFILE_DIR",
             "pushd src",
             "mkdir -p '$HOME' && cd '$HOME'",
             "cd '~'",
@@ -2996,6 +3165,16 @@ class TestProcessKillByName:
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
             "env 'RUN_NAME=test train' pkill -f train",
+            "env -S 'pkill -f x'",
+            "env -S'pkill -f x'",
+            "env --split-string='pkill -f x'",
+            "env -iS 'pkill -f x'",
+            "env -S 'sh -c \"pkill x\"'",
+            "env -S 'a; pkill x'",
+            "env -S 'pkill\\c' -f worker",
+            "env -S 'sh -c \"echo safe\\npkill x\"'",
+            # The env string's words must not hide an outer word at the same offset.
+            'echo  "$(pkill x)"; env -S \'sh -c "echo hi"\'',
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -3030,11 +3209,40 @@ class TestProcessKillByName:
             'kill -- "-$PGID"',
             'kill -9 "-1"',
             'kill "0"',
+            "PID=$(lsof -t -i :8000); kill $PID",
+            "PID=`lsof -t -i :8000`; kill $PID",
+            "export PID=$(lsof -t -i :8000); kill $PID",
+            'PID="$(lsof -t -i :8000)" && kill -9 "$PID"',
+            "PID=$(fuser 8000/tcp); kill ${PID}",
+            "PIDS=$(ps aux | grep python | awk '{print $2}'); kill $PIDS",
+            "pids[0]=$(ps -o pid= -C python); kill ${pids[@]}",
+            "bash -c 'P=$(lsof -t -i :8000); kill $P'",
+            "ps aux | grep python | awk '{print $2}' | while read p; do kill -9 $p; done",
+            "lsof -t -i :8000 | while read -r p; do kill $p; done",
+            "while read p; do kill $p; done < <(lsof -t -i :8000)",
+            "read p < <(lsof -t -i :8000); kill $p",
+            "lsof -t -i :8000 | while read -r -p 'pid?' p; do kill $p; done",
+            "ps -o pid= | while read; do kill $REPLY; done",
+            "read -a ids < <(lsof -t -i :8000); kill ${ids[@]}",
+            "for p in $(ps aux | grep python | awk '{print $2}'); do kill $p; done",
+            "for p in `lsof -t -i :8000`; do kill $p; done",
+            "env -S 'kill -9 -1'",
+            "env -S 'kill -9' -1",
+            "mapfile -t pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "readarray -t -d '' pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "lsof -t -i :8000 | { mapfile; kill ${MAPFILE[@]}; }",
+            "lsof -t -i :8000 | while read -- p; do kill $p; done",
+            'export "PID=$(lsof -t -i :8000)"; kill "$PID"',
+            "declare 'PID'=$(lsof -t -i :8000); kill $PID",
+            "read 'p[0]' < <(lsof -t -i :8000); kill \"${p[0]}\"",
+            "read p[i] < <(lsof -t -i :8000); kill ${p[i]}",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
     def test_kills_of_looked_up_ids_are_blocked(self, command, dangerous):
-        assert "pgrep, ps, lsof" in validate_command(command, dangerous=dangerous)
+        error = validate_command(command, dangerous=dangerous)
+        assert "pgrep, pidof, ps, lsof, fuser" in error
+        assert "read loop as its own command" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -3077,6 +3285,20 @@ class TestProcessKillByName:
             "ps aux | grep pkill",
             "cat > n.md <<'EOF'\npkill is blocked\nEOF",
             "cat > n.md <<'EOF'\n$(pkill -f x)\nEOF",
+            "PID=$(cat server.pid); ps -p $PID && kill $PID",
+            "PID=$(cat server.pid); kill $PID",
+            "sleep 5 & PID=$!; kill $PID",
+            "for p in 123 456; do kill $p; done",
+            "lsof -i :8000; PID=$(cat pid); kill $PID",
+            "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
+            "while read p; do kill $p; done < logs/pids",
+            "mapfile -t pids < logs/pids; kill ${pids[@]}",
+            "export 'PID=$(lsof -t)'; kill $OTHER_PID",
+            "PS1='$(ps)'; kill $PS1",
+            "env -S 'python -u x.py'",
+            "env -S 'cat \"name with space.txt\"'",
+            "env -S \"cat 'name with space.txt'\"",
+            "env -S 'cat name\\ with\\ space.txt'",
         ],
     )
     def test_kill_by_pid_and_mentions_stay_allowed(self, command):
