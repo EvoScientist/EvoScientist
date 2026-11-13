@@ -72,16 +72,13 @@ def _run_deploy_once(
     tunnel_error: str | None = None,
     printed: list | None = None,
     server: Server | None = None,
-    on_wait=None,
-    on_stop=None,
     inherited: dict | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     *port_occupied*: something holds the port, this data folder's server
     when *langgraph_dev_running*, another program otherwise. *server* is the
     fake the start goes through (a fresh one by default). Serving ends with
-    a Ctrl+C, after *on_wait* runs; *on_stop* runs inside the server's stop.
-    *inherited*: the signal handlers the process started with.
+    a Ctrl+C. *inherited*: the signal handlers the process started with.
     Returns a ``captured`` dict with observation points; *printed* collects
     the console output, also of a run that exits."""
     import EvoScientist.config as config_mod
@@ -130,8 +127,8 @@ def _run_deploy_once(
                 "handlers": dict(captured["signal_handlers"]),
             }
         )
-        if on_stop is not None:
-            on_stop()
+        if proc is lgm._PROCESS:
+            lgm._PROCESS = None
 
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop_langgraph_dev)
     from EvoScientist.langgraph_dev import registration
@@ -168,12 +165,10 @@ def _run_deploy_once(
 
     handlers: dict = dict(inherited or {})
     captured["signal_handlers"] = handlers
-    captured["installed"] = []
 
     def _fake_signal(signum, handler):
         previous = handlers.get(signum, signal.SIG_DFL)
         handlers[signum] = handler
-        captured["installed"].append((signum, handler))
         return previous
 
     monkeypatch.setattr(signal, "signal", _fake_signal)
@@ -190,12 +185,10 @@ def _run_deploy_once(
 
     monkeypatch.setattr(deploy_server, "_start_server", _recording_start_server)
 
-    # Serving ends as a Ctrl+C would end it, unless the test says otherwise.
+    # Serving ends as a Ctrl+C would end it.
     def _fake_wait_for_stop():
         captured["handlers_while_serving"] = dict(handlers)
-        if on_wait is not None:
-            on_wait()
-        raise KeyboardInterrupt
+        handlers[signal.SIGINT](signal.SIGINT, None)
 
     monkeypatch.setattr(deploy_server, "_wait_for_stop", _fake_wait_for_stop)
 
@@ -693,6 +686,7 @@ def test_deploy_reports_server_that_exits(monkeypatch, tmp_path):
             server=server,
         )
     assert any("langgraph dev startup failed" in p for p in printed)
+    assert len(_run_deploy_once.captured["stops"]) == 1
 
 
 def test_deploy_waits_for_another_start(monkeypatch, tmp_path):
