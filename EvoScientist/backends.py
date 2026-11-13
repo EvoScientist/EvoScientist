@@ -1059,7 +1059,14 @@ def _extract_all_paths(
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+    path_assignments = [
+        (int(token["start"]), int(token["end"]))
+        for token in shell_syntax.parse(command).tokens
+        if token["type"] == "word" and str(token["raw"]).startswith("PATH=")
+    ]
     for m in path_re.finditer(command):
+        if any(start <= m.start() < end for start, end in path_assignments):
+            continue
         # Skip paths that land at an executable-position offset
         if m.start(1) in exe_offsets:
             continue
@@ -1568,7 +1575,7 @@ def _rewrite_quoted_path(
     """
     if not path or "://" in path[max(0, len(path) - 10) :]:
         return None
-    if not path.startswith("/"):
+    if not path.startswith("/") or path in _PASSTHROUGH_DEVICE_PATHS:
         return None
 
     def in_workspace(relative: str) -> str:
@@ -1577,7 +1584,7 @@ def _rewrite_quoted_path(
             return _platform_quote(
                 anchor.rstrip("/") + ("/" + relative if relative else "/.")
             )
-        return shlex.quote("./" + relative if relative else ".")
+        return _platform_quote("./" + relative if relative else ".")
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
@@ -1587,6 +1594,22 @@ def _rewrite_quoted_path(
         ):
             resolved = in_workspace("skills/" + skill if skill else "skills")
         return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        protected = tuple(
+            str(folder)
+            for folder in (
+                skills_dir,
+                paths.GLOBAL_SKILLS_DIR,
+                paths.MEMORIES_DIR,
+                _BUILTIN_SKILLS_DIR,
+                *media_dirs,
+            )
+            if folder is not None
+        )
+        if _under_any(path, protected):
+            return None
+        return in_workspace(path[len(workspace_root.rstrip("/")) :].lstrip("/"))
 
     # Fix hallucinated system absolute paths that reference the workspace.
     if workspace_name:
@@ -1765,6 +1788,8 @@ def _convert_command_paths(
                 if raw[0] == "'"
                 else '"' + converted + '"'
             )
+        elif quoted and raw.startswith("PATH="):
+            continue
         elif quoted:
             anchor = workspace_root if absolute else None
 
@@ -1772,19 +1797,16 @@ def _convert_command_paths(
                 match: re.Match[str], anchor: str | None = anchor
             ) -> str:
                 nonlocal uses_tmp
-                # Single quotes would freeze substitutions in double quotes.
+                # Expansion can introduce traversal not visible to validation.
+                # Leave dynamic absolute paths intact so validation refuses them.
                 if match[1] == '"' and re.search(r"(?<!\\)[$`]", match[2]):
-                    if match[2] == "/tmp" or match[2].startswith("/tmp/"):
-                        uses_tmp = True
-                        # Keep the whole path in one quoted literal so path
-                        # validation sees the root, but retain expansions from
-                        # the original path. Escape only the inserted root.
-                        root = anchor or "."
-                        for char in ("\\", '"', "$", "`"):
-                            root = root.replace(char, "\\" + char)
-                        return '"' + root + match[2] + '"'
                     return match[0]
-                path = re.sub(r"\\(.)", r"\1", match[2])
+                path = match[2]
+                if match[1] == '"':
+                    path = re.sub(r'\\([\\"$`\n])', r"\1", path)
+                attached = _attached_path_word(path)
+                prefix = attached[0] if attached else ""
+                path = attached[1] if attached else path
                 result = _rewrite_quoted_path(
                     path,
                     workspace_name,
@@ -1793,9 +1815,16 @@ def _convert_command_paths(
                     anchor,
                     workspace_root,
                 )
-                if result is not None and (path == "/tmp" or path.startswith("/tmp/")):
+                if (
+                    result is not None
+                    and (path == "/tmp" or path.startswith("/tmp/"))
+                    and not (
+                        workspace_root
+                        and _is_under_allowed_prefix(path, (workspace_root,))
+                    )
+                ):
                     uses_tmp = True
-                return result or match[0]
+                return (prefix + result) if result is not None else match[0]
 
             replacement: str | None = _QUOTED_SPAN_RE.sub(replace_quoted, raw)
             replacement, tmp = shell_syntax.rewrite_substitutions(
