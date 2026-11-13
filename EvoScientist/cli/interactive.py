@@ -359,6 +359,23 @@ def _new_session_dirs(
 # =============================================================================
 
 
+def _print_turn_error(exc: Exception) -> None:
+    """Report a failed turn; the session stays open for the next prompt.
+
+    An authentication or missing-key error gets the onboarding hint. The turn
+    fails, as in the TUI, so ``/model`` can still switch to a model that has
+    a key (#782).
+    """
+    error_msg = str(exc).lower()
+    if "authentication" in error_msg or "api_key" in error_msg:
+        console.print("[red]Error: API key not configured.[/red]")
+        console.print(
+            "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
+        )
+    else:
+        console.print(f"[red]Error: {escape(str(exc))}[/red]")
+
+
 async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
     """Run one Rich CLI turn with a fresh, turn-local SIGINT policy.
 
@@ -431,6 +448,10 @@ def cmd_interactive(
         dirs: The session's workspace, and its run folder under
             ``--mode=run`` (``/new`` then moves to a fresh run folder)
     """
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         load_agent = partial(
@@ -1198,7 +1219,7 @@ def cmd_interactive(
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),
                             dangerous=sandbox_dangerous_mode(
-                                runtime_gateways.graph_gateway
+                                runtime_gateways.graph_gateway, config
                             ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
@@ -1734,19 +1755,7 @@ def cmd_interactive(
                         state["running"] = False
                         break
                     except Exception as e:
-                        error_msg = str(e)
-                        if (
-                            "authentication" in error_msg.lower()
-                            or "api_key" in error_msg.lower()
-                        ):
-                            console.print("[red]Error: API key not configured.[/red]")
-                            console.print(
-                                "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
-                            )
-                            state["running"] = False
-                            break
-                        else:
-                            console.print(f"[red]Error: {escape(str(e))}[/red]")
+                        _print_turn_error(e)
             finally:
                 queue_task.cancel()
                 try:

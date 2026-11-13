@@ -8,7 +8,7 @@ and ``read_file`` name the file in ``file_path``.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -484,6 +484,128 @@ class TestOnlySandboxFilesAreSent:
 class TestRoutedPaths:
     """A path under one of the agent's routes names that tier's file."""
 
+    def test_skill_write_never_falls_back_to_global_media(self, tmp_path):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        global_dir.mkdir()
+        (global_dir / "image.svg").write_text("global")
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+        assert backend.file_path("/image.svg", tool_name="write_file") is None
+        assert (
+            backend.file_path("/image.svg", tool_name="read_file")
+            == global_dir / "image.svg"
+        )
+
+    @pytest.mark.parametrize("subagent", [False, True])
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    async def test_skill_collision_forwards_primary_not_global(
+        self, workspace, subagent, tool_name
+    ):
+        from EvoScientist import paths
+
+        primary = workspace.skills_dir / "demo/assets/logo.svg"
+        global_file = paths.GLOBAL_SKILLS_DIR / "demo/assets/logo.svg"
+        for file, payload in [(primary, b"workspace"), (global_file, b"global")]:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(payload)
+        events = (
+            _subagent_turn(tool_name, "/skills/demo/assets/logo.svg", workspace.root)
+            if subagent
+            else _file_tool_turn(
+                tool_name, {"file_path": "/skills/demo/assets/logo.svg"}
+            )
+        )
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == [str(primary.resolve())]
+
+    @pytest.mark.parametrize("fallback", [False, True])
+    def test_colliding_skill_tiers_forward_the_tier_read_served(
+        self, tmp_path, monkeypatch, fallback
+    ):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        for folder, text in ((primary, "workspace"), (secondary, "builtin")):
+            folder.mkdir()
+            (folder / "result.txt").write_text(text)
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+        if fallback:
+            from deepagents.backends.protocol import ReadResult
+
+            monkeypatch.setattr(
+                backend._primary, "read", lambda *_: ReadResult(error="too large")
+            )
+        result = backend.read("/result.txt")
+        assert ("builtin" if fallback else "workspace") in str(result)
+        served = secondary if fallback else primary
+        assert backend.file_path("/result.txt") == served / "result.txt"
+
+    def test_single_skill_tier_still_resolves(self, tmp_path):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        secondary.mkdir()
+        file = secondary / "result.txt"
+        file.write_text("builtin")
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+        assert backend.file_path("/result.txt") == file
+
+    @pytest.mark.parametrize("outcome", ["error", "legacy", "exception"])
+    def test_colliding_skill_tiers_fall_back_to_global(
+        self, tmp_path, monkeypatch, outcome
+    ):
+        from deepagents.backends.protocol import ReadResult
+
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        for folder in (primary, global_dir, secondary):
+            folder.mkdir()
+            (folder / "result.txt").write_text(folder.name)
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+
+        def fail(*args):
+            if outcome == "exception":
+                raise OSError("unreadable")
+            return (
+                "Error: unreadable"
+                if outcome == "legacy"
+                else ReadResult(error="unreadable")
+            )
+
+        monkeypatch.setattr(backend._primary, "read", fail)
+        assert backend.file_path("/result.txt") == global_dir / "result.txt"
+        monkeypatch.setattr(backend._global, "read", fail)
+        assert backend.file_path("/result.txt") == secondary / "result.txt"
+        monkeypatch.setattr(backend._secondary, "read", fail)
+        assert backend.file_path("/result.txt") is None
+        # Writes still name primary, without consulting its read result.
+        assert (
+            backend.file_path("/result.txt", tool_name="write_file")
+            == primary / "result.txt"
+        )
+
+    def test_single_skill_tier_does_not_read_again(self, tmp_path, monkeypatch):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        primary.mkdir()
+        file = primary / "result.txt"
+        file.write_text("workspace")
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+
+        def unexpected_read(*args):
+            pytest.fail("single-tier forwarding should not re-read the file")
+
+        for tier in backend._backends():
+            monkeypatch.setattr(tier, "read", unexpected_read)
+        assert backend.file_path("/result.txt") == file
+
     LOGO = "/skills/demo/assets/logo.svg"
 
     @pytest.fixture
@@ -565,6 +687,128 @@ class TestRoutedPaths:
 
 class TestSandboxDangerousMode:
     """Host paths are read as given only for a sandbox this session built."""
+
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_classic_cli_captures_config_before_building_gateway(
+        self, monkeypatch, workspace, explicit
+    ):
+        from EvoScientist.cli.interactive import cmd_interactive
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.paths import SessionDirs
+
+        snapshot = EvoScientistConfig(dangerous_mode=True)
+        effective = MagicMock(return_value=snapshot)
+        monkeypatch.setattr("EvoScientist.config.get_effective_config", effective)
+        monkeypatch.setattr(
+            "EvoScientist.cli.interactive.resolve_ui_backend", lambda *a, **kw: "cli"
+        )
+
+        class GatewayReached(Exception):
+            pass
+
+        def capture(config, surface):
+            assert config is snapshot
+            raise GatewayReached()
+
+        monkeypatch.setattr("EvoScientist.config.resolve_gateway_backend", capture)
+        with pytest.raises(GatewayReached):
+            cmd_interactive(
+                dirs=SessionDirs(workspace), config=snapshot if explicit else None
+            )
+        assert effective.call_count == (0 if explicit else 1)
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_serve_uses_the_config_that_built_its_agent(self, monkeypatch, dangerous):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from EvoScientist.cli.commands import _serve_process_message
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.runtime import AsyncRuntime
+        from tests.fakes.serve import runtime_state
+
+        config = EvoScientistConfig(dangerous_mode=dangerous)
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config",
+            lambda: EvoScientistConfig(dangerous_mode=not dangerous),
+        )
+        state = runtime_state(config=config)
+        msg = ChannelMessage(
+            msg_id="mode-change",
+            content="hello",
+            sender="user",
+            channel_type="imessage",
+            metadata={},
+            channel_ref=None,
+            bus_ref=None,
+            chat_id="chat",
+            message_id="mode-change",
+        )
+        with (
+            AsyncRuntime(thread_name="test-media-mode") as runtime,
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("EvoScientist.cli.commands.build_metadata", return_value={}),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"
+            ) as stream,
+        ):
+            state.async_runtime = runtime
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg, runtime_state=state, model="model", show_thinking=False
+            )
+        assert stream.call_args.kwargs["dangerous"] is dangerous
+
+    def test_unknown_mode_never_grants_host_access(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config",
+            lambda: SimpleNamespace(dangerous_mode=True),
+        )
+        assert (
+            sandbox_dangerous_mode(LocalGraphGateway(thread_store=MagicMock()), None)
+            is False
+        )
+
+    async def test_tui_config_change_does_not_forward_host_file(
+        self, monkeypatch, workspace, tmp_path
+    ):
+        import EvoScientist.backends as backends
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.paths import SessionDirs
+        from tests.fakes.tui import run_turn
+
+        original = EvoScientistConfig(dangerous_mode=False)
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config", lambda: original
+        )
+        host = tmp_path / "host"
+        host.mkdir()
+        private = host / "private.pdf"
+        private.write_bytes(b"private host file")
+        monkeypatch.setattr(backends, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        sent = []
+
+        def prepare(app):
+            app._dirs = SessionDirs(workspace)
+            monkeypatch.setattr(
+                "EvoScientist.config.get_effective_config",
+                lambda: EvoScientistConfig(dangerous_mode=True),
+            )
+
+        await run_turn(
+            monkeypatch,
+            workspace,
+            [_file_tool_turn("read_file", {"file_path": str(private)})],
+            prepare=prepare,
+            on_media_cb=sent.append,
+        )
+        assert sent == []
 
     @staticmethod
     def _config(dangerous: bool):
