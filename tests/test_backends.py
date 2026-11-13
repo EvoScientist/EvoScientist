@@ -921,7 +921,15 @@ class TestWorkspaceRemovalAndComments:
 
     @pytest.mark.parametrize(
         "command",
-        ["rm -rf ~", "rm -rf $HOME/.cache/huggingface", 'rm -rf "${HOME}/.cache/pip"'],
+        [
+            "rm -rf ~",
+            "rm -rf $HOME/.cache/huggingface",
+            'rm -rf "${HOME}/.cache/pip"',
+            "rm -rf $USERPROFILE/x",
+            "rm -rf ${USERPROFILE}",
+            "rm -rf %USERPROFILE%",
+            'rm -rf "%USERPROFILE%\\Documents"',
+        ],
     )
     def test_removing_from_the_home_folder_is_refused(self, command, tmp_workspace):
         assert (
@@ -971,6 +979,17 @@ class TestWorkspaceRemovalAndComments:
             "rm -r ${HOME}/*",
             "rm '-r' ~",
             'rm "-rf" /',
+            "rm -rf ~/.",
+            "rm -rf ~/./",
+            'rm -rf "$HOME"/.',
+            "rm -rf $HOME/.",
+            "rm -rf ~root",
+            "rm -rf ~root/",
+            "rm -rf ~john.doe-2/*",
+            "rm -rf $USERPROFILE",
+            'rm -rf "${USERPROFILE}"/',
+            "rm -rf %USERPROFILE%",
+            "rm -rf %userprofile%\\",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(
@@ -983,7 +1002,17 @@ class TestWorkspaceRemovalAndComments:
 
     @pytest.mark.parametrize(
         "command",
-        ["rm -fr /tmp/x", "rm -rf ~/build/cache", "rm -r '$HOME'", 'rm -rf "\\$HOME"'],
+        [
+            "rm -fr /tmp/x",
+            "rm -rf ~/build/cache",
+            "rm -r '$HOME'",
+            'rm -rf "\\$HOME"',
+            "rm -rf ~/project",
+            "rm -rf ~root/project",
+            "rm -rf $USERPROFILE/AppData/Local/x",
+            "rm -rf $USERPROFILE_BACKUP",
+            "rm -rf ~-",
+        ],
     )
     def test_dangerous_mode_removes_deeper_paths(self, command, tmp_workspace):
         assert (
@@ -1147,6 +1176,9 @@ class TestSandboxCommandChecks:
             ("pushd ~", "'pushd ~'"),
             ("pushd /usr", "'pushd /usr'"),
             ("bash -c 'cd ~ && ls'", "'cd ~'"),
+            ("cd $USERPROFILE && ls", "'cd $USERPROFILE'"),
+            ('cd "${USERPROFILE}/x"', "'cd \"${USERPROFILE}/x\"'"),
+            ("cd %USERPROFILE%", "'cd %USERPROFILE%'"),
         ],
     )
     def test_cd_home_leaves_the_workspace(self, command, shown, monkeypatch):
@@ -1163,6 +1195,7 @@ class TestSandboxCommandChecks:
             "cd ./src && cd -",
             "cd -P src",
             "cd $HOMEDIR",
+            "cd $USERPROFILE_DIR",
             "pushd src",
             "mkdir -p '$HOME' && cd '$HOME'",
             "cd '~'",

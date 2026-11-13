@@ -105,8 +105,17 @@ _KILL_BY_LOOKUP_ERROR = (
     "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
     "itself."
 )
-# `$HOME` / `${HOME}` at the start of a path.
-_HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
+# The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
+# `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
+_HOME_VARIABLE_RE = re.compile(r"\$\{?(?:HOME|USERPROFILE)\b|(?i:%USERPROFILE%)")
+# The home folder itself as an rm target: `~` or `~user` as written, or one
+# of the variables above, then only `/`, `/.` or `/*` steps.
+_HOME_STEPS = r"(?:/+[.*]?)*"
+_HOME_TILDE_TARGET_RE = re.compile(rf"~(?:\w[\w.-]*)?{_HOME_STEPS}")
+_HOME_VARIABLE_TARGET_RE = re.compile(
+    rf"(?:\$(?:HOME|USERPROFILE)|\$\{{(?:HOME|USERPROFILE)\}}|(?i:%USERPROFILE%))"
+    rf"{_HOME_STEPS}"
+)
 # Commands that find processes by name, pattern or resource.
 _PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
 # Of those, the ones whose only job is matching names.
@@ -1118,8 +1127,9 @@ def _protected_removal_error(target: str) -> str:
 
 
 def _is_home_word(raw: str) -> bool:
-    """Whether a word as written starts in the home folder: ``~`` or
-    ``$HOME`` that the shell expands (not inside single quotes)."""
+    """Whether a word as written starts in the home folder: ``~``, ``$HOME``
+    or ``$USERPROFILE`` that the shell expands (not inside single quotes), or
+    cmd.exe's ``%USERPROFILE%``."""
     return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
 
 
@@ -1186,15 +1196,18 @@ def _recursive_rm_operands(
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     """Whether an rm operand is the file system root, a drive root or the home
-    folder itself (optionally followed by ``/`` or ``/*``)."""
+    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.`` or
+    ``/*``; rm itself refuses a ``.`` operand, but not every rm is checked)."""
     path = _removal_target(token) if token is not None else operand
     if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
         return True
     value = str(token["value"]) if token is not None else operand
-    home = r"(\$HOME|\$\{HOME\})(/\*?)?"
     return bool(
-        (operand.startswith("~") and re.fullmatch(r"~(/\*?)?", operand))
-        or (_is_home_word(operand) and re.fullmatch(home, value))
+        _HOME_TILDE_TARGET_RE.fullmatch(operand.replace("\\", "/"))
+        or (
+            _is_home_word(operand)
+            and _HOME_VARIABLE_TARGET_RE.fullmatch(value.replace("\\", "/"))
+        )
     )
 
 
