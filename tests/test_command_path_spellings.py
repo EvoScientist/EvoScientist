@@ -114,6 +114,7 @@ def test_quoted_tmp_variables_are_refused_instead_of_escaping_validation(tmp_pat
     assert not (tmp_path / "tmp/out.txt").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path spelling")
 @pytest.mark.parametrize("quote", ['"', "'"])
 def test_quoted_host_workspace_path_is_not_virtual_tmp(tmp_path, quote):
     path = str(tmp_path / "out.txt")
@@ -124,6 +125,7 @@ def test_quoted_host_workspace_path_is_not_virtual_tmp(tmp_path, quote):
     assert shlex.split(converted) == ["cat", "./out.txt"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX literal backslash semantics")
 @pytest.mark.parametrize("quote", ['"', "'"])
 def test_quoted_path_retains_literal_backslash(tmp_path, quote):
     converted, _ = _convert_command_paths(
@@ -161,3 +163,47 @@ def test_expanding_tmp_path_is_not_rewritten_past_validation(tmp_path):
         'cat "/tmp/$ESCAPE/file"', workspace_root=str(tmp_path)
     )
     assert validate_command(converted, workspace_root=str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'PATH="$(cat /etc/passwd >&2)"',
+        'PATH="`cat /etc/passwd >&2`"',
+        'export PATH="/usr/bin:$(cat /etc/passwd >&2)"',
+        'PATH="$(cat --input=/etc/passwd)"',
+    ],
+)
+def test_path_assignment_substitutions_cannot_hide_host_paths(tmp_path, command):
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert validate_command(converted, workspace_root=str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("prefix", ["--output=", "-o", "OUT="])
+def test_attached_mixed_quoted_path_maps_its_unquoted_head(tmp_path, prefix):
+    command, uses_tmp = _convert_command_paths(
+        f'echo {prefix}/tmp/"out file"', workspace_root=str(tmp_path)
+    )
+    assert uses_tmp
+    assert shlex.split(command) == ["echo", prefix + "./tmp/out file"]
+    assert validate_command(command, workspace_root=str(tmp_path)) is None
+
+
+def test_path_search_list_with_safe_substitution_remains_valid(tmp_path):
+    command = 'export PATH="/usr/bin:/bin:$(printf local)"'
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == command
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "export PATH='/usr/bin:$(cat /etc/passwd)'",
+        'export PATH="/usr/bin:\\$(cat /etc/passwd)"',
+    ],
+)
+def test_literal_path_search_text_is_not_a_substitution(tmp_path, command):
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == command
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
