@@ -99,3 +99,24 @@ class TestDeleteCommand:
         ctx.graph_gateway = FakeGraphGateway(thread_store=store)
         await DeleteCommand().execute(ctx, [])
         ui.wait_for_thread_pick.assert_awaited_once()
+
+
+async def test_unresolved_uuid_does_not_bypass_command_resolution():
+    from EvoScientist.commands.implementation.session import DeleteCommand
+
+    ctx, ui = _ctx(thread_store=FakeThreadStore())
+    ctx.graph_gateway.delete_thread = AsyncMock()
+    await DeleteCommand().execute(ctx, ["11111111-1111-1111-1111-111111111111"])
+    ctx.graph_gateway.delete_thread.assert_not_awaited()
+    assert "not found" in ui.append_system.call_args.args[0]
+
+
+async def test_delete_failure_reports_exception_type_without_success():
+    from EvoScientist.commands.implementation.session import DeleteCommand
+
+    ctx, ui = _ctx(thread_store=FakeThreadStore(resolved_thread_id="saved"))
+    ctx.graph_gateway.delete_thread = AsyncMock(side_effect=TimeoutError())
+    await DeleteCommand().execute(ctx, ["saved"])
+    messages = [c.args[0] for c in ui.append_system.call_args_list]
+    assert any("Could not delete session saved: TimeoutError()" in m for m in messages)
+    assert not any(m.startswith("Deleted session") for m in messages)

@@ -12,6 +12,7 @@ import httpx
 import pytest
 import typer
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph_sdk.errors import NotFoundError
 
 from EvoScientist.gateway import (
     GraphTarget,
@@ -4131,3 +4132,137 @@ async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_du
     texts = [event["content"] for event in events if event["type"] == "text"]
     assert texts == ["WRO", "new"]
     assert events[-1]["response"] == "new"
+
+
+async def test_server_gateway_delete_missing_thread_stops_at_exact_lookup():
+    threads = FakeLangGraphThreadsClient(threads=[])
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock()
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread("11111111-1111-1111-1111-111111111111")
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_server_gateway_delete_does_not_resolve_unique_prefix():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": DEFAULT_GRAPH_ID}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread(thread_id[:8])
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_failed_run_cancellation_prevents_unreported_server_delete():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(side_effect=RuntimeError("cancel unavailable"))
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    store = LangGraphServerThreadStore(client=client)
+    with pytest.raises(RuntimeError, match="cancel unavailable"):
+        await store.delete_thread("11111111-1111-1111-1111-111111111111")
+    client.threads.delete.assert_not_awaited()
+
+
+async def test_cancel_many_failure_keeps_server_registry_for_retry():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(return_value=[{"run_id": "r1"}]),
+            cancel_many=AsyncMock(side_effect=RuntimeError("cancel rejected")),
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    store = LangGraphServerThreadStore(client=client)
+    with pytest.raises(RuntimeError, match="cancel rejected"):
+        await store.delete_thread("11111111-1111-1111-1111-111111111111")
+    client.threads.delete.assert_not_awaited()
+
+
+def _cancel_not_found():
+    return NotFoundError(
+        "not found",
+        response=httpx.Response(
+            404, request=httpx.Request("GET", "http://localhost/runs")
+        ),
+        body=None,
+    )
+
+
+async def test_runs_ending_before_cancel_still_delete_the_thread():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(return_value=[{"run_id": "r1"}]),
+            cancel_many=AsyncMock(side_effect=_cancel_not_found()),
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    assert await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.runs.cancel_many.assert_awaited_once()
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_thread_gone_before_cancel_still_attempts_delete_and_returns_false():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=_cancel_not_found())),
+    )
+    assert not await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_cancel_list_not_found_does_not_hide_later_server_delete_error():
+    error = RuntimeError("delete unavailable")
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=error)),
+    )
+    with pytest.raises(RuntimeError) as raised:
+        await LangGraphServerThreadStore(client=client).delete_thread(
+            "11111111-1111-1111-1111-111111111111"
+        )
+    assert raised.value is error
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_server_gateway_delete_rejects_other_graph_before_cancellation():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": "other"}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread(thread_id)
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_server_gateway_delete_uses_explicit_graph_target():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": "custom"}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert await gateway.delete_thread(thread_id, GraphTarget(graph_id="custom"))
+    assert threads.deleted == [thread_id]
+    assert threads.searches == []

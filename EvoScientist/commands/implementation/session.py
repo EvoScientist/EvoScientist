@@ -348,7 +348,13 @@ class DeleteCommand(Command):
             )
             return
 
-        deleted = await gateway.delete_thread(resolved)
+        try:
+            deleted = await gateway.delete_thread(resolved)
+        except Exception as exc:
+            ctx.ui.append_system(
+                f"Could not delete session {resolved}: {exc!r}", style="red"
+            )
+            return
         if deleted:
             ctx.ui.append_system(f"Deleted session {resolved}.", style="green")
         else:
