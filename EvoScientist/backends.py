@@ -3016,4 +3016,4 @@ class AutoskillProposalSandboxBackend(CustomSandboxBackend):
         return super().execute(
             self._rewrite_autoskill_mount(command),
             timeout=timeout,
-)
+        )
