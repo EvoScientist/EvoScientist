@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import threading
 from typing import Any
 
@@ -134,7 +135,13 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         else:
             status.update(f"[dim]{escape(message)} ({int(fraction * 100)}%)...[/dim]")
 
-    from .server import _stop_signals_interrupt, lock_wait_status
+    from .server import (
+        _ignore,
+        _interrupt,
+        _stop_signals,
+        _stop_signals_interrupt,
+        lock_wait_status,
+    )
 
     runner = InstalledWebUIRunner(progress=_install_progress, log_path=webui_log)
     launcher = WebUILauncher(
@@ -248,6 +255,11 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     break
                 shutdown_event.wait(timeout=0.5)
         finally:
+            # Error-driven cleanup may begin before the first signal. Shield
+            # it too, without changing inherited ignored HUP or other handlers.
+            for sig in _stop_signals():
+                if signal.getsignal(sig) is _interrupt:
+                    signal.signal(sig, _ignore)
             # A closed terminal may reject output; that must not skip stop().
             with contextlib.suppress(OSError):
                 console.print(
