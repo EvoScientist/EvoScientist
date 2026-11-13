@@ -37,8 +37,8 @@ from .config import (
 )
 from .memory import MemorySourceType
 from .paths import (
+    SessionDirs,
     Workspace,
-    normalize_path,
     process_session_dirs,
     resolve_virtual_path,
 )
@@ -48,6 +48,7 @@ from .prompts import get_system_prompt
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 if TYPE_CHECKING:
+    from deepagents.backends.protocol import BackendProtocol
     from langchain.agents.middleware import InterruptOnConfig
     from langgraph.graph.state import CompiledStateGraph
 
@@ -353,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MissingApiKeyMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         WindowsFilePathMiddleware,
@@ -412,6 +414,9 @@ def _inject_subagent_middleware(
             WindowsFilePathMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
+            # Inside the model override: stops a call to a model with no
+            # API key before it reaches the provider (#782).
+            MissingApiKeyMiddleware(),
             # Inside the retry layer: marks each provider call for the
             # stream decoder.
             ModelCallBoundaryMiddleware(),
@@ -818,14 +823,33 @@ def load_mcp_and_build_kwargs(
 
 
 def _run_media_dir(workspace: Workspace, work_dir: str | Path) -> Path | None:
-    """The workspace's media folder, when the agent works outside the root.
+    """The media folder a sandbox rooted at *work_dir* is told about.
 
-    Channel attachments land in ``<root>/media`` and are referenced by their
-    real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
-    told about the folder to reach them; in the root it is already inside
-    the sandbox.
+    See :attr:`SessionDirs.sandbox_media_dir`.
     """
-    return None if normalize_path(work_dir) == workspace.root else workspace.media_dir
+    return SessionDirs(workspace, work_dir).sandbox_media_dir
+
+
+def file_tool_routes(workspace: Workspace) -> "dict[str, BackendProtocol]":
+    """The agent's file tool routes: path prefix to the backend it reaches.
+
+    ``/skills/`` merges the workspace, global and built-in skill tiers;
+    ``/memories/`` is the memory folder. Every other path goes to the
+    sandbox, which the caller roots at its work folder.
+    """
+    from .backends import MemoryFilesystemBackend, MergedSkillsBackend
+
+    return {
+        "/skills/": MergedSkillsBackend(
+            primary_dir=str(workspace.skills_dir),
+            global_dir=str(_paths_mod.GLOBAL_SKILLS_DIR),
+            secondary_dir=SKILLS_DIR,
+        ),
+        "/memories/": MemoryFilesystemBackend(
+            root_dir=str(_paths_mod.MEMORIES_DIR),
+            virtual_mode=True,
+        ),
+    }
 
 
 def _get_default_backend(
@@ -856,11 +880,7 @@ def _get_default_backend(
     """
     from deepagents.backends import CompositeBackend
 
-    from .backends import (
-        CustomSandboxBackend,
-        MemoryFilesystemBackend,
-        MergedSkillsBackend,
-    )
+    from .backends import CustomSandboxBackend
     from .setup.agent_env import agent_shell_overrides
 
     cfg = _ensure_config()
@@ -869,8 +889,6 @@ def _get_default_backend(
         # the run's HITL-suppression state so a mid-session flip can't go stale.
         guard_dangerous = False
     root_dir = str(work_dir if work_dir is not None else workspace.root)
-    memory_dir = str(_paths_mod.MEMORIES_DIR)
-    global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
     # Dangerous mode opens the workspace (`/`) route to the real filesystem;
     # the /skills/ and /memories/ routes stay confined (virtual_mode=True).
@@ -886,22 +904,7 @@ def _get_default_backend(
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )
-    sk_backend = MergedSkillsBackend(
-        primary_dir=str(workspace.skills_dir),
-        global_dir=global_skills_dir,
-        secondary_dir=SKILLS_DIR,
-    )
-    mem_backend = MemoryFilesystemBackend(
-        root_dir=memory_dir,
-        virtual_mode=True,
-    )
-    return CompositeBackend(
-        default=ws_backend,
-        routes={
-            "/skills/": sk_backend,
-            "/memories/": mem_backend,
-        },
-    )
+    return CompositeBackend(default=ws_backend, routes=file_tool_routes(workspace))
 
 
 def _model_retry_middleware(
@@ -988,6 +991,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MissingApiKeyMiddleware,
         ModelFallbackMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
@@ -1107,6 +1111,9 @@ def _get_default_middleware(
             timeout=cfg.code_interpreter_timeout,
             max_result_chars=cfg.code_interpreter_max_result_chars,
         ),
+        # Inside the model override and the fallback chain: stops a call to
+        # a model with no API key before it reaches the provider (#782).
+        MissingApiKeyMiddleware(),
         # Inside the fallback chain and the tool selector: marks each
         # provider call for the stream decoder.
         ModelCallBoundaryMiddleware(),
@@ -1401,12 +1408,7 @@ def create_cli_agent(
     from deepagents import create_deep_agent
     from deepagents.backends import CompositeBackend
 
-    from . import paths as _paths
-    from .backends import (
-        CustomSandboxBackend,
-        MemoryFilesystemBackend,
-        MergedSkillsBackend,
-    )
+    from .backends import CustomSandboxBackend
     from .setup.agent_env import agent_shell_overrides
 
     # Pure path only when BOTH config and chat_model are explicit: build from
@@ -1433,9 +1435,6 @@ def create_cli_agent(
 
     work_dir = str(work_dir if work_dir is not None else workspace.root)
 
-    _mem_dir = str(_paths.MEMORIES_DIR)
-    _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
-
     media_dir = _run_media_dir(workspace, work_dir)
     ws_backend = CustomSandboxBackend(
         root_dir=work_dir,
@@ -1449,22 +1448,7 @@ def create_cli_agent(
         skills_dir=workspace.skills_dir,
         media_dir=media_dir,
     )
-    sk_backend = MergedSkillsBackend(
-        primary_dir=str(workspace.skills_dir),
-        global_dir=_global_skills_dir,
-        secondary_dir=SKILLS_DIR,
-    )
-    mem_backend = MemoryFilesystemBackend(
-        root_dir=_mem_dir,
-        virtual_mode=True,
-    )
-    be = CompositeBackend(
-        default=ws_backend,
-        routes={
-            "/skills/": sk_backend,
-            "/memories/": mem_backend,
-        },
-    )
+    be = CompositeBackend(default=ws_backend, routes=file_tool_routes(workspace))
 
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain.

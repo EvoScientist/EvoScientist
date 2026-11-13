@@ -1793,7 +1793,10 @@ def run_textual_interactive(
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
             """
+            from ..EvoScientist import file_tool_routes
+            from ..gateway.runtime import sandbox_dangerous_mode
             from ..stream.display import (
+                forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
             )
@@ -1858,6 +1861,11 @@ def run_textual_interactive(
             _thinking_sent = False
             _todo_sent = False
             _media_sent: set[str] = set()
+            # Media paths resolve as the sandbox resolves them.
+            _media_dangerous = on_media_cb is not None and sandbox_dangerous_mode(
+                self._runtime_gateways.graph_gateway, config
+            )
+            _media_routes = file_tool_routes(self._dirs.workspace)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2215,20 +2223,17 @@ def run_textual_interactive(
                             on_todo_cb(state.todo_items)
                             _todo_sent = True
 
-                        if (
-                            on_media_cb
-                            and event_type == "tool_result"
-                            and event.get("success")
-                        ):
-                            tool_name = event.get("name", "")
-                            if tool_name in ("write_file", "read_file"):
-                                _forward_media_to_channel(
-                                    state,
-                                    tool_name,
-                                    _media_sent,
-                                    on_media_cb,
-                                    str(self._dirs.work_dir),
-                                )
+                        if on_media_cb:
+                            forward_media_result(
+                                state,
+                                event,
+                                _media_sent,
+                                on_media_cb,
+                                str(self._dirs.work_dir),
+                                media_dir=self._dirs.sandbox_media_dir,
+                                dangerous=_media_dangerous,
+                                routes=_media_routes,
+                            )
 
                         # -- Remove loading spinner on first content event --
                         if not loading_removed and event_type in (
@@ -4496,57 +4501,6 @@ def run_textual_interactive(
                 case _:
                     # Fallback for busy state with no specific phase (e.g. slash commands)
                     return f"Working...{elapsed}", busy_style
-
-    # ── Media forwarding helper (module-level) ──────────────
-
-    _MEDIA_EXTENSIONS = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".bmp",
-        ".webp",
-        ".svg",
-        ".pdf",
-        ".mp3",
-        ".wav",
-        ".mp4",
-    }
-
-    def _forward_media_to_channel(
-        state: StreamState,
-        tool_name: str,
-        media_sent: set[str],
-        send_fn: Any,
-        work_dir: str | None,
-    ) -> None:
-        """Check tool calls for media files and forward to channel.
-
-        Virtual paths resolve against ``work_dir``, the folder the agent
-        works in.
-        """
-        import os
-
-        from ..paths import resolve_virtual_path
-
-        arg_key = "path" if tool_name == "write_file" else "file_path"
-        for tc in reversed(state.tool_calls):
-            if tc.get("name") == tool_name:
-                p = tc.get("args", {}).get(arg_key, "")
-                if not p:
-                    p = tc.get("args", {}).get("path", "")
-                if p and p not in media_sent:
-                    ext = os.path.splitext(p)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = (
-                            str(resolve_virtual_path(work_dir, p)) if work_dir else p
-                        )
-                        if not os.path.isfile(real_path) and os.path.isfile(p):
-                            real_path = p
-                        if os.path.isfile(real_path):
-                            media_sent.add(p)
-                            send_fn(real_path)
-                break
 
     # ── Entry point ─────────────────────────────────────────
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..config import BaseChannelConfig
 from .rpc_client import ImsgRpcClient, RpcNotification
 from .targets import (
@@ -141,7 +141,7 @@ class IMessageChannelRpc(Channel):
         _VOICE_EXTS = {".caf", ".m4a", ".aac", ".ogg", ".opus", ".mp3", ".amr"}
         if self.config.include_attachments:
             attachments = message.get("attachments", [])
-            for att in attachments:
+            for index, att in enumerate(attachments):
                 # imsg CLI provides local file paths for attachments
                 file_path = att if isinstance(att, str) else att.get("path", "")
                 if not file_path:
@@ -161,7 +161,10 @@ class IMessageChannelRpc(Channel):
                             f"({att_path.stat().st_size} bytes)]"
                         )
                     else:
-                        local = self._media_path(f"imsg_{fname}")
+                        name = attachment_filename(
+                            fname, str(message.get("id") or ""), index
+                        )
+                        local = self._media_path(f"imsg_{name}")
                         try:
                             import shutil
 

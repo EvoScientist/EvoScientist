@@ -24,6 +24,7 @@ from ..middleware.tool_history_repair import (
 )
 from ..paths import file_tool_path
 from .emitter import StreamEventEmitter
+from .state import paragraph_break
 from .summarization import (
     _extract_summary_message_text,
     _find_summarization_event_payload,
@@ -433,7 +434,7 @@ class _CallRecord:
     thinking_chars: int = 0
     tool_call_ids: list[str] = field(default_factory=list)
     full_response_len: int = 0
-    selector_snapshot: tuple[bool, str, bool] | None = None
+    selector_snapshot: tuple[bool, str] | None = None
 
     def discard_payload(self) -> dict[str, Any]:
         return {
@@ -528,6 +529,7 @@ class _V3EventProcessor:
         self._value_recovery = process_value_messages
         self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
+        self._main_message_has_text = False
         # Where the pass a graded run's last verdict applies to starts in
         # ``full_response``; ``None`` until a verdict arrives.
         self._last_pass_start: int | None = None
@@ -581,6 +583,7 @@ class _V3EventProcessor:
                 0, len(self.full_response) - record.full_response_len
             )
             self.full_response = self.full_response[: record.full_response_len]
+            self._main_message_has_text = False
             if record.selector_snapshot is not None:
                 self._selector.restore(record.selector_snapshot)
             self._process_value_message_snapshots = self._value_recovery
@@ -731,12 +734,16 @@ class _V3EventProcessor:
         criteria = payload.get("criteria")
         if self._last_pass_start is None:
             self._last_pass_start = 0
+        events: list[dict[str, Any]] = []
         if result == "needs_revision":
+            self._end_text_message(None)
             if self.full_response.strip() and not self.full_response.endswith("\n\n"):
                 # Keep the draft; the revision starts on its own paragraph.
                 self.full_response += "\n\n"
+                events.append(self.emitter.text("\n\n").data)
             self._last_pass_start = len(self.full_response)
         return [
+            *events,
             self.emitter.rubric_evaluation(
                 iteration=iteration,
                 result=result if isinstance(result, str) else "",
@@ -745,7 +752,7 @@ class _V3EventProcessor:
                 if isinstance(criteria, list)
                 else [],
                 unverified=payload.get("unverified") is True,
-            ).data
+            ).data,
         ]
 
     @property
@@ -971,7 +978,6 @@ class _V3EventProcessor:
             return []
 
         if event_type == "message-finish":
-            self._end_text_message(subagent)
             events: list[dict[str, Any]] = []
             pending = self._selector.flush_pending_text()
             if pending and not pending.isspace():
@@ -984,9 +990,10 @@ class _V3EventProcessor:
                         ).data
                     )
                 else:
-                    self.full_response += pending
+                    pending = self._append_main_text(pending)
                     events.append(self.emitter.text(pending).data)
                 self._count_text(len(pending))
+            self._end_text_message(subagent)
             if subagent is None:
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
@@ -1093,6 +1100,8 @@ class _V3EventProcessor:
         if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
             self._end_text_message(subagent)
 
+        if msg.tool_calls:
+            events.extend(self._selector.flush_selection())
         for raw_tool_call_block in msg.tool_calls:
             tool_call_block = _as_raw_map(raw_tool_call_block)
             if tool_call_block is None:
@@ -1319,6 +1328,17 @@ class _V3EventProcessor:
 
     def _end_text_message(self, subagent: _SubagentInfo | None) -> None:
         self._held_space.pop(subagent.instance_id if subagent else None, None)
+        if subagent is None:
+            self._main_message_has_text = False
+
+    def _append_main_text(self, text: str) -> str:
+        # Put the separator in the emitted delta too: stateful frontends and
+        # standalone channels concatenate these deltas, independently of done.
+        if not self._main_message_has_text:
+            text = paragraph_break(self.full_response, text) + text
+        self._main_message_has_text = True
+        self.full_response += text
+        return text
 
     def _emit_text(
         self, text: str, subagent: _SubagentInfo | None
@@ -1342,15 +1362,16 @@ class _V3EventProcessor:
             return events
         if not emit_text or emit_text.isspace():
             return events
-        self._count_text(len(emit_text))
         if subagent is not None:
+            self._count_text(len(emit_text))
             events.append(
                 self.emitter.subagent_text(
                     subagent.name, emit_text, instance_id=subagent.instance_id
                 ).data
             )
             return events
-        self.full_response += emit_text
+        emit_text = self._append_main_text(emit_text)
+        self._count_text(len(emit_text))
         events.append(self.emitter.text(emit_text).data)
         return events
 
@@ -1506,6 +1527,8 @@ async def stream_agent_events(
         from .sink import SessionEventSink
 
         events = SessionEventSink()
+    # A run that ended before its first output leaves its selection behind.
+    events.discard_tool_selection()
 
     # Single assembly point for the run config (see gateway.types). No
     # per-run model/limit overrides on the local path: the local agent is
