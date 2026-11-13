@@ -3033,12 +3033,10 @@ class TestAbsolutePathDetection:
         assert validate_command("python /main.py") is None
 
     def test_safe_env_equals_dev(self):
-        """dd-style if=/dev/zero — the = prevents matching."""
-        # dd itself is blocked by BLOCKED_COMMANDS, but the /dev path
-        # should not trigger the absolute-path check due to = prefix
+        """Attached file operands no longer bypass system-path validation."""
         from EvoScientist.backends import _extract_all_paths
 
-        assert _extract_all_paths("if=/dev/zero") == []
+        assert _extract_all_paths("if=/dev/zero") == ["/dev/zero"]
 
     def test_safe_system_executable(self):
         """Running a system binary by absolute path should pass."""
