@@ -803,12 +803,12 @@ class LangGraphServerGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        resolved, _ = await self.thread_store.resolve_thread_id_prefix(
-            thread_id, graph_id=self._target_graph_id(target)
-        )
-        if resolved is None:
+        metadata = await self.thread_store.get_thread_metadata(thread_id)
+        if metadata is None or metadata.get("graph_id") != self._target_graph_id(
+            target
+        ):
             return False
-        return await self.thread_store.delete_thread(resolved)
+        return await self.thread_store.delete_thread(thread_id)
 
     async def clone_thread(
         self,
