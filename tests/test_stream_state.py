@@ -982,7 +982,8 @@ class TestRubricState:
         state.handle_event(
             {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
         )
-        state.handle_event({"type": "text", "content": "Revised answer."})
+        # The processor carries the revision separator in its text delta.
+        state.handle_event({"type": "text", "content": "\n\nRevised answer."})
 
         assert state.response_text == "First draft.\n\nRevised answer."
 
@@ -1121,6 +1122,8 @@ def test_discard_keeps_the_clean_prefix_of_a_boundary_crossing_narration_segment
             "criteria": [],
         }
     )
+    # Revision separators are emitted by the processor before the next call.
+    state.handle_event({"type": "text", "content": "\n\n"})
     state.handle_event({"type": "text", "content": "partial"})
     state.handle_event({"type": "tool_call", "id": "dead", "name": "ls", "args": {}})
     state.handle_event(
