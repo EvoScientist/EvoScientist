@@ -2990,6 +2990,15 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
         assert "blocked" in result.lower()
 
+    def test_backslash_newline_line_continuation_traversal_blocked(self):
+        result = validate_command("python s.py --output=.\\\n./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        result = validate_command("python s.py --output=.\\\r\n./out.txt")
+        assert result is not None
+        assert "blocked" in result.lower()
+
 
 # === Pipeline command validation ===
 

@@ -971,9 +971,36 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+def _join_line_continuations(s: str) -> str:
+    """Remove backslash-newline line continuations outside single quotes."""
+    parts: list[str] = []
+    in_single_quote = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "'":
+            in_single_quote = not in_single_quote
+            parts.append(c)
+            i += 1
+        elif c == "\\" and not in_single_quote and i + 1 < len(s):
+            if s[i + 1] == "\n":
+                i += 2
+            elif s[i + 1 : i + 3] == "\r\n":
+                i += 3
+            else:
+                parts.append(s[i : i + 2])
+                i += 2
+        else:
+            parts.append(c)
+            i += 1
+    return "".join(parts)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
+
+    command = _join_line_continuations(command)
 
     def _decode_shell_escapes(s: str) -> str:
         """Decode shell backslash escapes outside single quotes, preserving single-quoted literal backslashes."""
