@@ -276,3 +276,116 @@ def test_attached_existing_non_system_workspace_file_is_mapped(tmp_path, prefix)
         f"echo {prefix}/results/x.csv", workspace_root=str(tmp_path)
     )
     assert shlex.split(converted) == ["echo", prefix + "./results/x.csv"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'MODEL_PATH="/home/alice/models/x.pt"; python eval.py',
+        'export OUTPUT_PATH="/etc/cron.d/job"; echo x > "$OUTPUT_PATH"',
+        'KEYPATH="/root/.ssh/id_rsa"; cat $KEYPATH',
+        "SAVE_PATH=/home/alice/out; python x.py --save $SAVE_PATH",
+        'CONFIG_PATH=/etc/passwd; cat "$CONFIG_PATH"',
+    ],
+)
+def test_path_named_file_variable_is_validated(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    assert prepare_sandbox_command(command, str(tmp_path))[1] is not None
+
+
+@pytest.mark.parametrize("quote", ["", '"', "'"])
+def test_path_named_file_variable_tmp_value_is_mapped(tmp_path, quote):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    command, error = prepare_sandbox_command(
+        f"OUTPUT_PATH={quote}/tmp/out.csv{quote} python train.py", str(tmp_path)
+    )
+    assert error is None
+    assert shlex.split(command)[0] == "OUTPUT_PATH=./tmp/out.csv"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "export CUDA_HOME=/usr/local/cuda",
+        "CUDA_HOME=/usr/local/cuda pip install flash-attn",
+        "export JAVA_HOME=/usr/lib/jvm/java-17",
+        "make CC=/usr/bin/gcc",
+        "env CC=/usr/bin/gcc make",
+        "cmake -DCMAKE_C_COMPILER=/usr/bin/gcc .",
+        "cmake -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda .",
+        'export CUDA_HOME="/usr/local/cuda"',
+        "make CC=/opt/toolchain/gcc",
+        "make CC=/bin/cc",
+        "env TOOL=/sbin/tool build",
+    ],
+)
+def test_literal_toolchain_assignments_preserve_compatibility(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    converted, error = prepare_sandbox_command(command, str(tmp_path))
+    assert error is None
+    assert converted == command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "X=/etc/passwd; cat $X",
+        "OUT=/etc/x; echo hi > $OUT",
+        "KEY_HOME=/root/.ssh; cat $KEY_HOME",
+        "X=/usr/../etc/passwd; cat $X",
+        'X="/usr/$(cat /etc/passwd)"; echo "$X"',
+        "echo --output=/usr/local/x",
+        "ls /usr/local/cuda",
+    ],
+)
+def test_toolchain_assignment_rule_keeps_other_paths_refused(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    assert prepare_sandbox_command(command, str(tmp_path))[1] is not None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "LIBRARY_PATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "MANPATH",
+        "CLASSPATH",
+        "NODE_PATH",
+    ],
+)
+def test_other_known_search_lists_are_not_file_variables(tmp_path, name):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    original = f"{name}=/usr/a:/opt/b python x.py"
+    converted, error = prepare_sandbox_command(original, str(tmp_path))
+    assert error is None
+    assert converted == original
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "OUT=/usr/local/x; echo hi > $OUT",
+        "CUDA_HOME=/usr/local/cuda; ls $CUDA_HOME/bin",
+    ],
+)
+def test_toolchain_compatibility_is_not_a_read_only_guarantee(tmp_path, command):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    # Existing variable expansion is not tracked. This compatibility exception
+    # therefore does not provide read-only isolation for toolchain locations.
+    assert prepare_sandbox_command(command, str(tmp_path))[1] is None
+
+
+@pytest.mark.parametrize(
+    "raw", ["X=/usr_evil/file", "--output=/usr/x", "X=/optical/file"]
+)
+def test_toolchain_assignment_exemption_is_boundary_aware(raw):
+    from EvoScientist.backends import _is_toolchain_path_assignment
+
+    assert not _is_toolchain_path_assignment(raw)
