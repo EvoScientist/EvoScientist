@@ -162,6 +162,24 @@ class TestSimpleCommands:
         assert rm.args == ("-rf", "/a", "/b")
         assert echo.args == ()
 
+    def test_assignments_wherever_a_variable_is_set(self):
+        assert shell_syntax.assignments(
+            'A=1; B=$(ps aux | grep x) cmd; export C=`lsof -t`; local -r D="$(ps)" E'
+        ) == [
+            ("A", "1"),
+            ("B", "$(ps aux | grep x)"),
+            ("C", "`lsof -t`"),
+            ("D", '"$(ps)"'),
+        ]
+        assert shell_syntax.assignments("arr[0]=$(ps) n+=1") == [
+            ("arr", "$(ps)"),
+            ("n", "1"),
+        ]
+        assert sorted(
+            shell_syntax.assignments("bash -c 'P=$(pgrep x)'; echo $(Q=1)")
+        ) == [("P", "$(pgrep x)"), ("Q", "1")]
+        assert shell_syntax.assignments("echo A=1; FOO='x=1'") == [("FOO", "'x=1'")]
+
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")
         assert kill.args == ("`pgrep -f python`",)

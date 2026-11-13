@@ -619,11 +619,39 @@ def simple_commands(command: str) -> list[SimpleCommand]:
     return _simple_commands(command, set(), ())
 
 
+# Builtins whose `NAME=value` arguments set variables.
+DECLARATION_NAMES = frozenset({"export", "local", "declare", "typeset", "readonly"})
+
+
+def assignments(command: str) -> list[tuple[str, str]]:
+    """``(name, value as written)`` of each variable *command* sets with
+    ``NAME=value``: alone, before a command, as an argument of ``export`` /
+    ``local`` / ``declare``, and in the code it runs (see
+    :func:`simple_commands`)."""
+    found: list[tuple[str, str]] = []
+    for each in _simple_commands(command, set(), (), found):
+        if each.name in DECLARATION_NAMES:
+            for arg in each.args:
+                match = ASSIGNMENT_RE.match(arg)
+                if match is not None:
+                    found.append((_assigned_name(arg), arg[match.end() :]))
+    return found
+
+
+def _assigned_name(word: str) -> str:
+    """The variable a ``NAME=value``, ``NAME+=value`` or ``NAME[i]=value`` sets."""
+    return re.split(r"[\[+=]", word, maxsplit=1)[0]
+
+
 def _simple_commands(
-    command: str, seen: set[tuple[str, tuple[str, ...]]], outer: tuple[str, ...]
+    command: str,
+    seen: set[tuple[str, tuple[str, ...]]],
+    outer: tuple[str, ...],
+    assigned: list[tuple[str, str]] | None = None,
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
-    the wrappers they run under (*outer* for this one)."""
+    the wrappers they run under (*outer* for this one). Assignments in
+    command-name position go to *assigned* (see :func:`assignments`)."""
     words = parse(command)
     tokens = words.tokens
     found: list[SimpleCommand] = []
@@ -637,11 +665,14 @@ def _simple_commands(
         value = str(token["value"])
         if token["type"] == "op" and value == "`":
             in_backtick = not in_backtick
-        if (
-            not is_name
-            or value in COMMAND_PREFIX_WORDS
-            or ASSIGNMENT_RE.match(str(token["raw"]))
-        ):
+        if not is_name or value in COMMAND_PREFIX_WORDS:
+            continue
+        assignment = ASSIGNMENT_RE.match(str(token["raw"]))
+        if assignment is not None:
+            if assigned is not None:
+                end = _command_word_end(tokens, index, in_backtick)
+                text = command[int(token["start"]) : int(tokens[end - 1]["end"])]
+                assigned.append((_assigned_name(text), text[assignment.end() :]))
             continue
         args, heredocs = _command_arguments(command, words, index, in_backtick)
         for each in _unwrap(re.split(r"[\\/]", value)[-1], args, ()):
@@ -684,7 +715,7 @@ def _simple_commands(
         seen.add((text, chain))
         found.extend(
             inner._replace(via=(*via, *inner.via))
-            for inner in _simple_commands(text, seen, chain)
+            for inner in _simple_commands(text, seen, chain, assigned)
         )
     return found
 

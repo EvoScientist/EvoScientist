@@ -1231,12 +1231,80 @@ def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     )
 
 
+# `$NAME` / `${NAME...}`: the variable a word expands.
+_VARIABLE_REFERENCE_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+# `read` options whose value is the rest of the word or the next word.
+_READ_OPTIONS_WITH_VALUE = frozenset("adinNptu")
+
+
+def _runs_lookup(text: str) -> bool:
+    """Whether a word runs a process lookup in a ``$(...)`` or backticks."""
+    return ("$(" in text or "`" in text) and bool(
+        _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(text))
+    )
+
+
+def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
+    """The variables a ``read`` sets: its operands and a ``-a`` array, or
+    ``REPLY``."""
+    values = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    names: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        index += 1
+        if value == "--":
+            names.extend(values[index:])
+            break
+        if not value.startswith("-") or value == "-":
+            names.append(value)
+            continue
+        for position, letter in enumerate(value[1:], start=1):
+            if letter not in _READ_OPTIONS_WITH_VALUE:
+                continue
+            target = value[position + 1 :]
+            if not target and index < len(values):
+                target = values[index]
+                index += 1
+            if letter == "a":
+                names.append(target)
+            break
+    names = [name for name in names if re.fullmatch(r"[A-Za-z_]\w*", name)]
+    return names or ["REPLY"]
+
+
+def _looked_up_variables(
+    command: str, commands: list[shell_syntax.SimpleCommand], looks_up: bool
+) -> frozenset[str]:
+    """The variables that may hold ids a process lookup found: set from a
+    substitution that runs one, looped over one in ``for``, or set by a
+    ``read`` in a command that runs one (*looks_up*), wherever its input
+    comes from."""
+    names = {
+        name for name, value in shell_syntax.assignments(command) if _runs_lookup(value)
+    }
+    for found in commands:
+        if found.name == "for" and found.args[1:2] == ("in",):
+            if any(_runs_lookup(arg) for arg in found.args[2:]):
+                names.add(found.args[0])
+        elif found.name == "read" and looks_up:
+            names.update(_read_variables(found))
+    return frozenset(names)
+
+
 def _kill_by_lookup(
-    found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
+    found: shell_syntax.SimpleCommand,
+    looks_up: bool,
+    by_name: bool,
+    looked_up: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether a kill reaches processes found by name or pattern, or -1, 0 or
     a process group. *looks_up*: the command runs a process lookup; *by_name*:
-    one that matches names (pgrep, pidof), so a variable holds its ids."""
+    one that matches names (pgrep, pidof), so a variable holds its ids;
+    *looked_up*: the variables that hold ids a lookup found."""
     if found.name == "fuser":
         return any(
             arg in ("-k", "--kill")
@@ -1267,6 +1335,7 @@ def _kill_by_lookup(
     return any(
         re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
         or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
+        or not looked_up.isdisjoint(_VARIABLE_REFERENCE_RE.findall(arg))
         or (
             ("$(" in arg or "`" in arg)
             and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
@@ -1406,6 +1475,7 @@ def validate_command(
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
     by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
+    looked_up = _looked_up_variables(command, commands, looks_up)
     for found in commands:
         if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
@@ -1415,7 +1485,9 @@ def validate_command(
                 f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
                 f"{hint}"
             )
-        if found.name in _KILL_COMMANDS and _kill_by_lookup(found, looks_up, by_name):
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(
+            found, looks_up, by_name, looked_up
+        ):
             return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.
