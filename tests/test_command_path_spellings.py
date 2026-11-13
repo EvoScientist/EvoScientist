@@ -412,6 +412,17 @@ def test_attached_tmp_after_cd_uses_workspace_root(tmp_path, prefix):
     "command",
     [
         'bash -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
+        'bash -euo pipefail -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
+        'bash -o pipefail -c "PATH=/usr/bin:/bin; cat /etc/passwd"',
+        'bash -O extglob -c "PATH=/usr/bin; cat /etc/passwd"',
+        'eval "CUDA_HOME=/usr/local/cuda; cat /etc/passwd"',
+        'su -c "PATH=/usr/bin; cat /etc/passwd"',
+        'flock f -c "PATH=/usr/bin; cat /etc/passwd"',
+        'watch "CUDA_HOME=/usr/local/cuda; cat /etc/passwd"',
+        'ksh -c "PATH=/usr/bin; cat /etc/passwd"',
+        'eval "CC=/usr/bin/gcc -m64; cat /etc/passwd"',
+        'eval "CC=/usr/bin/gcc|cat /etc/passwd"',
+        'eval "CC=/usr/bin/gcc&&cat /etc/passwd"',
         'bash -c "PATH=/usr/bin:/bin; cat /etc/passwd"',
         "sh -c 'X=/usr/x; cat /etc/passwd'",
         'bash -lc "PATH=/usr/bin:/bin; python train.py --config=/etc/x"',
@@ -430,6 +441,8 @@ def test_shell_script_assignments_do_not_hide_file_operands(tmp_path, command):
     "command",
     [
         'make "CC=/usr/bin/clang -O3"',
+        'make "CC=/usr/bin/gcc -m64 -std=c11"',
+        'bash -euo pipefail -c "CUDA_HOME=/usr/local/cuda python setup.py build"',
         'CC="/usr/bin/clang -O3" make',
         'cmake -DCMAKE_PREFIX_PATH="/opt/a;/opt/b" .',
         'bash -c "CUDA_HOME=/usr/local/cuda python setup.py build"',
@@ -510,3 +523,24 @@ def test_quoted_search_list_keeps_literal_entries_while_rewriting_substitution(
         converted
         == f'PATH="$(cd {_platform_quote(str(tmp_path))}/tmp/x && pwd):$PATH" tool'
     )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "-o pipefail",
+        "-O extglob",
+        "-euo pipefail",
+        "+o pipefail",
+        "-o pipefail -O extglob",
+    ],
+)
+def test_named_shell_options_do_not_hide_script_paths(tmp_path, options):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    command, error = prepare_sandbox_command(
+        f'bash {options} -c "cat /tmp/a.txt"', str(tmp_path)
+    )
+    assert error is None
+    assert command == f'bash {options} -c "cat ./tmp/a.txt"'
+    assert (tmp_path / "tmp").is_dir()
