@@ -81,6 +81,15 @@ class SubAgentState:
             self._result_map.pop(tool_call_id, None)
 
 
+def paragraph_break(before: str, text: str) -> str:
+    """Return the missing padding between non-empty assistant messages."""
+    if not before.strip():
+        return ""
+    trailing = len(before) - len(before.rstrip("\n"))
+    leading = len(text) - len(text.lstrip("\n"))
+    return "\n" * max(0, 2 - trailing - leading)
+
+
 class StreamState:
     """Accumulates stream state for display updates."""
 
@@ -185,13 +194,9 @@ class StreamState:
             self.is_processing = False
             text_content = event.get("content", "")
             if text_content and self._round_boundary_pending:
-                if self.response_text.strip():
-                    trailing = len(self.response_text) - len(
-                        self.response_text.rstrip("\n")
-                    )
-                    leading = len(text_content) - len(text_content.lstrip("\n"))
-                    self._round_boundary_inserted = max(0, 2 - trailing - leading)
-                    text_content = "\n" * self._round_boundary_inserted + text_content
+                separator = paragraph_break(self.response_text, text_content)
+                self._round_boundary_inserted = len(separator)
+                text_content = separator + text_content
                 self._round_boundary_pending = False
             self.response_text += text_content
             self.latest_text += text_content
