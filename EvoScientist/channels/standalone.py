@@ -370,16 +370,12 @@ def run_standalone(
     """
     from ..paths import process_workspace
 
-    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
-    # API puts the bot token in the URL path), and httpx logs every request
-    # URL at INFO. A standalone channel started with DEBUG logging (each
-    # serve.py) would therefore write secrets to stdout and any redirected
-    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
-    # has. Keep this in run_standalone (shared by every channel), not in a
-    # single channel's serve.py.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.INFO)
+    # Keep channel credentials out of the log: cap the loggers that print
+    # credential-bearing HTTP URLs. Shared with `EvoSci serve` via the same
+    # helper (issue #666), so a cap change needs a single edit.
+    from .logging_caps import quiet_credential_url_loggers
+
+    quiet_credential_url_loggers()
 
     config = None
     backend = None

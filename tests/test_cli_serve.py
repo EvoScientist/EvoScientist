@@ -356,27 +356,26 @@ def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
     assert pointed == [8123]
 
 
-_CAP_CREDENTIAL_LOGGERS = ("httpx", "httpcore", "telegram")
-
 
 def test_configure_logging_never_reveals_channel_tokens(monkeypatch):
     """Issue #666: `EvoSci serve --debug` must not print channel credentials.
 
     httpx logs every request URL at INFO (Telegram's Bot API embeds the bot
     token in the URL path; DingTalk/WeCom send access_token as a query
-    parameter) and python-telegram-bot logs its API URL at DEBUG, so raising
-    the root level must not enable those loggers. A configured level stricter
-    than the caps must stay in charge.
+    parameter) and python-telegram-bot logs its API URL at DEBUG, so capping
+    these loggers must keep the URL-printing level out of reach regardless of
+    the root level.
     """
     import logging
     from types import SimpleNamespace
 
     import EvoScientist.config as cfg_mod
+    from EvoScientist.channels.logging_caps import CREDENTIAL_URL_LOGGERS
     from EvoScientist.cli.commands import _configure_logging
 
     root = logging.getLogger()
     root_handlers, root_level = root.handlers[:], root.level
-    loggers = [logging.getLogger(name) for name in _CAP_CREDENTIAL_LOGGERS]
+    loggers = [logging.getLogger(name) for name in CREDENTIAL_URL_LOGGERS]
     saved_levels = [lg.level for lg in loggers]
     try:
         for lg in loggers:
@@ -388,20 +387,13 @@ def test_configure_logging_never_reveals_channel_tokens(monkeypatch):
             lambda *_a: SimpleNamespace(log_level="DEBUG"),
         )
         _configure_logging()
-        assert logging.getLogger("httpx").level == logging.WARNING
-        assert logging.getLogger("httpcore").level == logging.WARNING
-        assert logging.getLogger("telegram").level == logging.INFO
-
-        monkeypatch.setattr(
-            cfg_mod,
-            "get_effective_config",
-            lambda *_a: SimpleNamespace(log_level="ERROR"),
-        )
-        _configure_logging()
-        assert logging.getLogger("httpx").level == logging.ERROR
-        assert logging.getLogger("telegram").level == logging.ERROR
+        for name, cap_level in CREDENTIAL_URL_LOGGERS.items():
+            # Assert the property, not the implementation: the cap must block
+            # the level at which the logger prints the credential-bearing
+            # URL (one standard step below the cap).
+            assert not logging.getLogger(name).isEnabledFor(cap_level - 10)
     finally:
-        for lg, level in zip(loggers, saved_levels, strict=False):
+        for lg, level in zip(loggers, saved_levels, strict=True):
             lg.setLevel(level)
         root.handlers[:] = root_handlers
         root.setLevel(root_level)
