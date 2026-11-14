@@ -1,0 +1,3293 @@
+"""Custom backends for EvoScientist agent."""
+
+import asyncio
+import contextlib
+import errno
+import os
+import posixpath
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING, Any, Literal
+
+from deepagents.backends import FilesystemBackend, LocalShellBackend
+from deepagents.backends.protocol import (
+    BackendProtocol,
+    DeleteResult,
+    EditResult,
+    ExecuteResponse,
+    FileDownloadResponse,
+    FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    WriteResult,
+)
+
+from . import paths, shell_syntax
+from .cancellation import bind_cancel_event, current_cancel_event
+
+if TYPE_CHECKING:
+    from langgraph.types import Command
+
+# Reproduced here to dodge a circular import from .EvoScientist (the canonical
+# SKILLS_DIR constant).
+_BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
+
+# Folder names that make a path look like a host path. Commands block such a
+# path unless it maps into the workspace; the file tools only cut it at the
+# workspace's folder name.
+_SYSTEM_PATH_PREFIXES = (
+    "/Users/",
+    "/home/",
+    "/tmp/",
+    "/var/",
+    "/etc/",
+    "/opt/",
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/root/",
+)
+
+# Device files commands use for plumbing; they are never confinement escapes.
+_PASSTHROUGH_DEVICE_PATHS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+
+# Path-confinement patterns: keep the agent inside the workspace. These are
+# bypassed in dangerous mode (real-filesystem access).
+_PATH_PATTERNS = [
+    r"~/",  # home directory
+]
+# Destructive patterns: catastrophic in every mode; `target` is where the
+# removed path starts. Outside dangerous mode a target strictly inside the
+# workspace (written after a `cd`) is exempt.
+_DESTRUCTIVE_PATTERNS = [
+    re.compile(r"\brm\s+-rf\s+(?P<target>/)"),  # rm -rf with absolute path
+    # The same with a Windows drive path, which Git Bash's rm accepts.
+    re.compile(r"\brm\s+-rf\s+(?P<target>['\"]?[A-Za-z]:[\\/])"),
+]
+
+# Dangerous commands that should never be executed
+BLOCKED_COMMANDS = [
+    "sudo",
+    "chmod",
+    "chown",
+    "mkfs",
+    "dd",
+    "shutdown",
+    "reboot",
+    # Kill by name or pattern, which reaches EvoScientist's own processes.
+    "pkill",
+    "killall",
+]
+_BLOCKED_COMMAND_HINTS = dict.fromkeys(
+    ("pkill", "killall"),
+    "Stop only a process you started, by its id: stop_process with the id "
+    "run_in_background returned, or kill <PID> with the PID you captured. "
+    "Never by name or pattern, which can reach EvoScientist itself.",
+)
+_KILL_BY_LOOKUP_ERROR = (
+    "Command blocked: kill takes only the id of a process you started (kill "
+    "12345, or stop_process with the id run_in_background returned). Ids looked "
+    "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
+    "itself."
+)
+# `$HOME` / `${HOME}` at the start of a path.
+_HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
+# Commands that find processes by name, pattern or resource.
+_PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
+# Of those, the ones whose only job is matching names.
+_NAME_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof"})
+# Commands that stop processes, checked by _kill_by_lookup.
+_KILL_COMMANDS = frozenset({"kill", "fuser", "taskkill", "taskkill.exe"})
+_BLOCKED_COMMAND_HINTS["chmod"] = (
+    "To run a script, call it through its interpreter (bash run.sh, "
+    "python run.py) instead of making it executable."
+)
+
+
+_active_shell_processes_lock = threading.RLock()
+_active_shell_processes: dict[threading.Event, set[subprocess.Popen[str]]] = {}
+_PROCESS_DRAIN_GRACE_SECONDS = 1.0
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Force-stop a shell and its descendants without waiting for reaping."""
+    from . import agent_shell
+
+    # Git Bash on Windows runs in a job object: stop all of it, including MSYS
+    # programs whose parent bash has exited. A job handle cannot be reused, so
+    # this also works after the shell itself has exited.
+    if agent_shell.terminate_job(process):
+        return
+    # A completed Popen has already reaped its PID, which the OS may reuse.
+    # Inspect the recorded state rather than calling poll(): an exited but
+    # unreaped shell can still have live descendants in its process group.
+    if process.returncode is not None:
+        return
+
+    try:
+        if os.name == "nt":
+            # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.
+            # taskkill is the native way to stop the complete descendant tree.
+            # No window: the parent may have no console (desktop app).
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _stop_collecting_process_output(process: subprocess.Popen[str]) -> None:
+    """Close inherited pipes and reap *process* without blocking the caller."""
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+    if process.poll() is None:
+        threading.Thread(target=process.wait, daemon=True).start()
+
+
+def cancel_active_shell_processes(event: threading.Event) -> None:
+    """Terminate every active shell command associated with *event*."""
+    with _active_shell_processes_lock:
+        processes = tuple(_active_shell_processes.get(event, ()))
+    for process in processes:
+        _terminate_process_tree(process)
+
+
+def _register_shell_process(
+    event: threading.Event | None,
+    process: subprocess.Popen[str],
+) -> None:
+    if event is None:
+        return
+    with _active_shell_processes_lock:
+        for owner in _shell_process_owners(event):
+            _active_shell_processes.setdefault(owner, set()).add(process)
+        cancel_now = event.is_set()
+    if cancel_now:
+        _terminate_process_tree(process)
+
+
+def _unregister_shell_process(
+    event: threading.Event | None,
+    process: subprocess.Popen[str],
+) -> None:
+    if event is None:
+        return
+    with _active_shell_processes_lock:
+        for owner in _shell_process_owners(event):
+            processes = _active_shell_processes.get(owner)
+            if processes is not None:
+                processes.discard(process)
+                if not processes:
+                    _active_shell_processes.pop(owner, None)
+
+
+def _shell_process_owners(event: threading.Event | None) -> Iterator[threading.Event]:
+    while event is not None:
+        yield event
+        event = event._parent if isinstance(event, _ExecuteCancelEvent) else None
+
+
+# Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
+# piped data as code or ship it off-box). Everything else piping is normal.
+_PIPE_NETWORKING_RHS = frozenset(
+    {
+        "nc",
+        "ncat",
+        "netcat",
+        "ssh",
+        "curl",
+        "wget",
+        "telnet",
+        "socat",
+        "scp",
+        "sftp",
+        "rsync",
+        "ftp",
+    }
+)
+_PIPE_INTERPRETER_RHS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ash",
+        "ksh",
+        "fish",
+        "python",
+        "python2",
+        "python3",
+        "node",
+        "bun",
+        "deno",
+        "ruby",
+        "perl",
+        "php",
+        "lua",
+        "iex",
+        "elixir",
+    }
+)
+_PIPE_DANGEROUS_RHS = _PIPE_INTERPRETER_RHS | _PIPE_NETWORKING_RHS
+
+
+def check_dangerous_command(command: str) -> str | None:
+    """Return a reason if *command* pipes output into an interpreter or a
+    network tool, else ``None``.
+
+    Deliberately narrow: this guards indirect prompt injection (the agent
+    ingests untrusted web content and could be induced to run
+    ``curl … | bash``). Everyday research shell — pipes into ``grep``/``head``,
+    redirects, ``python -c``, ``..``/``~`` paths — is NOT flagged here.
+    Workspace confinement stays in :func:`validate_command`.
+
+    Only the token immediately after the pipe is inspected, so wrapper
+    commands like ``env bash``, ``xargs bash``, or ``timeout 5 bash`` are
+    not detected — this is a known limitation, not a bug to fix here.
+    """
+    after_pipe = False
+    for token in shell_syntax.parse(command).tokens:
+        if token.get("type") == "op":
+            value = token.get("value")
+            if value == "|":
+                after_pipe = True
+            elif value == "&" and after_pipe:
+                # `|&` (pipe stdout+stderr) tokenizes as `|` then `&`;
+                # keep the pipe context open across the `&`.
+                pass
+            else:
+                after_pipe = False
+            continue
+        if after_pipe:
+            base = str(token.get("value", "")).split("/")[-1]
+            # strip trailing version digits: python3.11 -> python, lua5.4 -> lua
+            normalized = re.sub(r"[0-9.]+$", "", base) or base
+            if base in _PIPE_DANGEROUS_RHS or normalized in _PIPE_DANGEROUS_RHS:
+                kind = (
+                    "networking tool"
+                    if base in _PIPE_NETWORKING_RHS
+                    or normalized in _PIPE_NETWORKING_RHS
+                    else "interpreter"
+                )
+                return f"pipes output into {kind} '{base}'"
+            after_pipe = False
+    return None
+
+
+class ActionDecision(StrEnum):
+    """Outcome of the shell-action policy."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    PROMPT = "prompt"
+
+
+@dataclass(frozen=True)
+class ActionVerdict:
+    """A decision plus the reason to show the user or feed back to the agent."""
+
+    decision: ActionDecision
+    reason: str = ""
+
+
+# Per-run ``configurable`` key that disarms HITL and hands the dangerous-command
+# gate to the backend. Set client-side by ``resolve_per_run_config`` from
+# ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
+# every gateway run; read by the HITL ``when`` predicate and the backend/background
+# guards. A per-run channel (not a construction flag) so a shared server can
+# disarm one run without disarming the armed graph.
+HITL_SUPPRESSED_KEY = "hitl_suppressed"
+
+# Per-run ``configurable`` key carrying a session's "approve all" grant. Read
+# only by the HITL ``when`` predicate: an explicit human grant approves
+# everything, so unlike ``hitl_suppressed`` it does not arm the backend guard.
+HITL_APPROVE_ALL_KEY = "hitl_approve_all"
+
+# Per-run ``configurable`` key set by the gateways on every call of a run that
+# carries a rubric. The main agent grades only an invocation that has it, so a
+# rubric left in the thread by a run that never reached a verdict cannot grade
+# a later turn or a continuation started by another client.
+RUBRIC_RUN_KEY = "rubric_run"
+
+# Per-run ``configurable`` key carrying the retry tier (``model_retry_for_run``),
+# written fresh on every gateway run. All model calls of the run, sub-agents
+# included, share the one dict, so the retry layer also marks on it that a
+# call used its whole budget: later calls in the run are then not retried.
+MODEL_RETRY_RUN_KEY = "model_retry"
+
+
+def is_hitl_suppressed(config=None) -> bool:
+    """Whether the current run has HITL suppressed via ``configurable``.
+
+    Reads :data:`HITL_SUPPRESSED_KEY` off an explicit *config* (the run's
+    ``RunnableConfig`` dict) or, when omitted, the ambient
+    ``langgraph.config.get_config()``. The key is written only by the two
+    Python gateways; a run that reached langgraph dev directly (WebUI,
+    ``EvoSci deploy`` SDK clients, LangSmith Studio) never carries it, so when
+    it is absent we fall back to the serving process's ``auto_approve`` — this
+    restores the base behaviour for those clients (a file/env ``auto_approve``
+    deployment runs unattended instead of parking on an interrupt nothing
+    answers), while gateway-driven runs, which always set the key, are
+    unaffected. Returns ``False`` outside a runnable context (direct calls
+    without a config, tests) — the safe floor: armed graph, no backend guard.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    if HITL_SUPPRESSED_KEY not in configurable:
+        from .EvoScientist import _ensure_config
+
+        return bool(_ensure_config().auto_approve)
+    return bool(configurable[HITL_SUPPRESSED_KEY])
+
+
+def is_hitl_approve_all(config=None) -> bool:
+    """Whether the current call carries a session's "approve all" grant.
+
+    Reads :data:`HITL_APPROVE_ALL_KEY` off an explicit *config* or the ambient
+    run config. Only a literal ``True`` grants, and an absent key never does:
+    the grant belongs to the client that sent it, so there is no fallback to
+    the serving process's own settings.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get(HITL_APPROVE_ALL_KEY) is True
+
+
+def _keeps_grant(answer: Any) -> bool:
+    """An answer that approves every call, or a question's answer."""
+    if not isinstance(answer, dict):
+        return False
+    if "decisions" in answer:
+        decisions = answer["decisions"]
+        return (
+            isinstance(decisions, list)
+            and bool(decisions)
+            and all(
+                isinstance(decision, dict) and decision.get("type") == "approve"
+                for decision in decisions
+            )
+        )
+    return "answers" in answer or answer.get("status") in ("answered", "cancelled")
+
+
+def resume_declines(message: Any) -> bool:
+    """Whether *message* is a resume the session grant must not travel with.
+
+    With the grant a resume skips its pause and drops its decisions, so any other shape loses it.
+    """
+    resume = getattr(message, "resume", None)
+    if resume is None:
+        return False
+    if not isinstance(resume, dict):
+        return True
+    if any(key in resume for key in ("decisions", "answers", "status")):
+        return not _keeps_grant(resume)
+    return not resume or not all(_keeps_grant(answer) for answer in resume.values())
+
+
+def answer_keeps_grant(session_granted: bool, decisions: Any) -> bool:
+    """Whether an approval answer may carry the grant: the grant itself produced it."""
+    return session_granted and _keeps_grant({"decisions": decisions})
+
+
+def approve_all_configurable_extra(active: bool) -> dict[str, Any] | None:
+    """The ``configurable_extra`` part for a call that carries the session grant."""
+    return {HITL_APPROVE_ALL_KEY: True} if active else None
+
+
+def hitl_suppressed_for_run(config=None) -> bool:
+    """Whether THIS run must disarm HITL and fall back to the backend guard.
+
+    The pre-run derivation of the suppression flag: both gateway backends
+    call it when assembling a run's config and feed the result into
+    ``gateway.types.resolve_per_run_config(hitl_suppressed=...)``. True for
+    ``auto_mode`` (unattended) OR ``auto_approve`` (attended, prompts opted
+    out): both run against the always-armed graph with the interrupt disarmed
+    and the backend guarding the dangerous set — what those users get on main
+    today, and it keeps the always-armed auto-resume off the recursion limit
+    (#469). *config* defaults to the live session config (``_ensure_config`` —
+    cached, in-place-mutated), so unsaved mid-session toggles still apply.
+    """
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    return bool(
+        getattr(config, "auto_mode", False) or getattr(config, "auto_approve", False)
+    )
+
+
+def model_retry_for_run(config=None) -> dict[str, Any]:
+    """The retry tier THIS run carries to whichever gateway runs the main agent."""
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    unattended = bool(getattr(config, "auto_mode", False))
+    budget = (
+        getattr(config, "auto_mode_retry_wait_seconds", 0)
+        if unattended
+        else getattr(config, "model_retry_wait_seconds", 0)
+    )
+    # Same rule as the mounted layer (``_model_retry_middleware``).
+    try:
+        budget = max(0, int(budget))
+    except (TypeError, ValueError, OverflowError):
+        budget = 0
+    return {"unattended": unattended, "wait_budget_seconds": budget}
+
+
+def resolve_action_decision(
+    command: str,
+    *,
+    auto_approve: bool = False,
+    dangerous_mode: bool = False,
+    allow_list: list[str] | None = None,
+) -> ActionVerdict:
+    """Single source of truth for approve / reject / prompt.
+
+    Precedence:
+      1. ``dangerous_mode`` — the user asked for full power; run everything.
+      2. dangerous detection — pipe into interpreter/network.
+      3. ``auto_approve`` — opt-out means *never prompt*: approve, or reject
+         a dangerous command with a reason the agent can act on.
+      4. ``allow_list`` — case-sensitive match on a whole command or a
+         command-plus-space prefix; blank entries are ignored. Every segment of
+         a chain (``a; b``, ``a && b``, ``a | b``) must match, so an allow-listed
+         prefix cannot carry a non-listed command in behind it.
+    """
+    if dangerous_mode:
+        return ActionVerdict(ActionDecision.APPROVE)
+
+    reason = check_dangerous_command(command)
+
+    if auto_approve:
+        if reason:
+            return ActionVerdict(ActionDecision.REJECT, reason)
+        return ActionVerdict(ActionDecision.APPROVE)
+
+    if reason:
+        return ActionVerdict(ActionDecision.PROMPT, reason)
+
+    if allow_list:
+        prefixes = [p.strip() for p in allow_list if p.strip()]
+        # Match on a token boundary so allow-listing `ls` does not also approve
+        # `lsof` (case-sensitive, like the shell). Require EVERY segment of a
+        # chain to match, so `ls; rm -rf x` cannot ride in on an allow-listed
+        # `ls`. ``None`` means an unparseable construct (substitution/newline) —
+        # decline rather than risk approving a hidden command.
+        segments = _split_command_segments(command)
+        if segments is not None:
+            segments = segments or [command.strip()]
+            if prefixes and all(
+                any(seg == p or seg.startswith(p + " ") for p in prefixes)
+                for seg in segments
+            ):
+                return ActionVerdict(ActionDecision.APPROVE)
+
+    return ActionVerdict(ActionDecision.PROMPT)
+
+
+# A parked approval or question is closed without resuming the agent when the
+# turn ends there: a rejecting ``Command(resume=...)`` does not close the
+# checkpoint, HumanInTheLoop middleware turns it into a ToolMessage and routes
+# straight back to the model. Surfaces call ``close_parked_checkpoint`` so the
+# clear → patch → clear → verify sequence is shared with crash recovery, and
+# say why the turn ended.
+ParkedCloseReason = Literal["round_limit", "rejected", "unanswered"]
+
+HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
+
+_NO_RETRY = "Do not retry this tool call unless the user explicitly requests it."
+_MAY_HAVE_RUN = (
+    "Anything it had already done may have taken effect or may still be "
+    "finishing; check the current state instead of re-running it unless the "
+    "user asks."
+)
+
+# The user was asked about the call and it did not run. The round-limit
+# sentence predates the others and is kept as it was.
+_ASKED_RESULT: dict[ParkedCloseReason, str] = {
+    "rejected": (
+        "User rejected the tool call for `{name}` with id {call_id}. The tool "
+        f"was not executed. {_NO_RETRY}"
+    ),
+    "unanswered": (
+        "The approval request for the tool call `{name}` with id {call_id} was "
+        f"left unanswered. The tool was not executed. {_NO_RETRY}"
+    ),
+    "round_limit": (
+        "User rejected the tool call for `{name}` with id {call_id} "
+        f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not executed. "
+        f"{_NO_RETRY}"
+    ),
+}
+# How the turn ended, for a call that did not run or did not finish: no retry ban.
+_TURN_ENDED: dict[ParkedCloseReason, str] = {
+    "rejected": "the turn ended when the user rejected an approval request",
+    "unanswered": (
+        "the turn ended with an approval request or question left unanswered"
+    ),
+    "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
+}
+
+
+def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
+    """``(call, is_invalid)`` for calls of the last AI message without a result.
+
+    ``None`` when the messages cannot be read, which is not the same as none
+    being unanswered. A call without an id cannot be answered and is skipped.
+    """
+    from langchain_core.messages import AIMessage, convert_to_messages
+
+    try:
+        converted = list(convert_to_messages(messages))
+    except Exception:
+        return None
+
+    def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
+        # ``convert_to_messages`` leaves a dict's ``invalid_tool_calls`` in
+        # ``additional_kwargs`` (server state messages arrive as dicts).
+        invalid = message.invalid_tool_calls or message.additional_kwargs.get(
+            "invalid_tool_calls"
+        )
+        return [
+            *((call, False) for call in message.tool_calls),
+            *((call, True) for call in invalid or ()),
+        ]
+
+    last_calls: list[tuple[dict, bool]] = []
+    last_index = -1
+    for index, message in enumerate(converted):
+        if isinstance(message, AIMessage) and _calls(message):
+            last_calls = _calls(message)
+            last_index = index
+    answered = {
+        message.tool_call_id
+        for message in converted[last_index + 1 :]
+        if getattr(message, "type", None) == "tool" and message.tool_call_id
+    }
+    return [
+        (call, invalid)
+        for call, invalid in last_calls
+        if call.get("id") and call["id"] not in answered
+    ]
+
+
+def abandoned_tool_messages(
+    messages: list,
+    *,
+    reason: ParkedCloseReason,
+    parked_before_tools: bool = False,
+) -> list:
+    """Tool results for unanswered calls on the last AI message.
+
+    Closing a parked interrupt without these leaves dangling ``tool_calls``
+    or ``invalid_tool_calls``, and the next user turn is rejected by the
+    provider. Each result says what is known about its call:
+    ``parked_before_tools`` means the graph stopped before any tool of the
+    batch ran, so a gated call was the one the user was asked about and the
+    rest were simply not executed; anywhere else a valid call had started.
+    A malformed call never runs.
+    """
+    from langchain_core.messages import ToolMessage
+
+    from .EvoScientist import HITL_INTERRUPT_ON
+
+    results = []
+    for call, invalid in _unanswered_calls(messages) or ():
+        call_id = call["id"]
+        name = call.get("name") or "tool"
+        if invalid or (parked_before_tools and name not in HITL_INTERRUPT_ON):
+            content = (
+                f"The tool call for `{name}` with id {call_id} was not executed: "
+                f"{_TURN_ENDED[reason]}."
+            )
+        elif parked_before_tools:
+            content = _ASKED_RESULT[reason].format(name=name, call_id=call_id)
+        else:
+            content = (
+                f"The tool call for `{name}` with id {call_id} did not finish "
+                f"({_TURN_ENDED[reason]}). {_MAY_HAVE_RUN}"
+            )
+        results.append(
+            ToolMessage(
+                content=content, name=name, tool_call_id=call_id, status="error"
+            )
+        )
+    return results
+
+
+async def close_parked_checkpoint(
+    gateway,
+    target,
+    thread_id: str,
+    *,
+    reason: ParkedCloseReason,
+) -> None:
+    """End a parked HITL/ask_user turn without another model step.
+
+    Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` through
+    ``gateway`` so every such close and crash recovery share one
+    clear → patch → clear → verify sequence. After #470,
+    ``GraphTarget.local_graph`` may be None and execution is server-backed;
+    the gateway is the authority for checkpoint reads and writes.
+
+    Finished sibling writes (``ask_user`` beside another tool) stay in
+    history; unanswered calls get results worded for ``reason``. A rejecting
+    resume is not used: that resumes the agent. Raises when the thread is not
+    left closed with every call answered.
+    """
+    from .stream.events import _GatewayCheckpointOps, _recover_interrupted_graph_state
+
+    ok = await _recover_interrupted_graph_state(
+        _GatewayCheckpointOps(gateway, target, thread_id),
+        {"configurable": {"thread_id": thread_id}},
+        close_interrupts=True,
+        close_reason=reason,
+    )
+    if not ok:
+        raise RuntimeError(
+            f"Could not close parked HITL checkpoint on thread {thread_id}"
+        )
+
+
+def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
+    """Build a HITL resume Command keyed by interrupt_id.
+
+    Keying by id (not the flat ``{"decisions": …}``) is REQUIRED whenever the
+    graph has more than one pending interrupt — parallel sub-agents that each
+    call ``execute`` do exactly that, and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. Resuming a
+    single id resolves that interrupt and re-parks the rest (they re-emit on the
+    next stream), so callers drain them one at a time. Safe for N=1 too.
+    """
+    from langgraph.types import Command
+
+    return Command(resume={interrupt_id: {"decisions": decisions}})
+
+
+_SSH_OPTIONS_WITH_VALUE = {
+    "-B",
+    "-b",
+    "-c",
+    "-D",
+    "-E",
+    "-e",
+    "-F",
+    "-I",
+    "-i",
+    "-J",
+    "-L",
+    "-l",
+    "-m",
+    "-O",
+    "-o",
+    "-p",
+    "-Q",
+    "-R",
+    "-S",
+    "-W",
+    "-w",
+}
+
+
+def _ssh_option_consumes_next(token: str) -> bool:
+    """Return whether an SSH option token consumes the following argument."""
+    if token in _SSH_OPTIONS_WITH_VALUE:
+        return True
+    return False
+
+
+def _is_ssh_executable(token: str) -> bool:
+    return token == "ssh"
+
+
+def _is_shell_assignment(token: dict[str, object]) -> bool:
+    raw = str(token.get("raw", token.get("value", "")))
+    return re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", raw) is not None
+
+
+def _ssh_executable_index(words: list[dict[str, object]]) -> int | None:
+    idx = 0
+    while idx < len(words) and _is_shell_assignment(words[idx]):
+        idx += 1
+    if idx < len(words) and _is_ssh_executable(str(words[idx].get("value", ""))):
+        return idx
+    return None
+
+
+def _is_single_quoted_word(token: dict[str, object]) -> bool:
+    raw = str(token.get("raw", ""))
+    return raw.startswith("'") and raw.endswith("'")
+
+
+def _ssh_host_index(words: list[dict[str, object]], ssh_idx: int) -> int:
+    """Return the index of the host argument (first non-option after ssh)."""
+    idx = ssh_idx + 1
+    while idx < len(words):
+        value = str(words[idx].get("value", ""))
+        if value == "--":
+            idx += 1
+            break
+        if value.startswith("-") and value != "-":
+            idx += 2 if _ssh_option_consumes_next(value) else 1
+            continue
+        break
+    return idx
+
+
+def _ssh_invocations(
+    command: str,
+) -> list[tuple[list[dict[str, object]], int, int, int | None, int]]:
+    """Return SSH invocations as ``(words, ssh_idx, host_idx, remote_idx, extra)``.
+
+    Examples:
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host")]
+        [(0, 1, None, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host 'pwd'")]
+        [(0, 1, 2, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations('ssh host "pwd"')]
+        [(0, 1, 2, 0)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("ssh host 'pwd' extra")]
+        [(0, 1, 2, 1)]
+        >>> [(i, h, r, e) for _, i, h, r, e in _ssh_invocations("cat x && ssh -p 22 host 'pwd'")]
+        [(0, 3, 4, 0)]
+        >>> _ssh_invocations("/tmp/ssh host 'pwd'")
+        []
+    """
+    tokens = shell_syntax.parse(command).tokens
+    invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
+    segment: list[dict[str, object]] = []
+
+    def flush_segment() -> None:
+        if not segment:
+            return
+        words = [tok for tok in segment if tok.get("type") == "word"]
+        ssh_idx = _ssh_executable_index(words)
+        if ssh_idx is None:
+            return
+
+        host_idx = _ssh_host_index(words, ssh_idx)
+        remote_idx = host_idx + 1 if host_idx + 1 < len(words) else None
+        remote_extra_argv_count = (
+            max(0, len(words) - remote_idx - 1) if remote_idx is not None else 0
+        )
+        invocations.append(
+            (words, ssh_idx, host_idx, remote_idx, remote_extra_argv_count)
+        )
+
+    prev_end = 0
+    for token in tokens:
+        ends_command = shell_syntax.COMMAND_NEWLINE_RE.search(
+            command, prev_end, int(token["start"])
+        )
+        if token.get("type") == "op" or ends_command is not None:
+            flush_segment()
+            segment = []
+        if token.get("type") != "op":
+            segment.append(token)
+        prev_end = int(token["end"])
+    flush_segment()
+    return invocations
+
+
+def _ssh_remote_command_spans(command: str) -> list[tuple[int, int]]:
+    """Return remote-command argv spans in SSH invocations.
+
+    Only the supported single-quoted token after the destination host is treated
+    as remote argv. Plain ``ssh host`` has no remote argv and returns no spans.
+
+    Examples:
+        >>> _ssh_remote_command_spans("ssh host 'ls /home/u/project'")
+        [(9, 29)]
+        >>> _ssh_remote_command_spans('ssh host "ls /home/u/project"')
+        []
+        >>> _ssh_remote_command_spans("cat /tmp/x && ssh host 'pwd'")
+        [(23, 28)]
+    """
+    spans: list[tuple[int, int]] = []
+    for words, ssh_idx, host_idx, remote_idx, _ in _ssh_invocations(command):
+        # Mask the SSH executable path itself (e.g., /usr/bin/ssh) so
+        # virtual path conversion doesn't rewrite it.
+        spans.append(
+            (
+                int(words[ssh_idx]["start"]),
+                int(words[ssh_idx]["end"]),
+            )
+        )
+
+        if (
+            host_idx < len(words)
+            and remote_idx is not None
+            and _is_single_quoted_word(words[remote_idx])
+        ):
+            spans.append(
+                (
+                    int(words[remote_idx]["start"]),
+                    int(words[remote_idx]["end"]),
+                )
+            )
+    return spans
+
+
+def _mask_spans(
+    command: str, spans: list[tuple[int, int]]
+) -> tuple[str, dict[str, str]]:
+    """Replace spans with placeholders and return the restoration map."""
+    if not spans:
+        return command, {}
+    pieces: list[str] = []
+    replacements: dict[str, str] = {}
+    cursor = 0
+    nonce = uuid.uuid4().hex
+    for index, (start, end) in enumerate(sorted(spans)):
+        if start < cursor:
+            continue
+        placeholder = f"__EVOSCI_SSH_REMOTE_{nonce}_{index}__"
+        pieces.append(command[cursor:start])
+        pieces.append(placeholder)
+        replacements[placeholder] = command[start:end]
+        cursor = end
+    pieces.append(command[cursor:])
+    return "".join(pieces), replacements
+
+
+def _restore_spans(command: str, replacements: dict[str, str]) -> str:
+    for placeholder, original in replacements.items():
+        command = command.replace(placeholder, original)
+    return command
+
+
+def _mask_ssh_remote_commands(command: str) -> tuple[str, dict[str, str]]:
+    """Mask supported SSH remote argv so local path logic can skip it.
+
+    Examples:
+        >>> _restore_spans(*_mask_ssh_remote_commands("ssh host 'pwd'"))
+        "ssh host 'pwd'"
+    """
+    return _mask_spans(command, _ssh_remote_command_spans(command))
+
+
+def _validate_ssh_remote_command_format(command: str) -> str | None:
+    """Require SSH remote commands to be one single-quoted token after the host."""
+
+    def error() -> str:
+        return (
+            "SSH remote commands must be passed as a single quoted argument, "
+            "for example: ssh host 'cd /home/user/project && python train.py'."
+        )
+
+    for words, _, _, remote_idx, remote_extra_argv_count in _ssh_invocations(command):
+        if remote_idx is None:
+            continue
+        if not _is_single_quoted_word(words[remote_idx]):
+            return error()
+        if remote_extra_argv_count:
+            return error()
+    return None
+
+
+def _split_command_segments(command: str) -> list[str] | None:
+    """Split a compound command into raw segment strings on command boundaries.
+
+    Quote-aware (via ``shell_syntax.tokenize``). Boundaries are ``;`` ``&&`` ``||``
+    ``|`` ``&`` and grouping; redirections are not boundaries. Lets the allow-list
+    clear a chain only when *every* segment is allow-listed, not just the leading
+    one (``ls; rm -rf x`` must not ride in on an allow-listed ``ls``).
+
+    Returns ``None`` when the command contains a construct this small tokenizer
+    cannot safely reason about — command substitution (``$(...)`` or backticks,
+    which run a hidden command even inside double quotes) or a newline separator —
+    so the caller declines to allow-list it rather than approve a hidden command.
+    Deliberately a substring over-approximation: a literal/quoted ``$(``, backtick,
+    or newline also declines (a safe extra prompt, never a bypass). Quote/escape
+    awareness is intentionally not attempted — that fragility caused the original
+    chaining gap.
+    """
+    if "$(" in command or "`" in command or "\n" in command or "\r" in command:
+        return None
+    boundaries = {"&&", "||", ";", "|", "&", "(", ")"}
+    segments: list[str] = []
+    seg_start = 0
+    for token in shell_syntax.tokenize(command):
+        if token.get("type") == "op" and token.get("value") in boundaries:
+            seg = command[seg_start : int(token["start"])].strip()
+            if seg:
+                segments.append(seg)
+            seg_start = int(token["end"])
+    tail = command[seg_start:].strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _has_traversal_component(command: str) -> bool:
+    """Check if command contains '..' as a path component (not substring)."""
+    from pathlib import PurePosixPath
+
+    decoded = (
+        str(token["value"])
+        for token in shell_syntax.parse(command).tokens
+        if token["type"] == "word"
+    )
+    # Quotes and escapes can split a literal path component as written.
+    # Inspect shell-decoded words too.
+    for token in (*command.split(), *decoded):
+        if ".." in PurePosixPath(token).parts:
+            return True
+    return False
+
+
+def _collect_executable_positions(command: str) -> set[int]:
+    """Return the string offsets of executable tokens (first token per segment).
+
+    These are command names/paths that appear in executable position (e.g.
+    ``/usr/bin/python`` in ``/usr/bin/python script.py``) and should not be
+    treated as dangerous operand paths.
+    """
+    offsets: set[int] = set()
+    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", command):
+        for pipe_seg in segment.split("|"):
+            pipe_seg_stripped = pipe_seg.strip()
+            if not pipe_seg_stripped:
+                continue
+            # Offset of this pipe segment within *command*
+            seg_start = command.find(pipe_seg_stripped)
+            try:
+                tokens = shlex.split(pipe_seg_stripped)
+            except ValueError:
+                tokens = pipe_seg_stripped.split()
+            if not tokens:
+                continue
+            # First token is the executable itself — mark its offset
+            offsets.add(seg_start)
+    return offsets
+
+
+def _allowed_root(path: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The longest allow prefix that is *path* or its ancestor, else ``None``.
+
+    Boundary-aware: ``str.startswith`` alone would let ``/A/skills_evil``
+    match the prefix ``/A/skills`` — anchoring on ``/`` blocks neighbour
+    directories that merely share a name prefix.
+    """
+    best: str | None = None
+    for prefix in allow_prefixes:
+        normalized = prefix.rstrip("/")
+        # Skip empty/root prefixes: they'd reduce the check to startswith("/")
+        # and admit every absolute path, silently disabling the allowlist.
+        if not normalized:
+            continue
+        if path == normalized or path.startswith(normalized + "/"):
+            if best is None or len(normalized) > len(best):
+                best = normalized
+    return best
+
+
+def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
+    """True if *path* equals a prefix or is a strict descendant."""
+    return _allowed_root(path, allow_prefixes) is not None
+
+
+_SEARCH_LIST_VARIABLES = frozenset(
+    {
+        "PATH",
+        "PYTHONPATH",
+        "LD_LIBRARY_PATH",
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "PKG_CONFIG_PATH",
+        "MANPATH",
+        "CLASSPATH",
+        "NODE_PATH",
+    }
+)
+
+
+def _is_toolchain_path_assignment(raw: str) -> bool:
+    """A literal toolchain location in an assignment is a setting, not an operand.
+
+    Not a read-only guarantee: a later ``$NAME`` can still write there.
+    """
+    if re.search(r"(?<!\\)[$`]", raw):
+        return False
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        return False
+    if len(words) != 1:
+        return False
+    # A quoted setting may contain path-list separators and compiler flags,
+    # but must not swallow a command list supplied to eval or another shell.
+    match = re.fullmatch(
+        r"(?:-D)?[A-Za-z_]\w*=(/[^\s;:|&<>]*(?:[;:]/[^\s;:|&<>]*)*)"
+        r"(?:\s+-[^\s;|&<>]+)*",
+        words[0],
+    )
+    return match is not None and _is_under_allowed_prefix(
+        match[1], ("/usr", "/opt", "/bin", "/sbin")
+    )
+
+
+def _is_search_path_assignment(raw: str) -> bool:
+    """Search-list values are data; commands substituted into them are not."""
+    match = re.match(r"([A-Za-z_]\w*)=", raw)
+    return match is not None and match[1] in _SEARCH_LIST_VARIABLES
+
+
+def _attached_path_word(raw: str) -> tuple[str, str] | None:
+    """Split a literal option/assignment prefix from its absolute path."""
+    if _is_search_path_assignment(raw):
+        return None
+    path_pattern = r"((?:/|[A-Za-z]:[\\/]).*)" if _is_windows() else r"(/.*)"
+    match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)" + path_pattern, raw)
+    if match is None:
+        match = re.fullmatch(r"(-[A-Za-z])" + path_pattern, raw)
+    return (match[1], match[2]) if match is not None else None
+
+
+def _extract_all_paths(
+    command: str,
+    allow_prefixes: tuple[str, ...] = (),
+) -> list[str]:
+    """Extract potential file paths from a command, including inside quoted strings.
+
+    Scans both shell tokens and string literals (single/double quoted) to find
+    paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
+    Skips paths in executable position (command name).
+
+    Paths matched by ``allow_prefixes`` (via ``_is_under_allowed_prefix``)
+    are dropped.
+    """
+    exe_offsets = _collect_executable_positions(command)
+    paths: list[str] = []
+    # Pattern: match absolute paths starting with / followed by word chars, dots,
+    # dashes, slashes. Looks inside quotes and unquoted tokens alike.
+    # Excludes URL-like patterns (preceded by ://)
+    path_re = re.compile(
+        r"(?<![:=/.\w])"  # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+        r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
+        r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
+    )
+
+    def _later_system_path_start(path: str, root: str) -> int | None:
+        """First offset past the allowed root and its separator where another
+        absolute system path starts in *path*, else ``None``.
+
+        A match at ``len(root)`` is the root's own separator and child path,
+        so scanning starts one past it: a comma-joined, quoted or glued
+        second path is found, while a child folder that merely shares a name
+        with a system root (``/W s (copy)/tmp``) stays part of the allowed
+        path.
+        """
+        for i in range(len(root) + 1, len(path)):
+            if path_re.match(path, i):
+                return i
+        return None
+
+    path_assignments: list[tuple[int, int]] = []
+    allowed_path_words: list[tuple[int, int]] = []
+    tokens = shell_syntax.parse(command).tokens
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] != "word":
+            continue
+        if int(token["start"]) in scripts:
+            # A shell's script is a command line, not one assignment value.
+            paths.extend(_extract_all_paths(str(token["value"]), allow_prefixes))
+            path_assignments.append((int(token["start"]), int(token["end"])))
+            continue
+        raw = str(token["raw"])
+        value = str(token["value"])
+        attached = _attached_path_word(value)
+        path = attached[1] if attached is not None else value
+        allowed_root = _allowed_root_any(path, allow_prefixes)
+        if (
+            (
+                path.startswith("/")
+                or (_is_windows() and PureWindowsPath(path).is_absolute())
+            )
+            and allowed_root is not None
+            and not re.search(r"[$`;\n|&<>]|\s/", path)
+            and _later_system_path_start(path, allowed_root) is None
+        ):
+            # The raw regex splits spaced roots and quoted-root + /tmp
+            # concatenations. Keep a literal allowed path together, but do
+            # not exempt code or substitutions that can name other paths.
+            # Exempt the word only when no other system path starts past the
+            # allowed root and its separator: a comma-joined value or a
+            # quoted script can smuggle a second absolute path past the
+            # literal scan otherwise.
+            allowed_path_words.append((int(token["start"]), int(token["end"])))
+        if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
+            continue
+        path_assignments.append((int(token["start"]), int(token["end"])))
+
+        def collect_substitution(inner: str) -> tuple[str, bool]:
+            # Literal PATH entries are search-list data, but commands inside
+            # substitutions still read operands and must not bypass validation.
+            paths.extend(_extract_all_paths(inner, allow_prefixes))
+            return inner, False
+
+        shell_syntax.rewrite_substitutions(str(token["raw"]), collect_substitution)
+    for m in path_re.finditer(command):
+        if any(start <= m.start(1) < end for start, end in allowed_path_words):
+            continue
+        if any(start <= m.start() < end for start, end in path_assignments):
+            continue
+        # Skip paths that land at an executable-position offset
+        if m.start(1) in exe_offsets:
+            continue
+        extracted = m.group(1)
+        if extracted in _PASSTHROUGH_DEVICE_PATHS:
+            continue
+        allowed_root = _allowed_root(extracted, allow_prefixes)
+        if allowed_root is not None:
+            # An allowed match can glue a second absolute path to its tail
+            # (``/home/u/work/field=@/etc/passwd``); collect the later path
+            # instead of dropping the whole match.
+            later = _later_system_path_start(extracted, allowed_root)
+            if later is None:
+                continue
+            extracted = path_re.match(extracted, later)[1]
+            if extracted in _PASSTHROUGH_DEVICE_PATHS:
+                continue
+            if _is_under_allowed_prefix(extracted, allow_prefixes):
+                continue
+        paths.append(extracted)
+    # Attached option and assignment values have no whitespace before the
+    # slash, so the general literal scan deliberately does not match them.
+    for token in tokens:
+        if token["type"] != "word" or int(token["start"]) in scripts:
+            continue
+        if _is_toolchain_path_assignment(str(token["raw"])):
+            continue
+        attached = _attached_path_word(str(token["value"]))
+        if attached is None:
+            continue
+        path = attached[1]
+        if (
+            _is_system_path(path)
+            and path not in _PASSTHROUGH_DEVICE_PATHS
+            and not _is_under_allowed_prefix(path, allow_prefixes)
+        ):
+            paths.append(path)
+    return paths
+
+
+def _removal_target(token: dict[str, object]) -> str:
+    """A removal target as the agent's shell reads it, with ``/`` separators."""
+    if _is_windows():
+        from . import agent_shell
+
+        if not agent_shell.uses_bash():
+            # cmd.exe keeps backslashes; drop quotes of both kinds, which a
+            # program such as MSYS rm may still strip.
+            return re.sub("[\"']", "", str(token["raw"])).replace("\\", "/")
+    return str(token["value"]).replace("\\", "/")
+
+
+def _allowed_root_any(path: str, folders: tuple[str, ...]) -> str | None:
+    """The longest folder holding *path*, with either separator
+    (case-insensitive on Windows); ``None`` when none holds it.
+
+    Normalization preserves length, so the result's length also locates the
+    root inside the original *path*."""
+    path = path.replace("\\", "/")
+    folders = tuple(folder.replace("\\", "/") for folder in folders)
+    if _is_windows():
+        path, folders = path.lower(), tuple(folder.lower() for folder in folders)
+    return _allowed_root(path, folders)
+
+
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether *path* is one of *folders* or inside one, with either separator
+    (case-insensitive on Windows)."""
+    return _allowed_root_any(path, folders) is not None
+
+
+def _removal_problem(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> str | None:
+    """Why *path* may not be removed: ``"outside"`` (not strictly inside the
+    workspace, ``..``, or an expansion that could leave it) or ``"protected"``
+    (a protected folder, inside one or holding one); ``None`` when it may."""
+    path = path.replace("\\", "/")
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    if _is_windows():  # case-insensitive file systems
+        path, root = path.lower(), root.lower()
+    if not path.startswith(root + "/"):
+        return "outside"
+    segments = [
+        part for part in path[len(root) + 1 :].split("/") if part not in ("", ".")
+    ]
+    # A literal first segment keeps the target below the root whatever the
+    # rest expands to (`%` expands under cmd.exe).
+    if not segments or ".." in segments or re.search(r"[$`%]", segments[0]):
+        return "outside"
+    normalized = root + "/" + "/".join(segments)
+    if _under_any(normalized, protected) or any(
+        _under_any(folder, (normalized,)) for folder in protected
+    ):
+        return "protected"
+    return None
+
+
+def _protected_removal_error(target: str) -> str:
+    return (
+        f"Command blocked: '{target}' is or holds a protected folder (skills, "
+        f"memories or media), which shell commands may not remove."
+    )
+
+
+def _is_home_word(raw: str) -> bool:
+    """Whether a word as written starts in the home folder: ``~`` or
+    ``$HOME`` that the shell expands (not inside single quotes)."""
+    return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
+
+
+def _bare_cd_goes_home() -> bool:
+    """A bare ``cd`` goes home, except in cmd.exe, where it prints the folder."""
+    if not _is_windows():
+        return True
+    from . import agent_shell
+
+    return agent_shell.uses_bash()
+
+
+def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
+    absolute target outside them (a drive path on Windows too), the home
+    folder (``~``, ``$HOME``) or a bare ``cd``."""
+    for found in shell_syntax.simple_commands(command):
+        if found.name not in ("cd", "pushd"):
+            continue
+        targets = [
+            (arg, token)
+            for arg, token in zip(found.args, found.tokens, strict=True)
+            if not (arg.startswith("-") and arg != "-")
+        ]
+        if not targets:
+            if found.name == "cd" and _bare_cd_goes_home():
+                return "cd"
+            continue
+        arg, token = targets[0]
+        # As the agent's shell reads it, so a Windows drive path is absolute too.
+        path = _removal_target(token) if token is not None else arg
+        if _is_home_word(arg) or (
+            (path.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(path)))
+            and not _under_any(path, allow_prefixes)
+        ):
+            return f"{found.name} {arg}"
+    return None
+
+
+def _recursive_rm_operands(
+    found: shell_syntax.SimpleCommand,
+) -> list[tuple[str, dict[str, object] | None]]:
+    """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
+    ``--recursive``, in any spelling), with their tokens."""
+    if found.name != "rm":
+        return []
+    operands: list[tuple[str, dict[str, object] | None]] = []
+    recursive = options_done = False
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        if not options_done and arg == "--":
+            options_done = True
+        elif not options_done and arg.startswith("-") and arg != "-":
+            recursive = recursive or (
+                arg == "--recursive"
+                or (not arg.startswith("--") and bool({"r", "R"} & set(arg[1:])))
+            )
+        else:
+            operands.append((arg, token))
+    return operands if recursive else []
+
+
+def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
+    """Whether an rm operand is the file system root, a drive root or the home
+    folder itself (optionally followed by ``/`` or ``/*``)."""
+    path = _removal_target(token) if token is not None else operand
+    if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
+        return True
+    value = str(token["value"]) if token is not None else operand
+    home = r"(\$HOME|\$\{HOME\})(/\*?)?"
+    return bool(
+        (operand.startswith("~") and re.fullmatch(r"~(/\*?)?", operand))
+        or (_is_home_word(operand) and re.fullmatch(home, value))
+    )
+
+
+def _kill_by_lookup(
+    found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
+) -> bool:
+    """Whether a kill reaches processes found by name or pattern, or -1, 0 or
+    a process group. *looks_up*: the command runs a process lookup; *by_name*:
+    one that matches names (pgrep, pidof), so a variable holds its ids."""
+    if found.name == "fuser":
+        return any(
+            arg in ("-k", "--kill")
+            or (arg[:2] != "--" and arg[:1] == "-" and "k" in arg)
+            for arg in found.args
+        )
+    if found.name in ("taskkill", "taskkill.exe"):
+        options = {arg.upper() for arg in found.args}
+        by_pid = bool(options & {"/PID", "-PID"})
+        return bool(options & {"/IM", "-IM"}) or (
+            not by_pid and bool(options & {"/FI", "-FI"})
+        )
+    if "xargs" in found.via and looks_up:
+        return True
+    # As the shell reads them, so a quoted "-1" or "-$PGID" counts too.
+    args = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    if args and args[0] in ("-l", "-L"):
+        return False
+    if args and args[0] in ("-s", "-n"):
+        args = args[2:]
+    elif args and args[0].startswith("-") and args[0] != "--":
+        args = args[1:]  # the signal: -9, -TERM
+    if args and args[0] == "--":
+        args = args[1:]
+    return any(
+        re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
+        or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
+        or (
+            ("$(" in arg or "`" in arg)
+            and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
+        )
+        for arg in args
+    )
+
+
+def validate_command(
+    command: str,
+    allow_prefixes: tuple[str, ...] = (),
+    *,
+    dangerous: bool = False,
+    workspace_root: str | None = None,
+) -> str | None:
+    """
+    Validate a shell command for safety.
+
+    Args:
+        command: Shell command string.
+        allow_prefixes: Absolute path prefixes exempt from the system-path
+            block list (matching rules in ``_is_under_allowed_prefix``).
+        dangerous: When True (real-filesystem mode), skip the path-confinement
+            checks (``..`` traversal, ``~/``, ``cd`` out of the workspace,
+            absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
+            and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
+            enforced.
+        workspace_root: The workspace; ``cd`` may enter it, and a destructive
+            pattern whose target lies strictly inside it is allowed.
+
+    Returns:
+        None if command is safe, error message string if blocked.
+    """
+    # Path-confinement checks — skipped in dangerous mode.
+    if not dangerous:
+        # Check for '..' path traversal as a path component
+        if _has_traversal_component(command):
+            return (
+                "Command blocked: contains '..' path traversal. "
+                "All commands must operate within the workspace directory. "
+                "Use relative paths (e.g., './file.py') instead."
+            )
+
+        for pattern in _PATH_PATTERNS:
+            if re.search(pattern, command):
+                return (
+                    f"Command blocked: contains forbidden pattern '{pattern}'. "
+                    f"All commands must operate within the workspace directory. "
+                    f"Use relative paths (e.g., './file.py') instead."
+                )
+
+        outside = _cd_target_outside(
+            command, (workspace_root,) if workspace_root else ()
+        )
+        if outside is not None:
+            return (
+                f"Command blocked: '{outside}' leaves the workspace. "
+                f"Commands start in the workspace root; change into a directory "
+                f"inside it (e.g., 'cd ./subdir')."
+            )
+
+    # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    commands = shell_syntax.simple_commands(command)
+    tokens = shell_syntax.parse(command).tokens
+    whole_words = {
+        (start, end) for start, end, _quoted in shell_syntax.glued_words(tokens)
+    }
+    # A target glued to a substitution can expand to more paths than it shows.
+    targets = {
+        int(token["start"]): token
+        for token in tokens
+        if token["type"] == "word"
+        and (int(token["start"]), int(token["end"])) in whole_words
+    }
+    # Memories, skills and media stay protected even inside the workspace.
+    protected = tuple(prefix for prefix in allow_prefixes if prefix != workspace_root)
+    for pattern in _DESTRUCTIVE_PATTERNS:
+        for match in pattern.finditer(command):
+            target = targets.get(match.start("target"))
+            problem = (
+                _removal_problem(_removal_target(target), workspace_root, protected)
+                if not dangerous and workspace_root and target is not None
+                else "outside"
+            )
+            if problem is None:
+                continue
+            if problem == "protected":
+                return _protected_removal_error(str(target["raw"]))
+            return (
+                f"Command blocked: contains forbidden pattern '{match.group(0)}'. "
+                f"All commands must operate within the workspace directory. "
+                f"Use relative paths (e.g., './file.py') instead."
+            )
+    # Every absolute operand of a recursive rm, however it is spelled.
+    if not dangerous and workspace_root:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                path = _removal_target(token) if token is not None else operand
+                bare = path.lstrip("'\"")
+                if _is_home_word(operand):
+                    problem = "outside"
+                elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
+                    continue
+                elif token is None:
+                    problem = "outside"  # glued to a substitution
+                else:
+                    problem = _removal_problem(path, workspace_root, protected)
+                if problem == "protected":
+                    return _protected_removal_error(operand)
+                if problem is not None:
+                    return (
+                        f"Command blocked: rm would remove '{operand}', which is "
+                        f"outside the workspace or may expand there. Remove a "
+                        f"path inside the workspace (e.g., './build')."
+                    )
+
+    # Dangerous mode allows rm anywhere, but never of the whole system or home.
+    if dangerous:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                if _whole_system_target(operand, token):
+                    return (
+                        f"Command blocked: rm would remove '{operand}', the root, a "
+                        f"drive or the home folder, which is refused in every mode."
+                    )
+
+    # Blocked commands and kills by lookup, wherever they run — always enforced.
+    looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
+    by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
+    for found in commands:
+        if found.name in BLOCKED_COMMANDS:
+            hint = _BLOCKED_COMMAND_HINTS.get(
+                found.name, "Only standard development commands are permitted."
+            )
+            return (
+                f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
+                f"{hint}"
+            )
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(found, looks_up, by_name):
+            return _KILL_BY_LOOKUP_ERROR
+
+    # Absolute-system-path check — skipped in dangerous mode.
+    # Catches attacks like: python -c "os.remove('/Users/foo/file')"
+    if not dangerous:
+        escaped_paths = _extract_all_paths(command, allow_prefixes=allow_prefixes)
+        if escaped_paths:
+            path_sample = escaped_paths[0]
+            return (
+                f"Command blocked: contains absolute system path '{path_sample}'. "
+                f"All file operations must use relative paths within the workspace. "
+                f"Use relative paths (e.g., './file.py') instead."
+            )
+
+    return None
+
+
+def _subpath_under_mount(token: str, mount: str) -> str | None:
+    """Return the subpath of *token* under *mount*, or ``None`` if not under it.
+
+    Bare ``mount`` and ``mount + "/"`` both return ``""`` so the caller can
+    join uniformly (``Path(tier) / ""`` is the tier itself).
+    """
+    if token == mount or token == mount + "/":
+        return ""
+    prefix = mount + "/"
+    if token.startswith(prefix):
+        return token[len(prefix) :]
+    return None
+
+
+def _skills_tier_paths(
+    skills_dir: str | Path | None,
+) -> tuple[Path | None, Path | None, Path]:
+    """``(WORKSPACE or None, GLOBAL or None, BUILTIN)`` — the tier priority
+    chain that ``MergedSkillsBackend._backends()`` honors. Single source of
+    truth so the resolver and the backend can't silently drift out of order.
+    """
+    workspace_tier = Path(skills_dir) if skills_dir is not None else None
+    return (workspace_tier, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _cmd_quote(s: str) -> str:
+    """Quote *s* for cmd.exe using double-quote wrapping.
+
+    cmd.exe strips outer double quotes; content between them is taken
+    literally. Backslashes are not escape chars inside double quotes, so
+    Windows paths pass through unchanged. Embedded ``"`` is escaped as
+    ``\"``; bare paths with no shell-special chars need no quoting at all.
+
+    .. note::
+
+       ``%VAR%`` expansion is **not** neutralised here.  Variable expansion
+       happens before quote processing in cmd.exe, and ``%%`` collapsing
+       only occurs inside ``.bat``/``.cmd`` files — not via ``cmd /c``.
+       This is acceptable because virtual-mount paths (skills, memories)
+       should never contain percent signs in practice.
+
+    Mirrors the role of :func:`shlex.quote` for the Windows shell so the
+    sandbox command can pass a single token through :func:`subprocess.run`
+    with ``shell=True`` (which on Windows invokes cmd.exe, not /bin/sh).
+    """
+    if not s:
+        return '""'
+    if not any(c in s for c in ' \t\n"&|<>^()'):
+        return s
+    return '"' + s.replace('"', '\\"') + '"'
+
+
+def _platform_quote(s: str) -> str:
+    """Quote *s* for the agent's shell.
+
+    On POSIX, delegates to :func:`shlex.quote` (single-quote wrapping).
+    On Windows with the recorded Git Bash (:mod:`EvoScientist.agent_shell`),
+    :func:`shlex.quote` of the path with forward slashes (``C:/Users/...``),
+    which bash and native programs both accept. On Windows without it,
+    double-quote wrapping compatible with cmd.exe — see :func:`_cmd_quote`.
+    The platform check is read at call time, so tests can swap it via
+    ``monkeypatch.setattr(backends, "_is_windows", ...)`` without mutating
+    :mod:`sys` module state.
+    """
+    if not _is_windows():
+        return shlex.quote(s)
+    from . import agent_shell
+
+    if agent_shell.uses_bash():
+        return shlex.quote(s.replace("\\", "/"))
+    return _cmd_quote(s)
+
+
+def _resolve_virtual_mount_path(
+    token: str,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+) -> str | None:
+    """Resolve a virtual mount token to a shell-safe token, or ``None`` when
+    *token* is not a registered virtual mount.
+
+    For ``/skills/...``: walks ``_skills_tier_paths(skills_dir)`` priority
+    (WORKSPACE → GLOBAL → BUILTIN), returning :func:`_platform_quote` of the
+    first tier where the path exists. On miss, returns a workspace-relative
+    ``./skills/<rel>`` form — agent typed a virtual path, so the shell error
+    should reference a location they recognise (the workspace tier is
+    ``<workspace>/skills``, which is also where ``MergedSkillsBackend`` would
+    write a new skill).
+
+    For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
+    absolute and :func:`_platform_quote`-wrapped. Memories live outside the
+    workspace, so a relative form would point at an unrelated location.
+
+    ``media_dirs`` are set when the sandbox works in a ``--mode=run`` folder,
+    outside the workspace's ``media/``: the folder as configured (how channel
+    attachments are referenced) and its resolved target, both kept as they
+    are.
+
+    On Windows a ``/C:/...`` file-tool alias becomes the drive path the shell
+    takes.
+    """
+    host = paths.host_file_tool_path(token)
+    if not host.startswith("/"):
+        return _platform_quote(host)
+
+    rel = _subpath_under_mount(token, "/skills")
+    if rel is not None:
+        for tier in _skills_tier_paths(skills_dir):
+            if tier is None:
+                continue
+            candidate = Path(tier) / rel
+            if candidate.exists():
+                return _platform_quote(str(candidate))
+        return _platform_quote("./skills/" + rel if rel else "./skills")
+
+    rel = _subpath_under_mount(token, "/memories")
+    if rel is not None:
+        return _platform_quote(str(Path(paths.MEMORIES_DIR) / rel))
+
+    if any(
+        _subpath_under_mount(token, media.as_posix()) is not None
+        for media in media_dirs
+    ):
+        return _platform_quote(token)
+
+    return None
+
+
+def _guard_bare_absolute(result: str | None) -> str | None:
+    """If *result* is a bare absolute path (no surrounding quotes),
+    single-quote it so the post-process regex won't re-rewrite it."""
+    if result and result.startswith("/") and result == result.strip("'\""):
+        return "'" + result + "'"
+    return result
+
+
+def _rewrite_quoted_path(
+    path: str,
+    workspace_name: str | None,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+    anchor: str | None = None,
+    workspace_root: str | None = None,
+) -> str | None:
+    """Return the shell-quoted replacement for *path* (the decoded
+    content of a quoted ``"..."`` or ``'...'`` argument),
+    or ``None`` if no rewrite applies. With *anchor* (the workspace root,
+    after a ``cd``) workspace-relative results become absolute.
+    """
+    if not path or "://" in path[max(0, len(path) - 10) :]:
+        return None
+    if not path.startswith("/") or path in _PASSTHROUGH_DEVICE_PATHS:
+        return None
+
+    def in_workspace(relative: str) -> str:
+        if anchor:
+            # The root itself as `<root>/.`, which rm refuses to remove.
+            return _platform_quote(
+                anchor.rstrip("/") + ("/" + relative if relative else "/.")
+            )
+        return _platform_quote("./" + relative if relative else ".")
+
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
+    if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        if skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        ):
+            resolved = in_workspace("skills/" + skill if skill else "skills")
+        return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        protected = tuple(
+            str(folder)
+            for folder in (
+                skills_dir,
+                paths.GLOBAL_SKILLS_DIR,
+                paths.MEMORIES_DIR,
+                _BUILTIN_SKILLS_DIR,
+                *media_dirs,
+            )
+            if folder is not None
+        )
+        if _under_any(path, protected):
+            return None
+        return in_workspace(path[len(workspace_root.rstrip("/")) :].lstrip("/"))
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name:
+        for prefix in _SYSTEM_PATH_PREFIXES:
+            if path.startswith(prefix):
+                marker = f"/{workspace_name}/"
+                idx = path.rfind(marker)
+                if idx != -1:
+                    return _guard_bare_absolute(in_workspace(path[idx + len(marker) :]))
+                if path.endswith(f"/{workspace_name}"):
+                    return _guard_bare_absolute(in_workspace(""))
+                break
+
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path.lstrip("/"))
+    if _is_system_path(path) and workspace_root:
+        if Path(workspace_root + path).exists():
+            return in_workspace(path.lstrip("/"))
+    return None
+
+
+_QUOTED_SPAN_RE = re.compile(r'(["\'])((?:\\.|(?!\1).)*?)\1')
+
+
+def _is_system_path(path: str) -> bool:
+    return any((path + "/").startswith(prefix) for prefix in _SYSTEM_PATH_PREFIXES)
+
+
+_DRIVE_PATH_RE = re.compile(r"[A-Za-z]:([\\/]|$)")
+
+
+def _windows_workspace_rest(word: str, workspace_root: str | None) -> str | None:
+    """The ``/...`` rest of a word that starts with the workspace root, written
+    with either separator, or ``None``; only for a root with a drive (Windows)."""
+    if not workspace_root or not _DRIVE_PATH_RE.match(workspace_root):
+        return None
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    head = word[: len(root)].replace("\\", "/")
+    rest = word[len(root) :]
+    if head.lower() != root.lower() or not (rest == "" or rest.startswith("/")):
+        return None
+    return rest
+
+
+def _rewrite_path_word(
+    raw: str,
+    *,
+    workspace_root: str | None,
+    workspace_name: str | None,
+    skills_dir: str | Path | None,
+    media_dirs: tuple[Path, ...],
+    absolute: bool,
+    attached: bool = False,
+) -> tuple[str | None, bool]:
+    """Replacement for an unquoted path word (``None`` keeps it), and whether it
+    maps to the workspace's ``tmp/``. After a ``cd`` (*absolute*) workspace
+    paths are the quoted root plus the raw rest, so globs keep working."""
+
+    def in_workspace(rest: str) -> str:
+        if absolute and workspace_root:
+            if all(part in ("", ".") for part in rest.split("/")):
+                # The root itself as `<root>/.`: rm refuses a `.` operand, as
+                # it does the `.` written before a `cd`.
+                return _platform_quote(workspace_root) + "/."
+            return _platform_quote(workspace_root) + rest
+        return "." + rest if rest else "."
+
+    path = raw
+    if path in _PASSTHROUGH_DEVICE_PATHS:
+        return None, False
+    # Skills, memories and media inside the workspace keep their host path,
+    # so validation still sees them as protected.
+    protected = tuple(
+        str(folder)
+        for folder in (
+            skills_dir,
+            paths.GLOBAL_SKILLS_DIR,
+            paths.MEMORIES_DIR,
+            _BUILTIN_SKILLS_DIR,
+            *media_dirs,
+        )
+        if folder is not None
+    )
+    rest = _windows_workspace_rest(path, workspace_root)
+    if rest is not None:
+        if not _under_any(path, protected):
+            return in_workspace(rest), False
+        from . import agent_shell
+
+        # Git Bash would read the separators as escapes; real escapes stay.
+        return (
+            re.sub(r"\\(?=[\w.-])", "/", path) if agent_shell.uses_bash() else None
+        ), False
+
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
+    if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        missing_skill = skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        )
+        if missing_skill and absolute and workspace_root:
+            return in_workspace(path), False
+        return resolved, False
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        if _under_any(path, protected):
+            return None, False
+        return in_workspace(path[len(workspace_root.rstrip("/")) :]), False
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name and _is_system_path(path):
+        marker = f"/{workspace_name}/"
+        idx = path.rfind(marker)
+        if idx != -1:
+            rest = path[idx + len(marker) - 1 :]
+            return in_workspace("" if rest == "/" else rest), False
+        if path.endswith(f"/{workspace_name}"):
+            return in_workspace(""), False
+
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path), True
+
+    if _is_system_path(path):
+        # A host path, unless the workspace has it; validation reports the rest.
+        if workspace_root and Path(workspace_root + path).exists():
+            return in_workspace(path), False
+        return None, False
+
+    if attached and not (
+        path != "/" and workspace_root and Path(workspace_root + path).exists()
+    ):
+        # Attached slash values can be separators, routes or patterns.
+        # Only known workspace files get the bare-word fallback here.
+        return None, False
+    return in_workspace("" if path == "/" else path), False
+
+
+def _convert_command_paths(
+    command: str,
+    workspace_name: str | None = None,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
+    after_cd: bool = False,
+) -> tuple[str, bool]:
+    """:func:`convert_virtual_paths_in_command`, plus whether the result uses
+    the workspace's ``tmp/``; *after_cd* marks a substitution that runs after one."""
+    words = shell_syntax.parse(command)
+    cd_starts = [
+        int(token["start"])
+        for token, is_command_name in zip(words.tokens, words.name_flags, strict=True)
+        if is_command_name and token["value"] in ("cd", "pushd")
+    ]
+    rules = {
+        "workspace_root": workspace_root,
+        "workspace_name": workspace_name,
+        "skills_dir": skills_dir,
+        "media_dirs": media_dirs,
+    }
+    scripts = shell_syntax.shell_script_words(words.tokens)
+    edits: list[tuple[int, int, str]] = []
+    uses_tmp = False
+    for start, end, quoted in shell_syntax.glued_words(words.tokens):
+        if start in words.delimiters or start in words.arithmetic:
+            continue
+        raw = command[start:end]
+        absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        script = raw[1:-1]
+        if (
+            start in scripts
+            and len(raw) >= 2
+            and raw[0] in "'\""
+            and raw[-1] == raw[0]
+            and raw[0] not in script.replace('\\"', "")
+        ):
+            # The script of `sh -c` runs as a command line of its own.
+            converted, tmp = _convert_command_paths(script, **rules, after_cd=absolute)
+            uses_tmp = uses_tmp or tmp
+            replacement = (
+                raw
+                if converted == script
+                else shlex.quote(converted)
+                if raw[0] == "'"
+                else '"' + converted + '"'
+            )
+        elif quoted and _is_search_path_assignment(raw):
+            replacement, tmp = shell_syntax.rewrite_substitutions(
+                raw,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
+        elif quoted:
+            anchor = workspace_root if absolute else None
+
+            def replace_quoted(
+                match: re.Match[str], anchor: str | None = anchor
+            ) -> str:
+                nonlocal uses_tmp
+                # Expansion can introduce traversal not visible to validation.
+                # Leave dynamic absolute paths intact so validation refuses them.
+                if match[1] == '"' and re.search(r"(?<!\\)[$`]", match[2]):
+                    return match[0]
+                # A span after host: or pod: is a remote path, not a local one.
+                if match.string[: match.start()].endswith(":"):
+                    return match[0]
+                path = match[2]
+                if match[1] == '"':
+                    path = re.sub(r'\\([\\"$`\n])', r"\1", path)
+                attached = _attached_path_word(path)
+                prefix = attached[0] if attached else ""
+                path = attached[1] if attached else path
+                result = _rewrite_quoted_path(
+                    path,
+                    workspace_name,
+                    skills_dir,
+                    media_dirs,
+                    anchor,
+                    workspace_root,
+                )
+                if (
+                    result is not None
+                    and (path == "/tmp" or path.startswith("/tmp/"))
+                    and not (
+                        workspace_root
+                        and _is_under_allowed_prefix(path, (workspace_root,))
+                    )
+                ):
+                    uses_tmp = True
+                return (prefix + result) if result is not None else match[0]
+
+            replacement: str | None = _QUOTED_SPAN_RE.sub(replace_quoted, raw)
+            replacement, tmp = shell_syntax.rewrite_substitutions(
+                replacement,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
+            # Split an attached option/assignment before mapping an unquoted
+            # path head, e.g. --output=/tmp/"out file".
+            attached = _attached_path_word(replacement)
+            prefix, path_word = attached or ("", replacement)
+            head = re.match(r"/[^'\"]*", path_word)
+            if head is not None:
+                rewritten, tmp = _rewrite_path_word(
+                    head.group(0),
+                    **rules,
+                    absolute=absolute,
+                    attached=attached is not None,
+                )
+                if rewritten is not None:
+                    if head.group(0).endswith("/") and not rewritten.endswith("/"):
+                        rewritten += "/"
+                    replacement = prefix + rewritten + path_word[head.end() :]
+                    uses_tmp = uses_tmp or tmp
+        elif (
+            raw.startswith("/")
+            or _windows_workspace_rest(raw, workspace_root) is not None
+        ):
+            replacement, tmp = _rewrite_path_word(raw, **rules, absolute=absolute)
+            uses_tmp = uses_tmp or tmp
+        else:
+            attached = _attached_path_word(raw)
+            if attached is None:
+                continue
+            prefix, path = attached
+            rewritten, tmp = _rewrite_path_word(
+                path, **rules, absolute=absolute, attached=True
+            )
+            uses_tmp = uses_tmp or tmp
+            replacement = prefix + rewritten if rewritten is not None else None
+        if replacement is not None and replacement != raw:
+            edits.append((start, end, replacement))
+    for body_start, body_end, expands in words.bodies:
+        if not expands:
+            continue
+        body = command[body_start:body_end]
+        converted, tmp = shell_syntax.rewrite_substitutions(
+            body,
+            lambda inner: _convert_command_paths(inner, **rules, after_cd=after_cd),
+            heredoc=True,
+        )
+        if converted != body:
+            edits.append((body_start, body_end, converted))
+            uses_tmp = uses_tmp or tmp
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(edits):
+        pieces.append(command[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(command[cursor:])
+    return "".join(pieces), uses_tmp
+
+
+def convert_virtual_paths_in_command(
+    command: str,
+    workspace_name: str | None = None,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
+) -> str:
+    """Map virtual paths in a shell command into the workspace.
+
+    Words starting with ``/`` are paths. A quoted whole path, or an option
+    or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
+    mapped when it names ``/tmp``, a mount or a workspace file. Search lists
+    such as ``PATH``, other quoted text and here-document bodies are data
+    (``print(6 / 3)``), except commands substituted inside double quotes.
+    """
+    return _convert_command_paths(
+        command, workspace_name, skills_dir, media_dirs, workspace_root
+    )[0]
+
+
+class ReadOnlyFilesystemBackend(FilesystemBackend):
+    """
+    Read-only filesystem backend.
+
+    Allows read, ls, grep, glob operations but blocks write, edit, and upload.
+    Used for skills directory — agent can read skill definitions but cannot
+    modify them.
+    """
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(
+            error="This directory is read-only. Write operations are not permitted here."
+        )
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        return EditResult(
+            error="This directory is read-only. Edit operations are not permitted here."
+        )
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(
+                path=file_path,
+                error="This directory is read-only. Upload operations are not permitted here.",
+            )
+            for file_path, _ in files
+        ]
+
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(
+            error="This directory is read-only. Delete operations are not permitted here."
+        )
+
+
+class MemoryFilesystemBackend(FilesystemBackend):
+    """Filesystem backend for memory files with structured-write enforcement.
+
+    Agents may read memory files and edit existing profile notes, but raw file
+    creation is blocked so observations are recorded through memory tools.
+    """
+
+    _RAW_WRITE_ERROR = (
+        "Raw writes to /memories are blocked. Edit existing "
+        "/memories/profile/... files or use memory tools."
+    )
+    _RAW_EDIT_ERROR = (
+        "Raw edits under /memories are limited to existing "
+        "/memories/profile/... files. Use memory tools for observations."
+    )
+    _RAW_DELETE_ERROR = (
+        "Deletes under /memories are blocked. Manage memory files through "
+        "memory tools instead."
+    )
+
+    @staticmethod
+    def _is_profile_path(file_path: str) -> bool:
+        normalized = posixpath.normpath("/" + file_path.strip().lstrip("/"))
+        return normalized == "/profile" or normalized.startswith("/profile/")
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error=self._RAW_WRITE_ERROR)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if not self._is_profile_path(file_path):
+            return EditResult(error=self._RAW_EDIT_ERROR)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
+            for file_path, _ in files
+        ]
+
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(error=self._RAW_DELETE_ERROR)
+
+
+def build_memory_agent_backend(
+    *,
+    workspace_dir: str | Path,
+    memory_dir: str | Path,
+):
+    """Build the standard memory-agent backend with guarded `/memories/` routing."""
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
+
+
+def build_memory_worker_backend(
+    *,
+    workspace_dir: str | Path,
+    memory_dir: str | Path,
+):
+    """Build the memory-worker backend.
+
+    Workers may update profile memory through /memories/profile/... and write
+    observations through structured tools. The workspace itself is read-only.
+    """
+    from deepagents.backends import CompositeBackend
+
+    return CompositeBackend(
+        default=ReadOnlyFilesystemBackend(
+            root_dir=str(workspace_dir),
+            virtual_mode=True,
+        ),
+        routes={
+            "/memories/": MemoryFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            )
+        },
+    )
+
+
+def build_autoskill_agent_backend(
+    *,
+    memory_dir: str | Path,
+    proposals_dir: str | Path,
+    skills_dir: str | Path,
+    sandbox_timeout: int = 300,
+):
+    """Build the AutoSkills backend.
+
+    AutoSkills has a different security model from ordinary memory
+    maintenance: it can read memories and installed skills, write proposal
+    folders, and run shell validation from the proposal root.
+    """
+    from deepagents.backends import CompositeBackend
+
+    from .setup.agent_env import agent_shell_overrides
+
+    return CompositeBackend(
+        default=AutoskillProposalSandboxBackend(
+            root_dir=str(proposals_dir),
+            timeout=sandbox_timeout,
+            # Its prompt validates proposals with `execute`; same python as
+            # the other agents.
+            env=agent_shell_overrides(),
+            skills_dir=skills_dir,
+        ),
+        routes={
+            "/memories/": ReadOnlyFilesystemBackend(
+                root_dir=str(memory_dir),
+                virtual_mode=True,
+            ),
+            "/skills/": MergedSkillsBackend(
+                primary_dir=str(skills_dir),
+                global_dir=str(paths.GLOBAL_SKILLS_DIR),
+                secondary_dir=str(_BUILTIN_SKILLS_DIR),
+                writable_primary=False,
+            ),
+            "/autoskill-proposals/": FilesystemBackend(
+                root_dir=str(proposals_dir),
+                virtual_mode=True,
+            ),
+        },
+    )
+
+
+class MergedSkillsBackend(BackendProtocol):
+    """Skills backend that merges up to three skill directories.
+
+    Priority (high → low):
+    1. primary   — workspace/skills/  (project-local, writable)
+    2. global    — ~/.evoscientist/skills/  (user global, read-only)
+    3. secondary — EvoScientist/skills/  (built-in, PyPI, read-only)
+
+    Higher-priority skills override lower-priority skills with the same name.
+    All directories share the same virtual path namespace (/skills/).
+    Only the workspace tier (primary) allows write and edit operations.
+    """
+
+    def __init__(
+        self,
+        primary_dir: str,
+        secondary_dir: str,
+        global_dir: str | None = None,
+        writable_primary: bool = True,
+    ):
+        primary_backend = (
+            FilesystemBackend if writable_primary else ReadOnlyFilesystemBackend
+        )
+        self._primary = primary_backend(root_dir=primary_dir, virtual_mode=True)
+        self._global = (
+            ReadOnlyFilesystemBackend(root_dir=global_dir, virtual_mode=True)
+            if global_dir
+            else None
+        )
+        self._secondary = ReadOnlyFilesystemBackend(
+            root_dir=secondary_dir, virtual_mode=True
+        )
+
+    def _backends(self):
+        """Yield backends in priority order: primary → global → secondary."""
+        yield self._primary
+        if self._global:
+            yield self._global
+        yield self._secondary
+
+    def file_path(self, file_path: str, *, tool_name: str | None = None) -> Path | None:
+        """The write's primary file, otherwise the tier that ``read`` serves.
+
+        Re-read only when multiple tiers hold the file to preserve fallback
+        behavior without adding a second read in the single-tier case.
+        """
+        if tool_name == "write_file":
+            try:
+                path = self._primary._resolve_path(file_path)
+            except (ValueError, OSError):
+                return None
+            return path if path.is_file() else None
+        found = []
+        for backend in self._backends():
+            try:
+                path = backend._resolve_path(file_path)
+            except (ValueError, OSError):
+                continue
+            if path.is_file():
+                found.append((backend, path))
+        if len(found) == 1:
+            return found[0][1]
+        for backend, path in found:
+            try:
+                result = backend.read(file_path)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return path
+                elif not str(result).startswith("Error:"):
+                    return path
+            except (ValueError, OSError):
+                continue
+        return None
+
+    # -- read: try each tier in priority order --
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+        for backend in list(self._backends())[:-1]:
+            try:
+                result = backend.read(file_path, offset, limit)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return result
+                elif not str(result).startswith("Error:"):
+                    return result
+            except (ValueError, FileNotFoundError, OSError):
+                pass
+        return self._secondary.read(file_path, offset, limit)
+
+    # -- ls: merge all tiers, higher priority wins on name conflicts --
+
+    def ls(self, path: str = "/") -> LsResult:
+        merged: dict = {}
+        for backend in reversed(list(self._backends())):
+            result = backend.ls(path)
+            for item in result.entries or []:
+                merged[item["path"]] = item
+        return LsResult(entries=sorted(merged.values(), key=lambda x: x["path"]))
+
+    # -- grep: search all tiers --
+
+    def grep(
+        self, pattern: str, path: str | None = None, glob: str | None = None
+    ) -> GrepResult:
+        matches = []
+        for backend in self._backends():
+            try:
+                result = backend.grep(pattern, path, glob)
+                matches.extend(result.matches or [])
+            except Exception:
+                pass
+        return GrepResult(matches=matches)
+
+    # -- glob: merge all tiers, higher priority wins on name conflicts --
+
+    def glob(self, pattern: str, path: str = "/") -> GlobResult:
+        merged: dict = {}
+        for backend in reversed(list(self._backends())):
+            try:
+                result = backend.glob(pattern, path)
+                for item in result.matches or []:
+                    merged[item["path"]] = item
+            except Exception:
+                pass
+        return GlobResult(matches=sorted(merged.values(), key=lambda x: x["path"]))
+
+    # -- write / edit: only workspace/skills/ (primary) is writable --
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return self._primary.write(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        return self._primary.edit(file_path, old_string, new_string, replace_all)
+
+    # -- download / upload --
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """Download files, trying each tier in priority order."""
+        backends = list(self._backends())
+        responses: list[FileDownloadResponse] = []
+        for path in paths:
+            resp = backends[-1].download_files([path])[0]
+            for backend in backends[:-1]:
+                candidate = backend.download_files([path])[0]
+                if candidate.error is None:
+                    resp = candidate
+                    break
+            responses.append(resp)
+        return responses
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return self._primary.upload_files(files)
+
+
+def prepare_sandbox_command(
+    command: str,
+    cwd: str | Path,
+    *,
+    virtual_mode: bool = True,
+    dangerous: bool = False,
+    guard_dangerous: bool = False,
+    skills_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
+) -> tuple[str, str | None]:
+    """Normalize workspace paths in ``command`` and validate it for the sandbox.
+
+    Shared by :meth:`CustomSandboxBackend.execute` and the background-process tools so
+    both enforce *identical* workspace-path rewriting (so virtual ``/`` paths resolve to
+    the workspace, not the host root) and the same command validation.
+
+    Returns ``(prepared_command, error)``: ``error`` is a message string when the command
+    is rejected (the caller must NOT run it), otherwise ``None``. An accepted command
+    that uses ``/tmp`` gets the workspace's ``tmp/`` created, where the file tools put it.
+
+    ``guard_dangerous`` (see :func:`check_dangerous_command`) does not see inside an SSH
+    remote payload: a dangerous pipe *inside* a quoted ``ssh host '...'`` argument is not
+    detected, because the quoted payload is a single opaque token. Piping *into* ``ssh``
+    itself (e.g. ``cat secret | ssh host x``) is detected — the check runs on the original,
+    unmasked command so the SSH-masking done below (which also replaces the literal ``ssh``
+    token) does not blind it.
+    """
+    original_command = command
+
+    ssh_error = _validate_ssh_remote_command_format(command)
+    if ssh_error:
+        return command, ssh_error
+
+    command, ssh_replacements = _mask_ssh_remote_commands(command)
+
+    cwd_str = str(cwd).rstrip("/")
+    # The media folder as configured and as resolved: the file tools accept
+    # both spellings, so commands do too.
+    media_dirs: tuple[Path, ...] = ()
+    if media_dir is not None:
+        configured = Path(media_dir)
+        media_dirs = tuple(dict.fromkeys((configured, configured.resolve())))
+    uses_tmp = False
+    if virtual_mode:
+        # After SSH masking, so remote paths are never rewritten.
+        command, uses_tmp = _convert_command_paths(
+            command,
+            workspace_name=Path(cwd_str).name,
+            skills_dir=skills_dir,
+            media_dirs=media_dirs,
+            workspace_root=cwd_str,
+        )
+    # The rewrite injects absolute paths under these, and host paths under the
+    # workspace are real paths inside the sandbox.
+    allow_prefixes = tuple(
+        str(prefix)
+        for prefix in (
+            skills_dir,
+            paths.GLOBAL_SKILLS_DIR,
+            paths.MEMORIES_DIR,
+            _BUILTIN_SKILLS_DIR,
+            *media_dirs,
+            None if dangerous else cwd_str,
+        )
+        if prefix is not None
+    )
+    error = validate_command(
+        command,
+        allow_prefixes=allow_prefixes,
+        dangerous=dangerous,
+        workspace_root=None if dangerous else cwd_str,
+    )
+    if error:
+        return command, error
+
+    # No interactive approval is reachable here (unattended main agent, or an
+    # async sub-agent on a remote thread), so refuse the narrow dangerous set
+    # with a reason the agent can act on rather than running it blind.
+    if guard_dangerous and not dangerous:
+        dangerous_reason = check_dangerous_command(original_command)
+        if dangerous_reason:
+            return _restore_spans(command, ssh_replacements), (
+                f"Command blocked: {dangerous_reason}. "
+                f"Rewrite it to avoid that, or request approval from the user "
+                f"(the orchestrator can re-issue it after approval)."
+            )
+
+    if uses_tmp:
+        # `/tmp` maps to the workspace's tmp/, as in the file tools; if it
+        # cannot be created the command reports that itself.
+        with contextlib.suppress(OSError):
+            Path(cwd_str, "tmp").mkdir(exist_ok=True)
+    return _restore_spans(command, ssh_replacements), None
+
+
+class _MediaFolderView(ReadOnlyFilesystemBackend):
+    """Lists a run's media folder under the paths attachments are referenced by.
+
+    deepagents drops entries outside ``root_dir`` from ``ls``, ``glob`` and
+    ``grep`` results in virtual mode, so the run sandbox lists the media
+    folder through this view. It is rooted at the resolved folder, so entries
+    that resolve outside it (a symlink pointing out) are still dropped; paths
+    come in and go out in the host form the sandbox reads.
+    """
+
+    def __init__(self, media_dir: Path, resolve: Callable[[str], Path | None]):
+        super().__init__(root_dir=str(media_dir), virtual_mode=True)
+        self._media_dir = media_dir
+        self._resolve = resolve
+
+    def _resolve_path(self, key: str) -> Path:
+        path = self._resolve(key)
+        if path is None:
+            raise ValueError(f"Path is outside the media folder: {key}")
+        return path
+
+    def _to_virtual_path(self, path: Path) -> str:
+        # ValueError for an entry that resolves outside the folder; the
+        # listing skips it.
+        path.resolve().relative_to(self.cwd)
+        return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
+
+
+class _ExecuteCancelEvent(threading.Event):
+    """A per-call event whose is_set(), but not wait(), checks its parent."""
+
+    def __init__(self, parent: threading.Event | None) -> None:
+        super().__init__()
+        self._parent = parent
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self._parent is not None and self._parent.is_set())
+
+
+class CustomSandboxBackend(LocalShellBackend):
+    """
+    Custom sandbox backend - inherits LocalShellBackend with added safety.
+
+    Features:
+    - Inherits all file operations (ls, read, write, edit, grep, glob)
+    - Inherits shell command execution with output truncation and timeout
+    - Adds command validation to prevent directory traversal and dangerous operations
+    - Adds path sanitization to auto-correct common LLM path mistakes
+    - Compatible with LangGraph checkpointer (no thread locks)
+    """
+
+    def __init__(
+        self,
+        root_dir: str = ".",
+        *,
+        virtual_mode: bool = True,
+        timeout: int = 300,
+        max_output_bytes: int = 100_000,
+        env: dict[str, str] | None = None,
+        inherit_env: bool = True,
+        dangerous: bool = False,
+        guard_dangerous: bool = False,
+        refuse_delete: bool = False,
+        skills_dir: str | Path | None = None,
+        media_dir: str | Path | None = None,
+    ):
+        """
+        Initialize custom sandbox backend.
+
+        Args:
+            root_dir: File system root directory
+            virtual_mode: Whether to enable virtual path mode; ``False`` only
+                with ``dangerous=True`` (it raises ``ValueError`` otherwise)
+            timeout: Command execution timeout in seconds
+            max_output_bytes: Max output size before truncation (default 100KB)
+            env: Extra environment variables for subprocess
+            inherit_env: Whether to inherit parent process env (default True)
+            dangerous: Real-filesystem mode — the agent operates on real absolute
+                paths anywhere on disk (no workspace confinement). Forces
+                ``virtual_mode=False`` and relaxes path validation while keeping
+                the privileged-command blocklist. Defaults to False.
+            guard_dangerous: Refuse the narrow dangerous-command set (see
+                :func:`check_dangerous_command`) outright, for contexts where
+                no interactive approval is reachable (unattended auto-approve
+                runs, async sub-agents). Bypassed when ``dangerous=True``.
+                Defaults to False.
+            refuse_delete: Refuse the recursive ``delete`` FS tool outright,
+                relaying an approval request to the orchestrator. Used for async
+                research sub-agents (writing / data-analysis) that have no
+                interactive approval path. Bypassed when ``dangerous=True``.
+                Defaults to False.
+            skills_dir: The workspace skills tier. ``/skills/...`` paths in
+                commands resolve through it first, and it is allowlisted for
+                command validation.
+            media_dir: The workspace's media folder, when ``root_dir`` is a
+                ``--mode=run`` folder outside it. Channel attachments are
+                referenced by their real path there, and file tools and
+                commands reach them by that path. File tools can only read
+                and list it; ``/media/...`` stays a path inside the run folder.
+        """
+        self._dangerous = dangerous
+        self._skills_dir = skills_dir
+        # Attachments are referenced through the configured path; the resolved
+        # one (``media/`` may be a symlink) bounds what the sandbox can reach.
+        self._media_dir = Path(media_dir).absolute() if media_dir is not None else None
+        self._media_real = self._media_dir.resolve() if self._media_dir else None
+        self._media_view = (
+            _MediaFolderView(self._media_dir, self._media_path)
+            if self._media_dir
+            else None
+        )
+        self._guard_dangerous = guard_dangerous
+        self._refuse_delete = refuse_delete
+        if dangerous:
+            # Real paths require the legacy (non-virtual) resolution path so the
+            # parent backend returns absolute paths as-is.
+            virtual_mode = False
+        elif not virtual_mode:
+            # Non-virtual resolution passes absolute paths to the host as-is,
+            # which only dangerous mode allows.
+            raise ValueError("virtual_mode=False requires dangerous=True")
+        super().__init__(
+            root_dir=root_dir,
+            virtual_mode=virtual_mode,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            env=env,
+            inherit_env=inherit_env,
+        )
+        # Commands run in the resolved folder. A $PWD inherited from a symlinked
+        # start folder would make `pwd` print the link instead, and absolute
+        # paths built from it would miss the workspace.
+        self._env = {**self._env, "PWD": str(self.cwd)}
+        # Override parent's "local-" prefix with our own
+        self._sandbox_id = f"evosci-{uuid.uuid4().hex[:8]}"
+        # Ensure working directory exists
+        os.makedirs(str(self.cwd), exist_ok=True)
+
+    def _resolve_path(self, key: str) -> Path:
+        """Resolve a file-tool path to a path inside the workspace.
+
+        Intercepts all file operations (read, write, edit, ls, grep, glob).
+        ``/`` is the workspace root, so any other path is the workspace path
+        as written (``/tmp/x`` is the workspace's ``tmp/x``, as in commands).
+        Paths that name the workspace itself are mapped into it:
+          1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
+          2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> is a folder)
+             /<ws_name>                    → /        (unless <cwd>/<ws_name> exists)
+          3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
+
+        On Windows a Git Bash path (``/c/...``) is read as the drive path it
+        names when that lies in the working folder or the media folder;
+        otherwise it stays a workspace path, so a workspace folder named with
+        one letter is still reached. A drive path that reaches the working
+        folder under another name (a junction, a ``subst`` drive, an 8.3 short
+        name) is mapped into it once resolved; one anywhere else is refused.
+
+        In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
+        alias or Git Bash path and let the parent resolve real absolute paths
+        as-is.
+        """
+        key = paths.host_file_tool_path(key)
+        drive_path = paths.git_bash_drive_path(key)
+        if self._dangerous:
+            return super()._resolve_path(drive_path or key)
+
+        if drive_path is not None and self._working_relative(drive_path) is not None:
+            key = drive_path
+
+        media_path = self._media_path(key)
+        if media_path is not None:
+            return media_path
+
+        cwd_str = self.cwd.as_posix().rstrip("/")
+        ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
+
+        # Prefer the full cwd match so a parent path that happens to contain
+        # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
+        # confuse the folder-name match below.
+        key_path = Path(key)
+        if key_path.is_absolute():
+            try:
+                relative = key_path.relative_to(self.cwd)
+            except ValueError:
+                pass
+            else:
+                virtual = relative.as_posix()
+                return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
+        if _is_windows() and _DRIVE_PATH_RE.match(key):
+            relative = self._working_relative(key)
+            if relative is None:
+                # An OSError, so the file tools report it as an error message
+                # rather than raising.
+                raise PermissionError(
+                    errno.EACCES,
+                    "Path is outside the workspace; file tools reach only paths "
+                    "inside it, and '/' is its root",
+                    key,
+                )
+            virtual = relative.as_posix()
+            return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
+        # Auto-strip /<ws_name>/ prefix to prevent nesting, unless the
+        # workspace has its own <ws_name>: then the path is that folder, kept
+        # out of the system path correction below (a workspace named "tmp").
+        ws_prefix = f"/{ws_name}/"
+        if key.startswith(ws_prefix):
+            if (self.cwd / ws_name).is_dir():
+                return super()._resolve_path(key)
+            key = key[len(ws_prefix) - 1 :]  # "/<ws>/main.py" → "/main.py"
+        elif key == f"/{ws_name}":
+            if (self.cwd / ws_name).exists():
+                return super()._resolve_path(key)
+            key = "/"
+
+        # A host path that names the workspace by its folder name maps into it;
+        # any other path, system folder names included, is the workspace path
+        # as written.
+        if key.startswith(_SYSTEM_PATH_PREFIXES):
+            # rfind, not find: the cwd's parent path may itself contain
+            # "/<ws_name>/" as a substring, and we want the boundary
+            # nearest the file — the workspace mount.
+            idx = key.rfind(ws_prefix)
+            if idx != -1:
+                key = "/" + key[idx + len(ws_prefix) :]
+            elif key.endswith(f"/{ws_name}"):
+                key = "/"
+
+        return super()._resolve_path(key)
+
+    def _working_relative(self, drive_path: str) -> Path | None:
+        """A Windows *drive_path* relative to the working folder, or None.
+
+        Compared as written, then resolved: the working folder is the resolved
+        one, so a junction, a ``subst`` drive or an 8.3 short name of it only
+        matches once resolved.
+        """
+        path = Path(drive_path)
+        try:
+            return path.relative_to(self.cwd)
+        except ValueError:
+            pass
+        try:
+            return path.resolve().relative_to(self.cwd)
+        except (ValueError, OSError, RuntimeError):
+            return None
+
+    # Windows attachment references use a /C:/... file-tool alias so they
+    # pass deepagents' validation before reaching this backend.
+    def _media_relative(self, key: str) -> Path | None:
+        """*key* relative to the media folder, if it names a path inside it.
+
+        Compared as paths, not strings, so Windows keys with backslashes or
+        another drive-letter case match too, and a Git Bash key (``/c/...``)
+        is read as the drive path it names, as ``_resolve_path`` reads it. A
+        Windows drive path that names the folder under another name (a
+        junction, a ``subst`` drive, an 8.3 short name) matches once resolved,
+        as the working folder does.
+        """
+        if self._media_dir is None:
+            return None
+        key = paths.host_file_tool_path(key)
+        path = Path(paths.git_bash_drive_path(key) or key)
+        if not path.is_absolute():
+            return None
+        for base in (self._media_dir, self._media_real):
+            try:
+                return path.relative_to(base)
+            except ValueError:
+                continue
+        if _is_windows() and _DRIVE_PATH_RE.match(str(path)):
+            try:
+                return path.resolve().relative_to(self._media_real)
+            except (ValueError, OSError, RuntimeError):
+                return None
+        return None
+
+    def _media_path(self, key: str) -> Path | None:
+        """Real path for *key* if it names a file in the media folder."""
+        rel = self._media_relative(key)
+        if rel is None:
+            return None
+        path = (self._media_real / rel).resolve()
+        if not path.is_relative_to(self._media_real):
+            # An OSError, so the file tools report it as a read error rather
+            # than a traceback.
+            raise PermissionError(errno.EACCES, "Path is outside the media folder", key)
+        return path
+
+    _DELETE_APPROVAL_ERROR = (
+        "Delete blocked: needs approval. Report it to the orchestrator, which "
+        "can re-issue it after approval."
+    )
+
+    def delete(self, file_path: str) -> DeleteResult:
+        """Refuse ``delete`` for guarded async sub-agents (no approval path).
+
+        Also refuse a path that would remove the workspace root, and delete
+        exactly the path that was checked.
+
+        No ``adelete`` override is needed: the inherited ``BackendProtocol.adelete``
+        runs ``asyncio.to_thread(self.delete, ...)``, so async sub-agents reach
+        this refusal too.
+        """
+        if self._refuse_delete and not self._dangerous:
+            return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
+        if self._in_media(file_path):
+            return DeleteResult(error=self._MEDIA_READ_ONLY_ERROR)
+        # Resolve once and delete exactly that path: resolving again could
+        # name the workspace root if a folder named like it went away in
+        # between. A ValueError (path traversal) is raised, as the parent's
+        # delete raises it.
+        try:
+            resolved = self._resolve_path(file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+        if self._is_workspace_or_above(resolved):
+            return DeleteResult(error=self._DELETE_ROOT_ERROR)
+        # FilesystemBackend.delete's body, on the path resolved above.
+        try:
+            if not resolved.exists() and not resolved.is_symlink():
+                return DeleteResult(error=f"Error: '{file_path}' not found")
+            if resolved.is_symlink():
+                resolved.unlink()
+            elif resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+            return DeleteResult(path=file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+
+    _DELETE_ROOT_ERROR = (
+        "Delete blocked: the path is the workspace root or a folder that holds "
+        "it. Delete the files or folders inside the workspace instead."
+    )
+
+    def _is_workspace_or_above(self, path: Path) -> bool:
+        """Whether deleting *path* would remove the workspace root.
+
+        Dangerous mode leaves absolute paths as written, so ``..`` and
+        symlinked parents are resolved before comparing. A symlink is
+        removed as a link, so it never takes the workspace with it.
+        """
+        if path.is_symlink():
+            return False
+        try:
+            real = path.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return real == self.cwd or self.cwd.is_relative_to(real)
+
+    _MEDIA_READ_ONLY_ERROR = (
+        "The media folder holds channel attachments; the file tools do not "
+        "change it. Copy the file into the run folder (for example with a "
+        "shell command) and work on the copy."
+    )
+
+    def _in_media(self, file_path: str) -> bool:
+        return not self._dangerous and self._media_relative(file_path) is not None
+
+    def _tool_paths(self, items: list | None) -> list | None:
+        """Spell dangerous-mode result paths the way the file tools accept them."""
+        if not self._dangerous or not items:
+            return items
+        return [{**item, "path": paths.file_tool_path(item["path"])} for item in items]
+
+    def ls(self, path: str) -> LsResult:
+        if self._in_media(path):
+            return self._media_view.ls(path)
+        result = super().ls(path)
+        result.entries = self._tool_paths(result.entries)
+        return result
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        if path is not None and self._in_media(path):
+            return self._media_view.glob(pattern, path)
+        result = super().glob(pattern, path)
+        result.matches = self._tool_paths(result.matches)
+        return result
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+        context_lines: int = 0,
+    ) -> GrepResult:
+        if path is not None and self._in_media(path):
+            return self._media_view.grep(
+                pattern, path, glob, max_count=max_count, context_lines=context_lines
+            )
+        result = super().grep(
+            pattern, path, glob, max_count=max_count, context_lines=context_lines
+        )
+        result.matches = self._tool_paths(result.matches)
+        return result
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        if self._in_media(file_path):
+            return WriteResult(error=self._MEDIA_READ_ONLY_ERROR)
+        return super().write(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if self._in_media(file_path):
+            return EditResult(error=self._MEDIA_READ_ONLY_ERROR)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        if any(self._in_media(path) for path, _ in files):
+            return [
+                FileUploadResponse(path=path, error=self._MEDIA_READ_ONLY_ERROR)
+                for path, _ in files
+            ]
+        return super().upload_files(files)
+
+    async def aexecute(
+        self, command: str, *, timeout: int | None = None
+    ) -> ExecuteResponse:
+        event = _ExecuteCancelEvent(current_cancel_event())
+        with bind_cancel_event(event):
+            try:
+                return await super().aexecute(command, timeout=timeout)
+            except asyncio.CancelledError:
+                event.set()
+                raise
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """
+        Execute shell command in sandbox environment.
+
+        Commands are validated before execution to prevent:
+        - Directory traversal (../)
+        - Access to paths outside workspace
+        - Dangerous system commands
+
+        The validated command is handed to the owned process runner so
+        cancelling an agent turn can terminate the complete process tree.
+        """
+        # Preserve LocalShellBackend's public validation contract.  This
+        # override cannot delegate execution to the base implementation because
+        # it must retain the Popen handle for cancellation, so validate before
+        # command preparation and process launch instead.
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.",
+                exit_code=1,
+                truncated=False,
+            )
+
+        command, error = prepare_sandbox_command(
+            command,
+            self.cwd,
+            virtual_mode=self.virtual_mode,
+            dangerous=self._dangerous,
+            guard_dangerous=self._effective_guard_dangerous(),
+            skills_dir=self._skills_dir,
+            media_dir=self._media_dir,
+        )
+        if error:
+            return ExecuteResponse(output=error, exit_code=1, truncated=False)
+
+        return self._execute_prepared_command(command, timeout=timeout)
+
+    def _effective_guard_dangerous(self) -> bool:
+        """Guard the dangerous-command set for this call.
+
+        The construction flag stays a floor (``True`` for guarded async
+        sub-agents, which have no approval path at all). On top of it, a run
+        with HITL suppressed (``auto_mode`` or attended ``auto_approve``) is
+        guarded per call: the interrupt is disarmed there, so the backend is
+        the only gate. A plain attended run (no auto_mode/auto_approve) is NOT
+        guarded here — the HITL interrupt plus the client policy decide, so the
+        flag is not baked at construction and a mid-session flip can never
+        leave it stale.
+        """
+        return self._guard_dangerous or is_hitl_suppressed()
+
+    def _execute_prepared_command(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+    ) -> ExecuteResponse:
+        """Execute an already validated command in an owned process group."""
+
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+
+        cancel_event = current_cancel_event()
+        if cancel_event is not None and cancel_event.is_set():
+            return ExecuteResponse(
+                output="Command cancelled before execution.",
+                exit_code=130,
+                truncated=False,
+            )
+
+        from . import agent_shell
+
+        process: subprocess.Popen[str] | None = None
+        termination_reason: str | None = None
+        output_abandoned = False
+        launch: agent_shell.ShellLaunch | None = None
+        try:
+            launch = agent_shell.prepare(command, self._env)
+            process_options: dict[str, object] = {}
+            if os.name == "nt":
+                process_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | launch.creationflags
+                )
+            else:
+                process_options["start_new_session"] = True
+
+            process = subprocess.Popen(
+                launch.args,
+                shell=launch.shell,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                env=launch.env,
+                cwd=str(self.cwd),
+                **launch.text_options,
+                **process_options,
+            )
+            launch.started(process)
+            _register_shell_process(cancel_event, process)
+            deadline = time.monotonic() + effective_timeout
+            drain_deadline: float | None = None
+
+            while True:
+                now = time.monotonic()
+                if (
+                    termination_reason is None
+                    and cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    termination_reason = "cancelled"
+                    _terminate_process_tree(process)
+                    drain_deadline = now + _PROCESS_DRAIN_GRACE_SECONDS
+                elif termination_reason is None and now >= deadline:
+                    termination_reason = "timed_out"
+                    _terminate_process_tree(process)
+                    drain_deadline = now + _PROCESS_DRAIN_GRACE_SECONDS
+
+                if drain_deadline is not None and now >= drain_deadline:
+                    _stop_collecting_process_output(process)
+                    stdout = stderr = ""
+                    output_abandoned = True
+                    break
+
+                communicate_deadline = (
+                    drain_deadline if drain_deadline is not None else deadline
+                )
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=max(
+                            0.01,
+                            min(0.1, communicate_deadline - time.monotonic()),
+                        )
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+
+            if termination_reason == "timed_out":
+                if timeout is not None:
+                    timeout_output = (
+                        "Error: Command timed out after "
+                        f"{effective_timeout} seconds (custom timeout). The command "
+                        "may be stuck or require more time."
+                    )
+                else:
+                    timeout_output = (
+                        f"Error: Command timed out after {effective_timeout} seconds. "
+                        "For long-running commands, re-run using the timeout parameter."
+                    )
+                response = ExecuteResponse(
+                    output=timeout_output,
+                    exit_code=124,
+                    truncated=output_abandoned,
+                )
+            elif termination_reason == "cancelled" or (
+                cancel_event is not None and cancel_event.is_set()
+            ):
+                response = ExecuteResponse(
+                    output="Command cancelled.",
+                    exit_code=130,
+                    truncated=output_abandoned,
+                )
+            else:
+                output_parts = []
+                if stdout:
+                    output_parts.append(stdout)
+                if stderr:
+                    stderr_lines = stderr.strip().split("\n")
+                    output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
+                output = "\n".join(output_parts) if output_parts else "<no output>"
+
+                truncated = False
+                output_bytes = output.encode("utf-8")
+                if len(output_bytes) > self._max_output_bytes:
+                    output = output_bytes[: self._max_output_bytes].decode(
+                        "utf-8", errors="ignore"
+                    )
+                    output += (
+                        f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+                    )
+                    truncated = True
+                if process.returncode != 0:
+                    output = f"{output.rstrip()}\n\nExit code: {process.returncode}"
+                response = ExecuteResponse(
+                    output=output,
+                    exit_code=process.returncode,
+                    truncated=truncated,
+                )
+        except agent_shell.BashMissingError as exc:
+            response = ExecuteResponse(output=str(exc), exit_code=1, truncated=False)
+        except Exception as exc:
+            if process is not None:
+                _terminate_process_tree(process)
+            response = ExecuteResponse(
+                output=f"Error executing command ({type(exc).__name__}): {exc}",
+                exit_code=1,
+                truncated=False,
+            )
+        finally:
+            if process is not None:
+                _unregister_shell_process(cancel_event, process)
+            # The shell has exited or been stopped: its script can go, even if
+            # a detached descendant still holds the pipes.
+            if launch is not None:
+                launch.cleanup()
+
+        # Enhance timeout errors with actionable recovery guidance
+        if response.exit_code == 124:
+            # No ready-made `command &` line: on a compound command it still
+            # holds the output pipe and hangs the same way.
+            response = ExecuteResponse(
+                output=(
+                    f"{response.output}\n\n"
+                    f"Recovery — pick one:\n"
+                    f"  1. Needs more time? Re-run with a larger timeout (up to 3600s): "
+                    f"execute(command=..., timeout=600)\n"
+                    f"  2. Runs for minutes or longer? Start it with the "
+                    f"run_in_background tool: it returns a process id and writes the "
+                    f"output to a log (read it with check_process, stop it with "
+                    f"stop_process).\n"
+                    f"  3. No run_in_background tool here (a sub-agent)? Report the "
+                    f"command back so the main agent can run it in the background "
+                    f"instead of retrying it."
+                ),
+                exit_code=response.exit_code,
+                truncated=response.truncated,
+            )
+
+        return response
+
+
+def _routed_file_path(
+    backend: BackendProtocol, key: str, *, tool_name: str | None = None
+) -> Path | None:
+    """The file *key* names in a routed tier *backend*, or None if unknown."""
+    if isinstance(backend, MergedSkillsBackend):
+        return backend.file_path(key, tool_name=tool_name)
+    if not isinstance(backend, FilesystemBackend):
+        return None
+    try:
+        path = backend._resolve_path(key)
+    except (ValueError, OSError):
+        return None
+    return path if path.is_file() else None
+
+
+def sandbox_file_path(
+    path: str,
+    work_dir: str | Path,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
+    routes: dict[str, BackendProtocol] | None = None,
+    tool_name: str | None = None,
+) -> Path | None:
+    """The host file a file tool's *path* reached, or None outside the sandbox.
+
+    *routes* are the agent's file tool routes (see
+    ``EvoScientist.file_tool_routes``): a path under one of them names the
+    file in that route's tier, found as the agent's composite backend routes
+    it, or None when that tier keeps no file on disk. Any other path is
+    mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
+    so a host-looking path names the workspace file at that path as written,
+    not the host file. Outside dangerous mode the result
+    lies inside *work_dir* or *media_dir* once resolved; anything else, or a
+    path the sandbox refuses, gives None.
+    """
+    from deepagents.backends import CompositeBackend
+    from deepagents.backends.utils import validate_path
+
+    backend = CustomSandboxBackend(
+        root_dir=str(work_dir),
+        inherit_env=False,
+        dangerous=dangerous,
+        media_dir=media_dir,
+    )
+    if routes:
+        try:
+            routed, key = CompositeBackend(
+                default=backend, routes=routes
+            )._get_backend_and_key(validate_path(paths.file_tool_path(path)))
+        except ValueError:
+            return None
+        if routed is not backend:
+            return _routed_file_path(routed, key, tool_name=tool_name)
+    try:
+        resolved = backend._resolve_path(path)
+    except (ValueError, OSError):
+        return None
+    if dangerous:
+        return resolved
+    roots = [backend.cwd]
+    if media_dir is not None:
+        roots.append(Path(media_dir).resolve())
+    real = resolved.resolve()
+    return real if any(real.is_relative_to(root) for root in roots) else None
+
+
+class AutoskillProposalSandboxBackend(CustomSandboxBackend):
+    """Shell backend rooted at the autoskill proposal directory.
+
+    File-tool writes through this backend are blocked; proposal writes go
+    through the `/autoskill-proposals/` route. Shell commands run with cwd set
+    to the proposal root so validation commands can inspect generated skill
+    folders without executing in the user's project workspace.
+    """
+
+    _RAW_WRITE_ERROR = (
+        "Raw workspace writes are blocked for AutoSkills. Write proposal files "
+        "under /autoskill-proposals/<skill-name>/."
+    )
+
+    @staticmethod
+    def _rewrite_autoskill_mount(command: str) -> str:
+        return re.sub(
+            r"(^|[\s'\"(=<>])/autoskill-proposals(?=/|$|[\s'\";|&)])",
+            r"\1.",
+            command,
+        )
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error=self._RAW_WRITE_ERROR)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        return EditResult(error=self._RAW_WRITE_ERROR)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [
+            FileUploadResponse(path=file_path, error=self._RAW_WRITE_ERROR)
+            for file_path, _ in files
+        ]
+
+    def delete(self, file_path: str) -> DeleteResult:
+        return DeleteResult(
+            error="Deletes are blocked for AutoSkills. Manage proposal files "
+            "under /autoskill-proposals/ instead."
+        )
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        return super().execute(
+            self._rewrite_autoskill_mount(command),
+            timeout=timeout,
+        )
