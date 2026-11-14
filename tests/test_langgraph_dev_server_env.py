@@ -470,8 +470,13 @@ def test_start_without_a_job_keeps_the_spawn_flags(
     with pytest.raises(PopenAbort):
         manager._spawn_server(port=16179)
     if manager.os.name == "nt":
+        # Process-group flag + hidden console (lasting) + the suspended
+        # start that joins the server job (#604): the server joins the job
+        # before its first worker can escape it.
         assert captured["kwargs"]["creationflags"] == (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+            | 0x00000004
         )
     else:
         assert captured["kwargs"]["start_new_session"] is True

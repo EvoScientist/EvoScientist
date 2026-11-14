@@ -424,6 +424,16 @@ class _JobApi:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateJobObjectW.restype = wintypes.HANDLE
         k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.DuplicateHandle.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.HANDLE),
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
         k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -439,6 +449,24 @@ class _JobApi:
 
     def create(self) -> int | None:
         return self._k32.CreateJobObjectW(None, None)
+
+    def share(self, job: int, process: int) -> bool:
+        """Copy the ``job`` handle into ``process``, so the job lives as long
+        as that process does."""
+        from ctypes import wintypes
+
+        copy = wintypes.HANDLE()
+        return bool(
+            self._k32.DuplicateHandle(
+                self._k32.GetCurrentProcess(),
+                job,
+                process,
+                self._ctypes.byref(copy),
+                0,
+                False,
+                2,  # DUPLICATE_SAME_ACCESS
+            )
+        )
 
     def assign(self, job: int, process: int) -> bool:
         return bool(self._k32.AssignProcessToJobObject(job, process))
@@ -521,6 +549,52 @@ def terminate_job(process: subprocess.Popen) -> bool:
         if job is None:
             return False
         return _job_api().terminate(job)
+
+
+@functools.cache
+def _warn_no_server_job(error: int) -> None:
+    logger.warning(
+        f"Could not put the langgraph server in a kill-on-close Windows job "
+        f"(error {error}). Stopping it falls back to the process-tree walk, which "
+        "misses MSYS programs (sleep, grep, ssh, ...) whose parent bash has exited."
+    )
+
+
+def join_server_job(process: subprocess.Popen) -> None:
+    """Put the suspended langgraph server in a kill-on-close job whose only
+    handle lives in the server, then let it run: whatever the server started,
+    MSYS programs whose parent bash exited included, ends with it."""
+    api: _JobApi | None = None
+    try:
+        api = _job_api()
+        job = api.create()
+        if not job:
+            _warn_no_server_job(api.last_error())
+            return
+        try:
+            handle = int(process._handle)
+            # Kill-on-close only once the server holds its own handle:
+            # closing ours below would otherwise end it at once.
+            if not (
+                api.assign(job, handle)
+                and api.share(job, handle)
+                and api.kill_on_close(job)
+            ):
+                _warn_no_server_job(api.last_error())
+        finally:
+            api.close(job)
+    except (OSError, AttributeError) as exc:
+        logger.debug(f"No server job: {exc}")
+    finally:
+        import psutil
+
+        try:
+            if api is not None:
+                api.resume(int(process._handle))
+            else:
+                psutil.Process(process.pid).resume()
+        except (OSError, AttributeError, psutil.Error) as exc:
+            logger.debug(f"Could not resume the server: {exc}")
 
 
 class BashMissingError(RuntimeError):
