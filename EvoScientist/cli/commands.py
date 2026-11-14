@@ -3649,3 +3649,10 @@ def _configure_logging():
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
+    # Keep channel credentials out of the log: cap the loggers that print
+    # credential-bearing HTTP URLs. Shared with the per-channel standalone
+    # entry points via the same helper (issue #666).
+    from ..channels.logging_caps import quiet_credential_url_loggers
+
+    quiet_credential_url_loggers()
