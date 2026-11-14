@@ -1014,13 +1014,14 @@ def _collect_executable_positions(command: str) -> set[int]:
     return offsets
 
 
-def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
-    """True if *path* equals a prefix or is a strict descendant.
+def _allowed_root(path: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The longest allow prefix that is *path* or its ancestor, else ``None``.
 
     Boundary-aware: ``str.startswith`` alone would let ``/A/skills_evil``
     match the prefix ``/A/skills`` — anchoring on ``/`` blocks neighbour
     directories that merely share a name prefix.
     """
+    best: str | None = None
     for prefix in allow_prefixes:
         normalized = prefix.rstrip("/")
         # Skip empty/root prefixes: they'd reduce the check to startswith("/")
@@ -1028,8 +1029,14 @@ def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool
         if not normalized:
             continue
         if path == normalized or path.startswith(normalized + "/"):
-            return True
-    return False
+            if best is None or len(normalized) > len(best):
+                best = normalized
+    return best
+
+
+def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
+    """True if *path* equals a prefix or is a strict descendant."""
+    return _allowed_root(path, allow_prefixes) is not None
 
 
 _SEARCH_LIST_VARIABLES = frozenset(
@@ -1114,8 +1121,50 @@ def _extract_all_paths(
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+
+    def _later_blocked_path(path: str, root: str | None) -> str | None:
+        """The first absolute system path past *root* that no allowed prefix
+        holds, else ``None``.
+
+        An allowed match can chain: a later path may glue a further path
+        inside itself (``stage=@/etc/passwd``) or carry an unscanned suffix
+        that ``path_re`` stops before (``stage,/etc/passwd``). Keep scanning
+        the original word past each allowed candidate until nothing follows,
+        and return the first non-allowed path found.
+
+        ``path_re`` stops at whitespace, so a spaced allowed root reads as
+        truncated (``/home/u/My Files/...`` as ``/home/u/My``): match the
+        complete allowed roots against the original text at each match
+        offset before trusting the regex's candidate. A match at
+        ``len(root)`` is the root's own separator and child path, so
+        scanning starts one past it: a child folder that merely shares a
+        name with a system root (``/W s (copy)/tmp``) stays part of the
+        allowed path.
+        """
+        if root is None:
+            return None
+        start = len(root) + 1
+        while start < len(path):
+            match = None
+            for i in range(start, len(path)):
+                match = path_re.match(path, i)
+                if match is not None:
+                    break
+            if match is None:
+                return None
+            root_here = _allowed_root_any(path[match.start() :], allow_prefixes)
+            if root_here is not None:
+                start = match.start() + len(root_here) + 1
+                continue
+            candidate = match[1]
+            if candidate not in _PASSTHROUGH_DEVICE_PATHS:
+                return candidate
+            start = match.end()
+        return None
+
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
+    scanned_word_spans: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
     scripts = shell_syntax.shell_script_words(tokens)
     for token in tokens:
@@ -1130,17 +1179,23 @@ def _extract_all_paths(
         value = str(token["value"])
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
+        allowed_root = _allowed_root_any(path, allow_prefixes)
         if (
             (
                 path.startswith("/")
                 or (_is_windows() and PureWindowsPath(path).is_absolute())
             )
-            and _under_any(path, allow_prefixes)
+            and allowed_root is not None
             and not re.search(r"[$`;\n|&<>]|\s/", path)
+            and _later_blocked_path(path, allowed_root) is None
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths.
+            # Exempt the word only when no other system path starts past the
+            # allowed root and its separator: a comma-joined value or a
+            # quoted script can smuggle a second absolute path past the
+            # literal scan otherwise.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
@@ -1158,14 +1213,39 @@ def _extract_all_paths(
             continue
         if any(start <= m.start() < end for start, end in path_assignments):
             continue
+        if any(start <= m.start() < end for start, end in scanned_word_spans):
+            continue
         # Skip paths that land at an executable-position offset
         if m.start(1) in exe_offsets:
             continue
         extracted = m.group(1)
         if extracted in _PASSTHROUGH_DEVICE_PATHS:
             continue
-        if _is_under_allowed_prefix(extracted, allow_prefixes):
-            continue
+        allowed_root = _allowed_root(extracted, allow_prefixes)
+        if allowed_root is not None:
+            # An allowed match can glue absolute paths to its tail
+            # (``/home/u/work/field=@/etc/passwd``); walk the chain and
+            # collect the first later path no allowed prefix holds. path_re
+            # stops at whitespace, so scan the whole word, not the truncated
+            # match: a comma-joined spaced allowed root
+            # (``/home/u/My Files``) must be recognized whole.
+            # Quoted words can contain whitespace (a spaced allowed root),
+            # so the word ends at its token's end, not the next space.
+            word_end = m.end()
+            for token in tokens:
+                if int(token["start"]) <= m.start() < int(token["end"]):
+                    word_end = int(token["end"])
+                    break
+            else:
+                while word_end < len(command) and not command[word_end].isspace():
+                    word_end += 1
+            scanned_word_spans.append((m.start(), word_end))
+            later_path = _later_blocked_path(
+                command[m.start() : word_end], allowed_root
+            )
+            if later_path is None:
+                continue
+            extracted = later_path
         paths.append(extracted)
     # Attached option and assignment values have no whitespace before the
     # slash, so the general literal scan deliberately does not match them.
@@ -1199,14 +1279,23 @@ def _removal_target(token: dict[str, object]) -> str:
     return str(token["value"]).replace("\\", "/")
 
 
-def _under_any(path: str, folders: tuple[str, ...]) -> bool:
-    """Whether *path* is one of *folders* or inside one, with either separator
-    (case-insensitive on Windows)."""
+def _allowed_root_any(path: str, folders: tuple[str, ...]) -> str | None:
+    """The longest folder holding *path*, with either separator
+    (case-insensitive on Windows); ``None`` when none holds it.
+
+    Normalization preserves length, so the result's length also locates the
+    root inside the original *path*."""
     path = path.replace("\\", "/")
     folders = tuple(folder.replace("\\", "/") for folder in folders)
     if _is_windows():
         path, folders = path.lower(), tuple(folder.lower() for folder in folders)
-    return _is_under_allowed_prefix(path, folders)
+    return _allowed_root(path, folders)
+
+
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether *path* is one of *folders* or inside one, with either separator
+    (case-insensitive on Windows)."""
+    return _allowed_root_any(path, folders) is not None
 
 
 def _removal_problem(
