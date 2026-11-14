@@ -409,6 +409,48 @@ def test_attached_tmp_after_cd_uses_workspace_root(tmp_path, prefix):
 
 
 @pytest.mark.parametrize(
+    ("command", "rewritten"),
+    [
+        ("OUT=/tmp/x; cd sub && echo $OUT", "OUT={root}/tmp/x; cd sub && echo $OUT"),
+        (
+            'export OUT=/tmp/x && cd sub && echo "$OUT"',
+            'export OUT={root}/tmp/x && cd sub && echo "$OUT"',
+        ),
+        (
+            'OUT="/tmp/x"; cd sub && echo "$OUT"',
+            'OUT={root}/tmp/x; cd sub && echo "$OUT"',
+        ),
+        (
+            "make -C src DESTDIR=/tmp/stage install",
+            "make -C src DESTDIR={root}/tmp/stage install",
+        ),
+    ],
+)
+def test_assigned_tmp_names_the_workspace_tmp_after_a_later_cd(
+    tmp_path, command, rewritten
+):
+    from EvoScientist.backends import _platform_quote
+
+    converted, uses_tmp = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert uses_tmp
+    assert converted == rewritten.format(root=_platform_quote(str(tmp_path)))
+    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
+def test_execute_assigned_tmp_path_used_after_cd(tmp_path):
+    from EvoScientist.backends import CustomSandboxBackend
+
+    (tmp_path / "sub").mkdir()
+    result = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True).execute(
+        "OUT=/tmp/x; cd sub && echo payload > $OUT"
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "tmp" / "x").read_text() == "payload\n"
+    assert not (tmp_path / "sub" / "tmp").exists()
+
+
+@pytest.mark.parametrize(
     "command",
     [
         'bash -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
