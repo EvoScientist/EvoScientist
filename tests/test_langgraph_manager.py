@@ -723,7 +723,8 @@ class TestStartLanggraphDevSpawnFlags:
     terminal's console. On POSIX it gets its own session."""
 
     @pytest.mark.parametrize(
-        ("lasting", "flags"), [(True, 0x08000200), (False, 0x00000200)]
+        ("lasting", "flags"),
+        [(True, 0x08000200 | 0x00000004), (False, 0x00000200 | 0x00000004)],
     )
     def test_windows_uses_new_process_group(
         self, spawn_capture, monkeypatch, lasting, flags
