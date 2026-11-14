@@ -91,6 +91,7 @@ class TestAuxiliaryResolver:
 
 def _mock_cfg():
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_mode = False
     cfg.auto_approve = False

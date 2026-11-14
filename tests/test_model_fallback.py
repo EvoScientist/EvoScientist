@@ -710,6 +710,42 @@ class TestSynchronousFallback:
         assert result is response
         assert handler.call_count == 2
 
+    def test_primary_without_api_key_uses_a_fallback_with_one(self, monkeypatch):
+        """The missing-key check sits inside the chain (#782): a keyless
+        primary fails at once and the next model still gets the turn."""
+        from EvoScientist.middleware.error_normalization import (
+            MissingApiKeyMiddleware,
+        )
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        add_fallback("fb", "prov")
+        primary = ChatAnthropic(model="claude-sonnet-5-5", api_key="")
+        fallback = ChatAnthropic(model="claude-sonnet-5-5", api_key="sk-ant-test")
+
+        def request_for(model):
+            return SimpleNamespace(
+                model=model,
+                messages=[HumanMessage(content="hi")],
+                override=lambda **kw: request_for(kw["model"]),
+            )
+
+        called = []
+
+        def provider_call(request):
+            called.append(request.model)
+            return AI_RESPONSE
+
+        guard = MissingApiKeyMiddleware()
+        with patch("EvoScientist.llm.models.get_chat_model", return_value=fallback):
+            result = ModelFallbackMiddleware().wrap_model_call(
+                request_for(primary),
+                lambda request: guard.wrap_model_call(request, provider_call),
+            )
+
+        assert result is AI_RESPONSE
+        assert called == [fallback]
+
 
 class TestTruncatedResponseFallback:
     """Empty truncated model results must participate in the fallback chain."""
@@ -1131,6 +1167,7 @@ class TestExplicitSeeding:
         from EvoScientist.middleware.model_fallback import get_fallback_chain
 
         cfg = MagicMock()
+        cfg.code_interpreter_timeout = 60
         cfg.model_fallbacks = "factory-a:prov-a, factory-b:prov-b"
         cfg.auxiliary_model = ""
         cfg.auxiliary_provider = ""
@@ -1166,6 +1203,7 @@ class TestExplicitSeeding:
         for cfg in (cfg_v1, cfg_v2):
             cfg.auxiliary_model = ""
             cfg.auxiliary_provider = ""
+            cfg.code_interpreter_timeout = 60
         _reset_chain_initialization()
         with patch(
             "EvoScientist.EvoScientist._ensure_chat_model",

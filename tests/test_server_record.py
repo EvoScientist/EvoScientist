@@ -118,6 +118,33 @@ def test_write_record_records_server_its_starter_does_not_own(server_env, monkey
     assert _read()["lasting"] is False
 
 
+def test_write_record_names_owner_of_server_it_does_not_outlive(
+    server_env, monkeypatch
+):
+    """``EvoSci deploy`` (pid 10 in the fake tree) owns the server it started."""
+    monkeypatch.setenv(server_record.LASTING_VAR, "0")
+
+    server_record.write_record()
+
+    assert _read()[server_record.OWNER_PID_KEY] == 10
+
+
+def test_write_record_names_no_owner_of_lasting_server(server_env):
+    server_record.write_record()
+
+    assert server_record.OWNER_PID_KEY not in _read()
+
+
+def test_write_record_names_no_owner_it_cannot_find(server_env, monkeypatch):
+    """No starter among its ancestors: the server counts as owned."""
+    monkeypatch.setenv(server_record.LASTING_VAR, "0")
+    monkeypatch.setenv(server_record.SPAWNER_PID_VAR, "999")
+
+    server_record.write_record()
+
+    assert server_record.OWNER_PID_KEY not in _read()
+
+
 def test_write_record_without_starter_names_itself(server_env, monkeypatch):
     """A server started by hand: no starter, no ownership, no Ctrl+Break."""
     for name in (
