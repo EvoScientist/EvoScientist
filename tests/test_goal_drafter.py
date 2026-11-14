@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -21,6 +22,7 @@ from EvoScientist.middleware.goal import (
     parse_amendment,
     parse_criteria,
 )
+from tests.fakes.rubric import RaisingFileBackend
 
 
 class _Scripted(BaseChatModel):
@@ -44,6 +46,8 @@ class _Scripted(BaseChatModel):
             reply = "- late"
         if isinstance(reply, Exception):
             raise reply
+        if isinstance(reply, AIMessage):
+            return ChatResult(generations=[ChatGeneration(message=reply)])
         return ChatResult(generations=[ChatGeneration(message=AIMessage(reply))])
 
 
@@ -337,3 +341,60 @@ class TestDraft:
         drafter._agent = _Pausing()
         with pytest.raises(GraphInterrupt):
             await drafter.draft({"kind": "create", "objective": "ship it"})
+
+    async def test_a_raising_file_tool_costs_a_tool_result_not_the_draft(
+        self, tmp_path
+    ):
+        """A symlink out of the workspace makes ``read_file`` raise upstream.
+
+        The drafter must read the failure as that tool's result and still
+        return criteria, as the main agent and sub-agents already do.
+        """
+        model = _Scripted(
+            replies=[
+                AIMessage(
+                    "",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/link.md"},
+                            "id": "read-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                "- the file exists\n- it has a title",
+            ],
+            seen=[],
+        )
+        drafter = GoalDrafter(
+            model=model,
+            backend=RaisingFileBackend(root_dir=tmp_path, virtual_mode=True),
+        )
+
+        outcome = await drafter.draft(
+            {"kind": "create", "objective": "write the report"}
+        )
+
+        assert outcome == {
+            "objective": "write the report",
+            "criteria": "- the file exists\n- it has a title",
+        }
+        tool_result = next(m for m in model.seen[1] if isinstance(m, ToolMessage))
+        assert tool_result.status == "error"
+        assert "[TOOL ERROR] Tool 'read_file' failed" in tool_result.content
+        assert "outside root directory" in tool_result.content
+
+
+def test_the_drafting_agent_mounts_the_tool_error_handler():
+    """One raising file tool must not end the draft (see ``TestDraft`` above)."""
+    drafter, _model = _drafter("- a")
+
+    with patch("langchain.agents.create_agent") as create:
+        drafter._ensure_agent()
+
+    names = [type(m).__name__ for m in create.call_args.kwargs["middleware"]]
+    # The drafter mounts the Windows path middleware too, so assert that the
+    # error handler is mounted rather than pinning the whole order.
+    assert "ToolErrorHandlerMiddleware" in names
+    assert names.index("ToolErrorHandlerMiddleware") < names.index("_GraderCallBudget")

@@ -437,12 +437,13 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
         "ModelRetryMiddleware",
         "FilesystemMiddleware",
         "WindowsFilePathMiddleware",
+        "ToolErrorHandlerMiddleware",
         "_GraderCallBudget",
         "UnsupportedContentMiddleware",
         "ModelCallBoundaryMiddleware",
     ]
-    assert isinstance(grader_mw[3], _GraderCallBudget)
-    assert grader_mw[3].max_calls == 12
+    assert isinstance(grader_mw[4], _GraderCallBudget)
+    assert grader_mw[4].max_calls == 12
 
 
 class _RecordingGrader(BaseChatModel):
