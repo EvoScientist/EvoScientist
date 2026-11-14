@@ -424,17 +424,25 @@ def test_attached_tmp_after_cd_uses_workspace_root(tmp_path, prefix):
             "make -C src DESTDIR=/tmp/stage install",
             "make -C src DESTDIR={root}/tmp/stage install",
         ),
+        (
+            'make -C src "DESTDIR=/tmp/stage" install',
+            "make -C src DESTDIR={root}/tmp/stage install",
+        ),
+        (
+            'export "OUT=/tmp/x"; cd sub && echo "$OUT"',
+            'export OUT={root}/tmp/x; cd sub && echo "$OUT"',
+        ),
     ],
 )
 def test_assigned_tmp_names_the_workspace_tmp_after_a_later_cd(
     tmp_path, command, rewritten
 ):
-    from EvoScientist.backends import _platform_quote
+    from EvoScientist.backends import _platform_quote, prepare_sandbox_command
 
     converted, uses_tmp = _convert_command_paths(command, workspace_root=str(tmp_path))
     assert uses_tmp
     assert converted == rewritten.format(root=_platform_quote(str(tmp_path)))
-    assert validate_command(converted, workspace_root=str(tmp_path)) is None
+    assert prepare_sandbox_command(command, str(tmp_path)) == (converted, None)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")

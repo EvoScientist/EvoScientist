@@ -1096,16 +1096,18 @@ def _values_read_elsewhere(
         if token["type"] != "word":
             continue
         start = int(token["start"])
-        is_assignment = shell_syntax.ASSIGNMENT_RE.match(str(token["raw"]))
-        if is_name and not is_assignment:
-            name = re.split(r"[\\/]", str(token["value"]))[-1]
-        elif not is_assignment:
+        later_cd = any(cd_start > start for cd_start in cd_starts)
+        if is_name:
+            # Only an unquoted NAME= is a shell assignment.
+            if shell_syntax.ASSIGNMENT_RE.match(str(token["raw"])):
+                if later_cd:
+                    starts.add(start)
+            else:
+                name = re.split(r"[\\/]", str(token["value"]))[-1]
+        elif not shell_syntax.ASSIGNMENT_RE.match(str(token["value"])):
             continue
-        elif name in ("make", "gmake") and not is_name:
-            starts.add(start)
-        elif (is_name or name in _DECLARATION_COMMANDS) and any(
-            cd_start > start for cd_start in cd_starts
-        ):
+        elif name in ("make", "gmake") or (name in _DECLARATION_COMMANDS and later_cd):
+            # An argument may quote its NAME=, as in export "OUT=/tmp/x".
             starts.add(start)
     return starts
 
