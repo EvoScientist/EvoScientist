@@ -1080,6 +1080,38 @@ def _is_search_path_assignment(raw: str) -> bool:
     return match is not None and match[1] in _SEARCH_LIST_VARIABLES
 
 
+# Commands whose ``NAME=value`` arguments set a variable.
+_DECLARATION_COMMANDS = frozenset({"export", "declare", "local", "readonly", "typeset"})
+
+
+def _values_read_elsewhere(
+    words: shell_syntax.ShellWords, cd_starts: list[int]
+) -> set[int]:
+    """Starts of the ``NAME=value`` words whose value can be read in another
+    folder: a variable set before a later ``cd``, or a make variable, which make
+    reads in its ``-C`` folder and passes to the makes it runs elsewhere."""
+    starts: set[int] = set()
+    name = None
+    for token, is_name in zip(words.tokens, words.name_flags, strict=True):
+        if token["type"] != "word":
+            continue
+        start = int(token["start"])
+        later_cd = any(cd_start > start for cd_start in cd_starts)
+        if is_name:
+            # Only an unquoted NAME= is a shell assignment.
+            if shell_syntax.ASSIGNMENT_RE.match(str(token["raw"])):
+                if later_cd:
+                    starts.add(start)
+            else:
+                name = re.split(r"[\\/]", str(token["value"]))[-1]
+        elif not shell_syntax.ASSIGNMENT_RE.match(str(token["value"])):
+            continue
+        elif name in ("make", "gmake") or (name in _DECLARATION_COMMANDS and later_cd):
+            # An argument may quote its NAME=, as in export "OUT=/tmp/x".
+            starts.add(start)
+    return starts
+
+
 def _attached_path_word(raw: str) -> tuple[str, str] | None:
     """Split a literal option/assignment prefix from its absolute path."""
     if _is_search_path_assignment(raw):
@@ -1863,6 +1895,7 @@ def _convert_command_paths(
         "media_dirs": media_dirs,
     }
     scripts = shell_syntax.shell_script_words(words.tokens)
+    read_elsewhere = _values_read_elsewhere(words, cd_starts)
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
@@ -1870,6 +1903,9 @@ def _convert_command_paths(
             continue
         raw = command[start:end]
         absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        # A value read in another folder names the workspace path itself;
+        # substitutions in it still run here.
+        value_absolute = absolute or start in read_elsewhere
         script = raw[1:-1]
         if (
             start in scripts
@@ -1897,7 +1933,7 @@ def _convert_command_paths(
             )
             uses_tmp = uses_tmp or tmp
         elif quoted:
-            anchor = workspace_root if absolute else None
+            anchor = workspace_root if value_absolute else None
 
             def replace_quoted(
                 match: re.Match[str], anchor: str | None = anchor
@@ -1952,7 +1988,7 @@ def _convert_command_paths(
                 rewritten, tmp = _rewrite_path_word(
                     head.group(0),
                     **rules,
-                    absolute=absolute,
+                    absolute=value_absolute,
                     attached=attached is not None,
                 )
                 if rewritten is not None:
@@ -1972,7 +2008,7 @@ def _convert_command_paths(
                 continue
             prefix, path = attached
             rewritten, tmp = _rewrite_path_word(
-                path, **rules, absolute=absolute, attached=True
+                path, **rules, absolute=value_absolute, attached=True
             )
             uses_tmp = uses_tmp or tmp
             replacement = prefix + rewritten if rewritten is not None else None
