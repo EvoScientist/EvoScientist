@@ -542,7 +542,10 @@ class InboundConsumer:
             approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
             from ..EvoScientist import file_tool_routes
-            from ..stream.display import forward_media_result
+            from ..stream.display import (
+                forward_media_result,
+                received_media_state,
+            )
             from ..stream.state import StreamState
 
             # Media files the agent writes or reads are sent as their results
@@ -553,6 +556,7 @@ class InboundConsumer:
             media: list[str] = []
             media_sent: set[str] = set()
             media_routes = file_tool_routes(self._dirs.workspace)
+            received_files = received_media_state(msg.media)
 
             while True:
                 _hitl_round += 1
@@ -615,6 +619,7 @@ class InboundConsumer:
                             media_dir=self._dirs.sandbox_media_dir,
                             dangerous=self._dangerous,
                             routes=media_routes,
+                            received_files=received_files,
                         )
                         for path in media:
                             await self._send_media(msg, path)

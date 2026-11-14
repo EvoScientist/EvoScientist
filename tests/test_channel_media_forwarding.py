@@ -130,7 +130,17 @@ def _make_files(root) -> None:
         (root / name).write_bytes(b"x")
 
 
-def _rich_sent(events, work_dir) -> list[str]:
+def _bytes_sent_to(sent: list[bytes]):
+    """A send callback that records what each file holds when it is sent."""
+
+    def _send(path: str) -> None:
+        with open(path, "rb") as fh:
+            sent.append(fh.read())
+
+    return _send
+
+
+def _rich_sent(events, work_dir, received_media=None) -> list[str]:
     _make_files(work_dir)
     sent: list[str] = []
     display_mod._run_streaming(
@@ -141,13 +151,14 @@ def _rich_sent(events, work_dir) -> list[str]:
         interactive=False,
         on_file_write=sent.append,
         work_dir=work_dir,
+        received_media=received_media,
         gateway=FakeGraphGateway(events=events),
         _state=display_mod.StreamState(),
     )
     return sent
 
 
-async def _tui_sent(monkeypatch, workspace, events) -> list[str]:
+async def _tui_sent(monkeypatch, workspace, events, received_media=None) -> list[str]:
     from EvoScientist.paths import SessionDirs
     from tests.fakes.tui import run_turn
 
@@ -159,6 +170,7 @@ async def _tui_sent(monkeypatch, workspace, events) -> list[str]:
         [events],
         prepare=lambda app: setattr(app, "_dirs", SessionDirs(workspace)),
         on_media_cb=sent.append,
+        received_media=received_media,
     )
     return sent
 
@@ -199,6 +211,47 @@ class TestRichLoop:
     def test_a_subagent_file_is_sent(self, tmp_path, tool_name):
         events = _subagent_turn(tool_name, "/fig.png", tmp_path)
         assert self._run(events, tmp_path) == [str((tmp_path / "fig.png").resolve())]
+
+    @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file"])
+    @pytest.mark.parametrize("path", PATH_CASES)
+    def test_received_media_read_filter(self, tmp_path, turn, tool_name, path):
+        attachment = str((tmp_path / "fig.png").resolve())
+        sent = _rich_sent(
+            turn(tool_name, path, tmp_path), tmp_path, received_media=[attachment]
+        )
+        assert sent == ([] if tool_name == "read_file" else [attachment])
+
+    def test_modified_received_media_is_forwarded_on_read(self, tmp_path):
+        svg = tmp_path / "plot.svg"
+        svg.write_bytes(b"<svg>as received</svg>")
+        attachment = str(svg.resolve())
+        sent: list[bytes] = []
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r1", "read_file")
+            yield _call("e1", "edit_file", {"file_path": "/plot.svg"})
+            svg.write_bytes(b"<svg>updated</svg>")
+            yield _result("e1", "edit_file")
+            yield _call("r2", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        display_mod._run_streaming(
+            agent=None,
+            message="edit plot",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=False,
+            on_file_write=_bytes_sent_to(sent),
+            work_dir=tmp_path,
+            received_media=[attachment],
+            gateway=FakeGraphGateway(stream=_stream),
+            _state=display_mod.StreamState(),
+        )
+        assert sent == [b"<svg>updated</svg>"]
 
 
 class TestTui:
@@ -247,6 +300,59 @@ class TestTui:
             str((workspace.root / "fig.png").resolve())
         ]
 
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file"])
+    async def test_received_media_read_filter(self, monkeypatch, workspace, tool_name):
+        attachment = str((workspace.root / "fig.png").resolve())
+        sent = await _tui_sent(
+            monkeypatch,
+            workspace,
+            _path_turn(tool_name, "/fig.png", workspace.root),
+            received_media=[attachment],
+        )
+        assert sent == ([] if tool_name == "read_file" else [attachment])
+
+    async def test_modified_received_media_is_forwarded_on_read(
+        self, monkeypatch, workspace
+    ):
+        from EvoScientist.gateway.runtime import RuntimeGateways
+        from EvoScientist.paths import SessionDirs
+        from tests.fakes.tui import run_turn
+
+        svg = workspace.root / "plot.svg"
+        svg.write_bytes(b"<svg>as received</svg>")
+        attachment = str(svg.resolve())
+        sent: list[bytes] = []
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r1", "read_file")
+            yield _call("x1", "execute", {"command": "convert"})
+            svg.write_bytes(b"<svg>updated</svg>")
+            yield _result("x1", "execute")
+            yield _call("r2", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        custom_gateway = FakeGraphGateway(stream=_stream)
+
+        def _prepare(app):
+            app._dirs = SessionDirs(workspace)
+            app._runtime_gateways = RuntimeGateways(
+                thread_store=custom_gateway.thread_store,
+                graph_gateway=custom_gateway,
+            )
+
+        await run_turn(
+            monkeypatch,
+            workspace,
+            [],
+            prepare=_prepare,
+            on_media_cb=_bytes_sent_to(sent),
+            received_media=[attachment],
+        )
+        assert sent == [b"<svg>updated</svg>"]
+
     @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
     @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
     @pytest.mark.parametrize(
@@ -282,11 +388,13 @@ def _consumer(workspace, gateway, **kwargs):
     )
 
 
-async def _consumer_turn(consumer) -> list:
+async def _consumer_turn(consumer, media=None) -> list:
     """Run one turn and return everything it queued for the chat."""
     from EvoScientist.channels.bus.events import InboundMessage
 
-    msg = InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
+    msg = InboundMessage(
+        channel="stub", sender_id="u1", chat_id="c1", content="go", media=media or []
+    )
     await consumer._stream_with_hitl(msg, None, "t1", msg.session_key)
     queued = []
     while not consumer.bus.outbound.empty():
@@ -335,6 +443,137 @@ class TestStandaloneConsumer:
             ("", [str((workspace.root / "fig.png").resolve())]),
             ("finished", []),
         ]
+
+    @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
+    @pytest.mark.parametrize(
+        "path",
+        ["media/paper.pdf", "/media/paper.pdf", "{root}/media/paper.pdf"],
+    )
+    async def test_received_attachment_is_not_echoed(self, workspace, turn, path):
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        events = turn("read_file", path, workspace.root)
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[str(attachment)])
+
+        assert _queued_media(queued) == []
+
+    async def test_received_attachment_can_be_replaced(self, workspace):
+        attachment = workspace.root / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        path = str(attachment)
+        events = [
+            _call("read", "read_file", {"file_path": path}),
+            _result("read", "read_file"),
+            _call("write", "write_file", {"file_path": path, "content": "updated"}),
+            _result("write", "write_file"),
+            *_END,
+        ]
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[path])
+
+        assert _queued_media(queued) == [str(attachment.resolve())]
+
+    @pytest.mark.parametrize(
+        ("edited", "mtime_shift_ns"),
+        [
+            pytest.param(b"<svg>outgoing</svg>", 1_000_000_000, id="same-size"),
+            pytest.param(b"<svg>edited</svg>", 0, id="same-mtime"),
+        ],
+    )
+    async def test_modified_received_attachment_is_forwarded_on_read(
+        self, workspace, monkeypatch, edited, mtime_shift_ns
+    ):
+        import os
+
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "diagram.svg"
+        attachment.write_bytes(b"<svg>incoming</svg>")
+        received = attachment.stat()
+        sent: list[bytes] = []
+
+        async def _send(_msg, path):
+            _bytes_sent_to(sent)(path)
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/media/diagram.svg"})
+            yield _result("r1", "read_file")
+            yield _call("e1", "edit_file", {"file_path": "/media/diagram.svg"})
+            attachment.write_bytes(edited)
+            os.utime(
+                attachment,
+                ns=(received.st_atime_ns, received.st_mtime_ns + mtime_shift_ns),
+            )
+            yield _result("e1", "edit_file")
+            yield _call("r2", "read_file", {"file_path": "/media/diagram.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        consumer = _consumer(workspace, FakeGraphGateway(stream=_stream))
+        monkeypatch.setattr(consumer, "_send_media", _send)
+        await _consumer_turn(consumer, media=[str(attachment)])
+        assert sent == [edited]
+
+    async def test_received_filter_is_per_turn(self, workspace):
+        attachment = workspace.root / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        path = str(attachment)
+        events = _file_tool_turn("read_file", {"file_path": path})
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+
+        assert _queued_media(await _consumer_turn(consumer, media=[path])) == []
+        assert _queued_media(await _consumer_turn(consumer)) == [
+            str(attachment.resolve())
+        ]
+
+    async def test_same_named_file_elsewhere_is_forwarded(self, workspace):
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        output = workspace.root / "paper.pdf"
+        output.write_bytes(b"incoming document")
+        events = _file_tool_turn("read_file", {"file_path": "/paper.pdf"})
+        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[str(attachment)])
+
+        assert _queued_media(queued) == [str(output.resolve())]
+
+
+async def test_queue_bridge_preserves_received_media(monkeypatch, tmp_path):
+    from EvoScientist.channels.bus.events import InboundMessage
+    from EvoScientist.channels.bus.message_bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.cli import channel as channel_mod
+
+    queued = []
+
+    def enqueue(message):
+        queued.append(message)
+        result = asyncio.get_running_loop().create_future()
+        result.set_result("done")
+        return result
+
+    monkeypatch.setattr(channel_mod, "_enqueue_channel_message", enqueue)
+    bus = MessageBus()
+    manager = ChannelManager(bus, media_dir=tmp_path / "media")
+    received = [str(tmp_path / "paper.pdf")]
+    message = InboundMessage(
+        channel="stub", sender_id="u1", chat_id="c1", content="go", media=received
+    )
+
+    await channel_mod._handle_bus_message(bus, manager, message)
+
+    assert len(queued) == 1
+    assert queued[0].media == received
+    assert queued[0].media is not received
 
 
 class TestConsumerTurnEnds:

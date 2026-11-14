@@ -1215,6 +1215,7 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
+                            received_media=msg.media,
                             work_dir=str(state["dirs"].work_dir),
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),
