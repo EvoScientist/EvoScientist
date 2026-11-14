@@ -147,6 +147,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 ## 🔥 动态
 
+- **[2026 年 11 月 14 日]** 🍎 **EvoScientist 桌面应用** macOS 版（Apple 芯片）发布！[**下载**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg) 👈
 - **[2026 年 11 月 3 日]** 🖥️ **EvoScientist 桌面应用** Windows 版发布！[**下载**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe) 👈
 - **[2026 年 6 月 3 日]** 在 [ResearchClawBench](https://github.com/InternScience/ResearchClawBench)（Agent 模式）中，🥈 总体排名第 2 —— 同时 🥇 在基于 `GPT-5.4` 的智能体中排名第 1！[**排行榜**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[2026 年 4 月 18 日]** 🥇 提交时在 [DeepResearch Bench](https://deepresearch-bench.github.io/) 排名第一！[**排行榜**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
@@ -232,15 +233,15 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-dark.svg">
   <img alt="下载 Windows 版" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg" width="220" height="44">
-</picture></a>&nbsp;<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-dark.svg">
-  <img alt="macOS 即将推出" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg" width="220" height="44">
-</picture>
+</picture></a>&nbsp;<a href="https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-dark.svg">
+  <img alt="下载 macOS 版" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg" width="220" height="44">
+</picture></a>
 </p>
 
 > [!NOTE]
-> 安装包暂未签名：Windows SmartScreen 可能会要求确认（点「更多信息」→「仍要运行」）。
+> macOS 版适用于 Apple 芯片、macOS 13 或更高版本，已签名并通过 Apple 公证。Windows 安装包暂未签名：Windows SmartScreen 可能会要求确认（点「更多信息」→「仍要运行」）。
 
 ### 快速安装
 
