@@ -356,7 +356,6 @@ def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
     assert pointed == [8123]
 
 
-
 def test_configure_logging_never_reveals_channel_tokens(monkeypatch):
     """Issue #666: `EvoSci serve --debug` must not print channel credentials.
 
