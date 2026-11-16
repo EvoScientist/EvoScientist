@@ -959,10 +959,11 @@ class TestWorkspaceRemovalAndComments:
     def _prepare_with_workspace_folders(command: str, workspace: str):
         root = Path(workspace)
         (root / "skills" / "demo").mkdir(parents=True, exist_ok=True)
-        (root / "media").mkdir(exist_ok=True)
-        return prepare_sandbox_command(
-            command, workspace, skills_dir=root / "skills", media_dir=root / "media"
-        )[1]
+        # As the daemon builds it: no media folder of its own in the sandbox.
+        _command, error = prepare_sandbox_command(
+            command, workspace, skills_dir=root / "skills"
+        )
+        return error
 
     @pytest.mark.parametrize(
         "command",
@@ -970,19 +971,20 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf skills",
             "rm -rf ./skills/",
             "rm -rf skills/demo",
-            "rm -r media",
-            'rm -rf "media"',
             "rm -rf build skills",
             "echo hi; rm -rf skills",
             "rm '-r' skills",
             "bash -c 'rm -rf skills'",
             "rm -rf skills/*",
             "rm -rf 'skills/*'",
-            "rm -rf media/$X",
+            "rm -rf skills/$X",
             "rm -rf skills/{a,b}",
             "bash -c 'rm -rf skills'; cd build",
             'echo "$(rm -rf skills)"; cd build',
             "bash -c 'cd build'; rm -rf skills",
+            "echo cd; rm -rf skills",
+            "env -aC rm -rf skills",
+            "env -a -C rm -rf skills",
             "bash -c 'cd build'; bash -c 'rm -rf skills'",
             "env bash -c 'rm -rf skills'; env -C build ls",
             "nohup cd build; rm -rf skills",
@@ -1002,7 +1004,8 @@ class TestWorkspaceRemovalAndComments:
             "env FOO=1 tar -C out -xf a.tar; rm -rf skills",
             "rm -rf skills/$(printf demo)",
             "rm -rf skills/`printf demo`",
-            'rm -rf "media"/$(date +%F)',
+            'rm -rf "skills"/$(date +%F)',
+            "rm -rf skills/`date +%Y/%m`",
             "rm -rf 'sk'ills/$(printf demo)",
         ],
     )
@@ -1014,6 +1017,17 @@ class TestWorkspaceRemovalAndComments:
         workspace.mkdir()
         error = self._prepare_with_workspace_folders(command, str(workspace))
         assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command", ["rm -r .evoscientist", "rm -rf .evoscientist/memories/$(date +%F)"]
+    )
+    def test_relative_removals_of_memories_in_the_workspace_are_refused(
+        self, command, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(tmp_workspace) / ".evoscientist" / "memories"
+        )
+        assert "protected folder" in prepare_sandbox_command(command, tmp_workspace)[1]
 
     @pytest.mark.parametrize(
         "command",
@@ -3364,7 +3378,7 @@ class TestProcessKillByName:
             "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
             "while read p; do kill $p; done < logs/pids",
             "mapfile -t pids < logs/pids; kill ${pids[@]}",
-            "export 'PID=$(lsof -t)'; kill $OTHER_PID",
+            "export 'PID=$(lsof -t)'; kill $PID",
             "PS1='$(ps)'; kill $PS1",
             "env -S 'python -u x.py'",
             "env -S 'cat \"name with space.txt\"'",
