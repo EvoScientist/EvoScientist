@@ -1469,7 +1469,13 @@ def validate_command(
         # A relative operand of an rm that runs in the workspace root: only a
         # protected folder is refused (rm itself refuses `.`), and a first
         # segment that expands may be anything, so it is left alone.
-        for found in shell_syntax.starting_folder_commands(command):
+        # `commands` holds nested code too, so without an rm there is none.
+        starting = (
+            shell_syntax.starting_folder_commands(command)
+            if any(found.name == "rm" for found in commands)
+            else []
+        )
+        for found in starting:
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
                 bare = path.lstrip("'\"")
@@ -1500,7 +1506,11 @@ def validate_command(
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
     by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
-    looked_up = _looked_up_variables(command, commands, looks_up)
+    looked_up = (
+        _looked_up_variables(command, commands, looks_up)
+        if any(found.name in _KILL_COMMANDS for found in commands)
+        else frozenset()
+    )
     for found in commands:
         if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
