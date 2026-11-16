@@ -354,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        ModelRefusalDetectionMiddleware,
         SubagentMessageTimestampMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
@@ -395,7 +396,7 @@ def _inject_subagent_middleware(
             # from the model call (including inner middlewares) and
             # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
-            ErrorNormalizationMiddleware(),
+            ErrorNormalizationMiddleware(pass_through_refusals=True),
             # Stamps the reply of the attempt that succeeded: a failed one
             # raises before the stamp. Outside the tool error handler, so the
             # error results it builds are stamped when the tool fails. No input
@@ -414,6 +415,7 @@ def _inject_subagent_middleware(
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
             create_context_editing_middleware(chat_model),
+            ModelRefusalDetectionMiddleware(),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
             WindowsFilePathMiddleware(),
@@ -995,6 +997,7 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware,
         MessageTimestampMiddleware,
         ModelFallbackMiddleware,
+        ModelRefusalDetectionMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
@@ -1101,6 +1104,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),
+        ModelRefusalDetectionMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         WindowsFilePathMiddleware(),

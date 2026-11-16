@@ -28,8 +28,10 @@ not the exception's precise origin; a uniform envelope is more useful
 to the WebUI than gambling on the exception class. If the model isn't
 from a recognized provider, or the request carries no ``.model``, the
 exception re-raises unchanged and upstream's whitelist / catch-all
-behavior takes over. LangGraph signals, context overflow and model refusals
-also propagate unchanged so their upstream handlers can recognize them.
+behavior takes over. LangGraph handles its own signals, deepagents'
+summarization middleware handles context overflow, and its task tool turns
+sync subagent refusals into notices for the parent model. Other refusals
+are normalized so the WebUI can display their message.
 """
 
 from __future__ import annotations
@@ -200,6 +202,26 @@ def _check_refusal_output(response: ModelResponse) -> ModelResponse:
     return response
 
 
+class ModelRefusalDetectionMiddleware(AgentMiddleware):
+    """Detect metadata-only refusals inside the fallback chain on every attempt."""
+
+    name = "model_refusal_detection"
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return _check_refusal_output(handler(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return _check_refusal_output(await handler(request))
+
+
 def _should_pass_through(exc: BaseException) -> bool:
     """True if *exc* is a LangGraph-level signal that must propagate
     untouched — either a control-flow signal or a structural error
@@ -269,7 +291,10 @@ def _is_provider_error(exc: BaseException) -> bool:
 
 
 def _normalize(
-    request: ModelRequest | None, exc: BaseException
+    request: ModelRequest | None,
+    exc: BaseException,
+    *,
+    pass_through_refusals: bool = False,
 ) -> ProviderStreamError | None:
     """Return a :class:`ProviderStreamError` wrapping *exc* if the model
     on *request* comes from a recognized provider SDK, or ``None`` if
@@ -295,8 +320,9 @@ def _normalize(
       **outside** the user middleware stack to compress history and
       retry. Wrapping it here would change the type and break that
       self-healing fallback.
-    - ``ModelRefusalError`` — deepagents' task tool catches it by type to
-      report a subagent refusal to the parent model.
+    - ``ModelRefusalError`` when ``pass_through_refusals`` is set — sync
+      subagents preserve its type for deepagents' task tool, which reports
+      the refusal to the parent model.
     - Models we don't recognize as a provider SDK.
     """
     from langchain_core.exceptions import ContextOverflowError, ModelRefusalError
@@ -321,9 +347,10 @@ def _normalize(
     if _should_pass_through(exc):
         return None
 
-    # Upstream summarization and subagent middleware catch these by type
-    # to compress history or return a refusal notice to the parent.
-    if isinstance(exc, (ContextOverflowError, ModelRefusalError)):
+    # Summarization catches overflow by type to compress history.
+    if isinstance(exc, ContextOverflowError):
+        return None
+    if pass_through_refusals and isinstance(exc, ModelRefusalError):
         return None
 
     provider = _provider_from_model(getattr(request, "model", None))
@@ -362,9 +389,16 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
     Place this middleware right inside the retry layer, ahead of everything
     else in the list, so it catches exceptions raised by inner middlewares
     as well as the model handler itself.
+
+    Sync subagents set ``pass_through_refusals`` so deepagents' task tool
+    can return a refusal notice to the parent model.
     """
 
     name = "error_normalization"
+
+    def __init__(self, *, pass_through_refusals: bool = False) -> None:
+        super().__init__()
+        self._pass_through_refusals = pass_through_refusals
 
     def wrap_model_call(
         self,
@@ -372,9 +406,11 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         try:
-            return _check_truncated_output(_check_refusal_output(handler(request)))
+            return _check_truncated_output(handler(request))
         except Exception as exc:
-            normalized = _normalize(request, exc)
+            normalized = _normalize(
+                request, exc, pass_through_refusals=self._pass_through_refusals
+            )
             if normalized is None:
                 raise
             raise normalized from exc
@@ -385,11 +421,11 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         try:
-            return _check_truncated_output(
-                _check_refusal_output(await handler(request))
-            )
+            return _check_truncated_output(await handler(request))
         except Exception as exc:
-            normalized = _normalize(request, exc)
+            normalized = _normalize(
+                request, exc, pass_through_refusals=self._pass_through_refusals
+            )
             if normalized is None:
                 raise
             raise normalized from exc

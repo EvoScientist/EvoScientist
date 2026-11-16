@@ -12,7 +12,23 @@ from langchain.agents.middleware.types import ModelResponse
 from langchain_core.exceptions import ModelRefusalError
 from langchain_core.messages import AIMessage
 
-from EvoScientist.middleware.error_normalization import ErrorNormalizationMiddleware
+from EvoScientist.llm.errors import ProviderStreamError
+from EvoScientist.middleware.error_normalization import (
+    ErrorNormalizationMiddleware,
+    ModelRefusalDetectionMiddleware,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_fallback_chain():
+    from EvoScientist.middleware.model_fallback import (
+        _reset_chain_initialization,
+        clear_fallbacks,
+    )
+
+    clear_fallbacks()
+    yield
+    _reset_chain_initialization()
 
 
 def _message(reason="refusal", *, content=None):
@@ -64,7 +80,7 @@ async def _call(middleware, response, use_async):
 async def test_v1_metadata_refusal_raises_with_details(use_async, content):
     message = _message(content=content)
     response = ModelResponse(result=[message])
-    middleware = ErrorNormalizationMiddleware()
+    middleware = ModelRefusalDetectionMiddleware()
 
     with pytest.raises(ModelRefusalError, match=r"safety.*Cannot continue") as caught:
         await _call(middleware, response, use_async)
@@ -82,7 +98,7 @@ async def test_v1_metadata_refusal_raises_with_details(use_async, content):
 async def test_normal_v1_response_is_untouched(use_async):
     message = _message("end_turn")
     response = ModelResponse(result=[message])
-    middleware = ErrorNormalizationMiddleware()
+    middleware = ModelRefusalDetectionMiddleware()
 
     result = await _call(middleware, response, use_async)
     assert result is response
@@ -98,7 +114,7 @@ async def test_existing_refusal_error_keeps_its_type_and_single_block(use_async)
     block = {"type": "refusal", "refusal": "Already refused"}
     message = _message(content=[block])
     response = ModelResponse(result=[message])
-    outer = ErrorNormalizationMiddleware()
+    outer = ErrorNormalizationMiddleware(pass_through_refusals=True)
     inner = ModelRefusalMiddleware()
 
     async def invoke():
@@ -177,11 +193,13 @@ async def anthropic_model():
 
     clients = []
 
-    def build(reason):
+    def build(reason, *, text="Partial answer"):
         def respond(request):
             assert json.loads(request.content)["stream"] is True
             return httpx2.Response(
-                200, headers={"content-type": "text/event-stream"}, content=_sse(reason)
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(reason, text=text),
             )
 
         client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
@@ -200,40 +218,54 @@ async def anthropic_model():
 
 
 @pytest.mark.parametrize("reason", ["refusal", "end_turn"])
-async def test_real_anthropic_stream_through_local_gateway(anthropic_model, reason):
+@pytest.mark.parametrize("with_fallback", [False, True])
+async def test_real_anthropic_stream_through_local_gateway(
+    anthropic_model, reason, with_fallback, workspace, monkeypatch
+):
     from EvoScientist.gateway.local import LocalGraphGateway
     from EvoScientist.gateway.types import GraphTarget, RunRequest
+    from EvoScientist.middleware.model_fallback import add_fallback
     from EvoScientist.stream.json_sink import stream_json
 
+    model = anthropic_model(reason)
+    fallback = anthropic_model("end_turn", text="Fallback answer")
+    monkeypatch.setattr("EvoScientist.llm.models.get_chat_model", lambda **_: fallback)
+    if with_fallback:
+        add_fallback("fallback", "anthropic")
     graph = create_deep_agent(
-        model=anthropic_model(reason),
-        middleware=[ErrorNormalizationMiddleware()],
+        model=model,
+        middleware=_refusal_stack(workspace, model, "main"),
         subagents=[],
     )
     request = RunRequest(
         message="hello", thread_id="refusal-test", target=GraphTarget(local_graph=graph)
     )
     output = io.StringIO()
-    if reason == "refusal":
-        with pytest.raises(ModelRefusalError) as caught:
+    failed = reason == "refusal" and not with_fallback
+    if failed:
+        with pytest.raises(ProviderStreamError, match="Model refused") as caught:
             await stream_json(LocalGraphGateway(), request, out=output)
-        assert caught.value.raw_message.response_metadata["output_version"] == "v1"
-    else:
         assert (
-            await stream_json(LocalGraphGateway(), request, out=output)
-            == "Partial answer"
+            caught.value.__cause__.raw_message.response_metadata["output_version"]
+            == "v1"
+        )
+    else:
+        assert await stream_json(LocalGraphGateway(), request, out=output) == (
+            "Partial answer\n\nFallback answer"
+            if reason == "refusal"
+            else "Partial answer"
         )
     events = [json.loads(line) for line in output.getvalue().splitlines()]
     assert any(e["type"] == "text" and "Partial answer" in e["content"] for e in events)
-    assert events[-1]["type"] == ("error" if reason == "refusal" else "done")
-    if reason == "refusal":
+    assert events[-1]["type"] == ("error" if failed else "done")
+    if failed:
         assert not any(e["type"] == "done" for e in events)
 
 
 @pytest.mark.parametrize("reason", ["refusal", "end_turn"])
 @pytest.mark.parametrize("output_format", ["text", "stream-json"])
 def test_single_shot_cli_reports_refusal(
-    monkeypatch, tmp_path, anthropic_model, reason, output_format
+    monkeypatch, tmp_path, anthropic_model, reason, output_format, workspace
 ):
     from typer.testing import CliRunner
 
@@ -241,9 +273,10 @@ def test_single_shot_cli_reports_refusal(
     from EvoScientist.cli._app import app
     from EvoScientist.config import EvoScientistConfig
 
+    model = anthropic_model(reason)
     graph = create_deep_agent(
-        model=anthropic_model(reason),
-        middleware=[ErrorNormalizationMiddleware()],
+        model=model,
+        middleware=_refusal_stack(workspace, model, "main"),
         subagents=[],
     )
     config = EvoScientistConfig(ui_backend="cli", enable_async_subagents=False)
@@ -264,7 +297,7 @@ def test_single_shot_cli_reports_refusal(
         assert events[-1]["type"] == ("error" if reason == "refusal" else "done")
 
 
-def test_sync_task_reports_before_output_refusal_as_a_notice():
+def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
     import anthropic
     import httpx2
     from langchain_anthropic import ChatAnthropic
@@ -329,7 +362,7 @@ def test_sync_task_reports_before_output_refusal_as_a_notice():
                     "description": "Research",
                     "system_prompt": "Research",
                     "model": child,
-                    "middleware": [ErrorNormalizationMiddleware()],
+                    "middleware": _refusal_stack(workspace, child, "sync-subagent"),
                 }
             ],
         )
@@ -342,3 +375,123 @@ def test_sync_task_reports_before_output_refusal_as_a_notice():
     )
     assert "Cannot continue" in tasks[0].content
     assert result["messages"][-1].content == "Continue without the researcher"
+
+
+def test_main_refusal_keeps_its_webui_message():
+    from langgraph_api.serde import json_dumpb
+
+    from EvoScientist.middleware.error_normalization import _normalize
+
+    refusal = ModelRefusalError.from_refusal(
+        {"type": "refusal", "refusal": "Cannot continue"}, raw_message=_message()
+    )
+    normalized = _normalize(_request(), refusal)
+    payload = json.loads(json_dumpb(normalized if normalized is not None else refusal))
+
+    assert "Model refused" in payload["message"]
+    assert "Cannot continue" in payload["message"]
+    assert payload["provider"] == "anthropic"
+
+
+def _refusal_stack(workspace, model, kind):
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import (
+        _get_default_middleware,
+        _inject_subagent_middleware,
+    )
+
+    cfg = EvoScientistConfig()
+    if kind == "sync-subagent":
+        subs = [{"name": "researcher"}]
+        _inject_subagent_middleware(
+            subs, workspace=workspace, cfg=cfg, chat_model=model
+        )
+        middleware = subs[0]["middleware"]
+    else:
+        middleware = _get_default_middleware(
+            workspace=workspace,
+            cfg=cfg,
+            chat_model=model,
+            for_async_subagent=kind == "async-subagent",
+        )
+    # Exercise the factory's error-handling order without unrelated tools or memory.
+    return [
+        m
+        for m in middleware
+        if m.name
+        in {"error_normalization", "model_fallback", "model_refusal_detection"}
+    ]
+
+
+@pytest.mark.parametrize("kind", ["main", "async-subagent"])
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize(
+    "fallback_reasons",
+    [[], ["end_turn"], ["refusal", "end_turn"], ["refusal"]],
+    ids=["no-fallback", "fallback-answers", "second-fallback-answers", "all-refuse"],
+)
+async def test_refused_primary_uses_configured_fallbacks(
+    monkeypatch, workspace, kind, use_async, fallback_reasons
+):
+    from functools import partial
+
+    from langchain.agents.middleware.types import ModelRequest
+
+    from EvoScientist.middleware.model_fallback import set_fallback_chain
+
+    primary = _request().model
+    from langchain_anthropic import ChatAnthropic
+
+    fallbacks = [
+        ChatAnthropic(
+            model="fallback",
+            api_key="test",
+            base_url="https://api.minimaxi.com/anthropic",
+        )
+        for _ in fallback_reasons
+    ]
+    reasons = {id(primary): "refusal"}
+    reasons.update(zip(map(id, fallbacks), fallback_reasons, strict=True))
+    models = dict(
+        zip((f"fallback-{i}" for i in range(len(fallbacks))), fallbacks, strict=True)
+    )
+    monkeypatch.setattr(
+        "EvoScientist.llm.models.get_chat_model", lambda model, provider: models[model]
+    )
+    set_fallback_chain([(name, "anthropic") for name in models])
+    middleware = _refusal_stack(workspace, primary, kind)
+    called = []
+
+    def answer(request):
+        called.append(request.model)
+        reason = reasons[id(request.model)]
+        return ModelResponse(
+            result=[
+                _message(
+                    reason,
+                    content="Fallback answer" if reason == "end_turn" else None,
+                )
+            ]
+        )
+
+    async def aanswer(request):
+        return answer(request)
+
+    invoke = aanswer if use_async else answer
+    for m in reversed(middleware):
+        wrap = m.awrap_model_call if use_async else m.wrap_model_call
+        invoke = partial(wrap, handler=invoke)
+    request = ModelRequest(model=primary, messages=[], tools=[], state={})
+
+    async def run():
+        return await invoke(request) if use_async else invoke(request)
+
+    if "end_turn" in fallback_reasons:
+        response = await run()
+        assert response.result[-1].response_metadata["stop_reason"] == "end_turn"
+        assert response.result[-1].content == "Fallback answer"
+    else:
+        with pytest.raises(ProviderStreamError, match="Model refused") as caught:
+            await run()
+        assert caught.value.provider == ("minimax" if fallbacks else "anthropic")
+    assert called == [primary, *fallbacks]
