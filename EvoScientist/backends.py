@@ -1381,7 +1381,7 @@ def validate_command(
         workspace_root: The workspace; ``cd`` may enter it, a destructive
             pattern whose target lies strictly inside it is allowed, and the
             relative operands of a recursive rm that runs before any ``cd``
-            are resolved against it.
+            or ``pushd`` are resolved against it.
 
     Returns:
         None if command is safe, error message string if blocked.
