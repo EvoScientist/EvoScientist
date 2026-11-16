@@ -1274,7 +1274,16 @@ def _bare_cd_goes_home() -> bool:
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
     absolute target outside them (a drive path on Windows too), the home
-    folder (``~``, ``$HOME``) or a bare ``cd``."""
+    folder (``~``, ``$HOME``) or a bare ``cd``. A target that names a
+    variable the command sets is also read with each of its values, where a
+    ``..`` component leaves too (``T=..; cd "$T"``)."""
+
+    def absolute_outside(path: str) -> bool:
+        return (
+            path.startswith("/") or (_is_windows() and bool(_DRIVE_PATH_RE.match(path)))
+        ) and not _under_any(path, allow_prefixes)
+
+    assigned: dict[str, tuple[str, ...]] | None = None
     for found in shell_syntax.simple_commands(command):
         if found.name not in ("cd", "pushd"):
             continue
@@ -1290,11 +1299,19 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
         arg, token = targets[0]
         # As the agent's shell reads it, so a Windows drive path is absolute too.
         path = _removal_target(token) if token is not None else arg
-        if _is_home_word(arg) or (
-            (path.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(path)))
-            and not _under_any(path, allow_prefixes)
-        ):
+        if _is_home_word(arg) or absolute_outside(path):
             return f"{found.name} {arg}"
+        if "$" not in arg:
+            continue
+        if assigned is None:
+            assigned = shell_syntax.assigned_values(command)
+        for value in shell_syntax.word_values(arg, path, assigned) or ():
+            if (
+                _is_home_word(value)
+                or absolute_outside(value)
+                or ".." in re.split(r"[\\/]", value)
+            ):
+                return f"{found.name} {arg}"
     return None
 
 

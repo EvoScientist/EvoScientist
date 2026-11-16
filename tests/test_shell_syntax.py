@@ -293,6 +293,51 @@ class TestSimpleCommands:
             "export \"P=$(lsof -t)\" 'Q'=$(ps) 'R=$(ps)' -x=1 \"$X\"=1"
         ) == [("P", '"$(lsof -t)"'), ("Q", "''$(ps)"), ("R", "'$(ps)'")]
 
+    def test_assigned_values_as_the_shell_reads_them(self):
+        assert shell_syntax.assigned_values(
+            'T=..; A="$HOME"; export B=$A/x \'C\'=~; declare "D=a b"; E='
+        ) == {
+            "T": ("..",),
+            "A": ("$HOME",),
+            "B": ("$HOME/x",),
+            "C": ("~",),
+            "D": ("a b",),
+            "E": ("",),
+        }
+        # In any order and in nested code; every value of a name.
+        assert shell_syntax.assigned_values("cd \"$T\"; bash -c 'T=sub'; T=..") == {
+            "T": ("..", "sub")
+        }
+        assert shell_syntax.assigned_values("X=1 Y=${X}2") == {
+            "X": ("1",),
+            "Y": ("12",),
+        }
+
+    def test_assigned_values_leave_out_what_only_the_run_knows(self):
+        assert shell_syntax.assigned_values('A=$(pwd) B=`pwd` C="$(pwd)/x"') == {
+            "A": (),
+            "B": (),
+            "C": (),
+        }
+        # A name that refers back to itself stays as written.
+        assert shell_syntax.assigned_values("A=$A/x") == {"A": ("$A/x",)}
+        assert shell_syntax.assigned_values("A=$B; B=$A") == {
+            "A": ("$A",),
+            "B": ("$A",),
+        }
+
+    def test_word_values_follow_unquoted_references_only(self):
+        assigned = {"T": ("..", "sub"), "U": ()}
+        assert shell_syntax.word_values('"$T/x"', "$T/x", assigned) == [
+            "../x",
+            "sub/x",
+        ]
+        assert shell_syntax.word_values("${T}", "${T}", assigned) == ["..", "sub"]
+        assert shell_syntax.word_values("'$T'", "$T", assigned) is None
+        assert shell_syntax.word_values("\\$T", "$T", assigned) is None
+        assert shell_syntax.word_values("$OTHER", "$OTHER", assigned) is None
+        assert shell_syntax.word_values("$U", "$U", assigned) == []
+
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")
         assert kill.args == ("`pgrep -f python`",)

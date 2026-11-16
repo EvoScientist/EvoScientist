@@ -1417,6 +1417,44 @@ class TestSandboxCommandChecks:
     def test_cd_inside_the_workspace_passes(self, command):
         assert validate_command(command, workspace_root="/W") is None
 
+    @pytest.mark.parametrize(
+        ("command", "shown"),
+        [
+            ('TARGET=/etc; cd "$TARGET" && cat passwd', "'cd \"$TARGET\"'"),
+            ('T=..; cd "$T"', "'cd \"$T\"'"),
+            ("T=..; cd $T && ls", "'cd $T'"),
+            ('T=$HOME; cd "$T"', "'cd \"$T\"'"),
+            ('T=~; cd "$T"', "'cd \"$T\"'"),
+            ('T=..; cd "$T/sub"', "'cd \"$T/sub\"'"),
+            ("export T=/etc; pushd ${T}", "'pushd ${T}'"),
+            ('A=..; B=$A; cd "$B"', "'cd \"$B\"'"),
+            ("T=src; T=..; cd $T", "'cd $T'"),
+            ("bash -c 'T=..; cd \"$T\"'", "'cd \"$T\"'"),
+        ],
+    )
+    def test_cd_to_a_variable_set_in_the_command_is_checked(
+        self, command, shown, monkeypatch
+    ):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        assert f"{shown} leaves the workspace" in validate_command(
+            command, workspace_root="/W"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "OUT=results; cd $OUT && ls",
+            'T=src; cd "$T/sub"',
+            "T=/W/src; cd $T",
+            "T=..; cd '$T'",
+            'cd "$(pwd)"',
+            'T=$(dirname x); cd "$T"',
+            'cd "$WORKDIR"',
+        ],
+    )
+    def test_cd_to_a_variable_inside_the_workspace_passes(self, command):
+        assert validate_command(command, workspace_root="/W") is None
+
     @pytest.mark.parametrize("bash", [False, True])
     def test_windows_drive_targets_are_checked_like_absolute_paths(
         self, monkeypatch, bash

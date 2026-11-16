@@ -847,6 +847,106 @@ def _assigned_name(word: str) -> str:
     return re.split(r"[\[+=]", word, maxsplit=1)[0]
 
 
+_REFERENCE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+# Most values one word is read with, so a long chain of assignments stays cheap.
+_VALUES_CAP = 16
+
+
+def variable_references(word: str) -> set[str]:
+    """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
+    outside single quotes and not escaped."""
+    names: set[str] = set()
+    quote: str | None = None
+    index = 0
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            index += 1
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "$":
+            match = _REFERENCE_RE.match(word, index)
+            if match is not None:
+                names.add(match.group(1) or match.group(2))
+        index += 1
+    return names
+
+
+def assigned_values(command: str) -> dict[str, tuple[str, ...]]:
+    """The values *command* sets each variable to (see :func:`assignments`),
+    in any order, as the shell reads them: quotes removed, and a ``$NAME`` of
+    another variable set in *command* replaced by its values. A value with a
+    substitution is only known when the command runs, so it is left out; any
+    other ``$NAME`` (``$HOME``) stays as written."""
+    written: dict[str, list[str]] = {}
+    for name, value in assignments(command):
+        written.setdefault(name, []).append(value)
+    resolved: dict[str, tuple[str, ...]] = {}
+    pending: set[str] = set()  # a reference back to one stays as written
+
+    def resolve(name: str) -> tuple[str, ...]:
+        if name in resolved:
+            return resolved[name]
+        pending.add(name)
+        found: list[str] = []
+        for value in written[name]:
+            if "$(" in value or "`" in value:
+                continue
+            tokens = tokenize(value)
+            if not tokens:
+                found.append("")
+                continue
+            if len(tokens) != 1 or tokens[0]["type"] != "word":
+                continue
+            others = (variable_references(value) & written.keys()) - pending
+            found.extend(
+                expand_references(
+                    str(tokens[0]["value"]),
+                    {other: resolve(other) for other in others},
+                )
+            )
+        pending.discard(name)
+        resolved[name] = tuple(dict.fromkeys(found))[:_VALUES_CAP]
+        return resolved[name]
+
+    return {name: resolve(name) for name in written}
+
+
+def expand_references(text: str, values: dict[str, tuple[str, ...]]) -> list[str]:
+    """*text* with each ``$NAME`` / ``${NAME}`` of a variable in *values*
+    replaced by each of its values (at most a few combinations); empty when
+    one of them has none."""
+    results = [""]
+    last = 0
+    for match in _REFERENCE_RE.finditer(text):
+        name = match.group(1) or match.group(2)
+        if name not in values:
+            continue
+        literal = text[last : match.start()]
+        results = [
+            result + literal + value for result in results for value in values[name]
+        ][:_VALUES_CAP]
+        last = match.end()
+    return [result + text[last:] for result in results]
+
+
+def word_values(
+    word: str, value: str, assigned: dict[str, tuple[str, ...]]
+) -> list[str] | None:
+    """The values a word reads as with the variables *assigned* in its command
+    (see :func:`assigned_values`): *value* is the word as the shell reads it,
+    *word* as written. ``None`` when it names none of them."""
+    names = variable_references(word) & assigned.keys()
+    if not names:
+        return None
+    return expand_references(value, {name: assigned[name] for name in names})
+
+
 def _simple_commands(
     command: str,
     seen: set[tuple[str, tuple[str, ...]]],
