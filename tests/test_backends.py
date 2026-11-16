@@ -1020,7 +1020,77 @@ class TestWorkspaceRemovalAndComments:
         assert "protected folder" in error
 
     @pytest.mark.parametrize(
-        "command", ["rm -r .evoscientist", "rm -rf .evoscientist/memories/$(date +%F)"]
+        "command",
+        [
+            "cd skills && rm -rf demo",
+            "cd skills; rm -rf demo",
+            "cd ./skills/ && rm -rf demo",
+            "pushd skills && rm -rf demo",
+            "cd skills/demo && rm -rf .",
+            "cd skills && rm -rf *",
+            "cd skills && rm -rf $(echo demo)",
+            "cd build || cd skills; rm -rf demo",
+            "bash -c 'cd skills && rm -rf demo'",
+            "cd skills/demo && rm -rf $X",
+            "D=skills; cd $D && rm -rf demo",
+            'D=skills; cd "$D/demo" && rm -rf x',
+            "env -C skills rm -rf demo",
+            "env --chdir=skills/demo rm -rf x",
+            "env -C . sh -c 'rm -rf skills'",
+            'D=skills; env -C "$D" rm -rf x',
+            "D=skills; rm -rf $D",
+            'D=skills; rm -rf "$D/demo"',
+            "A=sk; D=${A}ills; rm -rf $D",
+            "export D=skills; rm -rf ${D}",
+        ],
+    )
+    @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
+    def test_removals_from_every_folder_a_cd_may_enter_are_checked(
+        self, command, folder, tmp_path
+    ):
+        workspace = tmp_path / folder
+        workspace.mkdir()
+        error = self._prepare_with_workspace_folders(command, str(workspace))
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd build && rm -rf skills",
+            "pushd build && rm -rf skills",
+            "(cd build; rm -rf skills)",
+            "(cd build); rm -rf skills",
+            "rm -rf demo; cd skills",
+            "bash -c 'cd build && rm -rf skills'",
+            "bash -c 'cd EvoSkills && rm -rf skills/old'",
+            "timeout 60 bash -c 'cd build && rm -rf skills'",
+            "bash <<'EOF'\ncd build\nrm -rf skills\nEOF",
+            'echo "$(cd build && rm -rf skills)"',
+            'cd build && >"$(rm -rf skills)" echo hi',
+            "cd `mktemp -d` && rm -rf skills",
+            'cd build && echo "$(rm -rf skills)"',
+            "cd build && cat <<EOF\n$(rm -rf skills)\nEOF",
+        ],
+    )
+    def test_a_removal_is_also_read_from_the_workspace_root(
+        self, command, tmp_workspace
+    ):
+        # The folders are read in any order, so the root is always one of
+        # them; `rm -rf build/skills` names the same folder without the cd.
+        error = self._prepare_with_workspace_folders(command, tmp_workspace)
+        assert "protected folder" in error
+        assert (
+            self._prepare_with_workspace_folders("rm -rf build/skills", tmp_workspace)
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -r .evoscientist",
+            "rm -rf .evoscientist/memories/$(date +%F)",
+            "cd .evoscientist && rm -rf memories",
+        ],
     )
     def test_relative_removals_of_memories_in_the_workspace_are_refused(
         self, command, tmp_workspace, monkeypatch
@@ -1041,26 +1111,21 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf $OUT",
             'rm -rf "$OUT"/skills',
             "rm skills/demo/x.py",
-            "cd build && rm -rf skills",
-            "pushd build && rm -rf skills",
             "env -C build rm -rf skills",
             "env -iC build rm -rf skills",
             "env --chdir=build rm -rf skills",
             "env --ch build rm -rf skills",
             "env -iu X -C build rm -rf skills",
             "env LANG=C -C build rm -rf skills",
-            "(cd build; rm -rf skills)",
-            "bash -c 'cd build && rm -rf skills'",
-            "bash -c 'cd EvoSkills && rm -rf skills/old'",
-            "timeout 60 bash -c 'cd build && rm -rf skills'",
-            "bash <<'EOF'\ncd build\nrm -rf skills\nEOF",
-            'echo "$(cd build && rm -rf skills)"',
             "env -C build sh -c 'rm -rf skills' && echo done",
             "nohup env -C build rm -rf skills",
-            'cd build && >"$(rm -rf skills)" echo hi',
-            "cd `mktemp -d` && rm -rf skills",
-            'cd build && echo "$(rm -rf skills)"',
-            "cd build && cat <<EOF\n$(rm -rf skills)\nEOF",
+            "env -C build env -C sub rm -rf skills",
+            "cd build && rm -rf demo",
+            "cd build && rm -rf *",
+            "cd src; cd -; rm -rf build",
+            'cd "$(pwd)" && rm -rf build',
+            "D=$(pwd); rm -rf $D/build",
+            'D=build; rm -rf "$D"',
             "rm -rf skill* {build,dist}",
             "rm -rf build/$(date +%F)",
             "rm -rf ./$(printf build)",
@@ -1068,6 +1133,14 @@ class TestWorkspaceRemovalAndComments:
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
         assert self._prepare_with_workspace_folders(command, tmp_workspace) is None
+
+    def test_the_folders_a_removal_is_read_from_are_capped(self):
+        command = "; ".join(f"cd d{i}" for i in range(20)) + "; rm -rf x"
+        commands = backends.shell_syntax.simple_commands(command)
+        folders = backends._possible_folders(commands, "/W", {})
+        assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
+        assert len(folders) == backends._FOLDERS_CAP
+        assert validate_command(command, workspace_root="/W") is None
 
     @pytest.mark.parametrize("bash", [False, True])
     def test_relative_protected_removals_on_windows(self, monkeypatch, bash):

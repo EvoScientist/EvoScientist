@@ -257,20 +257,6 @@ class TestSimpleCommands:
     def test_env_options_take_their_value_clustered_or_shortened(self, command):
         assert ("pkill", ("env",)) in self._found(command)
 
-    @pytest.mark.parametrize(
-        ("command", "names"),
-        [
-            ("rm a; cd b; rm c", ["rm"]),
-            ("bash -c 'rm a; cd b; rm c'; rm d", ["bash", "rm", "rm"]),
-            ('echo "$(cd b; rm a)"; rm c', ["echo", "rm"]),
-            ('bash -c "cd b; echo $(rm a)"', ["bash", "rm"]),
-            ("env -iC b sh -c 'rm a'; rm c", ["env", "rm"]),
-        ],
-    )
-    def test_starting_folder_commands_end_each_text_at_its_cd(self, command, names):
-        found = shell_syntax.starting_folder_commands(command)
-        assert [each.name for each in found] == names
-
     def test_assignments_wherever_a_variable_is_set(self):
         assert shell_syntax.assignments(
             'A=1; B=$(ps aux | grep x) cmd; export C=`lsof -t`; local -r D="$(ps)" E'

@@ -1271,6 +1271,17 @@ def _bare_cd_goes_home() -> bool:
     return agent_shell.uses_bash()
 
 
+def _folder_target(
+    found: shell_syntax.SimpleCommand,
+) -> tuple[str, dict[str, object] | None] | None:
+    """The target of a ``cd`` / ``pushd`` as written, with its token; ``None``
+    when it names none."""
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        if not (arg.startswith("-") and arg != "-"):
+            return arg, token
+    return None
+
+
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
     absolute target outside them (a drive path on Windows too), the home
@@ -1285,18 +1296,14 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
 
     assigned: dict[str, tuple[str, ...]] | None = None
     for found in shell_syntax.simple_commands(command):
-        if found.name not in ("cd", "pushd"):
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        targets = [
-            (arg, token)
-            for arg, token in zip(found.args, found.tokens, strict=True)
-            if not (arg.startswith("-") and arg != "-")
-        ]
-        if not targets:
+        target = _folder_target(found)
+        if target is None:
             if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
             continue
-        arg, token = targets[0]
+        arg, token = target
         # As the agent's shell reads it, so a Windows drive path is absolute too.
         path = _removal_target(token) if token is not None else arg
         if _is_home_word(arg) or absolute_outside(path):
@@ -1327,6 +1334,90 @@ def _literal_folder(operand: str) -> str | None:
     if len(tokens) != 1 or tokens[0]["type"] != "word":
         return None
     return _removal_target(tokens[0]) or None
+
+
+# Most folders an rm is checked from; each `cd` may double them.
+_FOLDERS_CAP = 64
+
+
+def _word_paths(
+    word: str, token: dict[str, object] | None, assigned: dict[str, tuple[str, ...]]
+) -> list[str]:
+    """The paths a word may name as the agent's shell reads it, with ``/``
+    separators: itself, or with each value of the variables its command sets
+    (see :func:`shell_syntax.word_values`)."""
+    path = _removal_target(token) if token is not None else word
+    values = shell_syntax.word_values(word, path, assigned)
+    return [path] if values is None else [value.replace("\\", "/") for value in values]
+
+
+def _folder_from(folder: str, target: str) -> str | None:
+    """The folder a ``cd`` to *target* from *folder* enters (an absolute
+    target as it is); ``None`` when only the run knows it (an expansion, a
+    glob, ``-``)."""
+    if not target or target == "-" or re.search(r"[$`%*?\[]", target):
+        return None
+    if target.startswith("/") or _DRIVE_PATH_RE.match(target):
+        return posixpath.normpath(target)
+    return posixpath.normpath(f"{folder}/{target}")
+
+
+def _possible_folders(
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    assigned: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """The folders the commands of one command may run in, whatever their
+    order: the workspace root, and each ``cd`` / ``pushd`` target read from
+    every folder found before it, also with the values of the variables the
+    command sets; at most :data:`_FOLDERS_CAP`. A target only the run knows
+    adds none, nor do ``cd -`` and ``popd``, which return to one of them."""
+    folders = [posixpath.normpath(workspace_root.replace("\\", "/"))]
+    for found in commands:
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        target = _folder_target(found)
+        if target is None:
+            continue
+        for value in _word_paths(*target, assigned):
+            for folder in list(folders):
+                entered = _folder_from(folder, value)
+                if entered is None or entered in folders:
+                    continue
+                if len(folders) == _FOLDERS_CAP:
+                    return folders
+                folders.append(entered)
+    return folders
+
+
+def _env_folders(
+    found: shell_syntax.SimpleCommand,
+    folders: list[str],
+    assigned: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """The folders *found* runs in, from each of *folders*, after the
+    ``env -C`` folders it runs under; empty when only the run knows one."""
+    for folder_word in found.folders:
+        values = shell_syntax.word_values(folder_word, folder_word, assigned)
+        folders = [
+            entered
+            for folder in folders
+            for value in ([folder_word] if values is None else values)
+            if (entered := _folder_from(folder, value.replace("\\", "/")))
+        ][:_FOLDERS_CAP]
+    return folders
+
+
+def _removes_protected(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> bool:
+    """Whether removing *path* (absolute, ``/`` separators) removes a protected
+    folder: inside one anywhere, or holding one in the workspace."""
+    path = posixpath.normpath(path)
+    return (
+        _under_any(path, protected)
+        or _removal_problem(path, workspace_root, protected) == "protected"
+    )
 
 
 def _recursive_rm_operands(
@@ -1523,8 +1614,8 @@ def validate_command(
             enforced.
         workspace_root: The workspace; ``cd`` may enter it, a destructive
             pattern whose target lies strictly inside it is allowed, and the
-            relative operands of a recursive rm that runs before any ``cd``
-            or ``pushd`` are resolved against it.
+            relative operands of a recursive rm are resolved against it and
+            every folder a ``cd`` or ``pushd`` in the command may enter.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1611,32 +1702,37 @@ def validate_command(
                         f"outside the workspace or may expand there. Remove a "
                         f"path inside the workspace (e.g., './build')."
                     )
-        # A relative operand of an rm that runs in the workspace root: only a
-        # protected folder is refused (rm itself refuses `.`), and a first
-        # segment that expands may be anything, so it is left alone.
-        # `commands` holds nested code too, so without an rm there is none.
-        starting = (
-            shell_syntax.starting_folder_commands(command)
-            if any(found.name == "rm" for found in commands)
-            else []
+        # Every operand read from every folder the rm may run in, with the
+        # values of the variables the command sets: only a protected folder
+        # is refused (rm itself refuses `.`), and a first segment that
+        # expands may be anything, so it is left alone.
+        removals = [
+            (found, operand, token)
+            for found in commands
+            for operand, token in _recursive_rm_operands(found)
+        ]
+        assigned = shell_syntax.assigned_values(command) if removals else {}
+        folders = (
+            _possible_folders(commands, workspace_root, assigned) if removals else []
         )
-        for found in starting:
-            for operand, token in _recursive_rm_operands(found):
-                path = _removal_target(token) if token is not None else operand
-                bare = path.lstrip("'\"")
-                if bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
-                    continue
-                if token is None:
-                    # Glued to a substitution: whatever it expands to stays
-                    # under the literal folder written before it.
-                    path = _literal_folder(operand)
-                    if path is None:
-                        continue
-                problem = _removal_problem(
-                    f"{workspace_root}/{path}", workspace_root, protected
-                )
-                if problem == "protected":
-                    return _protected_removal_error(operand)
+        for found, operand, token in removals:
+            if token is not None:
+                operand_paths = _word_paths(operand, token, assigned)
+            else:
+                # Glued to a substitution: whatever it expands to stays under
+                # the literal folder written before it, or under the folder
+                # the rm runs in when none is.
+                operand_paths = [
+                    _literal_folder(written) or written
+                    for written in shell_syntax.word_values(operand, operand, assigned)
+                    or [operand]
+                ]
+            for folder in _env_folders(found, folders, assigned):
+                for path in operand_paths:
+                    if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                        path = f"{folder}/{path}"
+                    if _removes_protected(path, workspace_root, protected):
+                        return _protected_removal_error(operand)
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:
