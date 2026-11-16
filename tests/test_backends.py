@@ -1155,6 +1155,19 @@ class TestWorkspaceRemovalAndComments:
         assert "refused in every mode" in error
 
     @pytest.mark.parametrize(
+        "command", ["rm -rf %USERPROFILE%\\*", "rm -rf %USERPROFILE%\\."]
+    )
+    def test_dangerous_mode_never_removes_home_under_cmd(self, command, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+        error = prepare_sandbox_command(
+            command, r"C:\Users\me\proj", virtual_mode=False, dangerous=True
+        )[1]
+        assert "refused in every mode" in error
+
+    @pytest.mark.parametrize(
         "command",
         [
             "rm -fr /tmp/x",

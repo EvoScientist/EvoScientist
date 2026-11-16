@@ -1271,7 +1271,6 @@ def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     path = _removal_target(token) if token is not None else operand
     if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
         return True
-    value = str(token["value"]) if token is not None else operand
     # The shell expands a tilde only while its prefix is unquoted; the steps
     # after it are read as the shell passes them (`~/""` is `~/`).
     tilde_prefix = operand.split("/", 1)[0]
@@ -1279,11 +1278,11 @@ def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
         (
             operand.startswith("~")
             and not re.search(r"[\"'\\]", tilde_prefix)
-            and _HOME_TILDE_TARGET_RE.fullmatch(value.replace("\\", "/"))
+            and _HOME_TILDE_TARGET_RE.fullmatch(path.replace("\\", "/"))
         )
         or (
             _is_home_word(operand)
-            and _HOME_VARIABLE_TARGET_RE.fullmatch(value.replace("\\", "/"))
+            and _HOME_VARIABLE_TARGET_RE.fullmatch(path.replace("\\", "/"))
         )
     )
 
