@@ -1145,8 +1145,15 @@ class TestWorkspaceRemovalAndComments:
         commands = backends.shell_syntax.simple_commands(command)
         folders = backends._possible_folders(commands, "/W", {})
         assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
-        assert len(folders) == backends._FOLDERS_CAP
+        # Past the cap, each later target is still read from the root.
+        assert "/W/d19" in folders
+        assert len(folders) < backends._FOLDERS_CAP + 20
         assert validate_command(command, workspace_root="/W") is None
+        assert "protected folder" in validate_command(
+            command.replace("rm -rf x", "cd skills && rm -rf demo"),
+            ("/W/skills",),
+            workspace_root="/W",
+        )
 
     @pytest.mark.parametrize("bash", [False, True])
     def test_relative_protected_removals_on_windows(self, monkeypatch, bash):

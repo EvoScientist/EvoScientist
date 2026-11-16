@@ -1371,9 +1371,11 @@ def _possible_folders(
     """The folders the commands of one command may run in, whatever their
     order: the workspace root, and each ``cd`` / ``pushd`` target read from
     every folder found before it, also with the values of the variables the
-    command sets; at most :data:`_FOLDERS_CAP`. A target only the run knows
-    adds none, nor do ``cd -`` and ``popd``, which return to one of them."""
-    folders = [posixpath.normpath(workspace_root.replace("\\", "/"))]
+    command sets. Past :data:`_FOLDERS_CAP` folders, a target is only read
+    from the workspace root. A target only the run knows adds none, nor do
+    ``cd -`` and ``popd``, which return to one of them."""
+    root = posixpath.normpath(workspace_root.replace("\\", "/"))
+    folders = [root]
     for found in commands:
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
@@ -1382,12 +1384,11 @@ def _possible_folders(
             continue
         for value in _word_paths(*target, assigned):
             for folder in list(folders):
-                entered = _folder_from(folder, value)
-                if entered is None or entered in folders:
+                if len(folders) >= _FOLDERS_CAP and folder != root:
                     continue
-                if len(folders) == _FOLDERS_CAP:
-                    return folders
-                folders.append(entered)
+                entered = _folder_from(folder, value)
+                if entered is not None and entered not in folders:
+                    folders.append(entered)
     return folders
 
 
