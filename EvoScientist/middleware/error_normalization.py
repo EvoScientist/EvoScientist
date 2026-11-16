@@ -19,16 +19,17 @@ recognized provider SDK client, wraps the exception in a
 ``Exception`` subclass, not a dataclass). The wrapper carries the SSE
 envelope pre-baked on its instance attributes.
 
-Contract: the wrap decision is based on the **model**, not the
-exception. Every exception raised inside a call to a recognized
-provider model gets wrapped — SDK exceptions, httpx errors,
+Contract: apart from the pass-through exceptions below, the wrap decision
+is based on the **model**, not the exception. Exceptions raised inside a
+call to a recognized provider model get wrapped — SDK exceptions, httpx errors,
 langchain-wrapper failures, and even builtins like ``RuntimeError``.
 At the middleware boundary we can tell which provider was in use, but
 not the exception's precise origin; a uniform envelope is more useful
 to the WebUI than gambling on the exception class. If the model isn't
 from a recognized provider, or the request carries no ``.model``, the
 exception re-raises unchanged and upstream's whitelist / catch-all
-behavior takes over.
+behavior takes over. LangGraph signals, context overflow and model refusals
+also propagate unchanged so their upstream handlers can recognize them.
 """
 
 from __future__ import annotations
@@ -173,6 +174,32 @@ def _check_truncated_output(response: ModelResponse) -> ModelResponse:
     )
 
 
+def _check_refusal_output(response: ModelResponse) -> ModelResponse:
+    """Catch response-level refusals missing from v3's assembled content blocks."""
+    from langchain_core.exceptions import ModelRefusalError
+    from langchain_core.messages import AIMessage
+
+    for message in getattr(response, "result", None) or []:
+        if not isinstance(message, AIMessage):
+            continue
+        if message.response_metadata.get("stop_reason") != "refusal":
+            continue
+        blocks = message.content_blocks
+        refusal = next((b for b in blocks if b.get("type") == "refusal"), None)
+        if refusal is None:
+            # v3 marks the assembled list as v1, bypassing the Anthropic
+            # translator that normally derives this block from stop_details.
+            details = message.response_metadata.get("stop_details")
+            if not isinstance(details, dict):
+                details = {}
+            refusal = {"type": "refusal", "refusal": details.get("explanation") or ""}
+            if category := details.get("category"):
+                refusal["extras"] = {"category": category}
+            message = message.model_copy(update={"content": [*blocks, refusal]})
+        raise ModelRefusalError.from_refusal(refusal, raw_message=message)
+    return response
+
+
 def _should_pass_through(exc: BaseException) -> bool:
     """True if *exc* is a LangGraph-level signal that must propagate
     untouched — either a control-flow signal or a structural error
@@ -268,9 +295,11 @@ def _normalize(
       **outside** the user middleware stack to compress history and
       retry. Wrapping it here would change the type and break that
       self-healing fallback.
+    - ``ModelRefusalError`` — deepagents' task tool catches it by type to
+      report a subagent refusal to the parent model.
     - Models we don't recognize as a provider SDK.
     """
-    from langchain_core.exceptions import ContextOverflowError
+    from langchain_core.exceptions import ContextOverflowError, ModelRefusalError
 
     from ..llm.errors import (
         ProviderStreamError,
@@ -292,9 +321,9 @@ def _normalize(
     if _should_pass_through(exc):
         return None
 
-    # SummarizationMiddleware sits outside our stack and catches this
-    # by exact type to trigger reactive history compression + retry.
-    if isinstance(exc, ContextOverflowError):
+    # Upstream summarization and subagent middleware catch these by type
+    # to compress history or return a refusal notice to the parent.
+    if isinstance(exc, (ContextOverflowError, ModelRefusalError)):
         return None
 
     provider = _provider_from_model(getattr(request, "model", None))
@@ -343,7 +372,7 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         try:
-            return _check_truncated_output(handler(request))
+            return _check_truncated_output(_check_refusal_output(handler(request)))
         except Exception as exc:
             normalized = _normalize(request, exc)
             if normalized is None:
@@ -356,7 +385,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         try:
-            return _check_truncated_output(await handler(request))
+            return _check_truncated_output(
+                _check_refusal_output(await handler(request))
+            )
         except Exception as exc:
             normalized = _normalize(request, exc)
             if normalized is None:
