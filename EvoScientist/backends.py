@@ -1248,11 +1248,26 @@ def _removal_problem(
     return None
 
 
-def _protected_removal_error(target: str) -> str:
-    return (
-        f"Command blocked: '{target}' is or holds a protected folder (skills, "
-        f"memories or media), which shell commands may not remove."
+def _protected_removal_error(target: str, folder: str | None = None) -> str:
+    """The refusal of removing *target*; *folder*: the workspace folder, other
+    than the root, that the command may change into and *target* is read from."""
+    read_from = (
+        f" (read from '{folder}', a folder this command may change into)"
+        if folder
+        else ""
     )
+    return (
+        f"Command blocked: '{target}'{read_from} is or holds a protected folder "
+        f"(skills, memories or media), which shell commands may not remove."
+    )
+
+
+def _workspace_folder(folder: str, root: str) -> str | None:
+    """*folder* relative to the workspace *root*, ``/`` separated; ``None``
+    for the root itself or a folder outside it."""
+    if folder == root or not _under_any(folder, (root,)):
+        return None
+    return folder[len(root.rstrip("/")) + 1 :]
 
 
 def _is_home_word(raw: str) -> bool:
@@ -1732,10 +1747,14 @@ def validate_command(
                 ]
             for folder in _env_folders(found, folders, assigned):
                 for path in operand_paths:
-                    if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                    relative = not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+                    if relative:
                         path = f"{folder}/{path}"
                     if _removes_protected(path, workspace_root, protected):
-                        return _protected_removal_error(operand)
+                        return _protected_removal_error(
+                            operand,
+                            _workspace_folder(folder, folders[0]) if relative else None,
+                        )
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:

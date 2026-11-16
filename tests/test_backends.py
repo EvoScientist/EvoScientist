@@ -1140,6 +1140,22 @@ class TestWorkspaceRemovalAndComments:
     def test_other_relative_removals_pass(self, command, tmp_workspace):
         assert self._prepare_with_workspace_folders(command, tmp_workspace) is None
 
+    @pytest.mark.parametrize(
+        ("command", "shown"),
+        [
+            ("rm -rf build; cd skills", "'build' (read from 'skills', a folder"),
+            ("cd skills/demo && rm -rf x", "'x' (read from 'skills/demo', a folder"),
+            ("env -C skills rm -rf x", "'x' (read from 'skills', a folder"),
+            ("cd build && rm -rf skills", "'skills' is or holds"),
+            ("rm -rf skills; cd build", "'skills' is or holds"),
+        ],
+    )
+    def test_a_refusal_names_the_folder_the_operand_is_read_from(
+        self, command, shown, tmp_workspace
+    ):
+        error = self._prepare_with_workspace_folders(command, tmp_workspace)
+        assert shown in error
+
     def test_the_folders_a_removal_is_read_from_are_capped(self):
         command = "; ".join(f"cd d{i}" for i in range(20)) + "; rm -rf x"
         commands = backends.shell_syntax.simple_commands(command)
