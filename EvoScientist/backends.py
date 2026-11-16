@@ -1171,11 +1171,6 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     return None
 
 
-# Commands that change the folder the commands after them run in; `popd`
-# cannot before a `pushd`, as each command starts with an empty stack.
-_FOLDER_COMMANDS = ("cd", "pushd")
-
-
 def _literal_folder(operand: str) -> str | None:
     """The folder an operand names before its first expansion (``$`` or a
     backtick), as the agent's shell reads it: ``skills`` for
@@ -1188,55 +1183,6 @@ def _literal_folder(operand: str) -> str | None:
     if len(tokens) != 1 or tokens[0]["type"] != "word":
         return None
     return _removal_target(tokens[0]) or None
-
-
-def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:
-    """Whether an ``env`` runs its command in another folder: ``-C`` (also
-    clustered, ``-iC``) or ``--chdir`` among env's own options."""
-    skip = False
-    for arg, token in zip(found.args, found.tokens, strict=True):
-        value = str(token["value"]) if token is not None else arg
-        if skip:
-            skip = False
-        elif re.match(r"-[i0v]*C", value) or (
-            len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0])
-        ):
-            return True
-        elif value in ("-S", "--split-string") or shell_syntax.env_value_is_next(value):
-            skip = True
-        elif not (value.startswith("-") or shell_syntax.ASSIGNMENT_RE.match(value)):
-            return False  # env's command: its options are its own
-    return False
-
-
-def _commands_in_starting_folder(command: str) -> list[shell_syntax.SimpleCommand]:
-    """The commands of *command* that run in the folder it starts in: the
-    ones written before its first ``cd`` or ``pushd`` in
-    command-name position (with the code they run), less the commands an
-    ``env -C`` runs. A folder change inside a substitution or a subshell
-    also ends them, which misses a removal rather than refusing one."""
-    words = shell_syntax.parse(command)
-    cut = next(
-        (
-            int(token["start"])
-            for token, is_name in zip(words.tokens, words.name_flags, strict=True)
-            if is_name
-            and re.split(r"[\\/]", str(token["value"]))[-1] in _FOLDER_COMMANDS
-        ),
-        len(command),
-    )
-    found: list[shell_syntax.SimpleCommand] = []
-    elsewhere: tuple[str, ...] | None = None  # the wrappers of an `env -C`'s command
-    for each in shell_syntax.simple_commands(command[:cut]):
-        if elsewhere is not None and each.via[: len(elsewhere)] == elsewhere:
-            continue
-        elsewhere = (
-            (*each.via, "env")
-            if each.name == "env" and _env_changes_folder(each)
-            else None
-        )
-        found.append(each)
-    return found
 
 
 def _recursive_rm_operands(
@@ -1523,7 +1469,7 @@ def validate_command(
         # A relative operand of an rm that runs in the workspace root: only a
         # protected folder is refused (rm itself refuses `.`), and a first
         # segment that expands may be anything, so it is left alone.
-        for found in _commands_in_starting_folder(command):
+        for found in shell_syntax.starting_folder_commands(command):
             for operand, token in _recursive_rm_operands(found):
                 path = _removal_target(token) if token is not None else operand
                 bare = path.lstrip("'\"")
