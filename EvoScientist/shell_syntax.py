@@ -48,10 +48,11 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
     "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
 }
 # Long shell options whose value is the next word.
-_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file"})
+_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
 # Short option letters that take the next word, also inside a cluster
-# (``-euo pipefail``); zsh's -o takes the rest of its word when there is one. Only bash's ``-O`` takes a shopt name: zsh's is a flag,
-# so ``zsh -O -c 'x'`` runs ``x``.
+# (``-euo pipefail``). ``-O`` takes a shopt name in bash (and in ``sh``
+# when that is bash); zsh's ``-O`` is a flag, so ``zsh -O -c 'x'`` runs
+# ``x``, and zsh's ``-o`` takes the rest of its word when there is one.
 _SHELL_LETTERS_WITH_VALUE = {"bash": "oO", "sh": "oO"}
 
 

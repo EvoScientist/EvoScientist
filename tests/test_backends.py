@@ -1297,6 +1297,11 @@ class TestWorkspaceRemovalAndComments:
                 'bash --rcfile ./rc -lc "cat /tmp/x"',
                 'bash --rcfile ./rc -lc "cat ./tmp/x"',
             ),
+            (
+                'bash --init-file ./rc -c "cat /tmp/x"',
+                'bash --init-file ./rc -c "cat ./tmp/x"',
+            ),
+            ('sh -O extglob -c "cat /tmp/x"', 'sh -O extglob -c "cat ./tmp/x"'),
         ],
     )
     def test_shell_c_scripts_are_rewritten(self, command, expected):
@@ -3345,6 +3350,8 @@ class TestProcessKillByName:
             "zsh -O -c 'pkill -f x'",
             "zsh -opipefail -c 'pkill -f x'",
             "zsh -onomatch -c 'pkill -f x'",
+            "bash -oO pipefail extglob -c 'pkill -f x'",
+            "zsh --emulate sh -c 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
             "env -S 'pkill -f x'",
             "env -S'pkill -f x'",
