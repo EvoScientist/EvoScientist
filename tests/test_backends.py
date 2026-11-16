@@ -1182,6 +1182,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf ~/''",
             "rm -rf ~root/'.'",
             "env -iC / rm -rf ~",
+            "rm -rf ~/.*",
+            "rm -rf $HOME/.*",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(

@@ -110,9 +110,10 @@ _KILL_BY_LOOKUP_ERROR = (
 # `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
 _HOME_VARIABLE_RE = re.compile(r"\$\{?(?:HOME|USERPROFILE)\b|(?i:%USERPROFILE%)")
 # The home folder itself as an rm target: `~` or `~user` as written, or one
-# of the variables above, then only `/`, `/.` or `/*` steps. Each step takes
-# one slash, so a long run of slashes splits one way only (no backtracking).
-_HOME_STEPS = r"(?:/[.*]?)*"
+# of the variables above, then only `/`, `/.`, `/*` or `/.*` steps. Each step
+# takes one slash, so a long run of slashes splits one way only (no
+# backtracking).
+_HOME_STEPS = r"(?:/\.?\*?)*"
 _HOME_TILDE_TARGET_RE = re.compile(rf"~(?:\w[\w.-]*)?{_HOME_STEPS}")
 _HOME_VARIABLE_TARGET_RE = re.compile(
     rf"(?:\$(?:HOME|USERPROFILE)|\$\{{(?:HOME|USERPROFILE)\}}|(?i:%USERPROFILE%))"
@@ -1212,8 +1213,9 @@ def _recursive_rm_operands(
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     """Whether an rm operand is the file system root, a drive root or the home
-    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.`` or
-    ``/*``; rm itself refuses a ``.`` operand, but not every rm is checked)."""
+    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.``,
+    ``/*`` or ``/.*``; rm itself refuses a ``.`` operand, but not every rm is
+    checked)."""
     path = _removal_target(token) if token is not None else operand
     if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
         return True
