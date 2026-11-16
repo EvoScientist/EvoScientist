@@ -104,7 +104,7 @@ _KILL_BY_LOOKUP_ERROR = (
     "12345, or stop_process with the id run_in_background returned). Ids a "
     "process lookup found (pgrep, pidof, ps, lsof, fuser), also through a "
     "variable or a read loop beside one, and -1 / 0 can reach EvoScientist "
-    "itself. To kill ids listed in a file, run that read loop as its own command."
+    "itself."
 )
 # The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
 # `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).

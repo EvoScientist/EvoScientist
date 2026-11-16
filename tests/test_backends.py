@@ -3327,7 +3327,6 @@ class TestProcessKillByName:
     def test_kills_of_looked_up_ids_are_blocked(self, command, dangerous):
         error = validate_command(command, dangerous=dangerous)
         assert "pgrep, pidof, ps, lsof, fuser" in error
-        assert "read loop as its own command" in error
 
     @pytest.mark.parametrize(
         "command",
