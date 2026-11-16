@@ -408,18 +408,16 @@ def shell_script_words(tokens: Sequence[dict[str, object]]) -> set[int]:
         for option in options:
             if option["type"] != "word":
                 break
-            # Decoded: shells strip quotes and escapes, so "-c" and -\c
-            # still name the command string option.
-            value = str(option["value"])
-            if not value.startswith(("-", "+")):
+            raw = str(option["raw"])
+            if not raw.startswith(("-", "+")):
                 break
-            if SHELL_C_OPTION_RE.fullmatch(value):
+            if SHELL_C_OPTION_RE.fullmatch(raw):
                 script = next(options, None)
                 if script is not None and script["type"] == "word":
                     starts.add(int(script["start"]))
                 break
             # -o/-O consume a separate option name, including in -euo.
-            if re.fullmatch(r"[-+][A-Za-z]*[oO]", value):
+            if re.fullmatch(r"[-+][A-Za-z]*[oO]", raw):
                 name = next(options, None)
                 if name is None or name["type"] != "word":
                     break
