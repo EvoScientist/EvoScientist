@@ -679,6 +679,11 @@ def test_workspace_name_ending_in_a_symbol_keeps_its_own_paths(tmp_path, root_na
         "cat ./{a,..}/x",
         "cat '{..,a}'/x",
         "ls {a,..,b}",
+        # `..` built from a choice and the text next to it, or nested.
+        "cat /tmp/.{.,a}/etc/passwd",
+        "cat /tmp/{.,a}./etc/passwd",
+        "cat /tmp/{a,{b,..}}/x",
+        "cat /tmp/.{-../}/etc/passwd",
     ],
 )
 def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
@@ -690,7 +695,16 @@ def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "command", ["echo {1..5}", "cat ./{a,b}..txt", "ls ./{a..c}/x", "cat a{..,b}"]
+    "command",
+    [
+        "echo {1..5}",
+        "cat ./{a,b}..txt",
+        "ls ./{a..c}/x",
+        "cat a{..,b}",
+        "for i in {1..100000}; do echo $i; done",
+        "cat ./file{1,2}.txt",
+        "cat ./{{a,b},c}/x",
+    ],
 )
 def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
     from EvoScientist.backends import _has_traversal_component

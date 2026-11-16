@@ -983,8 +983,74 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
-# A whole path component that is a brace list with `..` as one choice.
-_BRACE_TRAVERSAL_RE = re.compile(r"(?:^|/)\{(?:[^{}/]*,)?\.\.(?:,[^{}/]*)?\}(?:/|$)")
+# Words a brace expansion may produce before we stop and treat it as unsafe.
+_BRACE_EXPANSION_LIMIT = 4096
+_BRACE_INT_SEQUENCE_RE = re.compile(r"[+-]?\d+\.\.[+-]?\d+(?:\.\.[+-]?\d+)?")
+_BRACE_CHAR_SEQUENCE_RE = re.compile(r"(.)\.\.(.)(?:\.\.[+-]?\d+)?", re.DOTALL)
+
+
+def _brace_choices(body: str) -> list[str] | None:
+    """Return what ``{body}`` expands to, or None if bash keeps it literal."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(body):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    if parts:
+        return [*parts, body[start:]]
+    if _BRACE_INT_SEQUENCE_RE.fullmatch(body):
+        # Numbers only: no choice can be or build a `..` component.
+        return ["0"]
+    seq = _BRACE_CHAR_SEQUENCE_RE.fullmatch(body)
+    if seq:
+        lo, hi = sorted((ord(seq.group(1)), ord(seq.group(2))))
+        return [chr(c) for c in range(lo, hi + 1)]
+    return None
+
+
+def _first_brace_expansion(word: str) -> tuple[int, int, list[str]] | None:
+    """Find the first ``{...}`` that bash expands: (start, end, choices)."""
+    for start, ch in enumerate(word):
+        if ch != "{":
+            continue
+        depth = 0
+        for end in range(start, len(word)):
+            if word[end] == "{":
+                depth += 1
+            elif word[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    choices = _brace_choices(word[start + 1 : end])
+                    if choices is not None:
+                        return start, end, choices
+                    break
+    return None
+
+
+def _expand_braces(word: str) -> list[str] | None:
+    """Expand brace lists and sequences in ``word`` like bash does.
+
+    Returns None when the result would pass ``_BRACE_EXPANSION_LIMIT`` words.
+    """
+    pending = [word]
+    expanded: list[str] = []
+    while pending:
+        current = pending.pop()
+        found = _first_brace_expansion(current)
+        if found is None:
+            expanded.append(current)
+            continue
+        start, end, choices = found
+        pending.extend(current[:start] + c + current[end + 1 :] for c in choices)
+        if len(pending) + len(expanded) > _BRACE_EXPANSION_LIMIT:
+            return None
+    return expanded
 
 
 def _has_traversal_component(command: str) -> bool:
@@ -999,10 +1065,11 @@ def _has_traversal_component(command: str) -> bool:
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
-        if ".." in PurePosixPath(token).parts:
+        # Brace expansion can build `..` (`/tmp/{..,a}/x`, `/tmp/.{.,a}/x`).
+        words = _expand_braces(token) if "{" in token else [token]
+        if words is None:
             return True
-        # Brace expansion can spell `..` as one choice (`/tmp/{..,a}/x`).
-        if _BRACE_TRAVERSAL_RE.search(token):
+        if any(".." in PurePosixPath(word).parts for word in words):
             return True
     return False
 
