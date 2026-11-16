@@ -983,6 +983,10 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# A whole path component that is a brace list with `..` as one choice.
+_BRACE_TRAVERSAL_RE = re.compile(r"(?:^|/)\{(?:[^{}/]*,)?\.\.(?:,[^{}/]*)?\}(?:/|$)")
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
@@ -996,6 +1000,9 @@ def _has_traversal_component(command: str) -> bool:
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
+            return True
+        # Brace expansion can spell `..` as one choice (`/tmp/{..,a}/x`).
+        if _BRACE_TRAVERSAL_RE.search(token):
             return True
     return False
 
@@ -1121,11 +1128,15 @@ def _extract_all_paths(
     # Pattern: match absolute paths starting with / followed by word chars, dots,
     # dashes, slashes. Looks inside quotes and unquoted tokens alike.
     # Excludes URL-like patterns (preceded by ://)
-    path_re = re.compile(
-        r"(?<![:=/.\w])"  # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+    system_path = (
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+    # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+    path_re = re.compile(r"(?<![:=/.\w])" + system_path)
+    # A later path inside a word may also follow a list or map separator
+    # (`<root>/a.csv:/etc/passwd`, `<root>/a.csv=/etc/passwd`).
+    later_path_re = re.compile(r"(?<![/.\w])" + system_path)
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
@@ -1142,6 +1153,17 @@ def _extract_all_paths(
         value = str(token["value"])
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
+        # Scan past the allowed root, so its own folder names
+        # (`Project (2)`) are not read as later paths.
+        allowed_root = max(
+            (
+                prefix.rstrip("/\\")
+                for prefix in allow_prefixes
+                if _under_any(path, (prefix,))
+            ),
+            key=len,
+            default="",
+        )
         # A system path later in the word, outside the allowed folders. Read
         # from the decoded value, so quote-split spellings (`/e""tc`) count.
         # A toolchain setting (`-DCMAKE_PREFIX_PATH=<root>/x;/usr/local`) is
@@ -1152,8 +1174,8 @@ def _extract_all_paths(
             else next(
                 (
                     found[1]
-                    for i in range(1, len(path))
-                    if (found := path_re.match(path, i))
+                    for i in range(len(allowed_root) + 1, len(path))
+                    if (found := later_path_re.match(path, i))
                     and not _under_any(path[i:], allow_prefixes)
                     and found[1] not in _PASSTHROUGH_DEVICE_PATHS
                 ),
@@ -1173,7 +1195,7 @@ def _extract_all_paths(
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths,
             # nor a word with a second system path later in it
-            # (`<root>/a.csv,/home/u/b.csv`, `<root>/{..,a}/etc/passwd`).
+            # (`<root>/a.csv,/home/u/b.csv`, `<root>/a.csv:/etc/passwd`).
             # A later path that is itself allowed (`<root>/a,<root>/b`) or a
             # passthrough device (`<root>/a,/dev/null`) is fine.
             allowed_path_words.append((int(token["start"]), int(token["end"])))

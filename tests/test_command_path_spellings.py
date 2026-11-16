@@ -604,13 +604,15 @@ def test_spaced_workspace_keeps_parent_components_refused(tmp_path, operand):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
-@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize("root_name", ["ws", "my project", "Project (2)"])
 @pytest.mark.parametrize(
     "command",
     [
         "cd sub && python x.py --files=/tmp/a.csv,/home/u/data.csv",
         "cd sub && python x.py --files=/tmp/a.csv,/tmp/b.csv",
-        "cd sub && cat /tmp/{..,a}/{..,b}/{..,c}/{..,d}/etc/passwd",
+        "cd sub && python x.py --files=/tmp/a.csv:/etc/passwd",
+        "cd sub && python x.py --map=/tmp/a.csv=/etc/passwd",
+        "python x.py --files=/memories/a:/etc/passwd",
         "cd sub && eval \"/tmp/tool '/etc/passwd'\"",
         "python x.py --files=/memories/a,/etc/passwd",
         "cd sub && python x.py --files=/memories/a,/etc/passwd",
@@ -631,7 +633,7 @@ def test_allowed_path_word_does_not_hide_a_later_system_path(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
-@pytest.mark.parametrize("root_name", ["ws", "my project"])
+@pytest.mark.parametrize("root_name", ["ws", "my project", "Project (2)"])
 @pytest.mark.parametrize(
     "command",
     [
@@ -639,6 +641,9 @@ def test_allowed_path_word_does_not_hide_a_later_system_path(
         "cd sub && python x.py --files=/data/a.csv,/data/b.csv",
         "cd sub && cat /tmp/{a,b}/x.csv",
         "python x.py --files=/memories/a,/memories/b",
+        "cd sub && python x.py --files=/data/a.csv:/data/b.csv",
+        "cd sub && cat /tmp/a.csv",
+        "cd sub && echo {1..3} /tmp/{a,b}.csv",
     ],
 )
 def test_allowed_path_word_with_only_workspace_paths_still_runs(
@@ -654,6 +659,46 @@ def test_allowed_path_word_with_only_workspace_paths_still_runs(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["c++", "data [v2]", "run=1", "a:b"])
+def test_workspace_name_ending_in_a_symbol_keeps_its_own_paths(tmp_path, root_name):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / root_name
+    root.mkdir()
+    assert prepare_sandbox_command("cd sub && cat /tmp/a.csv", str(root))[1] is None
+    error = prepare_sandbox_command(
+        "cd sub && python x.py --files=/tmp/a.csv,/etc/passwd", str(root)
+    )[1]
+    assert "/etc/passwd" in error
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat /tmp/{..,a}/{..,b}/.ssh/id_rsa",
+        "cat ./{a,..}/x",
+        "cat '{..,a}'/x",
+        "ls {a,..,b}",
+    ],
+)
+def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
+    from EvoScientist.backends import validate_command
+
+    error = validate_command(command, allow_prefixes=(str(tmp_path),))
+    assert error is not None
+    assert "'..' path traversal" in error
+
+
+@pytest.mark.parametrize(
+    "command", ["echo {1..5}", "cat ./{a,b}..txt", "ls ./{a..c}/x", "cat a{..,b}"]
+)
+def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
+    from EvoScientist.backends import _has_traversal_component
+
+    assert not _has_traversal_component(command)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
 @pytest.mark.parametrize(
     ("files", "allowed"),
     [
@@ -665,6 +710,9 @@ def test_allowed_path_word_with_only_workspace_paths_still_runs(
         ("/tmp/my project/a.csv,/dev/null,/etc/passwd", False),
         ('/tmp/my project/a.csv,/e""tc/passwd', False),
         ('/tmp/my project/a.csv,/h""ome/u/b.csv', False),
+        ("/tmp/my project/a.csv:/etc/passwd", False),
+        ("/tmp/my project/a.csv=/etc/passwd", False),
+        ("/tmp/my project/a.csv:/tmp/my project/b.csv", True),
     ],
 )
 def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
