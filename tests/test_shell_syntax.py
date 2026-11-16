@@ -343,6 +343,12 @@ class TestSimpleCommands:
             "B": ("$A",),
         }
 
+    def test_the_values_of_one_word_are_capped(self):
+        values = dict.fromkeys("VWXYZ", ("a", "b"))
+        expanded = shell_syntax.expand_references("$V$W$X$Y$Z", values)
+        assert len(expanded) == shell_syntax._VALUES_CAP
+        assert expanded[0] == "aaaaa"
+
     def test_word_values_follow_unquoted_references_only(self):
         assigned = {"T": ("..", "sub"), "U": ()}
         assert shell_syntax.word_values('"$T/x"', "$T/x", assigned) == [

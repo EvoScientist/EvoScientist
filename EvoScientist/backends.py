@@ -1373,7 +1373,7 @@ def _folder_from(folder: str, target: str) -> str | None:
     glob, ``-``)."""
     if not target or target == "-" or re.search(r"[$`%*?\[]", target):
         return None
-    if target.startswith("/") or _DRIVE_PATH_RE.match(target):
+    if target.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(target)):
         return posixpath.normpath(target)
     return posixpath.normpath(f"{folder}/{target}")
 

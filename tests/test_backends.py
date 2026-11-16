@@ -1156,6 +1156,24 @@ class TestWorkspaceRemovalAndComments:
         error = self._prepare_with_workspace_folders(command, tmp_workspace)
         assert shown in error
 
+    def test_a_removal_in_a_protected_folder_outside_the_workspace_is_refused(self):
+        assert "protected folder" in validate_command(
+            "env -C /M rm -rf x", ("/M", "/W"), workspace_root="/W"
+        )
+        assert (
+            validate_command(
+                "env -C /W/build rm -rf x", ("/M", "/W"), workspace_root="/W"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("windows", [False, True])
+    def test_a_drive_target_is_absolute_only_on_windows(self, monkeypatch, windows):
+        monkeypatch.setattr(backends, "_is_windows", lambda: windows)
+        commands = backends.shell_syntax.simple_commands("cd C:/W/skills")
+        folders = backends._possible_folders(commands, "C:/W" if windows else "/W", {})
+        assert folders[-1] == ("C:/W/skills" if windows else "/W/C:/W/skills")
+
     def test_the_folders_a_removal_is_read_from_are_capped(self):
         command = "; ".join(f"cd d{i}" for i in range(20)) + "; rm -rf x"
         commands = backends.shell_syntax.simple_commands(command)
