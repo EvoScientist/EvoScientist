@@ -36,7 +36,7 @@ def ignore_stop_signal(signum: int, frame: Any) -> None:
 
 
 def interrupt_stop_signal(signum: int, frame: Any) -> None:
-    """End deploy as Ctrl+C does, with the signals that end it ignored from
+    """End the command as Ctrl+C does, with the stop signals ignored from
     now on, so a second one cannot cut the stop short. Ignored by a no-op:
     with ``SIG_IGN``, a second signal already pending prints an error."""
     ignore_further_stop_signals()
