@@ -1,0 +1,668 @@
+"""Tests for ``run_webui`` bind-host wiring.
+
+The front-end is the ``@evoscientist/webui`` Next.js standalone server, started
+as ``node dist/server.js``. It takes no flags: it reads ``PORT`` and
+``HOSTNAME`` from its environment, and without ``HOSTNAME`` it binds every
+interface. Setting ``HOSTNAME`` on the node env is therefore the *only* way to
+choose the front-end's interface — these tests pin that contract so a refactor
+can't quietly drop it and silently widen or re-narrow the bind.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from EvoScientist.deploy import webui as webui_mod
+
+NODE = "/opt/node/bin/node"
+APP = "/data/tools/webui/0.3.1"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """``webui.log`` lands next to the isolated ``langgraph_dev.log``."""
+
+
+def _make_config(
+    *,
+    default_workdir: str = "",
+    langgraph_dev_port: int = 6174,
+    langgraph_dev_host: str = "127.0.0.1",
+    webui_port: int = 4716,
+    webui_host: str = "127.0.0.1",
+):
+    return SimpleNamespace(
+        default_workdir=default_workdir,
+        langgraph_dev_port=langgraph_dev_port,
+        langgraph_dev_host=langgraph_dev_host,
+        webui_port=webui_port,
+        webui_host=webui_host,
+        langgraph_dev_jobs_per_worker=10,
+        langgraph_dev_file_persistence=True,
+    )
+
+
+class _RecordingConsole:
+    """A real Rich console rendering to a buffer.
+
+    Rendering for real (rather than stringifying the arguments) matters here:
+    the remote-backend hint lives *inside* a ``Panel``, so a naive ``str(arg)``
+    would only ever see ``<rich.panel.Panel object at ...>`` and the assertion
+    would pass or fail for the wrong reason. Width is pinned wide so the
+    strings under test don't wrap mid-token.
+    """
+
+    def __init__(self, sink: list):
+        import io
+
+        from rich.console import Console
+
+        self._sink = sink
+        self._buf = io.StringIO()
+        self._console = Console(file=self._buf, width=200, no_color=True)
+
+    def print(self, *args, **kwargs):
+        self._buf.seek(0)
+        self._buf.truncate()
+        self._console.print(*args, **kwargs)
+        self._sink.append(self._buf.getvalue())
+
+    def status(self, *args, **kwargs):
+        class _Ctx:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def update(self_inner, *a, **k):
+                self._sink.append(f"status: {a[0] if a else ''}")
+
+        return _Ctx()
+
+
+class _InterruptingConsole(_RecordingConsole):
+    """Raises ``KeyboardInterrupt`` when a line containing ``trigger`` prints,
+    simulating a Ctrl+C that lands while ``run_webui`` renders its output."""
+
+    def __init__(self, sink: list, trigger: str):
+        super().__init__(sink)
+        self._trigger = trigger
+
+    def print(self, *args, **kwargs):
+        super().print(*args, **kwargs)
+        if self._trigger in self._sink[-1]:
+            raise KeyboardInterrupt
+
+
+def _run_webui_once(
+    monkeypatch,
+    config,
+    *,
+    backend_port_occupied: bool = False,
+    interrupt_on: str | None = None,
+    signal_on: tuple[str, int] | None = None,
+    ignored_hangup: bool = False,
+    closed_terminal: bool = False,
+):
+    """Run ``run_webui`` with every external dependency mocked.
+
+    ``interrupt_on``: raise ``KeyboardInterrupt`` from the console when a line
+    containing this text prints; ``run_webui`` then propagates it."""
+    import atexit
+    import os
+    import signal
+
+    import EvoScientist.config as config_mod
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    captured: dict[str, Any] = {"printed": [], "node_env": {}, "node_args": []}
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    hangup = getattr(signal, "SIGHUP", None)
+    if hangup is not None:
+        handlers[hangup] = signal.SIG_IGN if ignored_hangup else signal.SIG_DFL
+    captured["original_handlers"] = handlers.copy()
+    captured["handlers"] = handlers
+
+    original_signal = signal.signal
+    original_getsignal = signal.getsignal
+
+    def _signal(sig, handler):
+        if sig not in handlers:
+            return original_signal(sig, handler)
+        previous = handlers[sig]
+        handlers[sig] = handler
+        return previous
+
+    def _deliver(stage):
+        if signal_on is not None and signal_on[0] == stage:
+            handler = handlers[signal_on[1]]
+            assert callable(handler), "shutdown signal has no handler"
+            handler(signal_on[1], None)
+
+    monkeypatch.setattr(signal, "signal", _signal)
+    monkeypatch.setattr(
+        signal, "getsignal", lambda sig: handlers.get(sig, original_getsignal(sig))
+    )
+
+    monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
+    console = (
+        _InterruptingConsole(captured["printed"], interrupt_on)
+        if interrupt_on
+        else _RecordingConsole(captured["printed"])
+    )
+    original_print = console.print
+    captured["closed_terminal_writes"] = 0
+
+    def _print(*args, **kwargs):
+        if closed_terminal and any("Shutting down" in str(a) for a in args):
+            captured["closed_terminal_writes"] += 1
+            raise OSError("terminal closed")
+        original_print(*args, **kwargs)
+        if "EvoScientist WebUI" in captured["printed"][-1]:
+            _deliver("banner")
+
+    console.print = _print
+    monkeypatch.setattr(webui_mod, "console", console)
+    monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
+    # The installed front-end: Node and WebUI provisioning are stubbed; the
+    # launcher's readiness wait is covered in test_launcher.py.
+    from pathlib import Path
+
+    from EvoScientist.deploy import launcher as launcher_mod
+    from EvoScientist.setup import node as node_mod
+    from EvoScientist.setup import webui as setup_webui
+
+    monkeypatch.setattr(
+        node_mod,
+        "ensure_node",
+        lambda **_kw: node_mod.NodeInfo("system", "22.0.0", Path(NODE)),
+    )
+    monkeypatch.setattr(node_mod, "activate_runtime", lambda: None)
+    monkeypatch.setattr(
+        setup_webui,
+        "ensure_webui",
+        lambda *_a, **_kw: setup_webui.WebUIInfo("0.3.1", Path(APP)),
+    )
+    monkeypatch.setattr(setup_webui, "mark_in_use", lambda _info: None)
+    monkeypatch.setattr(setup_webui, "cleanup_old_versions", lambda: [])
+    captured["update_checks"] = 0
+
+    def _fake_update_check(_self):
+        captured["update_checks"] += 1
+
+    monkeypatch.setattr(
+        launcher_mod.InstalledWebUIRunner, "start_update_check", _fake_update_check
+    )
+    monkeypatch.setattr(
+        launcher_mod.BundledWebUIRunner, "preflight", lambda _self, _cfg: None
+    )
+
+    def _wait_ready(self, *a, **k):
+        _deliver("readiness")
+        return self._result()
+
+    monkeypatch.setattr(launcher_mod.WebUILauncher, "wait_ready", _wait_ready)
+    original_start = launcher_mod.WebUILauncher.start
+
+    def _start(self):
+        result = original_start(self)
+        _deliver("startup")
+        return result
+
+    monkeypatch.setattr(launcher_mod.WebUILauncher, "start", _start)
+
+    from EvoScientist.langgraph_dev import registration
+    from tests.fakes.langgraph_dev import Server
+
+    server = Server(monkeypatch, pid=99999)
+    if backend_port_occupied:
+        server.occupied.add(int(config.langgraph_dev_port))
+    if registration.register_folder.__module__ == registration.__name__:
+        # Unless the test says how the backend answers the registration.
+        monkeypatch.setattr(
+            registration,
+            "register_folder",
+            lambda workspace, *, url: registration.ServerExposure(),
+        )
+
+    captured["stop_calls"] = 0
+
+    def _fake_stop(*_a, **_kw):
+        captured["stop_calls"] += 1
+
+    monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop)
+
+    class _FakeProc:
+        pid = 12345
+
+        def __init__(self):
+            self.poll_calls = 0
+
+        def poll(self):
+            self.poll_calls += 1
+            # Run one terminal poll/sleep before reporting the front-end exit.
+            return None if self.poll_calls == 1 else 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    def _fake_popen(args, **kwargs):
+        captured["node_args"] = args
+        captured["node_env"] = kwargs.get("env", {})
+        captured["node_stdout"] = kwargs.get("stdout")
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    # The front-end runner's stop shells out to taskkill on Windows — neutralize.
+    captured["frontend_stops"] = 0
+
+    def _stop_frontend(_proc):
+        captured["frontend_stops"] += 1
+
+    monkeypatch.setattr(launcher_mod, "_stop_process_tree", _stop_frontend)
+    captured["atexit_fns"] = []
+    monkeypatch.setattr(
+        atexit, "register", lambda fn, *a, **k: captured["atexit_fns"].append(fn) or fn
+    )
+
+    # Patch this module's time reference, not time.sleep globally: readiness
+    # and backend startup use the real module and must keep their own waits.
+    def _sleep(_seconds):
+        _deliver("wait")
+
+    monkeypatch.setattr(webui_mod, "time", SimpleNamespace(sleep=_sleep))
+
+    try:
+        if interrupt_on or (signal_on and signal_on[0] != "wait"):
+            with pytest.raises(KeyboardInterrupt):
+                webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+        else:
+            try:
+                webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+            except KeyboardInterrupt:
+                pytest.fail("a normal WebUI stop must return without an interrupt")
+    finally:
+        # The registered teardown closes it at exit; the tests never run it.
+        if captured.get("node_stdout") is not None:
+            captured["node_stdout"].close()
+        if server.spawns:
+            captured["backend_port"] = server.spawns[0]["port"]
+            captured["backend_host"] = server.spawns[0]["host"]
+    return captured
+
+
+# =============================================================================
+# Front-end bind interface (HOSTNAME)
+# =============================================================================
+
+
+def test_hostname_env_carries_webui_host(monkeypatch):
+    config = _make_config(webui_host="0.0.0.0")
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["node_env"].get("HOSTNAME") == "0.0.0.0", (
+        "HOSTNAME is the package's only bind knob — without it the front-end "
+        "falls back to its own 127.0.0.1 default"
+    )
+
+
+def test_hostname_env_defaults_to_loopback(monkeypatch):
+    """The front-end serves the workspace file/upload and skill-install
+    endpoints, so it stays off the network until ``webui_host`` opts in."""
+    config = _make_config()
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["node_env"].get("HOSTNAME") == "127.0.0.1"
+
+
+def test_port_env_set(monkeypatch):
+    config = _make_config(webui_port=4800)
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["node_env"].get("PORT") == "4800"
+
+
+def test_installed_server_runs_without_npx_or_flags(monkeypatch):
+    """The installed copy runs as ``node dist/server.js``: no ``npx``, and no
+    flags, since the standalone server reads only its environment."""
+    captured = _run_webui_once(monkeypatch, _make_config())
+
+    from pathlib import Path
+
+    assert captured["node_args"] == [
+        str(Path(NODE)),
+        str(Path(APP) / "dist" / "server.js"),
+    ]
+    assert captured["node_env"].get("NODE_ENV") == "production"
+
+
+def test_node_output_goes_to_webui_log_next_to_the_backend_log(
+    monkeypatch, runtime_paths
+):
+    captured = _run_webui_once(monkeypatch, _make_config())
+    log = runtime_paths.webui_log
+    assert captured["node_stdout"].name == str(log)
+    assert any("webui.log" in line for line in captured["printed"])
+
+
+def test_update_check_starts_once_the_ui_is_up(monkeypatch):
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert captured["update_checks"] == 1
+
+
+def test_a_crashed_webui_points_at_webui_log(monkeypatch):
+    import typer
+
+    class _CrashingLauncher(webui_mod.WebUILauncher):
+        def wait_ready(self, *a, **k):
+            raise webui_mod.LauncherError(
+                "webui_start_failed",
+                "WebUI process exited before it became ready.",
+                "[Errno 54] Connection reset by peer",
+            )
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _CrashingLauncher)
+    with pytest.raises(typer.Exit):
+        _run_webui_once(monkeypatch, _make_config())
+    panel = "\n".join(webui_mod.console._sink)
+    assert "Connection reset by peer" in panel
+    assert "webui.log" in panel
+    assert "Shutting down" in webui_mod.console._sink[-1]
+
+
+def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
+    import typer
+
+    from tests.fakes.langgraph_dev import break_start_lock
+
+    break_start_lock(monkeypatch, tmp_path, "mkdir")
+    with pytest.raises(typer.Exit):
+        _run_webui_once(monkeypatch, _make_config())
+    panel = webui_mod.console._sink[-1]
+    assert not any("Shutting down" in line for line in webui_mod.console._sink)
+    assert "WebUI failed" in panel
+    assert "langgraph dev startup failed" in panel
+
+
+def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
+    """While another process starts the server the spinner says so, as
+    EvoSci deploy does, then goes back to starting langgraph dev."""
+    from tests.fakes.langgraph_dev import LockHolder
+
+    holder = LockHolder()
+
+    class _ReleasingLauncher(webui_mod.WebUILauncher):
+        """Frees the other start's lock once the wait has been reported."""
+
+        def __init__(self, *a, on_lock_wait, **k):
+            def _wait(waiting: bool) -> None:
+                on_lock_wait(waiting)
+                if waiting:
+                    holder.release.set()
+
+            super().__init__(*a, on_lock_wait=_wait, **k)
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _ReleasingLauncher)
+    try:
+        captured = _run_webui_once(monkeypatch, _make_config())
+    finally:
+        holder.done()
+    statuses = [p for p in captured["printed"] if p.startswith("status: ")]
+    waiting = (
+        "status: [dim]Waiting for another EvoSci process to start or stop "
+        "langgraph dev...[/dim]"
+    )
+    assert waiting in statuses
+    after = statuses[statuses.index(waiting) + 1 :]
+    assert after[:1] == ["status: [dim]Starting langgraph dev...[/dim]"]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
+    config = _make_config(webui_host=blank)
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["node_env"].get("HOSTNAME") == "127.0.0.1"
+
+
+# =============================================================================
+# Backend bind interface + security warning
+# =============================================================================
+
+
+def test_backend_host_reaches_start(monkeypatch):
+    config = _make_config(langgraph_dev_host="0.0.0.0")
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["backend_host"] == "0.0.0.0"
+
+
+def test_backend_defaults_to_loopback(monkeypatch):
+    """The backend is an unauthenticated API whose agent can run shell, so it
+    stays off the network unless ``langgraph_dev_host`` opts in."""
+    config = _make_config()
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert captured["backend_host"] == "127.0.0.1"
+
+
+def test_public_bind_warning_when_backend_exposed(monkeypatch):
+    """Users who widen the backend get told every time it is reachable
+    off-box — an unauthenticated, shell-capable API deserves a standing
+    reminder, not a one-time opt-in prompt."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
+    config = _make_config(langgraph_dev_host="0.0.0.0")
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert any("PUBLIC BIND" in line for line in captured["printed"])
+
+
+def test_no_public_bind_warning_when_backend_on_loopback(monkeypatch):
+    """The warning must be silenceable, or it degrades into background noise
+    that users learn to skip past."""
+    config = _make_config(langgraph_dev_host="127.0.0.1")
+    captured = _run_webui_once(monkeypatch, config)
+
+    assert not any("PUBLIC BIND" in line for line in captured["printed"])
+
+
+def test_public_bind_warning_when_frontend_exposed(monkeypatch):
+    """The front-end earns its own banner: it is not a passive app shell — its
+    API reads, writes and uploads workspace files and installs skills."""
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
+    captured = _run_webui_once(monkeypatch, config)
+
+    banner = "\n".join(captured["printed"])
+    assert "WebUI listening on 0.0.0.0" in banner
+
+
+def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):
+    """The UI talks to the backend from the browser, so a remote visitor
+    cannot reach a loopback backend — say so instead of letting every request
+    fail silently."""
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
+    captured = _run_webui_once(monkeypatch, config)
+
+    banner = "\n".join(captured["printed"])
+    assert "Remote visitors cannot reach" in banner
+    assert "langgraph_dev_host" in banner
+
+
+def test_no_remote_hint_when_backend_answers_public(monkeypatch):
+    """A reused backend another session bound to the network: the session's
+    own host setting says nothing about it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
+    captured = _run_webui_once(monkeypatch, config)
+
+    banner = "\n".join(captured["printed"])
+    assert "Remote visitors cannot reach" not in banner
+
+
+# =============================================================================
+# The backend outlives the WebUI
+# =============================================================================
+
+
+def test_backend_outlives_webui(monkeypatch):
+    """The backend the WebUI started is shared by every session: closing the
+    WebUI stops only its front-end."""
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert captured["stop_calls"] == 0
+    assert captured["frontend_stops"] == 1
+    assert captured["atexit_fns"] == []
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+def test_teardown_runs_before_output_interrupt_returns(monkeypatch):
+    """Cleanup does not wait for interpreter exit after a banner interrupt."""
+    captured = _run_webui_once(
+        monkeypatch, _make_config(), interrupt_on="langgraph dev ready"
+    )
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["atexit_fns"] == []
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+@pytest.mark.parametrize("stage", ["startup", "readiness", "banner", "wait"])
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_stop_signals_clean_up_webui(monkeypatch, stage, signal_name):
+    import signal
+
+    signum = getattr(signal, signal_name, None)
+    if signum is None:
+        pytest.skip(f"{signal_name} is unavailable on this platform")
+    captured = _run_webui_once(monkeypatch, _make_config(), signal_on=(stage, signum))
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+def test_inherited_ignored_hangup_stays_ignored(monkeypatch):
+    import signal
+
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("SIGHUP is unavailable on this platform")
+    captured = _run_webui_once(monkeypatch, _make_config(), ignored_hangup=True)
+    assert captured["handlers"][signal.SIGHUP] is signal.SIG_IGN
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+
+
+def test_closed_terminal_does_not_skip_cleanup(monkeypatch):
+    captured = _run_webui_once(monkeypatch, _make_config(), closed_terminal=True)
+    assert captured["closed_terminal_writes"] == 1
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+@pytest.mark.parametrize("stage", ["startup", "readiness"])
+def test_unexpected_launcher_error_cleans_up(monkeypatch, stage):
+    stops = []
+
+    class _BrokenLauncher(webui_mod.WebUILauncher):
+        def start(self):
+            result = super().start()
+            if stage == "startup":
+                raise RuntimeError("unexpected launcher failure")
+            return result
+
+        def wait_ready(self, *args, **kwargs):
+            raise RuntimeError("unexpected launcher failure")
+
+        def stop(self):
+            stops.append(True)
+            super().stop()
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _BrokenLauncher)
+    with pytest.raises(RuntimeError, match="unexpected launcher failure"):
+        _run_webui_once(monkeypatch, _make_config())
+    assert stops == [True]
+
+
+def test_missing_python_hint_is_printed_by_the_launcher(monkeypatch):
+    """The agent is built inside the server, so the launching process shows
+    the hint (conftest pins the agent's python as missing)."""
+    from EvoScientist.setup import research_env
+
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert any(research_env.MISSING_PYTHON_HINT in line for line in captured["printed"])
+
+
+def test_warnings_with_brackets_print_as_they_are(monkeypatch):
+    """Warnings can carry paths; Rich markup must not eat or choke on them."""
+    from EvoScientist import agent_shell
+
+    warning = "gives its agents /home/u/[lab]/[/x]/bin/python"
+    monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: warning)
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert any(warning in line for line in captured["printed"])
+
+
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("stage", ["message", "stop"])
+def test_first_stop_signal_during_error_cleanup(monkeypatch, signal_name, stage):
+    import signal
+
+    signum = getattr(signal, signal_name, None)
+    if signum is None:
+        pytest.skip(f"{signal_name} is unavailable on this platform")
+    stops = []
+    deliveries = []
+    original_print = _RecordingConsole.print
+
+    def deliver():
+        deliveries.append(stage)
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
+
+    def print_with_signal(self, *args, **kwargs):
+        if stage == "message" and any("Shutting down" in str(a) for a in args):
+            deliver()
+        return original_print(self, *args, **kwargs)
+
+    class BrokenLauncher(webui_mod.WebUILauncher):
+        def wait_ready(self, *args, **kwargs):
+            raise RuntimeError("readiness failed unexpectedly")
+
+        def stop(self):
+            if stage == "stop":
+                deliver()
+            super().stop()
+            stops.append(True)
+
+    monkeypatch.setattr(_RecordingConsole, "print", print_with_signal)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", BrokenLauncher)
+    try:
+        with pytest.raises(RuntimeError, match="readiness failed unexpectedly"):
+            _run_webui_once(monkeypatch, _make_config())
+    except KeyboardInterrupt:
+        pytest.fail("first shutdown signal interrupted error-driven cleanup")
+    assert stops == [True]
+    assert deliveries == [stage]
