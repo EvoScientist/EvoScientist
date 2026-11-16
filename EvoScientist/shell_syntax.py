@@ -772,8 +772,10 @@ def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
             else:
                 skip = sum(c in with_value for c in cluster)
             if value[0] == "+":
-                # +n undoes -n
+                # +n undoes -n, but c and s are start-up modes that a + word
+                # turns on too (``bash +c 'x'`` runs x)
                 letters = "".join(c for c in letters if c not in cluster)
+                letters += "".join(c for c in cluster if c in "cs")
             else:
                 letters += cluster
         else:

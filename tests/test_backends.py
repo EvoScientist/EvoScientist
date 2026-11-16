@@ -3352,6 +3352,11 @@ class TestProcessKillByName:
             "zsh -onomatch -c 'pkill -f x'",
             "bash -oO pipefail extglob -c 'pkill -f x'",
             "zsh --emulate sh -c 'pkill -f x'",
+            # +c turns on command mode like -c; it is not undone by +
+            "bash +c 'pkill -f x'",
+            "zsh +c 'pkill -f x'",
+            "zsh -c +c 'pkill -f x'",
+            "sh +ec 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
             "env -S 'pkill -f x'",
             "env -S'pkill -f x'",
