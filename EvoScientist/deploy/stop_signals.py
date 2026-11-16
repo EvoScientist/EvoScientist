@@ -56,19 +56,19 @@ def ignore_further_stop_signals() -> None:
 
 @contextlib.contextmanager
 def interrupt_on_stop_signals() -> Iterator[None]:
-    """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
-    does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
-    otherwise end the process without it, and leave the server, which runs
-    in its own session or process group, running. Installed before the
-    start, so a signal while the server starts stops it too. A SIGHUP this
-    process started with ignored stays ignored: ``nohup EvoSci deploy &``
-    keeps deploy and its server up after a logout. (SIGINT is taken over
-    even when ignored, as a shell ignores it for ``EvoSci deploy &`` and a
-    later ``kill -INT`` stops deploy.)
+    """Each stop signal raises ``KeyboardInterrupt``, as Ctrl+C does, so the
+    command's ``finally`` runs its stop: SIGTERM and SIGHUP would otherwise
+    end the process without it, and leave what it started, which runs in its
+    own session or process group, running. Installed before the start, so a
+    signal while the server starts stops it too. A SIGHUP this process
+    started with ignored stays ignored: ``nohup EvoSci deploy &`` (or the
+    terminal WebUI under ``nohup``) keeps running after a logout. (SIGINT is
+    taken over even when ignored, as a shell ignores it for a ``&`` job and a
+    later ``kill -INT`` stops it.)
 
     The first such signal also ignores the rest from then on: every stop
     that follows it, the one ``ensure_server`` makes of a server it was
-    starting as well as deploy's own, runs to the end."""
+    starting as well as the command's own, runs to the end."""
     hangup = getattr(signal, "SIGHUP", None)
     previous = {
         sig: signal.signal(sig, interrupt_stop_signal)
