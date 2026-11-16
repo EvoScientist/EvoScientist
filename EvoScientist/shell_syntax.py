@@ -487,6 +487,9 @@ class SimpleCommand(NamedTuple):
         dict[str, object] | None, ...
     ]  # per arg: its token, or None if several
     via: tuple[str, ...]  # wrappers it runs under, outermost first
+    # The folders `env -C` changes into before it runs, outermost first, as
+    # the shell passes them to env.
+    folders: tuple[str, ...] = ()
 
 
 def _command_word_end(
@@ -704,15 +707,23 @@ def _unwrap(
     name: str,
     args: list[tuple[str, dict[str, object] | None]],
     via: tuple[str, ...],
-    scripts: list[tuple[str, tuple[str, ...]]],
+    scripts: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
     starting_folder: bool = False,
+    folders: tuple[str, ...] = (),
 ) -> list[SimpleCommand]:
     """The command and, through wrappers such as ``env`` or ``xargs``, the
-    commands it runs. Strings that ``env -S`` splits are read in place and
-    also go to *scripts*, with the wrappers they run under, to be read as
-    shell code. With *starting_folder*, an ``env -C`` runs nothing here."""
+    commands it runs, in the ``env -C`` *folders* they run in. Strings that
+    ``env -S`` splits are read in place and also go to *scripts*, with the
+    wrappers and folders they run under, to be read as shell code. With
+    *starting_folder*, an ``env -C`` runs nothing here."""
     found = [
-        SimpleCommand(name, tuple(a for a, _ in args), tuple(t for _, t in args), via)
+        SimpleCommand(
+            name,
+            tuple(a for a, _ in args),
+            tuple(t for _, t in args),
+            via,
+            folders,
+        )
     ]
     if name not in WRAPPER_NAMES:
         return found
@@ -725,13 +736,15 @@ def _unwrap(
         split = _env_split_string(value, rest, position) if name == "env" else None
         if split is not None:
             text, position = split
-            scripts.append((_env_shell_text(text), (*via, name)))
+            scripts.append((_env_shell_text(text), (*via, name), folders))
             rest[position:position] = _env_words(text)
             continue
         if name == "env" and value.startswith("-"):
             takes_next, changes_folder = _env_option(value)
             if changes_folder and starting_folder:
                 return found
+            if changes_folder:
+                folders = (*folders, _env_folder(value, rest, position, takes_next))
             if takes_next:
                 position += 1
             continue
@@ -748,9 +761,25 @@ def _unwrap(
             continue
         inner = re.split(r"[\\/]", value)[-1]
         return found + _unwrap(
-            inner, rest[position:], (*via, name), scripts, starting_folder
+            inner, rest[position:], (*via, name), scripts, starting_folder, folders
         )
     return found
+
+
+def _env_folder(
+    value: str,
+    args: list[tuple[str, dict[str, object] | None]],
+    position: int,
+    takes_next: bool,
+) -> str:
+    """The folder an ``env`` option *value* that changes it names: the next
+    word in *args* (at *position*), or the rest of *value* (``-Cbuild``,
+    ``-iCbuild``, ``--chdir=build``)."""
+    if takes_next:
+        return _word_value(*args[position]) if position < len(args) else ""
+    if value.startswith("--"):
+        return value.partition("=")[2]
+    return value[value.index("C") + 1 :]
 
 
 def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
@@ -949,19 +978,22 @@ def word_values(
 
 def _simple_commands(
     command: str,
-    seen: set[tuple[str, tuple[str, ...]]],
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
     outer: tuple[str, ...],
     assigned: list[tuple[str, str]] | None = None,
     starting_folder: bool = False,
+    outer_folders: tuple[str, ...] = (),
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
-    the wrappers they run under (*outer* for this one). Assignments in
-    command-name position go to *assigned* (see :func:`assignments`). With
-    *starting_folder*, see :func:`starting_folder_commands`."""
+    the wrappers and ``env -C`` folders they run under (*outer* and
+    *outer_folders* for this one). Assignments in command-name position go to
+    *assigned* (see :func:`assignments`). With *starting_folder*, see
+    :func:`starting_folder_commands`."""
     words = parse(command)
     tokens = words.tokens
     found: list[SimpleCommand] = []
-    nested: list[tuple[str, tuple[str, ...]]] = []  # text, wrappers it runs under
+    # Text, and the wrappers and `env -C` folders it runs under.
+    nested: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
     # Tokens read as scripts, not again as quoted words; by identity, as an
     # `env -S` string's words carry offsets into that string, not *command*.
     script_tokens: set[int] = set()
@@ -1005,7 +1037,11 @@ def _simple_commands(
             script, reads_stdin = _shell_code(each)
             if script is not None:
                 nested.append(
-                    (_word_value(each.args[script], each.tokens[script]), each.via)
+                    (
+                        _word_value(each.args[script], each.tokens[script]),
+                        each.via,
+                        each.folders,
+                    )
                 )
                 # Ending the script at its first `cd` must not drop what the
                 # outer shell expands in it first (`bash -c "cd x; $(...)"`).
@@ -1018,10 +1054,12 @@ def _simple_commands(
                     start, end, _expands = words.bodies[body]
                     text = command[start:end].rstrip("\n")
                     # Without the end line.
-                    nested.append((text[: text.rfind("\n") + 1], each.via))
+                    nested.append(
+                        (text[: text.rfind("\n") + 1], each.via, each.folders)
+                    )
 
     def collect(body: str) -> tuple[str, bool]:
-        nested.append((body, ()))
+        nested.append((body, (), ()))  # runs before the command it is in
         return body, False
 
     for token in tokens:
@@ -1034,14 +1072,17 @@ def _simple_commands(
     for body, (start, end, expands) in enumerate(words.bodies):
         if expands and body not in code_bodies:
             rewrite_substitutions(command[start:end], collect, heredoc=True)
-    for text, via in nested:
+    for text, via, folders in nested:
         chain = (*outer, *via)
-        if (text, chain) in seen:
+        folder_chain = (*outer_folders, *folders)
+        if (text, chain, folder_chain) in seen:
             continue  # the same code reached through another nesting
-        seen.add((text, chain))
+        seen.add((text, chain, folder_chain))
         found.extend(
-            inner._replace(via=(*via, *inner.via))
-            for inner in _simple_commands(text, seen, chain, assigned, starting_folder)
+            inner._replace(via=(*via, *inner.via), folders=(*folders, *inner.folders))
+            for inner in _simple_commands(
+                text, seen, chain, assigned, starting_folder, folder_chain
+            )
         )
     return found
 

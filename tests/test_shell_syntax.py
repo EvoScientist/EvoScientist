@@ -293,6 +293,37 @@ class TestSimpleCommands:
             "export \"P=$(lsof -t)\" 'Q'=$(ps) 'R=$(ps)' -x=1 \"$X\"=1"
         ) == [("P", '"$(lsof -t)"'), ("Q", "''$(ps)"), ("R", "'$(ps)'")]
 
+    @pytest.mark.parametrize(
+        ("command", "folders"),
+        [
+            ("env -C build rm x", ("build",)),
+            ("env -iC build rm x", ("build",)),
+            ("env -iCbuild rm x", ("build",)),
+            ("env --chdir=build rm x", ("build",)),
+            ("env --ch build rm x", ("build",)),
+            ("env -C 'my dir' rm x", ("my dir",)),
+            ("env -C a env -C b rm x", ("a", "b")),
+            ("nohup env -C a rm x", ("a",)),
+            ("env -C a sh -c 'rm x'", ("a",)),
+            ("env -C a -S \"sh -c 'rm x'\"", ("a",)),
+            ("env -u C rm x", ()),
+            ('env -C a echo "$(rm x)"', ()),  # expands before env runs
+        ],
+    )
+    def test_commands_carry_the_env_folders_they_run_in(self, command, folders):
+        removals = [
+            each for each in shell_syntax.simple_commands(command) if each.name == "rm"
+        ]
+        assert removals
+        assert all(each.folders == folders for each in removals)
+
+    def test_the_same_script_in_two_env_folders_is_read_in_both(self):
+        found = shell_syntax.simple_commands("env -C a sh -c X; env -C b sh -c X")
+        assert [each.folders for each in found if each.name == "X"] == [
+            ("a",),
+            ("b",),
+        ]
+
     def test_assigned_values_as_the_shell_reads_them(self):
         assert shell_syntax.assigned_values(
             'T=..; A="$HOME"; export B=$A/x \'C\'=~; declare "D=a b"; E='
