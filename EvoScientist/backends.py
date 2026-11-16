@@ -1202,7 +1202,7 @@ def _env_changes_folder(found: shell_syntax.SimpleCommand) -> bool:
             len(value) > 2 and "--chdir".startswith(value.split("=", 1)[0])
         ):
             return True
-        elif value in ("-u", "--unset", "-S", "--split-string"):
+        elif value in ("-S", "--split-string") or shell_syntax.env_value_is_next(value):
             skip = True
         elif not (value.startswith("-") or shell_syntax.ASSIGNMENT_RE.match(value)):
             return False  # env's command: its options are its own

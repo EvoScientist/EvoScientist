@@ -996,6 +996,8 @@ class TestWorkspaceRemovalAndComments:
             "env -iC build rm -rf skills",
             "env --chdir=build rm -rf skills",
             "env --ch build rm -rf skills",
+            "env -iu X -C build rm -rf skills",
+            "env LANG=C -C build rm -rf skills",
             "(cd build; rm -rf skills)",
             "rm -rf skill* {build,dist}",
             "rm -rf build/$(date +%F)",
@@ -1118,6 +1120,7 @@ class TestWorkspaceRemovalAndComments:
             'rm -rf ~/""',
             "rm -rf ~/''",
             "rm -rf ~root/'.'",
+            "env -iC / rm -rf ~",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(
@@ -3173,6 +3176,14 @@ class TestProcessKillByName:
             "env -S 'a; pkill x'",
             "env -S 'pkill\\c' -f worker",
             "env -S 'sh -c \"echo safe\\npkill x\"'",
+            "env -iC . pkill -f x",
+            "env --ch . pkill -f x",
+            "env -iu FOO pkill -f x",
+            "env -au pkill -f x",
+            "env -aSx pkill -f x",
+            "env --env0-from vars pkill -f x",
+            "env --unset X pkill -f x",
+            "env --chdir=build pkill -f x",
             # The env string's words must not hide an outer word at the same offset.
             'echo  "$(pkill x)"; env -S \'sh -c "echo hi"\'',
         ],

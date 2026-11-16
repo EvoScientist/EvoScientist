@@ -210,6 +210,20 @@ class TestSimpleCommands:
             ("python", ("env",)),
         ]
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "env -iC build pkill x",
+            "env --ch build pkill x",
+            "env -iu A pkill x",
+            "env -au pkill x",
+            "env -P bin pkill x",
+            "env --argv0 x pkill x",
+        ],
+    )
+    def test_env_options_take_their_value_clustered_or_shortened(self, command):
+        assert ("pkill", ("env",)) in self._found(command)
+
     def test_assignments_wherever_a_variable_is_set(self):
         assert shell_syntax.assignments(
             'A=1; B=$(ps aux | grep x) cmd; export C=`lsof -t`; local -r D="$(ps)" E'

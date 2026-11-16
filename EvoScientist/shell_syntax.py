@@ -39,7 +39,6 @@ WRAPPER_NAMES = frozenset(
 _WRAPPER_VALUE_RE = re.compile(r"-?\d+(\.\d+)?[smhd]?")
 # Wrapper options whose value is the next word.
 _WRAPPER_OPTIONS_WITH_VALUE = {
-    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
@@ -554,6 +553,11 @@ def _word_value(arg: str, token: dict[str, object] | None) -> str:
     return str(token["value"]) if token is not None else arg
 
 
+# Short options of GNU and BSD env, other than `-S`, whose value is the rest
+# of the word or the next word.
+_ENV_VALUE_LETTERS = frozenset("aCPu")
+
+
 def _env_split_string(
     value: str, args: list[tuple[str, dict[str, object] | None]], position: int
 ) -> tuple[str, int] | None:
@@ -568,7 +572,7 @@ def _env_split_string(
             return attached, position
     elif value.startswith("-") and len(value) > 1:
         for index, letter in enumerate(value[1:], start=1):
-            if letter in "uC":  # the rest of the word is that option's value
+            if letter in _ENV_VALUE_LETTERS:  # the rest of the word is its value
                 return None
             if letter == "S":
                 if value[index + 1 :]:
@@ -581,6 +585,24 @@ def _env_split_string(
     if position >= len(args):
         return None
     return _word_value(*args[position]), position + 1
+
+
+def env_value_is_next(value: str) -> bool:
+    """Whether an ``env`` option word other than ``-S`` takes the next word as
+    its value; short options also clustered (``-iC``), long ones also as a
+    prefix (``--ch``)."""
+    if not value.startswith("-"):
+        return False
+    if value.startswith("--"):
+        option, equals, _ = value.partition("=")
+        return not equals and any(
+            len(option) > 2 and long.startswith(option)
+            for long in ("--argv0", "--chdir", "--env0-from", "--unset")
+        )
+    for index, letter in enumerate(value[1:], start=1):
+        if letter in _ENV_VALUE_LETTERS:
+            return index == len(value) - 1
+    return False
 
 
 # Escapes `env -S` turns into control characters, as GNU env documents.
@@ -669,6 +691,10 @@ def _unwrap(
             text, position = split
             scripts.append((_env_shell_text(text), (*via, name)))
             rest[position:position] = _env_words(text)
+            continue
+        if name == "env" and value.startswith("-"):
+            if env_value_is_next(value):
+                position += 1
             continue
         if value in takes_value:
             position += 1
