@@ -3003,6 +3003,32 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
         assert "blocked" in result.lower()
 
+    def test_apostrophe_in_double_quotes_does_not_hide_line_continuation(self):
+        result = validate_command('echo "\'" > .\\\n./out.txt')
+        assert result is not None
+        assert "blocked" in result.lower()
+
+        # Single quotes still keep a backslash-newline literal.
+        assert validate_command("echo 'a\\\nb' > ./out.txt") is None
+        assert validate_command('echo "\'" > ./out.txt') is None
+
+    def test_quoted_equals_argument_with_dotdot_allowed(self):
+        assert validate_command("echo 'label=..'") is None
+        assert validate_command("echo label=..x") is None
+
+    def test_path_bearing_equals_forms_still_blocked(self):
+        for command in (
+            "python s.py --output=../out.txt",
+            "python s.py --output='..'/out.txt",
+            "python s.py '--output=../out.txt'",
+            "OUT=../out.txt python s.py",
+            "A=b OUT='../out.txt' python s.py",
+            "dd of=../out.txt",
+        ):
+            result = validate_command(command)
+            assert result is not None, command
+            assert "blocked" in result.lower(), command
+
 
 # === Pipeline command validation ===
 

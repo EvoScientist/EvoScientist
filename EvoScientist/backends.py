@@ -972,14 +972,23 @@ def _split_command_segments(command: str) -> list[str] | None:
 
 
 def _join_line_continuations(s: str) -> str:
-    """Remove backslash-newline line continuations outside single quotes."""
+    """Remove backslash-newline line continuations outside single quotes.
+
+    Tracks double-quote state so an apostrophe inside double quotes
+    (``"'"``) does not open a bogus single-quoted region.
+    """
     parts: list[str] = []
     in_single_quote = False
+    in_double_quote = False
     i = 0
     while i < len(s):
         c = s[i]
-        if c == "'":
+        if c == "'" and not in_double_quote:
             in_single_quote = not in_single_quote
+            parts.append(c)
+            i += 1
+        elif c == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
             parts.append(c)
             i += 1
         elif c == "\\" and not in_single_quote and i + 1 < len(s):
@@ -1033,7 +1042,7 @@ def _has_traversal_component(command: str) -> bool:
             if ".." in PurePosixPath(s).parts:
                 return True
             # Also check unquoted version to prevent bypasses like '..'/'..' or -o'.'./path
-            unquoted = s.replace("'", "").replace('"', '').replace('`', '')
+            unquoted = s.replace("'", "").replace('"', "").replace("`", "")
             if unquoted != s and ".." in PurePosixPath(unquoted).parts:
                 return True
         except Exception:
@@ -1072,13 +1081,25 @@ def _has_traversal_component(command: str) -> bool:
     ]
     words.update(str(token["value"]) for token in word_tokens)
 
+    # Path-bearing "=" forms only: ``--opt=VALUE`` / ``-o=VALUE`` (checked on
+    # decoded words) and a leading ``NAME=VALUE`` assignment whose name is
+    # unquoted in the raw word. A quoted ``'label=..'`` argument is plain data.
+    for token in words:
+        option = re.fullmatch(r"--?[\w-]+=(.*)", token, flags=re.DOTALL)
+        if option is not None and _check_candidate(option[1]):
+            return True
+    for wt in word_tokens:
+        raw = str(wt["raw"])
+        if re.match(r"[A-Za-z_]\w*=", raw):
+            if _check_candidate(raw.split("=", 1)[1]):
+                return True
+            value = str(wt["value"])
+            if "=" in value and _check_candidate(value.split("=", 1)[1]):
+                return True
+
     for token in words:
         if _check_candidate(token):
             return True
-        if "=" in token:
-            for part in token.split("="):
-                if _check_candidate(part):
-                    return True
         if ":" in token:
             for part in token.split(":"):
                 if _check_candidate(part):
