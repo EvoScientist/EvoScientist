@@ -1000,6 +1000,14 @@ def _has_traversal_component(command: str) -> bool:
             entries = [value] if glued[0].startswith("-") else value.split(":")
             if any(".." in PurePosixPath(entry).parts for entry in entries):
                 return True
+    # Double-quoted substitutions execute their contents as commands too.
+    # Keep quote/escape handling in the shared shell parser rather than
+    # treating a quoted literal containing "$()" as an executable script.
+    _, substitution_traversal = shell_syntax.rewrite_substitutions(
+        command, lambda inner: (inner, _has_traversal_component(inner))
+    )
+    if substitution_traversal:
+        return True
     # A shell's script (bash -c '...') is a command line of its own: check
     # inside it too, the way _extract_all_paths recurses into script words.
     scripts = shell_syntax.shell_script_words(tokens)
