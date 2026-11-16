@@ -672,6 +672,24 @@ def test_workspace_name_ending_in_a_symbol_keeps_its_own_paths(tmp_path, root_na
     assert "/etc/passwd" in error
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("folder", ["Project (2)", "c++", "data [v2]", "x)"])
+def test_folder_name_ending_in_a_symbol_inside_workspace_runs(tmp_path, folder):
+    from EvoScientist.backends import prepare_sandbox_command, validate_command
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    for rest in ("tmp/a.csv", "usr/lib.a", "etc/x"):
+        command = f'cd sub && cat "/tmp/{folder}/{rest}"'
+        assert prepare_sandbox_command(command, str(root))[1] is None
+        command = f'cat "{root}/{folder}/{rest}"'
+        assert validate_command(command, allow_prefixes=(str(root),)) is None
+    error = prepare_sandbox_command(
+        f'cd sub && python x.py --files="/tmp/{folder}/a.csv,/etc/passwd"', str(root)
+    )[1]
+    assert "/etc/passwd" in error
+
+
 @pytest.mark.parametrize(
     "command",
     [

@@ -1218,9 +1218,12 @@ def _extract_all_paths(
     )
     # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
     path_re = re.compile(r"(?<![:=/.\w])" + system_path)
-    # A later path inside a word may also follow a list or map separator
-    # (`<root>/a.csv:/etc/passwd`, `<root>/a.csv=/etc/passwd`).
-    later_path_re = re.compile(r"(?<![/.\w])" + system_path)
+    # A later path inside a word starts after a list or map separator
+    # (`<root>/a.csv,/etc/passwd`, `<root>/a.csv:/etc/passwd`,
+    # `<root>/a.csv=/etc/passwd`) or a quote (`eval "/tmp/x '/etc/passwd'"`).
+    # After any other character it is a folder of the path itself
+    # (`<root>/Project (2)/tmp/a.csv`).
+    later_path_re = re.compile(r"(?<=[,:;=\s'\"])" + system_path)
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
