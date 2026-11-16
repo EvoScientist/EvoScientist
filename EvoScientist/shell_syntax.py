@@ -22,9 +22,14 @@ def command_newline(command: str, start: int, end: int) -> int | None:
     """The end of the first newline between two tokens (*start* to *end*)
     that ends a command, not a backslash line continuation. A backslash
     before *start* belongs to the word before it, as in ``x\\\\``, so it
-    continues nothing."""
-    match = _NEWLINE_RE.search(command[start:end])
-    return None if match is None else start + match.end()
+    continues nothing; nor does one that ends a comment."""
+    gap = command[start:end]
+    comment = gap.find("#")  # before a newline, only a comment leaves a `#`
+    match = _NEWLINE_RE.search(gap if comment == -1 else gap[:comment])
+    if match is not None:
+        return start + match.end()
+    newline = -1 if comment == -1 else gap.find("\n", comment)
+    return None if newline == -1 else start + newline + 1
 
 
 ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")

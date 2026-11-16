@@ -873,6 +873,29 @@ class TestWorkspaceRemovalAndComments:
         # The next line's words are arguments of echo, not a command.
         assert validate_command(command) is None
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo start # stop the old server \\\npkill -f uvicorn",
+            "python train.py \\\n  --lr 1e-3 \\\n  # --resume ckpt \\\npkill -f uvicorn",
+            "bash <<EOF # note \\\npkill x\nEOF",
+        ],
+    )
+    def test_a_backslash_ending_a_comment_continues_nothing(self, command):
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo x\\\\\nssh host 'cat /home/user/project/file'",
+            "echo ready # done \\\nssh host 'cat /home/user/project/file'",
+        ],
+    )
+    def test_ssh_after_a_line_ending_in_a_backslash_is_still_masked(
+        self, command, tmp_workspace
+    ):
+        assert prepare_sandbox_command(command, tmp_workspace) == (command, None)
+
     def test_cd_after_a_glued_hash_is_still_checked(self):
         assert "leaves the workspace" in validate_command(
             "echo $(date)#; cd /etc; ls", workspace_root="/W"
