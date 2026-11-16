@@ -203,7 +203,10 @@ def _check_refusal_output(response: ModelResponse) -> ModelResponse:
 
 
 class ModelRefusalDetectionMiddleware(AgentMiddleware):
-    """Detect metadata-only refusals inside the fallback chain on every attempt."""
+    """Raise ModelRefusalError for refusals recorded only in response metadata.
+
+    List it after ModelFallbackMiddleware so every fallback attempt is checked.
+    """
 
     name = "model_refusal_detection"
 
@@ -347,7 +350,8 @@ def _normalize(
     if _should_pass_through(exc):
         return None
 
-    # Summarization catches overflow by type to compress history.
+    # SummarizationMiddleware sits outside our stack and catches this
+    # by exact type to trigger reactive history compression + retry.
     if isinstance(exc, ContextOverflowError):
         return None
     if pass_through_refusals and isinstance(exc, ModelRefusalError):

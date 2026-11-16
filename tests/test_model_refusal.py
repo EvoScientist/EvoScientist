@@ -1,4 +1,4 @@
-"""Explicit refusals must fail local turns, including v3 assembled messages."""
+"""Explicit refusals must fail local turns or become task notices, including v3 assembled messages."""
 
 from __future__ import annotations
 
