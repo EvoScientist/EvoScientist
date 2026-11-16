@@ -712,6 +712,25 @@ def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
     assert not _has_traversal_component(command)
 
 
+@pytest.mark.parametrize(
+    "word",
+    [
+        "{\x00..\U0010ffff}",  # a character range too big to expand
+        "a{b,c}" * 20,  # 2**20 words
+        "{" * 50_000 + "}" * 50_000,  # too many braces to scan
+        "x" * 70_000 + "{a,b}",  # too long to expand
+    ],
+)
+def test_brace_words_too_big_to_expand_are_refused(word):
+    import time
+
+    from EvoScientist.backends import _has_traversal_component
+
+    started = time.monotonic()
+    assert _has_traversal_component(f"cat {word}")
+    assert time.monotonic() - started < 2
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
 @pytest.mark.parametrize(
     ("files", "allowed"),

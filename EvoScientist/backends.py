@@ -983,10 +983,17 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
-# Words a brace expansion may produce before we stop and treat it as unsafe.
-_BRACE_EXPANSION_LIMIT = 4096
+# Limits for brace expansion. Past them the word is treated as unsafe.
+_BRACE_EXPANSION_LIMIT = 4096  # words one word may expand to
+_BRACE_EXPANSION_CHARS = 1 << 20  # characters held while expanding
+_BRACE_WORD_MAX_BRACES = 256  # `{` in one word
+_BRACE_WORD_MAX_CHARS = 1 << 16  # length of one word that has a `{`
 _BRACE_INT_SEQUENCE_RE = re.compile(r"[+-]?\d+\.\.[+-]?\d+(?:\.\.[+-]?\d+)?")
 _BRACE_CHAR_SEQUENCE_RE = re.compile(r"(.)\.\.(.)(?:\.\.[+-]?\d+)?", re.DOTALL)
+
+
+class _BraceExpansionTooLarge(Exception):
+    pass
 
 
 def _brace_choices(body: str) -> list[str] | None:
@@ -1010,46 +1017,56 @@ def _brace_choices(body: str) -> list[str] | None:
     seq = _BRACE_CHAR_SEQUENCE_RE.fullmatch(body)
     if seq:
         lo, hi = sorted((ord(seq.group(1)), ord(seq.group(2))))
+        if hi - lo >= _BRACE_EXPANSION_LIMIT:
+            raise _BraceExpansionTooLarge
         return [chr(c) for c in range(lo, hi + 1)]
     return None
 
 
 def _first_brace_expansion(word: str) -> tuple[int, int, list[str]] | None:
     """Find the first ``{...}`` that bash expands: (start, end, choices)."""
-    for start, ch in enumerate(word):
-        if ch != "{":
-            continue
-        depth = 0
-        for end in range(start, len(word)):
-            if word[end] == "{":
-                depth += 1
-            elif word[end] == "}":
-                depth -= 1
-                if depth == 0:
-                    choices = _brace_choices(word[start + 1 : end])
-                    if choices is not None:
-                        return start, end, choices
-                    break
+    # Match braces in one pass so a word full of `{` stays linear.
+    closing: dict[int, int] = {}
+    opened: list[int] = []
+    for i, ch in enumerate(word):
+        if ch == "{":
+            opened.append(i)
+        elif ch == "}" and opened:
+            closing[opened.pop()] = i
+    for start in sorted(closing):
+        end = closing[start]
+        choices = _brace_choices(word[start + 1 : end])
+        if choices is not None:
+            return start, end, choices
     return None
 
 
 def _expand_braces(word: str) -> list[str] | None:
     """Expand brace lists and sequences in ``word`` like bash does.
 
-    Returns None when the result would pass ``_BRACE_EXPANSION_LIMIT`` words.
+    Returns None when the result would pass the expansion limits.
     """
+    if word.count("{") > _BRACE_WORD_MAX_BRACES or len(word) > _BRACE_WORD_MAX_CHARS:
+        return None
     pending = [word]
     expanded: list[str] = []
-    while pending:
-        current = pending.pop()
-        found = _first_brace_expansion(current)
-        if found is None:
-            expanded.append(current)
-            continue
-        start, end, choices = found
-        pending.extend(current[:start] + c + current[end + 1 :] for c in choices)
-        if len(pending) + len(expanded) > _BRACE_EXPANSION_LIMIT:
-            return None
+    chars = len(word)
+    try:
+        while pending:
+            current = pending.pop()
+            found = _first_brace_expansion(current)
+            if found is None:
+                expanded.append(current)
+                continue
+            start, end, choices = found
+            if len(pending) + len(expanded) + len(choices) > _BRACE_EXPANSION_LIMIT:
+                return None
+            chars += len(choices) * len(current)
+            if chars > _BRACE_EXPANSION_CHARS:
+                return None
+            pending.extend(current[:start] + c + current[end + 1 :] for c in choices)
+    except _BraceExpansionTooLarge:
+        return None
     return expanded
 
 
