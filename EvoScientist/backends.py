@@ -2018,6 +2018,11 @@ def _convert_command_paths(
         "media_dirs": media_dirs,
     }
     scripts = shell_syntax.shell_script_words(words.tokens)
+    # A variable can be read after a cd or in another folder, so its value names
+    # the workspace path, unless that path needs quoting ($VAR would split).
+    anchor_values = (
+        bool(workspace_root) and _platform_quote(workspace_root)[0] not in "'\""
+    )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
@@ -2025,6 +2030,9 @@ def _convert_command_paths(
             continue
         raw = command[start:end]
         absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        value_absolute = absolute or (
+            anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
+        )
         script = raw[1:-1]
         if (
             start in scripts
@@ -2052,7 +2060,7 @@ def _convert_command_paths(
             )
             uses_tmp = uses_tmp or tmp
         elif quoted:
-            anchor = workspace_root if absolute else None
+            anchor = workspace_root if value_absolute else None
 
             def replace_quoted(
                 match: re.Match[str], anchor: str | None = anchor
@@ -2107,7 +2115,7 @@ def _convert_command_paths(
                 rewritten, tmp = _rewrite_path_word(
                     head.group(0),
                     **rules,
-                    absolute=absolute,
+                    absolute=value_absolute,
                     attached=attached is not None,
                 )
                 if rewritten is not None:
@@ -2127,7 +2135,7 @@ def _convert_command_paths(
                 continue
             prefix, path = attached
             rewritten, tmp = _rewrite_path_word(
-                path, **rules, absolute=absolute, attached=True
+                path, **rules, absolute=value_absolute, attached=True
             )
             uses_tmp = uses_tmp or tmp
             replacement = prefix + rewritten if rewritten is not None else None
@@ -2166,9 +2174,11 @@ def convert_virtual_paths_in_command(
 
     Words starting with ``/`` are paths. A quoted whole path, or an option
     or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
-    mapped when it names ``/tmp``, a mount or a workspace file. Search lists
-    such as ``PATH``, other quoted text and here-document bodies are data
-    (``print(6 / 3)``), except commands substituted inside double quotes.
+    mapped when it names ``/tmp``, a mount or a workspace file; an assignment's
+    value maps to the workspace path itself, as words after a ``cd`` do, unless
+    that path needs quoting. Search lists such as ``PATH``, other quoted text
+    and here-document bodies are data (``print(6 / 3)``), except commands
+    substituted inside double quotes.
     """
     return _convert_command_paths(
         command, workspace_name, skills_dir, media_dirs, workspace_root
