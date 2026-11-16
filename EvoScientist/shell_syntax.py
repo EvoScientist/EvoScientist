@@ -931,7 +931,9 @@ def word_values(
 ) -> list[str] | None:
     """The values a word reads as with the variables *assigned* in its command
     (see :func:`assigned_values`): *value* is the word as the shell reads it,
-    *word* as written. ``None`` when it names none of them."""
+    *word* as written. ``None`` when it names none of them, and empty when
+    one it names has no value known before the command runs; callers then
+    read the word as written."""
     names = variable_references(word) & assigned.keys()
     if not names:
         return None

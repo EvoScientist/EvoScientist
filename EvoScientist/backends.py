@@ -1344,11 +1344,12 @@ def _word_paths(
     word: str, token: dict[str, object] | None, assigned: dict[str, tuple[str, ...]]
 ) -> list[str]:
     """The paths a word may name as the agent's shell reads it, with ``/``
-    separators: itself, or with each value of the variables its command sets
-    (see :func:`shell_syntax.word_values`)."""
+    separators: with each value of the variables its command sets (see
+    :func:`shell_syntax.word_values`), else itself, also when only the run
+    knows a value (``D=$(date +%F); rm -rf memories/$D``)."""
     path = _removal_target(token) if token is not None else word
     values = shell_syntax.word_values(word, path, assigned)
-    return [path] if values is None else [value.replace("\\", "/") for value in values]
+    return [value.replace("\\", "/") for value in values] if values else [path]
 
 
 def _folder_from(folder: str, target: str) -> str | None:
@@ -1402,7 +1403,7 @@ def _env_folders(
         folders = [
             entered
             for folder in folders
-            for value in ([folder_word] if values is None else values)
+            for value in (values or [folder_word])
             if (entered := _folder_from(folder, value.replace("\\", "/")))
         ][:_FOLDERS_CAP]
     return folders
@@ -1704,8 +1705,9 @@ def validate_command(
                     )
         # Every operand read from every folder the rm may run in, with the
         # values of the variables the command sets: only a protected folder
-        # is refused (rm itself refuses `.`), and a first segment that
-        # expands may be anything, so it is left alone.
+        # is refused (rm itself refuses `.`). A first segment that expands
+        # may be anything, so it is left alone, unless the folder it is read
+        # from is itself in a protected folder.
         removals = [
             (found, operand, token)
             for found in commands

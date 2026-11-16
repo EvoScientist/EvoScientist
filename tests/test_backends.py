@@ -1042,6 +1042,9 @@ class TestWorkspaceRemovalAndComments:
             'D=skills; rm -rf "$D/demo"',
             "A=sk; D=${A}ills; rm -rf $D",
             "export D=skills; rm -rf ${D}",
+            "X=$(true); rm -rf skills/$X",
+            "X=`true`; rm -rf skills/$X",
+            "X=$(true); cd skills && rm -rf demo$X",
         ],
     )
     @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
@@ -1090,6 +1093,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -r .evoscientist",
             "rm -rf .evoscientist/memories/$(date +%F)",
             "cd .evoscientist && rm -rf memories",
+            "D=$(date +%F); rm -rf .evoscientist/memories/$D",
+            'D=$(date +%F); rm -rf ".evoscientist/memories/$D"',
         ],
     )
     def test_relative_removals_of_memories_in_the_workspace_are_refused(
@@ -1126,6 +1131,7 @@ class TestWorkspaceRemovalAndComments:
             'cd "$(pwd)" && rm -rf build',
             "D=$(pwd); rm -rf $D/build",
             'D=build; rm -rf "$D"',
+            "X=$(true); rm -rf build/$X",
             "rm -rf skill* {build,dist}",
             "rm -rf build/$(date +%F)",
             "rm -rf ./$(printf build)",
