@@ -684,10 +684,9 @@ def test_folder_name_ending_in_a_symbol_inside_workspace_runs(tmp_path, folder):
         assert prepare_sandbox_command(command, str(root))[1] is None
         command = f'cat "{root}/{folder}/{rest}"'
         assert validate_command(command, allow_prefixes=(str(root),)) is None
-    error = prepare_sandbox_command(
-        f'cd sub && python x.py --files="/tmp/{folder}/a.csv,/etc/passwd"', str(root)
-    )[1]
-    assert "/etc/passwd" in error
+    for sep in (",", ":", "=", "@", "(", " '"):
+        command = f'cd sub && python x.py --files="/tmp/{folder}/a.csv{sep}/etc/passwd"'
+        assert "/etc/passwd" in prepare_sandbox_command(command, str(root))[1]
 
 
 @pytest.mark.parametrize(
