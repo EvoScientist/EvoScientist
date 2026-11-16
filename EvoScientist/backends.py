@@ -971,6 +971,13 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
+# ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
+_GLUED_VALUE_PREFIX_RE = re.compile(
+    r"\+{0,2}[\w.-]+(?:\[[^]]*\])?(?::[A-Z]+)?[+:?!]*=|-[A-Za-z]+,?"
+)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
@@ -982,13 +989,17 @@ def _has_traversal_component(command: str) -> bool:
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
-        # Option and assignment spellings glue the value to the word, so a
-        # bare split misses them: --output=../x, OUT=../x and -o../x.
-        if "=" in token and ".." in PurePosixPath(token.split("=", 1)[1]).parts:
-            return True
-        unglued = re.sub(r"^-[A-Za-z]+", "", token)
-        if unglued != token and ".." in PurePosixPath(unglued).parts:
-            return True
+        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
+        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+        value = token
+        for _ in range(4):
+            glued = _GLUED_VALUE_PREFIX_RE.match(value)
+            if glued is None:
+                break
+            value = value[glued.end() :]
+            entries = [value] if glued[0].startswith("-") else value.split(":")
+            if any(".." in PurePosixPath(entry).parts for entry in entries):
+                return True
     # A shell's script (bash -c '...') is a command line of its own: check
     # inside it too, the way _extract_all_paths recurses into script words.
     scripts = shell_syntax.shell_script_words(tokens)
