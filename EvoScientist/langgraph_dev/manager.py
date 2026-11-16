@@ -1397,6 +1397,10 @@ def _spawn_server(
     # in the CLI process and on a plain ``import EvoScientist``.
     sub_env["EVOSCIENTIST_SERVER_PROCESS"] = "1"
 
+    # langgraph-cli reports usage at every ``langgraph dev`` start unless this
+    # is exactly "1", so any inherited value is overwritten.
+    sub_env["LANGGRAPH_CLI_NO_ANALYTICS"] = "1"
+
     # Propagate the effective bind port into the subprocess's config resolution
     # via the standard ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` override (see
     # ``EvoScientist/config/settings.py``). Without this, ``EvoSci deploy

@@ -282,6 +282,8 @@ class TestValidateSetting:
         [
             ("sandbox_execute_timeout", 0, "greater than 0"),
             ("sandbox_execute_timeout", True, "expected a number"),
+            ("code_interpreter_timeout", 0, "greater than 0"),
+            ("code_interpreter_timeout", -5, "greater than 0"),
             ("memory_skill_synthesis_time", "25:00", "HH:MM"),
             ("proactive_idle_minutes", -1, "0 or more"),
             ("proactive_quiet_hours", "late", "HH:MM-HH:MM"),

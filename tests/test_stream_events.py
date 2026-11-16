@@ -1568,7 +1568,7 @@ class TestV3ProtocolStreaming:
         kinds = [e["type"] for e in events if e["type"] in ("thinking", "text")]
         assert kinds == ["thinking", "text", "text", "text"]
         texts = [e["content"] for e in events if e.get("type") == "text"]
-        assert texts == ["Answer", "Next", "Last"]
+        assert texts == ["Answer", "\n\nNext", "\n\nLast"]
 
     async def test_each_subagent_holds_its_own_whitespace(self):
         """A held space belongs to the stream it arrived in."""
@@ -2307,7 +2307,7 @@ class TestModelRetryRollback:
         )
         assert self._retries(out)[0]["discarded"] == self._zero()
         assert self._discards(out) == []
-        assert self._done(out)["response"] == "Let me check.Done."
+        assert self._done(out)["response"] == "Let me check.\n\nDone."
         assert [
             e["type"] for e in out if e["type"] in ("tool_call", "tool_result")
         ] == ["tool_call", "tool_result"]
@@ -2439,7 +2439,7 @@ class TestModelRetryRollback:
         )
         assert self._discards(out) == []
         assert self._retries(out)[0]["discarded"] == self._zero()
-        assert self._done(out)["response"] == "First.Second."
+        assert self._done(out)["response"] == "First.\n\nSecond."
 
     async def test_whole_message_fallback_after_partial_primary(self):
         from langchain_core.messages import AIMessage
@@ -2514,8 +2514,8 @@ class TestModelRetryRollback:
                 model_call_end("2"),
             ]
         )
-        assert self._retries(out)[0]["discarded"]["text_chars"] == 1
-        assert self._done(out)["response"] == "ABY"
+        assert self._retries(out)[0]["discarded"]["text_chars"] == len("\n\nx")
+        assert self._done(out)["response"] == "AB\n\nY"
 
     async def test_summarization_messages_are_skipped(self):
         from tests.fakes.stream_v3 import (
@@ -2662,7 +2662,7 @@ class TestModelRetryRollback:
             ]
         )
         assert self._discards(out) == []
-        assert self._done(out)["response"] == "First.Second."
+        assert self._done(out)["response"] == "First.\n\nSecond."
 
     async def test_retry_names_the_agent_from_the_event_not_the_namespace(self):
         """The server tracker names a namespace after its graph node; the event knows the agent."""

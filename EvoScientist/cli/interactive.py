@@ -448,6 +448,10 @@ def cmd_interactive(
         dirs: The session's workspace, and its run folder under
             ``--mode=run`` (``/new`` then moves to a fresh run folder)
     """
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         load_agent = partial(
@@ -1215,7 +1219,7 @@ def cmd_interactive(
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),
                             dangerous=sandbox_dangerous_mode(
-                                runtime_gateways.graph_gateway
+                                runtime_gateways.graph_gateway, config
                             ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,

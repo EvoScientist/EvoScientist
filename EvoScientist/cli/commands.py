@@ -2063,7 +2063,9 @@ def _serve_process_message(
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
                 routes=file_tool_routes(dirs.workspace),
-                dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway),
+                dangerous=sandbox_dangerous_mode(
+                    runtime_gateways.graph_gateway, runtime_state.config
+                ),
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
