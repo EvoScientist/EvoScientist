@@ -404,15 +404,23 @@ def shell_script_words(tokens: Sequence[dict[str, object]]) -> set[int]:
         name = re.split(r"[\\/]", str(token["value"]))[-1]
         if token["type"] != "word" or name not in SHELL_NAMES:
             continue
-        for option, script in zip(
-            tokens[index + 1 :], tokens[index + 2 :], strict=False
-        ):
-            if option["type"] != "word" or not str(option["raw"]).startswith("-"):
+        options = iter(tokens[index + 1 :])
+        for option in options:
+            if option["type"] != "word":
                 break
-            if SHELL_C_OPTION_RE.fullmatch(str(option["raw"])):
-                if script["type"] == "word":
+            raw = str(option["raw"])
+            if not raw.startswith(("-", "+")):
+                break
+            if SHELL_C_OPTION_RE.fullmatch(raw):
+                script = next(options, None)
+                if script is not None and script["type"] == "word":
                     starts.add(int(script["start"]))
                 break
+            # -o/-O consume a separate option name, including in -euo.
+            if re.fullmatch(r"[-+][A-Za-z]*[oO]", raw):
+                name = next(options, None)
+                if name is None or name["type"] != "word":
+                    break
     return starts
 
 

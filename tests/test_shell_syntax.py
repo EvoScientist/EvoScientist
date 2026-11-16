@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from EvoScientist import shell_syntax
 
 
@@ -94,6 +96,39 @@ class TestWordsAndScripts:
         assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
             command.index("'")
         }
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            "-o pipefail",
+            "-O extglob",
+            "-euo pipefail",
+            "+o pipefail",
+            "-o pipefail -O extglob",
+            "-o pipefail -lc",
+        ],
+    )
+    def test_named_shell_options_are_skipped_before_the_script(self, options):
+        option_c = "" if options.endswith("-lc") else " -c"
+        command = f"timeout 5 bash {options}{option_c} 'cat /tmp/a'"
+        assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
+            command.index("'")
+        }
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -o",
+            "bash -O; echo x",
+            "bash -o pipefail",
+            "bash -c",
+            "bash -o pipefail; echo -c 'not a script'",
+        ],
+    )
+    def test_missing_named_option_or_script_does_not_consume_next_command(
+        self, command
+    ):
+        assert not shell_syntax.shell_script_words(shell_syntax.parse(command).tokens)
 
     def test_substitutions_in_double_quotes_are_converted(self):
         assert shell_syntax.rewrite_substitutions(

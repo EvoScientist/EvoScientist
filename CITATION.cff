@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use EvoScientist in your research, please cite this software."
+
+type: software
+title: "EvoScientist"
+
+authors:
+  - family-names: "Zhang"
+    given-names: "Xi"
+
+repository-code: "https://github.com/EvoScientist/EvoScientist"
+
+license: "Apache-2.0"
+date-released: 2026-01-27

@@ -1863,7 +1863,7 @@ def run_textual_interactive(
             _media_sent: set[str] = set()
             # Media paths resolve as the sandbox resolves them.
             _media_dangerous = on_media_cb is not None and sandbox_dangerous_mode(
-                self._runtime_gateways.graph_gateway
+                self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
             _MIN_THINKING_LEN = 200

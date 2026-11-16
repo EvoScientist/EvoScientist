@@ -4957,38 +4957,39 @@ def test_auto_mode_holds_when_workspace_tier_root_is_external(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
-def test_update_uses_resolved_virtual_path_for_internal_alias(
+def test_update_follows_a_link_inside_the_skills_folder(
     tmp_path,
     monkeypatch,
 ):
-    """An internal alias must not invent a path absent from the runtime."""
+    """The runtime lists a linked folder under its own name, so it can win."""
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "skills"
-    first = _write_installed_skill_in_dir(
+    linked = _write_installed_skill_in_dir(
         workspace_skills,
         "a",
         skill_name="alias-order",
-        description="First physical skill.",
-        body="# Alias order\n\nKeep first.\n",
+        description="Reached through the link.",
+        body="# Alias order\n\nKeep linked.\n",
     )
-    winner = _write_installed_skill_in_dir(
+    other = _write_installed_skill_in_dir(
         workspace_skills,
         "m",
         skill_name="alias-order",
-        description="Runtime winner.",
-        body="# Alias order\n\nRuntime winner.\n",
+        description="Listed before the link.",
+        body="# Alias order\n\nKeep other.\n",
     )
-    (workspace_skills / "z").symlink_to(first, target_is_directory=True)
+    (workspace_skills / "z").symlink_to(linked, target_is_directory=True)
     from EvoScientist.tools.skills_manager import installed_skill_index
 
     assert (
-        installed_skill_index(Workspace(tmp_path))["alias-order"] == "Runtime winner."
+        installed_skill_index(Workspace(tmp_path))["alias-order"]
+        == "Reached through the link."
     )
     _write_skill_folder(
         memory_dir,
         "alias-order",
-        "Use when testing resolved virtual path ordering.",
+        "Use when testing the order of linked folders.",
         "# Alias order\n\nUpdated winner.\n",
     )
     proposal = submit_autoskill_proposal(
@@ -4996,7 +4997,7 @@ def test_update_uses_resolved_virtual_path_for_internal_alias(
         skill_name="alias-order",
         cluster_hash="cluster-alias-order",
         source_observation_ids=["O-1", "O-2", "O-3"],
-        rationale="The update must target the resolved runtime winner.",
+        rationale="The update must target the skill the runtime loads.",
         operation="update",
         target_skill_name="alias-order",
         skills_dir=workspace_skills,
@@ -5009,9 +5010,9 @@ def test_update_uses_resolved_virtual_path_for_internal_alias(
     )
 
     assert result["approved"] is True
-    assert Path(result["path"]) == winner
-    assert "Updated winner." in (winner / "SKILL.md").read_text(encoding="utf-8")
-    assert "Keep first." in (first / "SKILL.md").read_text(encoding="utf-8")
+    assert Path(result["path"]) == linked
+    assert "Updated winner." in (linked / "SKILL.md").read_text(encoding="utf-8")
+    assert "Keep other." in (other / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_update_replaces_hardlinked_target_without_touching_global(
