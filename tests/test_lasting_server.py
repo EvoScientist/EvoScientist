@@ -459,6 +459,26 @@ def test_server_stop_leaves_deploy_owned_server(monkeypatch):
     assert server_cmd.manual_stop_command(6174) in output
 
 
+def test_server_stop_points_to_itself_while_named_owner_runs(monkeypatch):
+    """A record that names its owner: once that owner is gone, the stop
+    itself ends the server, so no manual kill command."""
+    from EvoScientist.cli import server_cmd
+    from EvoScientist.langgraph_dev import server_record
+
+    stopped = []
+    owner = {server_record.OWNER_PID_KEY: 77}
+    _recorded_server(monkeypatch, _record(lasting=False, fields=owner), stopped)
+    monkeypatch.setattr(manager, "owner_running", lambda _record: True)
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert stopped == []
+    output = " ".join(result.output.split())
+    assert "run EvoSci server stop again" in output
+    assert server_cmd.manual_stop_command(6174) not in output
+
+
 def test_server_stop_stops_server_nobody_else_owns(monkeypatch):
     """A record that does not say who owns its server (a server started by
     hand, an older release) is the stop's to end."""
@@ -908,6 +928,31 @@ def test_server_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "--yes" not in result.output
     assert "left running" in result.output
+
+
+@pytest.mark.parametrize("yes", [False, True])
+def test_server_stop_asks_before_stopping_busy_server_its_owner_left(
+    busy_server, monkeypatch, yes
+):
+    """EvoSci deploy was killed and left its server: the stop ends it like
+    the background server, so its work is asked about first."""
+    from EvoScientist.langgraph_dev import server_record
+
+    owner = {server_record.OWNER_PID_KEY: 77}
+    monkeypatch.setattr(
+        manager, "read_record", lambda **_k: _record(lasting=False, fields=owner)
+    )
+    monkeypatch.setattr(manager, "_parent_pid", lambda pid: 1)
+
+    result = CliRunner().invoke(app, ["server", "stop", *(["--yes"] if yes else [])])
+
+    if yes:
+        assert result.exit_code == 0, result.output
+        assert busy_server == ["server"]
+    else:
+        assert result.exit_code == 1
+        assert "--yes" in result.output
+        assert busy_server == []
 
 
 def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):

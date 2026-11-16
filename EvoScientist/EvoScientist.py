@@ -354,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MissingApiKeyMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         WindowsFilePathMiddleware,
@@ -413,6 +414,9 @@ def _inject_subagent_middleware(
             WindowsFilePathMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
+            # Inside the model override: stops a call to a model with no
+            # API key before it reaches the provider (#782).
+            MissingApiKeyMiddleware(),
             # Inside the retry layer: marks each provider call for the
             # stream decoder.
             ModelCallBoundaryMiddleware(),
@@ -987,6 +991,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MissingApiKeyMiddleware,
         ModelFallbackMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
@@ -1106,6 +1111,9 @@ def _get_default_middleware(
             timeout=cfg.code_interpreter_timeout,
             max_result_chars=cfg.code_interpreter_max_result_chars,
         ),
+        # Inside the model override and the fallback chain: stops a call to
+        # a model with no API key before it reaches the provider (#782).
+        MissingApiKeyMiddleware(),
         # Inside the fallback chain and the tool selector: marks each
         # provider call for the stream decoder.
         ModelCallBoundaryMiddleware(),

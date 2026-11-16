@@ -1100,12 +1100,8 @@ async def test_pause_state_read_failure_on_a_resume_does_not_cancel():
     }
 
 
-async def test_root_failed_lifecycle_emits_partial_text_as_done():
-    """A root ``failed`` ends the turn with ``done`` and any partial text.
-
-    The path for a new message breaks on root failed and emits ``done``. An
-    ``error`` event is reserved for raised exceptions.
-    """
+async def test_root_failed_lifecycle_ends_the_turn_with_an_error():
+    """A root ``failed`` ends the turn with ``error`` after any partial text."""
     stream = FakeLangGraphThreadStream(
         THREAD_ID,
         events=[
@@ -1116,15 +1112,19 @@ async def test_root_failed_lifecycle_emits_partial_text_as_done():
         stay_open=True,
     )
     gateway, _ = _gateway(stream)
+    events: list[dict] = []
 
-    events = await _turn(gateway, "hi")
+    async def collect() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id=THREAD_ID)
+        ):
+            events.append(event)
 
-    assert [event["type"] for event in events] == ["text", "done"]
-    assert events[-1] == {
-        "type": "done",
-        "content": "partial",
-        "response": "partial",
-    }
+    with pytest.raises(RuntimeError, match="Run failed"):
+        async with asyncio.timeout(GUARD_SECONDS):
+            await collect()
+
+    assert [event["type"] for event in events] == ["text", "error"]
 
 
 async def test_skip_replay_uses_module_timeout_constants(monkeypatch):

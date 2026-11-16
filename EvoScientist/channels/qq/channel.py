@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..capabilities import QQ as QQ_CAPS
 from ..config import BaseChannelConfig
 from ..formatter import UnifiedFormatter
@@ -189,14 +189,14 @@ class QQChannel(Channel):
             annotations: list[str] = []
             media_paths: list[str] = []
             attachments = getattr(message, "attachments", None) or []
-            for att in attachments:
+            for index, att in enumerate(attachments):
                 url = getattr(att, "url", "") or ""
                 filename = getattr(att, "filename", "attachment") or "attachment"
                 content_type = getattr(att, "content_type", "") or ""
                 if url:
                     local, ann = await self._download_attachment(
                         url,
-                        f"qq_{filename}",
+                        attachment_filename(filename, message.id, index),
                     )
                     if local:
                         media_paths.append(local)

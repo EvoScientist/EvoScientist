@@ -32,6 +32,24 @@ def test_start_sets_server_process_env(monkeypatch, tmp_path, runtime_paths, inh
     assert captured["env"]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
 
 
+@pytest.mark.parametrize("inherited", [None, "", "0", "false"])
+def test_start_turns_off_langgraph_cli_analytics(
+    monkeypatch, tmp_path, runtime_paths, inherited
+):
+    """langgraph-cli sends usage data at every ``langgraph dev`` start unless
+    ``LANGGRAPH_CLI_NO_ANALYTICS`` is ``"1"``, so the server always gets it."""
+    if inherited is None:
+        monkeypatch.delenv("LANGGRAPH_CLI_NO_ANALYTICS", raising=False)
+    else:
+        monkeypatch.setenv("LANGGRAPH_CLI_NO_ANALYTICS", inherited)
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+
+    with pytest.raises(PopenAbort):
+        manager._spawn_server(port=16175)
+
+    assert captured["env"]["LANGGRAPH_CLI_NO_ANALYTICS"] == "1"
+
+
 def test_start_runs_server_in_server_home(monkeypatch, tmp_path, runtime_paths):
     """The server serves every registered project, so it gets no workspace of
     its own. The user's ``EVOSCIENTIST_WORKSPACE_DIR`` (Docker sets it) passes

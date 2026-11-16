@@ -5,6 +5,7 @@ This module defines the Channel interface that all messaging channels
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 import threading
@@ -17,6 +18,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..paths import file_tool_path
 from ..runtime import AsyncRuntime
@@ -155,6 +157,29 @@ def media_path(media_dir: Path, filename: str) -> Path:
     """Ensure *media_dir* exists and return a path inside it."""
     media_dir.mkdir(parents=True, exist_ok=True)
     return media_dir / filename
+
+
+# Fixed allowance for prefixes added by current and future channel callers.
+_CHANNEL_PREFIX_RESERVE = 32
+
+
+def attachment_filename(filename: str, message_id: str, index: int) -> str:
+    """Keep attachments distinct across messages and within one message."""
+    identity = (
+        hashlib.sha256(str(message_id).encode()).hexdigest()[:16]
+        if message_id
+        else uuid4().hex
+    )
+    safe_name = filename.replace("\\", "_").replace("/", "_")
+    prefix = f"{identity}_{index}_"
+    # Reserve caller prefix space independently of the currently longest channel.
+    budget = 255 - _CHANNEL_PREFIX_RESERVE - len(prefix.encode())
+    suffix = Path(safe_name).suffix
+    stem = safe_name[: -len(suffix)] if suffix else safe_name
+    suffix = suffix.encode()[:budget].decode(errors="ignore")
+    stem_budget = budget - len(suffix.encode())
+    stem = stem.encode()[:stem_budget].decode(errors="ignore")
+    return f"{prefix}{stem}{suffix}"
 
 
 def check_attachment_size(file_size: int, filename: str) -> str | None:

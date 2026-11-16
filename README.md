@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.2" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -138,6 +138,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 > Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
+- **[14 Nov 2026]** 🍎 The **EvoScientist desktop app** is out for macOS (Apple silicon)! [**Download**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg) 👈
 - **[03 Nov 2026]** 🖥️ The **EvoScientist desktop app** is out for Windows! [**Download**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe) 👈
 - **[03 Jun 2026]** 🥈 Ranked #2 overall — and 🥇 #1 among `GPT-5.4`-based agents — on [ResearchClawBench](https://github.com/InternScience/ResearchClawBench) (Agent Mode)! [**Leaderboard**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[18 Apr 2026]** 🥇 Ranked #1 on [DeepResearch Bench](https://deepresearch-bench.github.io/) at submission time! [**Leaderboard**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
@@ -152,6 +153,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[14 Nov 2026]** **[v0.4.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.3)** — New models: Claude Fable 5.2 (Anthropic + OpenRouter), Gemini 4 Carbon and Gemini 4 Hydrogen (Google + OpenRouter); `EvoSci workspace move` for moved or renamed projects; the background server runs the ccproxy behind Claude Pro/Max sign-in, and `EvoSci server` replaces `EvoSci service` and `EvoSci ccproxy`; media files the agent writes or reads are sent to the chat; deepagents 0.7.38.
 - **[06 Nov 2026]** **[v0.4.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.2)** — One `reasoning_effort` for Claude, OpenAI, OpenRouter and DeepSeek, defaulting to `high`; new model: Tencent HY4 (OpenRouter), replacing HY4 Preview and HY3; background processes EvoScientist loses track of are reported instead of dropped; removing a project stops its work on the server; failed commands show as failed; deepagents 0.7.34.
 - **[03 Nov 2026]** **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** — The WebUI and the desktop app share the one background server from any project (WebUI 0.5); on Windows a run cut by a server stop runs again at the next start; cancelling a run on the server stops its shell command; clearer tool errors; fixes for resumed scheduled tasks, background-process checks and `EvoSci deploy --tunnel`; compatibility code for data older than v0.3.8 removed.
 - **[31 Oct 2026]** **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** — One background service for every project (stop it with `EvoSci server stop`); new model: GPT-6.1 Terra (OpenAI + OpenRouter); a project `.env` now holds only `EvoSci` command settings; hardened setup, a stricter shell sandbox and a safer `EvoSci update`; Apple silicon only on macOS; fixes for memory workers, serve turns and standalone channels.
@@ -222,15 +224,15 @@ Download it for your platform:
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-dark.svg">
   <img alt="Download for Windows" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg" width="220" height="44">
-</picture></a>&nbsp;<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-dark.svg">
-  <img alt="macOS coming soon" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg" width="220" height="44">
-</picture>
+</picture></a>&nbsp;<a href="https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-dark.svg">
+  <img alt="Download for macOS" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg" width="220" height="44">
+</picture></a>
 </p>
 
 > [!NOTE]
-> The installer is not signed yet: Windows SmartScreen may ask you to confirm (More info → Run anyway).
+> The macOS app is for Apple silicon on macOS 13 or later, signed and notarized. The Windows installer is not signed yet: Windows SmartScreen may ask you to confirm (More info → Run anyway).
 
 ### Quick Install
 
@@ -477,7 +479,7 @@ export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
 export TAVILY_API_KEY="tvly-..."    # app.tavily.com
 ```
 
-Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yaml`.
+Or use `EvoSci config set` to persist keys in `~/.config/evoscientist/config.yaml`. OpenAI- and Anthropic-compatible endpoints (vLLM, LM Studio, a gateway) are configured with the `custom-openai` / `custom-anthropic` providers — see the [custom endpoints guide](docs/guides/custom-endpoints.md).
 
 Every agent takes its keys from `config.yaml` or the environment. A project `.env` holds only settings of the `EvoSci` command started in that folder, such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`; `EvoSci` warns about, and ignores, any key or other setting EvoScientist reads in it. Other variables in it, such as `HF_TOKEN`, are ignored too: export them in your shell before starting EvoSci.
 

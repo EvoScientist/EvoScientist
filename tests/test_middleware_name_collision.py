@@ -53,6 +53,7 @@ def test_backend_summarization_is_the_only_deliberate_collision(
 
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     cfg.auxiliary_model = ""

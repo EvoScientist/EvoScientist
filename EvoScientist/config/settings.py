@@ -612,6 +612,15 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # The interpreter refuses a timeout that is not above 0, which would
+        # stop every agent build.
+        t = self.code_interpreter_timeout
+        if isinstance(t, bool) or not isinstance(t, int | float) or not t > 0:
+            logging.getLogger(__name__).warning(
+                "Invalid code_interpreter_timeout %r; falling back to 60.", t
+            )
+            self.code_interpreter_timeout = 60.0
+
         # A retry budget that is not a whole number of seconds (a hand-edited
         # ``60s``) goes back to its default; ``0`` or less switches the retry off.
         for name in ("model_retry_wait_seconds", "auto_mode_retry_wait_seconds"):
@@ -1095,7 +1104,7 @@ def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
         raise ValueError("must be a finite number")
 
     warning = None
-    if key == "sandbox_execute_timeout" and value <= 0:
+    if key in ("sandbox_execute_timeout", "code_interpreter_timeout") and value <= 0:
         raise ValueError("must be greater than 0")
     if key == "memory_skill_synthesis_time":
         value = _normalize_hhmm(value)

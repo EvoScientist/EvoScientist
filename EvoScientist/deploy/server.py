@@ -18,11 +18,12 @@ closes. :mod:`.json_mode` documents the events.
 
 from __future__ import annotations
 
-import atexit
+import contextlib
 import os
 import signal
-import threading
-from collections.abc import Callable
+import subprocess
+import time
+from collections.abc import Callable, Iterator
 from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
@@ -91,13 +92,6 @@ def deploy(
             raise typer.Exit(code)
         return
 
-    from ..langgraph_dev.manager import (
-        RUNTIME,
-        TunnelFailedError,
-        _base_url,
-        read_tunnel_url,
-    )
-
     # 1. Load config (deploy is opinionated about full MCP + async; the only
     # overrides are the bind flags).
     config = _load_config(debug, host, port)
@@ -109,12 +103,7 @@ def deploy(
 
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
     from ..cli.commands import _prepare_workdir_or_exit
-    from ..langgraph_dev.registration import (
-        RegistrationError,
-        ServerUnusableError,
-        register_folder,
-    )
-    from ..paths import Workspace, start_workspace_path
+    from ..paths import start_workspace_path
 
     ws = str(start_workspace_path(workdir, config.default_workdir))
     # Create the folder (or refuse a known project's missing one); do NOT
@@ -132,9 +121,125 @@ def deploy(
 
     effective_host = _resolve_host(host, config)
 
-    # 4 to 7: the server, started here and owned by this command (never
-    # one already running for this data folder).
-    _start_server(config, effective_port, effective_host, tunnel, ws)
+    # 4 to 10: the server, started here and owned by this command (never
+    # one already running for this data folder), and stopped here, whatever
+    # ends the command.
+    with _stop_signals_interrupt():
+        proc: subprocess.Popen | None = None
+        try:
+            proc = _start_server(config, effective_port, effective_host, tunnel, ws)
+            _serve(ws, effective_port, effective_host, tunnel)
+        finally:
+            _stop_own_server(proc)
+
+
+def _stop_signals() -> list[signal.Signals]:
+    """The signals that end ``EvoSci deploy``. On macOS and Linux that
+    includes SIGHUP: the terminal closed or the SSH session dropped. (On
+    Windows the server shares the terminal's console, so closing it ends the
+    server too.)"""
+    stops = [signal.SIGINT, signal.SIGTERM]
+    hangup = getattr(signal, "SIGHUP", None)
+    if hangup is not None:
+        stops.append(hangup)
+    return stops
+
+
+def _say(markup: str) -> None:
+    """Print a stop message; after a hang-up the terminal is gone, and
+    writing to it fails without stopping the stop."""
+    with contextlib.suppress(OSError):
+        console.print(markup)
+
+
+def _ignore(signum: int, frame: Any) -> None:
+    """A stop signal after the first: the stop is already under way."""
+
+
+def _interrupt(signum: int, frame: Any) -> None:
+    """End deploy as Ctrl+C does, with the signals that end it ignored from
+    now on, so a second one cannot cut the stop short. Ignored by a no-op:
+    with ``SIG_IGN``, a second signal already pending prints an error."""
+    for sig in _stop_signals():
+        if signal.getsignal(sig) is _interrupt:
+            signal.signal(sig, _ignore)
+    signal.default_int_handler(signum, frame)
+
+
+@contextlib.contextmanager
+def _stop_signals_interrupt() -> Iterator[None]:
+    """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
+    does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
+    otherwise end the process without it, and leave the server, which runs
+    in its own session or process group, running. Installed before the
+    start, so a signal while the server starts stops it too. A SIGHUP this
+    process started with ignored stays ignored: ``nohup EvoSci deploy &``
+    keeps deploy and its server up after a logout. (SIGINT is taken over
+    even when ignored, as a shell ignores it for ``EvoSci deploy &`` and a
+    later ``kill -INT`` stops deploy.)
+
+    The first such signal also ignores the rest from then on: every stop
+    that follows it, the one ``ensure_server`` makes of a server it was
+    starting as well as deploy's own, runs to the end."""
+    hangup = getattr(signal, "SIGHUP", None)
+    previous = {
+        sig: signal.signal(sig, _interrupt)
+        for sig in _stop_signals()
+        if sig != hangup or signal.getsignal(sig) is not signal.SIG_IGN
+    }
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _stop_own_server(proc: subprocess.Popen | None) -> None:
+    """Stop the server this command started: *proc*, or, when the start was
+    interrupted before ``ensure_server`` returned its handle, the one the
+    manager holds right after spawning. The signals that end deploy are
+    ignored meanwhile: a second Ctrl+C must not cut the stop short and
+    leave the server running."""
+    from ..langgraph_dev import manager as lgm
+
+    server = proc if proc is not None else lgm._PROCESS
+    if server is None:
+        return
+    previous = {sig: signal.signal(sig, _ignore) for sig in _stop_signals()}
+    try:
+        _say("\n[dim]Stopping langgraph dev...[/dim]")
+        # A server that never became ready has no run to put back in the
+        # queue, and on Windows would only finish loading first.
+        lgm.stop_langgraph_dev(server, clean=proc is not None)
+        _say("[dim]Stopped.[/dim]")
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _wait_for_stop() -> None:
+    """Block until a signal that ends deploy raises ``KeyboardInterrupt``.
+    The short sleeps keep Ctrl+C prompt on Windows, where a blocking wait
+    without a timeout does not see it."""
+    while True:
+        time.sleep(0.5)
+
+
+def _serve(ws: str, effective_port: int, effective_host: str, tunnel: bool) -> None:
+    """Register the workspace with the started server, show the Ready
+    banner and serve until a signal ends deploy."""
+    from ..langgraph_dev.manager import (
+        RUNTIME,
+        TunnelFailedError,
+        _base_url,
+        read_tunnel_url,
+    )
+    from ..langgraph_dev.registration import (
+        RegistrationError,
+        ServerUnusableError,
+        register_folder,
+    )
+    from ..paths import Workspace
 
     # The server serves the projects its clients register, this one too.
     try:
@@ -191,7 +296,6 @@ def deploy(
     log_hint = _shorten(str(RUNTIME.log_file))
     public_line = f"[bold]Public URL:[/bold]   {public_url}\n" if public_url else ""
     from ..langgraph_dev.assistants import chat_assistant_id
-    from ..paths import Workspace
 
     assistant_id = chat_assistant_id(Workspace(ws))
     console.print(
@@ -211,33 +315,9 @@ def deploy(
         )
     )
 
-    # 10. Block on signal — mirror serve's dual-gate (threading.Event +
-    # explicit SIGINT/SIGTERM handlers) so SIGTERM (no default raise) also
-    # triggers clean shutdown.
-    shutdown_event = threading.Event()
-
-    def _handle_shutdown(signum: int, _frame: Any) -> None:
-        shutdown_event.set()
-        if signum == signal.SIGINT:
-            signal.default_int_handler(signum, _frame)
-
-    _orig_sigint = signal.signal(signal.SIGINT, _handle_shutdown)
-    _orig_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown)
-
-    try:
-        while not shutdown_event.is_set():
-            shutdown_event.wait(timeout=0.5)
-    except KeyboardInterrupt:
-        shutdown_event.set()
-    finally:
-        signal.signal(signal.SIGINT, _orig_sigint)
-        signal.signal(signal.SIGTERM, _orig_sigterm)
-        # stop_langgraph_dev runs via atexit during interpreter
-        # shutdown, so subprocess teardown happens AFTER this print returns.
-        # Don't claim "Stopped." here — that would be a lie until atexit fires.
-        console.print(
-            "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
-        )
+    # 10. Serve until a signal ends deploy; the caller stops the server.
+    with contextlib.suppress(KeyboardInterrupt):
+        _wait_for_stop()
 
 
 def _start_server(
@@ -246,12 +326,12 @@ def _start_server(
     effective_host: str,
     tunnel: bool,
     ws: str,
-) -> None:
+) -> subprocess.Popen:
     """Start the server this command owns, printing the startup banner right
-    before; exits 1 when one already runs for this data folder, or the port
-    or the start fails."""
+    before, and return its handle; exits 1 when one already runs for this
+    data folder, or the port or the start fails."""
     from ..ccproxy_manager import uses_oauth
-    from ..langgraph_dev.manager import ensure_server, is_lasting, stop_langgraph_dev
+    from ..langgraph_dev.manager import ensure_server, is_lasting, owner_running
 
     starting = (
         "[dim]Starting langgraph dev and its ccproxy...[/dim]"
@@ -305,8 +385,7 @@ def _start_server(
         console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
         raise typer.Exit(1) from exc
     if result.started:
-        atexit.register(stop_langgraph_dev, result.proc)
-        return
+        return result.proc
     record = result.record
     if result.problem == "running":
         where = f"port {result.port}"
@@ -321,6 +400,12 @@ def _start_server(
         status = " [bold]EvoSci server status[/bold] lists the projects it serves."
         if record is None:
             console.print("[dim]Stop the existing EvoSci/serve session first.[/dim]")
+        elif record.lasting is False and not owner_running(record):
+            console.print(
+                "[dim]The EvoSci deploy or desktop app that started it no "
+                "longer runs. Stop it with [bold]EvoSci server stop[/bold], "
+                f"then deploy again.{status}[/dim]"
+            )
         elif not is_lasting(record):
             console.print(
                 f"[dim]It is not the background service: another "
