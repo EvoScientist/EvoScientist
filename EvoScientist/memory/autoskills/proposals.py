@@ -932,11 +932,83 @@ def copied_files(proposal_dir: Path) -> list[Path]:
     return sorted(files, key=lambda relative: relative.as_posix())
 
 
+_COMPARE_CHUNK = 1 << 20
+
+
+def _file_digest(path: Path) -> str:
+    """The sha256 of one file's bytes, read in bounded chunks.
+
+    The read goes through ``Path.open`` in chunks so a skill with a large
+    data file does not have to fit in memory -- the revert path runs in the
+    server. The file is checked for being a regular file first, without
+    blocking on a FIFO: opening a pipe would wait for a writer that may
+    never come.
+    """
+    if not _is_regular_now(path):
+        raise OSError(f"Not a regular file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_COMPARE_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_regular_now(path: Path) -> bool:
+    """Whether the path is a regular file right now, without blocking on a FIFO.
+
+    ``O_NONBLOCK`` makes the open of a FIFO fail instead of wait, and the
+    ``fstat`` confirms what was actually opened.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+
+
+def _read_regular_bytes(path: Path) -> bytes:
+    """Read a file that must be a regular file, without blocking on a FIFO.
+
+    ``copied_files`` checks each path with ``stat`` and skips anything that is
+    not a regular file, but the file can be replaced between that check and
+    the read. Opening a FIFO then blocks until a writer appears, which would
+    hang the caller while it holds the proposal lock.
+
+    ``O_NONBLOCK`` makes the open of a FIFO fail instead of wait, and the
+    ``fstat`` afterwards confirms the opened file is still a regular file --
+    so a swapped-in device or pipe is rejected rather than read.
+
+    ``O_BINARY`` keeps the read byte-exact: without it Windows opens in text
+    mode and rewrites CRLF, which would change the digest of every file.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"Not a regular file: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, _COMPARE_CHUNK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _draft_digest(proposal_dir: Path) -> str:
     digest = hashlib.sha256()
     for relative in copied_files(proposal_dir):
         name = relative.as_posix().encode("utf-8")
-        content = (proposal_dir / relative).read_bytes()
+        content = _read_regular_bytes(proposal_dir / relative)
         digest.update(len(name).to_bytes(8, "big"))
         digest.update(name)
         digest.update(len(content).to_bytes(8, "big"))
@@ -1613,6 +1685,7 @@ def _record_approval(
     scope: str,
     workspace_shadow: Path | None,
     provenance: dict[str, str] | None,
+    approved_digests: dict[str, str] | None = None,
 ) -> None:
     if provenance:
         manifest["upstream_source"] = provenance["source"]
@@ -1628,6 +1701,14 @@ def _record_approval(
     manifest["approved_by"] = approved_by
     manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
+    # What the approval actually installed, per file. A revert compares the
+    # installed skill against this, not against the live draft: the draft can
+    # change after the approval, and an edit that happens to match the
+    # changed draft must not be deleted as if the approval had never run.
+    if approved_digests is not None:
+        manifest["approved_content_digests"] = approved_digests
+    else:
+        manifest.pop("approved_content_digests", None)
     # The tier the skill was actually installed into, which an approval may
     # override.
     manifest["scope"] = scope
@@ -1698,7 +1779,10 @@ def approve_skill_proposal(
     if failure is not None:
         return failure
     try:
-        if manifest.get("content_digest") != _draft_digest(proposal_dir):
+        recorded_digest = manifest.get("content_digest")
+        if recorded_digest is not None and recorded_digest != _draft_digest(
+            proposal_dir
+        ):
             return {
                 "approved": False,
                 "proposal_id": manifest.get("proposal_id"),
@@ -1752,16 +1836,26 @@ def approve_skill_proposal(
         )
     try:
         # Install a verified snapshot: agent file writes do not take our lock.
+        approved_digests: dict[str, str] = {}
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = Path(temporary)
             for relative in copied_files(proposal_dir):
                 target_file = snapshot / relative
                 target_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(proposal_dir / relative, target_file)
-            if _draft_digest(snapshot) != manifest.get("content_digest"):
+            recorded_digest = manifest.get("content_digest")
+            if recorded_digest is not None and _draft_digest(snapshot) != (
+                recorded_digest
+            ):
                 raise ValueError(
                     "Proposal content changed since submission; resubmit it for review"
                 )
+            # The digests of the snapshot that is about to be installed: this
+            # is what a revert must compare the installed skill against.
+            approved_digests = {
+                relative.as_posix(): _file_digest(snapshot / relative)
+                for relative in copied_files(snapshot)
+            }
             if created and base_skill_dir is not None:
                 shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
             blocked_path = _copy_proposed_skill(snapshot, destination)
@@ -1773,6 +1867,7 @@ def approve_skill_proposal(
                 scope=target_scope,
                 workspace_shadow=workspace_shadow,
                 provenance=upstream_provenance,
+                approved_digests=approved_digests,
             )
             had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
             mark_cluster_processed(memory_dir, cluster_hash)
@@ -1892,11 +1987,23 @@ def _unlink_checked(path: Path) -> None:
         path.unlink()
 
 
-def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
+def _remove_unchanged_copy(
+    installed: Path,
+    proposal_dir: Path,
+    *,
+    approved_digests: dict[str, str] | None = None,
+) -> bool:
     """Delete a new skill's files if every one is still one the approval copied.
 
     Files already gone count as removed, so a revert cut short can run again;
     caches go too, but a file added or edited since keeps the whole folder.
+
+    ``approved_digests`` is the per-file digest of what the approval actually
+    installed. With it the comparison uses that content and never reads the
+    live draft: the draft can change after the approval, and an edit that
+    happens to match the changed draft would otherwise be deleted as if the
+    approval had never run. Without it (an approval made before this was
+    recorded) the comparison falls back to the live draft.
     """
     try:
         top = installed.lstat()
@@ -1904,10 +2011,14 @@ def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
         return True
     if not _plain(top, directory=True):
         return False
-    copied = {
-        relative.as_posix(): proposal_dir / relative
-        for relative in copied_files(proposal_dir)
-    }
+    if approved_digests is None:
+        copied = {
+            relative.as_posix(): proposal_dir / relative
+            for relative in copied_files(proposal_dir)
+        }
+    else:
+        # The approved content names the files that were installed.
+        copied = dict.fromkeys(approved_digests)
     present = _regular_files(installed)
     if present is None or not all(
         name in copied or _is_cache(name) for name in present
@@ -1916,7 +2027,18 @@ def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
 
     def unchanged(name: str, path: Path) -> bool:
         # A cache may differ from a copied one: Finder rewrites .DS_Store freely.
-        return name not in copied or _is_cache(name) or _same_bytes(path, copied[name])
+        if name not in copied or _is_cache(name):
+            return True
+        if approved_digests is not None:
+            # Compare with what the approval installed, in bounded chunks.
+            expected = approved_digests.get(name)
+            if expected is None:
+                return False
+            try:
+                return _file_digest(path) == expected
+            except OSError:
+                return False
+        return _same_bytes(path, proposal_dir / name)
 
     if not all(unchanged(name, path) for name, path in present.items()):
         return False
@@ -1997,7 +2119,12 @@ def revert_skill_proposal(
         if installed:
             if not _installed_in_its_tier(manifest, Path(installed)):
                 return refused("skill_changed")
-            if not _remove_unchanged_copy(Path(installed), proposal.path):
+            approved_digests = manifest.get("approved_content_digests")
+            if not isinstance(approved_digests, dict):
+                approved_digests = None
+            if not _remove_unchanged_copy(
+                Path(installed), proposal.path, approved_digests=approved_digests
+            ):
                 return refused("skill_changed")
         if status == "approved":
             _notify_approved_skill()

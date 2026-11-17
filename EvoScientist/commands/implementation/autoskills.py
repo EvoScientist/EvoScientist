@@ -23,6 +23,10 @@ class AutoSkillsCommand(Command):
     name = AUTOSKILLS_COMMAND
     alias: ClassVar[list[str]] = ["/skills-review"]
     description = "Review EvoMemory autoskill proposals"
+    # The version each listed proposal had when the user saw it. A decision
+    # must match it: a draft resubmitted since the review carries a new
+    # version, and the user did not see that content.
+    _reviewed_versions: ClassVar[dict[str, str]] = {}
     subcommands: ClassVar[list[SubCommand]] = [
         SubCommand("status", "Show AutoSkills config and proposals for review"),
         SubCommand("help", "Show AutoSkills command examples"),
@@ -203,6 +207,9 @@ class AutoSkillsCommand(Command):
         table.add_column("Observations", justify="right")
         table.add_column("Description", style="dim")
         for proposal in proposals:
+            # Remember what the user was shown, so a decision made later can
+            # refuse a draft that was resubmitted since.
+            self._reviewed_versions[proposal.proposal_id] = proposal.updated_at
             table.add_row(
                 proposal.proposal_id,
                 proposal.operation,
@@ -253,6 +260,7 @@ class AutoSkillsCommand(Command):
             skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
             scope=scope,
+            expected_updated_at=self._reviewed_versions.get(proposal_id),
         )
         if result.get("approved"):
             verb = "Updated" if result.get("operation") == "update" else "Approved"
@@ -292,6 +300,7 @@ class AutoSkillsCommand(Command):
             paths.MEMORIES_DIR,
             proposal_id,
             workspace_dir=workspace_dir,
+            expected_updated_at=self._reviewed_versions.get(proposal_id),
         )
         if result.get("rejected"):
             ctx.ui.append_system(

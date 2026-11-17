@@ -1503,9 +1503,13 @@ def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch)
         result = revert_skill_proposal(memory_dir, "focused-validation")
 
     assert result["reverted"] is True, result
-    for sizes in reads.values():
-        assert sizes
-        assert all(0 < size <= 1 << 20 for size in sizes), reads
+    # The installed files are compared in bounded reads, never whole-file.
+    assert reads[installed]
+    assert all(0 < size <= 1 << 20 for size in reads[installed]), reads
+    # The comparison uses the APPROVED content, so the live draft is not
+    # read at all: it can change after the approval, and an edit matching
+    # the changed draft must not be deleted as if the approval never ran.
+    assert not reads[draft], reads
 
 
 @pytest.mark.parametrize("changed", [False, True])
