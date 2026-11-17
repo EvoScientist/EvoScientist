@@ -1035,6 +1035,7 @@ class TestWorkspaceRemovalAndComments:
             "D=skills; cd $D && rm -rf demo",
             'D=skills; cd "$D/demo" && rm -rf x',
             "env -C skills rm -rf demo",
+            "env -C build -C skills rm -rf demo",
             "env --chdir=skills/demo rm -rf x",
             "env -C . sh -c 'rm -rf skills'",
             'D=skills; env -C "$D" rm -rf x',

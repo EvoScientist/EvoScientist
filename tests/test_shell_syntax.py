@@ -289,6 +289,9 @@ class TestSimpleCommands:
             ("env --ch build rm x", ("build",)),
             ("env -C 'my dir' rm x", ("my dir",)),
             ("env -C a env -C b rm x", ("a", "b")),
+            # One env changes folder once, to its last -C.
+            ("env -C a -C b rm x", ("b",)),
+            ("env -C a --chdir=b env -C c -Cd rm x", ("b", "d")),
             ("nohup env -C a rm x", ("a",)),
             ("env -C a sh -c 'rm x'", ("a",)),
             ("env -C a -S \"sh -c 'rm x'\"", ("a",)),

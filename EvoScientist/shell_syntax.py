@@ -687,7 +687,8 @@ def _unwrap(
     folders: tuple[str, ...] = (),
 ) -> list[SimpleCommand]:
     """The command and, through wrappers such as ``env`` or ``xargs``, the
-    commands it runs, in the ``env -C`` *folders* they run in. Strings that
+    commands it runs, in the ``env -C`` *folders* they run in (the last
+    ``-C`` of each ``env``, as GNU ``env`` changes folder once). Strings that
     ``env -S`` splits are read in place and also go to *scripts*, with the
     wrappers and folders they run under, to be read as shell code."""
     found = [
@@ -702,6 +703,7 @@ def _unwrap(
     if name not in WRAPPER_NAMES:
         return found
     takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
+    outer_folders = folders  # one env changes folder once, to its last -C
     rest = list(args)
     position = 0
     while position < len(rest):
@@ -716,7 +718,8 @@ def _unwrap(
         if name == "env" and value.startswith("-"):
             takes_next, changes_folder = _env_option(value)
             if changes_folder:
-                folders = (*folders, _env_folder(value, rest, position, takes_next))
+                folder = _env_folder(value, rest, position, takes_next)
+                folders = (*outer_folders, folder)
             if takes_next:
                 position += 1
             continue
