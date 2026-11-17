@@ -1305,7 +1305,8 @@ def _run_fake(monkeypatch, script, **kw) -> subprocess.CompletedProcess[str]:
 def _active_on_every_beat(write):
     """``(script, beat, beats)`` for a step that prints nothing and is busy
     for twice the silence limit: ``beat`` calls ``write()`` (the step's sign
-    of work) and ends the step once that time has passed. A writer thread
+    of work) and ends the step once that time has passed since the first
+    heartbeat, after the silence count has started. A writer thread
     would leave the check open to a scheduling gap longer than the limit;
     writing on the heartbeat puts a change before every activity sample."""
     import threading
@@ -1313,12 +1314,16 @@ def _active_on_every_beat(write):
 
     done = threading.Event()
     beats: list[int] = []
-    start = time.monotonic()
+    start: float | None = None
 
     def beat() -> None:
+        nonlocal start
         beats.append(1)
         write()
-        if time.monotonic() - start > 2 * FAST_LIMIT:
+        now = time.monotonic()
+        if start is None:
+            start = now
+        elif now - start > 2 * FAST_LIMIT:
             done.set()
 
     def script(_out):
