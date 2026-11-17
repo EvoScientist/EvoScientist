@@ -3564,14 +3564,9 @@ class TestAnthropicStructuredOutput:
 class TestAnthropicApiKey:
     @staticmethod
     def _model(monkeypatch, api_key):
-        from langchain_anthropic import ChatAnthropic
-
-        from EvoScientist.llm.patches import _patch_anthropic_thinking_binding
-
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        _patch_anthropic_thinking_binding()
-        return ChatAnthropic(
-            model="claude-sonnet-5-5", api_key=api_key, max_tokens=1024, max_retries=0
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+        return get_chat_model(
+            "claude-sonnet-5-5", provider="anthropic", max_tokens=1024, max_retries=0
         )
 
     @staticmethod
@@ -3618,14 +3613,12 @@ class TestAnthropicApiKey:
             await self._invoke(model, use_async)
         assert len(requests) == 1
 
-    def test_patch_is_idempotent(self):
+    def test_patch_is_idempotent(self, monkeypatch):
         from langchain_anthropic import ChatAnthropic
 
-        from EvoScientist.llm.patches import _patch_anthropic_thinking_binding
-
-        _patch_anthropic_thinking_binding()
+        self._model(monkeypatch, "sk-ant-test")
         create, acreate = ChatAnthropic._create, ChatAnthropic._acreate
-        _patch_anthropic_thinking_binding()
+        self._model(monkeypatch, "sk-ant-test")
         assert ChatAnthropic._create is create
         assert ChatAnthropic._acreate is acreate
 

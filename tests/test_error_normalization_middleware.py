@@ -596,20 +596,13 @@ def test_check_truncated_output_keeps_the_truncation_rule_and_normal_completion(
 # ---------------------------------------------------------------------------
 
 
-def test_other_providers_are_not_checked():
-    from EvoScientist.llm.patches import _check_api_key
+def test_missing_key_error_is_normalized_with_its_message(monkeypatch):
+    from EvoScientist.llm import get_chat_model
 
-    for model in (_openai_model(), _google_model(), None):
-        _check_api_key(model)
-
-
-def test_missing_key_error_is_normalized_with_its_message():
-    from langchain_anthropic import ChatAnthropic
-
-    from EvoScientist.llm.patches import _patch_anthropic_thinking_binding
-
-    _patch_anthropic_thinking_binding()
-    request = _request(ChatAnthropic(model="claude-sonnet-5-5", api_key=""))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    request = _request(
+        get_chat_model("claude-sonnet-5-5", provider="anthropic", max_retries=0)
+    )
 
     def inner(req):
         return req.model.invoke("hi")
@@ -618,3 +611,33 @@ def test_missing_key_error_is_normalized_with_its_message():
         ErrorNormalizationMiddleware().wrap_model_call(request, inner)
     assert info.value.provider == "anthropic"
     assert "EvoSci config set anthropic_api_key <key>" in str(info.value)
+
+
+async def test_summary_model_does_not_retry_a_missing_key(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from langchain_core.messages import HumanMessage
+
+    from EvoScientist.llm import get_chat_model, patches
+    from EvoScientist.middleware.error_normalization import MissingApiKeyError
+    from EvoScientist.middleware.summarization import (
+        create_per_run_summarization_middleware,
+    )
+
+    checked = []
+    check = patches._check_api_key
+
+    def counted(model):
+        checked.append(model)
+        check(model)
+
+    monkeypatch.setattr(patches, "_check_api_key", counted)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    model = get_chat_model("claude-sonnet-5-5", provider="anthropic", max_retries=0)
+    summarizer = create_per_run_summarization_middleware(model, MagicMock())
+
+    with pytest.raises(MissingApiKeyError):
+        await summarizer._acreate_summary(
+            [HumanMessage("hi"), AIMessage("ok"), HumanMessage("again")]
+        )
+    assert checked == [model]

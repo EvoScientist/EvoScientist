@@ -966,10 +966,6 @@ def _check_api_key(model: Any) -> None:
     a key is saved. Claude sign-in through ccproxy sets a placeholder key and
     routed providers resolve their own, so neither is empty here.
     """
-    if not any(
-        cls.__module__.startswith("langchain_anthropic") for cls in type(model).__mro__
-    ):
-        return
     key = getattr(model, "anthropic_api_key", None)
     value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
     if value:
