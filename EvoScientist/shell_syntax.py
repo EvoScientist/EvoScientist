@@ -868,10 +868,11 @@ class TooManyValues(ValueError):
         self.word = word
 
 
-def _references(word: str) -> list[re.Match[str]]:
+def _references(word: str) -> list[tuple[re.Match[str], bool]]:
     """The ``$NAME`` / ``${NAME}`` of a word as written that the shell
-    expands: outside single quotes and not escaped."""
-    found: list[re.Match[str]] = []
+    expands (outside single quotes and not escaped), each with whether it is
+    inside double quotes."""
+    found: list[tuple[re.Match[str], bool]] = []
     quote: str | None = None
     index = 0
     while index < len(word):
@@ -888,7 +889,7 @@ def _references(word: str) -> list[re.Match[str]]:
         elif char == "$":
             match = _REFERENCE_RE.match(word, index)
             if match is not None:
-                found.append(match)
+                found.append((match, quote == '"'))
         index += 1
     return found
 
@@ -896,7 +897,7 @@ def _references(word: str) -> list[re.Match[str]]:
 def variable_references(word: str) -> set[str]:
     """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
     outside single quotes and not escaped."""
-    return {match.group(1) or match.group(2) for match in _references(word)}
+    return {match.group(1) or match.group(2) for match, _ in _references(word)}
 
 
 def braced_value(word: str) -> str | None:
@@ -905,7 +906,7 @@ def braced_value(word: str) -> str | None:
     (``"$D"ills`` reads ``${D}ills``); ``None`` when it is not one word."""
     parts: list[str] = []
     last = 0
-    for match in _references(word):
+    for match, _quoted in _references(word):
         name = match.group(1) or match.group(2)
         parts.append(word[last : match.start()] + "${" + name + "}")
         last = match.end()
@@ -1025,16 +1026,29 @@ def word_values(
     (see :func:`assigned_values`): *value* is the word as the shell reads it,
     *word* as written. ``None`` when it names none of them, and empty when
     one it names has no value known before the command runs; callers then
-    read the word as written. :class:`TooManyValues` (naming *word*) when it
-    may read as more than :data:`_VALUES_CAP` values."""
+    read the word as written. A value of a name outside double quotes is
+    split into the words it makes (``D="x skills"; rm -rf $D``).
+    :class:`TooManyValues` (naming *word*) when it may read as more than
+    :data:`_VALUES_CAP` values, or when the command sets ``IFS``, which
+    changes how such a value splits."""
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
     value = braced_value(word) or value
+    unquoted = any(
+        not quoted
+        for match, quoted in _references(word)
+        if (match.group(1) or match.group(2)) in names
+    )
+    if unquoted and "IFS" in assigned:
+        raise TooManyValues(word)
     try:
-        return expand_references(value, {name: assigned[name] for name in names})
+        values = expand_references(value, {name: assigned[name] for name in names})
     except TooManyValues:
         raise TooManyValues(word) from None
+    if unquoted:
+        values = [field for each in values for field in each.split() or [each]]
+    return values
 
 
 def _simple_commands(

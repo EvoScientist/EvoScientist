@@ -394,6 +394,14 @@ class TestSimpleCommands:
             "X=build; X=$(echo skills); Y=a; Y=(b c); Z=a; Z=$R; R=`pwd`; S=$(pwd)"
         ) == {"X": None, "Y": None, "Z": None, "R": (), "S": ()}
 
+    def test_an_unquoted_value_splits_into_the_words_it_makes(self):
+        assigned = {"D": ("x .evoscientist",)}
+        assert shell_syntax.word_values("$D", "$D", assigned) == ["x", ".evoscientist"]
+        assert shell_syntax.word_values('"$D"', "$D", assigned) == ["x .evoscientist"]
+        with pytest.raises(shell_syntax.TooManyValues):
+            shell_syntax.word_values("$D", "$D", {**assigned, "IFS": (":",)})
+        assert shell_syntax.word_values('"$D"', "$D", {**assigned, "IFS": (":",)})
+
     def test_a_variable_set_in_part_has_no_values_to_read(self):
         # Its value depends on the order of the assignments.
         assert shell_syntax.assigned_values(

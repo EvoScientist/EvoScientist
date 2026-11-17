@@ -1040,6 +1040,7 @@ class TestWorkspaceRemovalAndComments:
             'A=sk; D="$A"ills; rm -rf $D',
             'D=sk; env -C "$D"ills rm -rf x',
             "B=skills; A=$B; B=$A; rm -rf $A",
+            'D="x skills"; rm -rf $D',
             "env --chdir=skills/demo rm -rf x",
             "env -C . sh -c 'rm -rf skills'",
             'D=skills; env -C "$D" rm -rf x',
@@ -1103,6 +1104,7 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf .evoscientist/memories/$(date +%F)",
             "cd .evoscientist && rm -rf memories",
             'D=.evoscientist; D=$D/memories; rm -rf "$D/old"',
+            'D="x .evoscientist"; rm -rf $D',
             # A cd runs under its own env -C folders.
             "env -C .evoscientist sh -c 'cd memories; rm -rf profile'",
             "env -C .evoscientist sh -c 'cd memories && env -C . rm -rf profile'",
@@ -1233,6 +1235,8 @@ class TestWorkspaceRemovalAndComments:
             'X=build; X=$(echo skills); rm -rf "$X"',
             'T=sub; T=$(echo /etc); cd "$T"',
             "X=build; X=$Y; Y=`echo skills`; rm -rf $X/demo",
+            # IFS changes how an unquoted value splits.
+            "IFS=:; D=x:skills; rm -rf $D",
         ],
     )
     def test_a_word_whose_variable_has_values_the_check_cannot_know_is_refused(
@@ -1623,6 +1627,7 @@ class TestSandboxCommandChecks:
             ('A=..; B=$A; cd "$B"', "'cd \"$B\"'"),
             ("T=src; T=..; cd $T", "'cd $T'"),
             ("T=.; T=$T.; cd $T", "'cd $T'"),
+            ('T=".. "; cd $T', "'cd $T'"),
             ("bash -c 'T=..; cd \"$T\"'", "'cd \"$T\"'"),
         ],
     )
