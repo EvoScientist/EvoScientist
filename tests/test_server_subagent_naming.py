@@ -284,11 +284,11 @@ def test_an_old_completion_does_not_end_a_replacement_child():
     )
     tracker.process(_lifecycle_ended(["tools:task-1"], trigger_call_id="t1"))
     replacement = tracker.process(
-        _lifecycle_started(
-            ["tools:task-1"], graph_name="second", trigger_call_id="t2"
-        )
+        _lifecycle_started(["tools:task-1"], graph_name="second", trigger_call_id="t2")
     )
-    stale_end = tracker.process(_lifecycle_ended(["tools:task-1"], trigger_call_id="t1"))
+    stale_end = tracker.process(
+        _lifecycle_ended(["tools:task-1"], trigger_call_id="t1")
+    )
 
     assert _starts(replacement) == ["second"], replacement
     assert not stale_end, stale_end
