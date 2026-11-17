@@ -957,11 +957,22 @@ _VALUES_CAP = 16
 class UnknownValues(ValueError):
     """A word may read as values the check does not follow: more than
     :data:`_VALUES_CAP`, or of a variable set in a way it does not follow
-    (see :func:`assigned_values`); *word* is it."""
+    (see :func:`assigned_values`); *word* is it. *partial* when the check
+    knows some of them but not all (``D=sk; D+=ills``), rather than none, as
+    for a variable only the run sets (``read D``)."""
 
-    def __init__(self, word: str) -> None:
+    def __init__(self, word: str, partial: bool = True) -> None:
         super().__init__(word)
         self.word = word
+        self.partial = partial
+
+
+class AssignedValues(dict[str, tuple[str, ...] | None]):
+    """:func:`assigned_values`: each variable's values, ``None`` when they
+    are not followed; *partial* holds those of them the check knows in part
+    (see :class:`UnknownValues`)."""
+
+    partial: frozenset[str] = frozenset()
 
 
 def _references(word: str) -> list[tuple[re.Match[str], bool]]:
@@ -1026,7 +1037,7 @@ def braced_value(word: str) -> str | None:
     return str(tokens[0]["value"])
 
 
-def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
+def assigned_values(command: str) -> AssignedValues:
     """The values *command* sets each variable to with plain assignments
     (see :func:`assignments`), in any order, as the shell reads them: quotes
     removed, and a ``$NAME`` of another variable set in *command* replaced by
@@ -1047,6 +1058,12 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
         written.setdefault(name, []).append(value)
         if head != name or value.startswith("("):  # an array too
             other.add(name)
+    # Set in part, or to an array: the `=` values are only some of them.
+    partial = {
+        _assigned_name(head)
+        for head, value in found
+        if head != _assigned_name(head) or value.startswith("(")
+    }
     if opaque:  # any of them may be set some other way
         other.update(written)
     resolved: dict[str, tuple[str, ...] | None] = dict.fromkeys(other)
@@ -1060,8 +1077,10 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
         pending.add(name)
         try:
             values: tuple[str, ...] | None = resolve_values(name)
-        except UnknownValues:
+        except UnknownValues as exc:
             values = None
+            if exc.partial:
+                partial.add(name)
         pending.discard(name)
         resolved[name] = values
         return values
@@ -1084,7 +1103,13 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
                 run_only = True
                 continue
             names = variable_references(value) & (written.keys() | other)
-            expanded = expand_references(read, {each: resolve(each) for each in names})
+            known = {each: resolve(each) for each in names}
+            if any(known[each] is None for each in names):
+                if any(each in partial for each in names if known[each] is None):
+                    raise UnknownValues(name)
+                run_only = True  # it names a variable only the run sets
+                continue
+            expanded = expand_references(read, known)
             run_only = run_only or not expanded
             found.extend(expanded)
         values = tuple(dict.fromkeys(found))
@@ -1096,7 +1121,9 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
 
     for name in written:
         resolve(name)
-    return resolved
+    result = AssignedValues(resolved)
+    result.partial = frozenset(partial)
+    return result
 
 
 def expand_references(
@@ -1137,11 +1164,21 @@ def word_values(
     command sets ``IFS``."""
     word = _CHECKED_REFERENCE_RE.sub(r"${\1}", word)
     value = _CHECKED_REFERENCE_RE.sub(r"${\1}", value)
-    if any(
-        (match.group(1) or match.group(2)) in assigned
+    # Known in part unless every unfollowed name it reads is one only the run
+    # sets; a plain dict knows no such names.
+    partial_names = getattr(assigned, "partial", None)
+
+    def in_part(names: set[str]) -> bool:
+        return partial_names is None or any(
+            assigned[name] is not None or name in partial_names for name in names
+        )
+
+    operated = {
+        match.group(1) or match.group(2)
         for match in _OPERATOR_REFERENCE_RE.finditer(word)
-    ):
-        raise UnknownValues(word)
+    } & assigned.keys()
+    if operated:
+        raise UnknownValues(word, in_part(operated))
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
@@ -1153,6 +1190,9 @@ def word_values(
     )
     if unquoted and "IFS" in assigned:
         raise UnknownValues(word)
+    unfollowed = {name for name in names if assigned[name] is None}
+    if unfollowed:
+        raise UnknownValues(word, in_part(unfollowed))
     try:
         values = expand_references(value, {name: assigned[name] for name in names})
     except UnknownValues:

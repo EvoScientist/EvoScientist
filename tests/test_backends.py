@@ -1257,6 +1257,10 @@ class TestWorkspaceRemovalAndComments:
             '(cd "$(dirname "$f")" && pip install -e .); done',
             'for f in $(git ls-files "*.egg-info"); do '
             'rm -rf "$(dirname "$f")/build"; done',
+            # A cd to a variable whose values are not followed, with no rm.
+            'for X in $(ls -d */); do cd "$X"; done',
+            'git ls-files | while read f; do cd "$f"; done',
+            'D=pkg; source .venv/bin/activate; cd "$D" && pytest',
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
@@ -1346,6 +1350,8 @@ class TestWorkspaceRemovalAndComments:
             "declare -n D=E; E=skills; rm -rf $D",
             ": ${D:=skills}; rm -rf $D",
             "read D; rm -rf $D",
+            # A cd to such a variable in front of a recursive rm.
+            'read d; cd "$d"; rm -rf skills',
             'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
             # Read as the shell reads the words, and through a nameref.
             'D=x; declare -n R=D; R=skills; rm -rf "$D"',

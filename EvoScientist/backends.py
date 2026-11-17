@@ -1331,7 +1331,10 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     absolute target outside them (a drive path on Windows too), the home
     folder (``~``, ``$HOME``) or a bare ``cd``. A target that names a
     variable the command sets is also read with each of its values, where a
-    ``..`` component leaves too (``T=..; cd "$T"``)."""
+    ``..`` component leaves too (``T=..; cd "$T"``); one whose values are not
+    followed is read as written when only the run sets it (``read D``), as
+    a variable the command does not set. :class:`shell_syntax.UnknownValues`
+    when the check knows its values only in part (``T=.; T+=.``)."""
 
     def absolute_outside(path: str) -> bool:
         return (
@@ -1342,7 +1345,12 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
     for found in shell_syntax.simple_commands(command):
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        target = _folder_target(found, assigned)
+        try:
+            target = _folder_target(found, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:
+                raise
+            target = _folder_target(found)  # its options read as written
         if target is None:
             if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
@@ -1354,7 +1362,14 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
             return f"{found.name} {arg}"
         if "$" not in arg:
             continue
-        values = shell_syntax.word_values(arg, path, assigned)
+        try:
+            values = shell_syntax.word_values(arg, path, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:  # the values it may have are not all checked
+                raise
+            # Only the run knows it, as for a variable the command does not
+            # set; the rm check refuses it in front of a recursive rm.
+            continue
         for value in values or ():
             if (
                 _is_home_word(value)
