@@ -318,8 +318,8 @@ class TestSimpleCommands:
             'T=..; A="$HOME"; export B=$A/x \'C\'=~; declare "D=a b"; E='
         ) == {
             "T": ("..",),
-            "A": ("$HOME",),
-            "B": ("$HOME/x",),
+            "A": ("${HOME}",),
+            "B": ("${HOME}/x",),
             "C": ("~",),
             "D": ("a b",),
             "E": ("",),
@@ -340,10 +340,10 @@ class TestSimpleCommands:
             "C": (),
         }
         # A name that refers back to itself stays as written.
-        assert shell_syntax.assigned_values("A=$A/x") == {"A": ("$A/x",)}
+        assert shell_syntax.assigned_values("A=$A/x") == {"A": ("${A}/x",)}
         assert shell_syntax.assigned_values("A=$B; B=$A") == {
-            "A": ("$A",),
-            "B": ("$A",),
+            "A": ("${A}",),
+            "B": ("${A}",),
         }
 
     def test_more_values_than_the_cap_are_reported(self):
@@ -360,6 +360,23 @@ class TestSimpleCommands:
             shell_syntax.word_values('"$U"', "$U", assigned)
         assert raised.value.word == '"$U"'
         assert shell_syntax.word_values("$V", "$V", assigned) == ["1"]
+
+    def test_a_name_ends_where_it_is_written_not_where_quotes_end(self):
+        assert shell_syntax.braced_value('"$D"ills') == "${D}ills"
+        assert shell_syntax.braced_value("'$D'ills") == "$Dills"
+        assert shell_syntax.braced_value("a b") is None
+        assert shell_syntax.assigned_values('A=sk; D="$A"ills') == {
+            "A": ("sk",),
+            "D": ("skills",),
+        }
+        assigned = {"D": ("sk",)}
+        assert shell_syntax.word_values('"$D"ills', "$Dills", assigned) == ["skills"]
+        [env_rm] = [
+            each
+            for each in shell_syntax.simple_commands('env -C "$D"ills rm x')
+            if each.name == "rm"
+        ]
+        assert env_rm.folders == ("${D}ills",)
 
     def test_a_variable_set_in_part_has_no_values_to_read(self):
         # Its value depends on the order of the assignments.

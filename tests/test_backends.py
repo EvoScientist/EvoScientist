@@ -1036,6 +1036,9 @@ class TestWorkspaceRemovalAndComments:
             'D=skills; cd "$D/demo" && rm -rf x',
             "env -C skills rm -rf demo",
             "env -C build -C skills rm -rf demo",
+            'D=sk; rm -rf "$D"ills',
+            'A=sk; D="$A"ills; rm -rf $D',
+            'D=sk; env -C "$D"ills rm -rf x',
             "env --chdir=skills/demo rm -rf x",
             "env -C . sh -c 'rm -rf skills'",
             'D=skills; env -C "$D" rm -rf x',
@@ -1207,7 +1210,7 @@ class TestWorkspaceRemovalAndComments:
             ("/W/skills",),
             workspace_root="/W",
         )
-        assert "'$T' may name more paths than the check follows" in error
+        assert "'${T}' may name more paths than the check follows" in error
 
     @pytest.mark.parametrize(
         "command",

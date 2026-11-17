@@ -718,7 +718,8 @@ def _unwrap(
         if name == "env" and value.startswith("-"):
             takes_next, changes_folder = _env_option(value)
             if changes_folder:
-                folder = _env_folder(value, rest, position, takes_next)
+                option = _braced_word_value(*rest[position - 1])
+                folder = _env_folder(option, rest, position, takes_next)
                 folders = (*outer_folders, folder)
             if takes_next:
                 position += 1
@@ -739,6 +740,12 @@ def _unwrap(
     return found
 
 
+def _braced_word_value(arg: str, token: dict[str, object] | None) -> str:
+    """:func:`_word_value`, with each ``$NAME`` written ``${NAME}``."""
+    braced = braced_value(str(token["raw"])) if token is not None else None
+    return braced if braced is not None else _word_value(arg, token)
+
+
 def _env_folder(
     value: str,
     args: list[tuple[str, dict[str, object] | None]],
@@ -747,9 +754,10 @@ def _env_folder(
 ) -> str:
     """The folder an ``env`` option *value* that changes it names: the next
     word in *args* (at *position*), or the rest of *value* (``-Cbuild``,
-    ``-iCbuild``, ``--chdir=build``)."""
+    ``-iCbuild``, ``--chdir=build``); a ``$NAME`` in it written ``${NAME}``
+    (see :func:`braced_value`)."""
     if takes_next:
-        return _word_value(*args[position]) if position < len(args) else ""
+        return _braced_word_value(*args[position]) if position < len(args) else ""
     if value.startswith("--"):
         return value.partition("=")[2]
     return value[value.index("C") + 1 :]
@@ -860,10 +868,10 @@ class TooManyValues(ValueError):
         self.word = word
 
 
-def variable_references(word: str) -> set[str]:
-    """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
-    outside single quotes and not escaped."""
-    names: set[str] = set()
+def _references(word: str) -> list[re.Match[str]]:
+    """The ``$NAME`` / ``${NAME}`` of a word as written that the shell
+    expands: outside single quotes and not escaped."""
+    found: list[re.Match[str]] = []
     quote: str | None = None
     index = 0
     while index < len(word):
@@ -880,9 +888,31 @@ def variable_references(word: str) -> set[str]:
         elif char == "$":
             match = _REFERENCE_RE.match(word, index)
             if match is not None:
-                names.add(match.group(1) or match.group(2))
+                found.append(match)
         index += 1
-    return names
+    return found
+
+
+def variable_references(word: str) -> set[str]:
+    """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
+    outside single quotes and not escaped."""
+    return {match.group(1) or match.group(2) for match in _references(word)}
+
+
+def braced_value(word: str) -> str | None:
+    """A word as written, as the shell reads it, with each ``$NAME`` it
+    expands written ``${NAME}``, so quote removal keeps where the name ends
+    (``"$D"ills`` reads ``${D}ills``); ``None`` when it is not one word."""
+    parts: list[str] = []
+    last = 0
+    for match in _references(word):
+        name = match.group(1) or match.group(2)
+        parts.append(word[last : match.start()] + "${" + name + "}")
+        last = match.end()
+    tokens = tokenize("".join(parts) + word[last:])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return str(tokens[0]["value"])
 
 
 def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
@@ -923,18 +953,15 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
         for value in written[name]:
             if "$(" in value or "`" in value:
                 continue
-            tokens = tokenize(value)
-            if not tokens:
+            if not tokenize(value):
                 found.append("")
                 continue
-            if len(tokens) != 1 or tokens[0]["type"] != "word":
+            read = braced_value(value)
+            if read is None:
                 continue
             others = (variable_references(value) & written.keys()) - pending
             found.extend(
-                expand_references(
-                    str(tokens[0]["value"]),
-                    {other: resolve(other) for other in others},
-                )
+                expand_references(read, {other: resolve(other) for other in others})
             )
         values = tuple(dict.fromkeys(found))
         if len(values) > _VALUES_CAP:
@@ -978,6 +1005,7 @@ def word_values(
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
+    value = braced_value(word) or value
     try:
         return expand_references(value, {name: assigned[name] for name in names})
     except TooManyValues:
