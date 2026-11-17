@@ -215,6 +215,8 @@ def test_the_digest_read_is_byte_exact_on_crlf_files(tmp_path):
     ``os.open`` defaults to TEXT mode on Windows, which rewrites CRLF as LF
     and changes every digest. A digest that differs from the file's own bytes
     makes every approval read as "the content changed since submission".
+    The read is hashed as a stream, so the length is taken from the opened
+    descriptor and the bytes follow it one chunk at a time.
     """
     from EvoScientist.memory.autoskills.proposals import _draft_digest
 
@@ -232,7 +234,8 @@ def test_the_digest_read_is_byte_exact_on_crlf_files(tmp_path):
     expected.update(len(b"SKILL.md").to_bytes(8, "big"))
     expected.update(b"SKILL.md")
     expected.update(len(raw).to_bytes(8, "big"))
-    expected.update(raw)
+    file_digest = hashlib.sha256(raw)
+    expected.update(file_digest.digest())
     assert digest == expected.hexdigest(), "the digest is not over the file's own bytes"
 
 

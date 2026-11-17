@@ -231,27 +231,28 @@ def test_review_preexisting_pending_manifest_has_no_digest_and_is_still_approvab
     skills_dir = tmp_path / "skills"
     _write_draft(memory_dir, "focused-validation", "Old body.")
     _submit(memory_dir, skills_dir, "focused-validation")
-    manifest_path = (
-        autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
-    )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["content_digest"]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    # A draft submitted before this feature has no recorded digest. It must
-    # not become unapprovable after the upgrade.
+    # A draft submitted before seals existed has no record outside the
+    # proposals directory. Removing that record is what such a draft looks
+    # like, and it must not become unapprovable after the upgrade. The body
+    # is left untouched: a body newer than the manifest is still refused.
+    seal = memory_dir / "autoskills" / "seals" / "focused-validation.json"
+    seal.unlink()
     result = approve_skill_proposal(
         memory_dir, "focused-validation", skills_dir=skills_dir
     )
     assert result["approved"] is True, result
 
 
-def test_review_manifest_and_rationale_are_digest_exclusions(tmp_path):
+def test_review_rationale_is_a_digest_exclusion_but_decision_fields_are_not(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
     folder = _write_draft(memory_dir, "focused-validation", "Old body.")
     _submit(memory_dir, skills_dir, "focused-validation")
     (folder / "RATIONALE.md").write_text("Changed rationale.\n", encoding="utf-8")
     (folder / ".ordinary.tmp").write_text("Excluded bytes\n", encoding="utf-8")
+    # Rationale and scratch files are not installed, so they are not part of
+    # the sealed digest. The decision fields are: an edit of cluster_hash in
+    # the manifest must not be what the approval marks processed.
     manifest_path = folder / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["cluster_hash"] = "cluster-manifest-edit"
@@ -260,9 +261,19 @@ def test_review_manifest_and_rationale_are_digest_exclusions(tmp_path):
         result = approve_skill_proposal(
             memory_dir, "focused-validation", skills_dir=skills_dir
         )
-    assert result["approved"] is True
-    assert "cluster-manifest-edit" in processed_cluster_hashes(memory_dir)
+    assert result["approved"] is False, result
+    assert "resubmit" in result["error"]
+    assert "cluster-manifest-edit" not in processed_cluster_hashes(memory_dir)
     assert "cluster-original" not in processed_cluster_hashes(memory_dir)
+
+    manifest["cluster_hash"] = "cluster-original"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        restored = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+    assert restored["approved"] is True, restored
+    assert "cluster-original" in processed_cluster_hashes(memory_dir)
 
 
 def test_review_draft_can_change_after_snapshot_verification(tmp_path, monkeypatch):

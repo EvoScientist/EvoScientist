@@ -324,6 +324,28 @@ def _manifest(memory_dir, proposal_id):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _as_legacy(memory_dir, proposal_id, **changes):
+    """Turn a submitted draft into one recorded before seals existed.
+
+    A real submission has a seal outside the proposals directory, and editing
+    its manifest is a change the approval refuses. Dropping the seal is what
+    a draft written by an older version looks like; ``changes`` then edits
+    the manifest the way that older version wrote it.
+    """
+    seal = Path(memory_dir) / "autoskills" / "seals" / f"{proposal_id}.json"
+    seal.unlink(missing_ok=True) if seal.exists() else None
+    if not changes:
+        return
+    path = autoskill_proposals_dir(memory_dir) / proposal_id / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in changes.items():
+        if value is None:
+            manifest.pop(key, None)
+        else:
+            manifest[key] = value
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def _resubmit_focused_validation(memory_dir, skills_dir):
     result = submit_autoskill_proposal(
         memory_dir=memory_dir,
@@ -1006,7 +1028,7 @@ def _approve_quietly(memory_dir, proposal_id, skills_dir, **kwargs):
         result = approve_skill_proposal(
             memory_dir, proposal_id, skills_dir=skills_dir, **kwargs
         )
-    assert result["approved"] is True
+    assert result["approved"] is True, result
     return result
 
 
@@ -1061,10 +1083,7 @@ def test_a_decision_in_the_same_millisecond_gets_a_new_updated_at(
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
-    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest["updated_at"] = "2026-11-06T09:00:00.000Z"
-    path.write_text(json.dumps(manifest), encoding="utf-8")
+    _as_legacy(memory_dir, "focused-validation", updated_at="2026-11-06T09:00:00.000Z")
     start = datetime(2026, 11, 6, 9, 0, 0, tzinfo=UTC)
     ticks = iter([start, start + timedelta(milliseconds=1)])
 
@@ -1472,44 +1491,40 @@ def test_a_manifest_that_is_a_fifo_never_blocks_the_listing(tmp_path):
 def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
     draft = autoskill_proposals_dir(memory_dir) / "focused-validation"
-    reads = {installed: [], draft: []}
-    real_open = Path.open
+    installed_files = {
+        path.resolve() for path in installed.rglob("*") if path.is_file()
+    }
+    sizes: list[int] = []
+    real_open = os.open
+    real_read = os.read
+    watched: set[int] = set()
 
-    class Recorded:
-        def __init__(self, handle, sizes):
-            self._handle = handle
-            self._sizes = sizes
+    def watching_open(path, flags, *args):
+        fd = real_open(path, flags, *args)
+        try:
+            if Path(os.fsdecode(path)).resolve() in installed_files:
+                watched.add(fd)
+        except OSError:
+            pass
+        return fd
 
-        def read(self, size=-1):
-            self._sizes.append(size)
-            return self._handle.read(size)
+    def bounded(fd, size):
+        if fd in watched:
+            sizes.append(size)
+        return real_read(fd, size)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            self._handle.close()
-
-    def recording_open(self, *args, **kwargs):
-        handle = real_open(self, *args, **kwargs)
-        mode = args[0] if args else kwargs.get("mode", "r")
-        for root, sizes in reads.items():
-            if "b" in mode and Path(self).is_relative_to(root):
-                return Recorded(handle, sizes)
-        return handle
-
-    monkeypatch.setattr(Path, "open", recording_open)
+    monkeypatch.setattr(os, "open", watching_open)
+    monkeypatch.setattr(os, "read", bounded)
     with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
         result = revert_skill_proposal(memory_dir, "focused-validation")
 
     assert result["reverted"] is True, result
     # The installed files are compared in bounded reads, never whole-file.
-    assert reads[installed]
-    assert all(0 < size <= 1 << 20 for size in reads[installed]), reads
-    # The comparison uses the APPROVED content, so the live draft is not
-    # read at all: it can change after the approval, and an edit matching
-    # the changed draft must not be deleted as if the approval never ran.
-    assert not reads[draft], reads
+    assert sizes
+    assert all(0 < size <= 1 << 20 for size in sizes), sizes
+    # The comparison uses the approved digest, so the live draft is not what
+    # decides the revert. It is still on disk afterwards.
+    assert (draft / "SKILL.md").is_file()
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -1947,11 +1962,7 @@ def test_revert_drops_scope_a_legacy_draft_never_had(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
-    path = autoskill_proposals_dir(memory_dir) / "focused-validation" / "manifest.json"
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    del manifest["scope"]
-    del manifest["submitted_scope"]
-    path.write_text(json.dumps(manifest), encoding="utf-8")
+    _as_legacy(memory_dir, "focused-validation", scope=None, submitted_scope=None)
     _approve_quietly(memory_dir, "focused-validation", skills_dir)
     assert _manifest(memory_dir, "focused-validation")["scope"] == "workspace"
 
@@ -4194,12 +4205,9 @@ def test_legacy_proposal_without_scope_keeps_workspace_behaviour(
     )
     # Drop the recorded scope to stand in for a proposal written before
     # scopes existed.
-    manifest_path = (
-        autoskill_proposals_dir(memory_dir) / "global-validation" / "manifest.json"
-    )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["scope"]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # The seal goes too: a draft from before scopes also predates the
+    # sealed record. Deleting scope from a sealed manifest is refused.
+    _as_legacy(memory_dir, "global-validation", scope=None)
 
     approved = approve_skill_proposal(
         memory_dir,
@@ -4247,12 +4255,9 @@ def test_legacy_proposal_needs_explicit_scope_for_global(tmp_path, monkeypatch):
         target_skill_name="global-validation",
         skills_dir=workspace_skills,
     )
-    manifest_path = (
-        autoskill_proposals_dir(memory_dir) / "global-validation" / "manifest.json"
-    )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["scope"]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # The seal goes too: a draft from before scopes also predates the
+    # sealed record. Deleting scope from a sealed manifest is refused.
+    _as_legacy(memory_dir, "global-validation", scope=None)
 
     approved = approve_skill_proposal(
         memory_dir,
