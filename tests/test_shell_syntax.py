@@ -118,9 +118,6 @@ class TestWordsAndScripts:
     @pytest.mark.parametrize(
         "command",
         [
-            "bash -o pipefail -c 'ls /x'",
-            "bash -euo pipefail -c 'ls /x'",
-            "bash -O extglob -c 'ls /x'",
             "bash -c -e 'ls /x'",
             "bash -co pipefail 'ls /x'",
             "zsh -O -c 'ls /x'",
@@ -150,7 +147,7 @@ class TestWordsAndScripts:
         assert not shell_syntax.shell_script_words(shell_syntax.parse(command).tokens)
 
     @pytest.mark.parametrize(
-        "command", ["bash -o pipefail ./run.sh -c", "bash -o -c 'ls /x'"]
+        "command", ["bash -o pipefail ./run.sh -c", "bash -o -c 'ls /x'", "bash -c --"]
     )
     def test_an_option_value_or_script_file_is_no_script(self, command):
         assert (

@@ -47,8 +47,14 @@ _WRAPPER_OPTIONS_WITH_VALUE = {
     "nice": frozenset({"-n", "--adjustment"}),
     "xargs": frozenset({"-n", "-I", "-P", "-L", "-s", "-d", "-E", "-a"}),
 }
-# Long shell options whose value is the next word.
-_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--rcfile", "--init-file", "--emulate"})
+# Long shell options whose value is the next word (names without dashes).
+_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"rcfile", "init-file", "emulate"})
+# bash also reads its long options with one dash (``bash -login -c 'x'``).
+_BASH_LONG_OPTIONS = frozenset(
+    "debug debugger dump-po-strings dump-strings help init-file login noediting"
+    " noprofile norc posix pretty-print protected rcfile restricted verbose"
+    " version wordexp".split()
+)
 # Short option letters that take the next word, also inside a cluster
 # (``-euo pipefail``). ``-O`` takes a shopt name in bash (and in ``sh``
 # when that is bash); zsh's ``-O`` is a flag, so ``zsh -O -c 'x'`` runs
@@ -753,27 +759,31 @@ def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
     (``bash -c -e 'x'``), and an option value is not an operand
     (``bash -euo pipefail -c 'x'``)."""
     with_value = _SHELL_LETTERS_WITH_VALUE.get(shell, "o")
+    # bash reads -login like --login, but only before its first short option
+    one_dash_long = shell in ("bash", "sh")
     letters = ""
     skip = 0
     for position, value in enumerate(values):
         if skip:
             skip -= 1
-        elif value in ("-", "--"):
+        elif value in ("-", "--") or (shell == "zsh" and value == "+"):
             return (position + 1 if position + 1 < len(values) else None), letters
-        elif value.startswith("--"):
-            skip = int(value in _SHELL_LONG_OPTIONS_WITH_VALUE)
-        elif value[:1] in ("-", "+") and len(value) > 1:
+        elif value.startswith("--") or (
+            one_dash_long and value.startswith("-") and value[1:] in _BASH_LONG_OPTIONS
+        ):
+            skip = int(value.lstrip("-") in _SHELL_LONG_OPTIONS_WITH_VALUE)
+        elif value[:1] in ("-", "+"):
+            one_dash_long = False
             cluster = value[1:]
             if shell == "zsh" and "o" in cluster[:-1]:
                 # zsh takes the rest of the word as the -o value
                 # (``-opipefail``) and the next word only after a bare o
                 cluster = cluster[: cluster.index("o") + 1]
-                skip = 0
             else:
                 skip = sum(c in with_value for c in cluster)
             if value[0] == "+":
-                # +n undoes -n, but c and s are start-up modes that a + word
-                # turns on too (``bash +c 'x'`` runs x)
+                # +n undoes -n, but +c runs the script in every shell and +s
+                # reads stdin in bash (kept for all: it only adds checks)
                 letters = "".join(c for c in letters if c not in cluster)
                 letters += "".join(c for c in cluster if c in "cs")
             else:
