@@ -982,7 +982,8 @@ def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    tokens = shell_syntax.parse(command).tokens
+    parsed = shell_syntax.parse(command)
+    tokens = parsed.tokens
     decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
@@ -1000,14 +1001,26 @@ def _has_traversal_component(command: str) -> bool:
             entries = [value] if glued[0].startswith("-") else value.split(":")
             if any(".." in PurePosixPath(entry).parts for entry in entries):
                 return True
-    # Double-quoted substitutions execute their contents as commands too.
-    # Keep quote/escape handling in the shared shell parser rather than
-    # treating a quoted literal containing "$()" as an executable script.
-    _, substitution_traversal = shell_syntax.rewrite_substitutions(
-        command, lambda inner: (inner, _has_traversal_component(inner))
-    )
-    if substitution_traversal:
-        return True
+
+    # The substitution helper reads shell words, not whole commands: comments
+    # and literal heredoc bodies must not affect its quote tracking.
+    def check_substitution(inner: str) -> tuple[str, bool]:
+        return inner, _has_traversal_component(inner)
+
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                str(token["raw"]), check_substitution
+            )
+            if traversal:
+                return True
+    for start, end, expands in parsed.bodies:
+        if expands:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                command[start:end], check_substitution, heredoc=True
+            )
+            if traversal:
+                return True
     # A shell's script (bash -c '...') is a command line of its own: check
     # inside it too, the way _extract_all_paths recurses into script words.
     scripts = shell_syntax.shell_script_words(tokens)
