@@ -1757,6 +1757,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
+            received_media: list[str] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1798,6 +1799,7 @@ def run_textual_interactive(
                 forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
+                received_media_state,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1865,6 +1867,7 @@ def run_textual_interactive(
                 self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
+            _received_files = received_media_state(received_media)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2234,6 +2237,7 @@ def run_textual_interactive(
                                 media_dir=self._dirs.sandbox_media_dir,
                                 dangerous=_media_dangerous,
                                 routes=_media_routes,
+                                received_files=_received_files,
                             )
 
                         # -- Remove loading spinner on first content event --
@@ -3458,6 +3462,7 @@ def run_textual_interactive(
                         else None,
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
+                        received_media=msg.media,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
