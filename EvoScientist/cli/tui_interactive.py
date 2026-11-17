@@ -2207,8 +2207,9 @@ def run_textual_interactive(
                         if (
                             on_todo_cb
                             and not _todo_sent
-                            and event_type == "tool_call"
+                            and event_type == "tool_result"
                             and event.get("name") == "write_todos"
+                            and event.get("success", True)
                             and state.todo_items
                         ):
                             if (
