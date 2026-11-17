@@ -2060,6 +2060,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
+                received_media=msg.media,
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
                 routes=file_tool_routes(dirs.workspace),
