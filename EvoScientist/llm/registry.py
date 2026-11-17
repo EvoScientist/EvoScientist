@@ -365,27 +365,20 @@ async def list_model_picker_entries(
         )
         if discovered:
             # In place, not appended: the custom-openai group keeps the
-            # position it has in the static registry. Repeated rows collapse
-            # to the first, matching list_models_by_provider.
+            # position it has in the static registry. The discovery already
+            # stripped blank ids and removed duplicates.
             replacement = [(name, name, "custom-openai") for name in discovered]
-            seen_names: set[str] = set()
-            unique: list[tuple[str, str, str]] = []
-            for row in replacement:
-                if row[0] in seen_names:
-                    continue
-                seen_names.add(row[0])
-                unique.append(row)
             merged: list[tuple[str, str, str]] = []
             inserted = False
             for row in entries:
                 if row[2] == "custom-openai":
                     if not inserted:
-                        merged.extend(unique)
+                        merged.extend(replacement)
                         inserted = True
                     continue
                 merged.append(row)
             if not inserted:
-                merged.extend(unique)
+                merged.extend(replacement)
             entries = merged
     return entries
 

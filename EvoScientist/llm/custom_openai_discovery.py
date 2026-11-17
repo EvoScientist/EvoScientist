@@ -29,13 +29,25 @@ def _names_from_body(body: object) -> list[str]:
 
     ``_listed_models`` lives next to the key checker. Importing it here (not
     from ``llm.registry``) keeps the registry free of the config package.
+
+    The ids are stripped and de-duplicated in the order the endpoint listed
+    them: a blank id is not a model, and the same model twice would show up
+    twice in a picker.
     """
     from ..config.provider_keys import _listed_models
 
     listed = _listed_models(body)
     if not listed:
         return []
-    return list(listed)
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in listed:
+        name = raw.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def list_custom_openai_models(
