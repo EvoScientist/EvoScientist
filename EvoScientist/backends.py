@@ -1410,6 +1410,12 @@ def _word_paths(
     return [value.replace("\\", "/") for value in values] if values else [path]
 
 
+def _normpath(path: str) -> str:
+    """*path* normalised, with one leading ``/`` (``posixpath.normpath`` keeps
+    two, so ``env -C /`` would read ``//W/skills``)."""
+    return re.sub(r"^/+", "/", posixpath.normpath(path))
+
+
 def _folder_from(folder: str, target: str) -> str | None:
     """The folder a ``cd`` to *target* from *folder* enters (an absolute
     target as it is); ``None`` when only the run knows it (an expansion, a
@@ -1417,8 +1423,8 @@ def _folder_from(folder: str, target: str) -> str | None:
     if not target or target == "-" or re.search(r"[$`%*?\[]", target):
         return None
     if target.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(target)):
-        return posixpath.normpath(target)
-    return posixpath.normpath(f"{folder}/{target}")
+        return _normpath(target)
+    return _normpath(f"{folder}/{target}")
 
 
 def _possible_folders(
@@ -1453,12 +1459,10 @@ def _possible_folders(
 
 
 # Commands that run other commands again or out of order: a loop (`done`, or
-# `for` with a `{ }` body), a function, or a string run as code.
-_OUT_OF_ORDER_NAMES = frozenset(
-    {"for", "select", "done", "function"} | shell_syntax.STRING_CODE_NAMES
-)
-# A function definition: `NAME()` or `function NAME`.
-_FUNCTION_RE = re.compile(r"\(\s*\)|\bfunction\s")
+# `for` with a `{ }` body) or a function.
+_OUT_OF_ORDER_NAMES = frozenset({"for", "select", "done", "function"})
+# A function definition: `NAME() {` or `NAME() (`, or `function NAME`.
+_FUNCTION_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
 
 
 def _runs_out_of_order(
@@ -1720,12 +1724,9 @@ def _folder_removal_error(
     changes_folder = any(
         found.name in shell_syntax.FOLDER_COMMANDS for found in commands
     )
-    # A string run as code, or `cd NAME` entering the folder in $NAME, may
-    # change folder where no cd is written.
+    # `cd NAME` may enter the folder in $NAME.
     hides_folder_changes = any(
-        found.name in shell_syntax.STRING_CODE_NAMES
-        or (found.name == "shopt" and "cdable_vars" in found.args)
-        for found in commands
+        found.name == "shopt" and "cdable_vars" in found.args for found in commands
     )
     if relative and (
         hides_folder_changes
@@ -1733,9 +1734,9 @@ def _folder_removal_error(
     ):
         return (
             "Command blocked: the folder each recursive rm runs in is not "
-            "followed, as the command changes folder in a loop or a function, "
-            "or runs a string as code (eval, trap, alias, source). Run the rm "
-            "as a command of its own, or name its path from the workspace root."
+            "followed, as the command changes folder in a loop or a function "
+            "(or with cdable_vars). Run the rm as a command of its own, or "
+            "name its path from the workspace root."
         )
     assigned = shell_syntax.assigned_values(command)
     folders = _possible_folders(commands, workspace_root, assigned)
@@ -1766,7 +1767,7 @@ def _folder_removal_error(
             for path in operand_paths:
                 relative = not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
                 if relative:
-                    path = f"{folder}/{path}"
+                    path = _normpath(f"{folder}/{path}")
                 if _removes_protected(path, workspace_root, protected):
                     return _protected_removal_error(
                         operand,

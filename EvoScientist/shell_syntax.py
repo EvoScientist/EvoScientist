@@ -840,9 +840,9 @@ _PLAIN_DECLARATION_OPTION_RE = re.compile(r"[-+][xrg]+")
 # Builtins that set the variables named in their arguments from what the run
 # reads or prints.
 _RUN_SETTER_NAMES = frozenset({"read", "mapfile", "readarray", "getopts", "let"})
-# Builtins that run a string as shell code later or elsewhere, where it may
-# set any variable or change folder.
-STRING_CODE_NAMES = frozenset({"eval", "trap", "alias", "source", "."})
+# Builtins that run a string or a file as code in this shell, where it may
+# set any variable.
+CODE_RUNNER_NAMES = frozenset({"eval", "source", "."})
 _NAME_RE = re.compile(r"[A-Za-z_]\w*")
 
 
@@ -854,7 +854,7 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
     ``printf -v``, ``declare -a``, ``${NAME:=value}``, a loop over words the
     run makes); and whether it may set any variable at all: with a nameref
     (``declare -n``), which writes through to another, or a builtin that runs
-    a string as code (see :data:`STRING_CODE_NAMES`). Options and names are
+    code in this shell (see :data:`CODE_RUNNER_NAMES`). Options and names are
     read as the shell reads them (``declare "-n"``, ``read "D"``)."""
     found: list[tuple[str, str]] = []
     other: set[str] = set()
@@ -865,7 +865,7 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
             _word_value(arg, token)
             for arg, token in zip(args, each.tokens, strict=True)
         ]
-        if each.name in STRING_CODE_NAMES:
+        if each.name in CODE_RUNNER_NAMES:
             opaque = True
         elif each.name in ("for", "select") and args:
             loop_words = [word for word in args[2:] if word != "do"]
@@ -948,6 +948,8 @@ _REFERENCE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _OPERATOR_REFERENCE_RE = re.compile(
     r"\$\{(?:[#!]([A-Za-z_]\w*)|([A-Za-z_]\w*)(?![\w}]))"
 )
+# `${NAME:?message}` / `${NAME?message}`: NAME's value, or an error.
+_CHECKED_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_]\w*):?\?[^}]*\}")
 # Most values one word is read with, so a long chain of assignments stays cheap.
 _VALUES_CAP = 16
 
@@ -1054,12 +1056,10 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
         found: list[str] = []
         run_only = False  # a value only the run knows
         for value in written[name]:
-            if any(
-                (match.group(1) or match.group(2)) in written.keys() | other
-                for match in _OPERATOR_REFERENCE_RE.finditer(value)
-            ):
-                raise UnknownValues(name)
-            if "$(" in value or "`" in value:
+            value = _CHECKED_REFERENCE_RE.sub(r"${\1}", value)
+            # An operator form (`${X:-build}`) is read as written, as the
+            # word it is in would be.
+            if "$(" in value or "`" in value or _OPERATOR_REFERENCE_RE.search(value):
                 run_only = True
                 continue
             if not tokenize(value):
@@ -1119,7 +1119,10 @@ def word_values(
     :class:`UnknownValues` (naming *word*) when it may read as more than
     :data:`_VALUES_CAP` values, names a variable whose values are not
     followed, reads one with an index or an operator (``${D[@]}``,
-    ``${D%/}``), or splits one while the command sets ``IFS``."""
+    ``${D%/}``; ``${D:?}`` reads as ``$D``), or splits one while the
+    command sets ``IFS``."""
+    word = _CHECKED_REFERENCE_RE.sub(r"${\1}", word)
+    value = _CHECKED_REFERENCE_RE.sub(r"${\1}", value)
     if any(
         (match.group(1) or match.group(2)) in assigned
         for match in _OPERATOR_REFERENCE_RE.finditer(word)

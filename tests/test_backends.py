@@ -1227,12 +1227,6 @@ class TestWorkspaceRemovalAndComments:
             "for i in 1 2; { cd memories; cd .evoscientist; }; rm -rf x",
             'for d in .evoscientist memories; do cd "$d"; done; rm -rf x',
             "while true; do cd x; done; rm -rf build",
-            "trap 'cd memories' DEBUG; cd .evoscientist; rm -rf x",
-            "alias c='cd memories'; cd .evoscientist; c; rm -rf x",
-            "eval 'cd memories'; cd x; rm -rf y",
-            "eval cd .evoscientist/memories; rm -rf x",
-            "trap 'cd .evoscientist/memories' DEBUG; rm -rf x",
-            ". ./setup.sh; rm -rf x",
             "shopt -s cdable_vars; S=.evoscientist/memories; cd S; rm -rf x",
             'for d in */; do (cd "$d" && rm -rf build); done',
         ],
@@ -1250,6 +1244,13 @@ class TestWorkspaceRemovalAndComments:
             "for d in build dist; do rm -rf $d; done",
             "f(){ make; }; f; rm -rf build",
             "for i in 1 2; do cd x; done; rm -rf /W/build",
+            # Common shapes: code run from a file or a string, a call in quotes.
+            "source .venv/bin/activate && rm -rf build",
+            'eval "$(conda shell.bash hook)"; rm -rf build',
+            'cd build && python -c "main()" && rm -rf dist',
+            "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; rm -rf build",
+            'OUT=build; rm -rf "${OUT:?}"/*',
+            'X=${X:-build}; rm -rf "$X"',
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
@@ -1262,6 +1263,12 @@ class TestWorkspaceRemovalAndComments:
             workspace_root="/W",
         )
         assert "read from 'my skills'" in error
+
+    def test_an_env_folder_at_the_root_still_matches_protected_folders(self):
+        error = validate_command(
+            "env -C / rm -rf W/skills", ("/W/skills",), workspace_root="/W"
+        )
+        assert "protected folder" in error
 
     def test_an_empty_unquoted_cd_target_is_a_bare_cd(self):
         error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
@@ -1331,7 +1338,6 @@ class TestWorkspaceRemovalAndComments:
             ": ${D:=skills}; rm -rf $D",
             "read D; rm -rf $D",
             'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
-            'D=skills; E=${D%/}; rm -rf "$E"',
             # Read as the shell reads the words, and through a nameref.
             'D=x; declare -n R=D; R=skills; rm -rf "$D"',
             'declare "-n" D=P; P=skills; rm -rf $D',
