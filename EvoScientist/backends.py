@@ -1390,34 +1390,58 @@ def _folder_from(folder: str, target: str) -> str | None:
     return posixpath.normpath(f"{folder}/{target}")
 
 
+# A loop, or a function, which may run a `cd` again after a later one.
+_REPEATS_RE = re.compile(r"\b(?:done|function)\b|\w\s*\(\s*\)")
+
+
 def _possible_folders(
+    command: str,
     commands: list[shell_syntax.SimpleCommand],
     workspace_root: str,
     assigned: dict[str, tuple[str, ...] | None],
 ) -> list[tuple[str, tuple[str, ...]]]:
-    """The folders the commands of one command may run in, whatever their
-    order, each with the ``env -C`` folders of the command that entered it:
-    the workspace root, and each ``cd`` / ``pushd`` target read from every
-    folder found before it that the ``cd`` may run in (see
-    :func:`_run_folders`), also with the values of the variables the command
-    sets. Past :data:`_FOLDERS_CAP` folders, a target is only read from the
-    workspace root. A target only the run knows adds none, nor do ``cd -``
-    and ``popd``, which return to one of them."""
+    """The folders the commands of *command* (its *commands*) may run in,
+    each with the ``env -C`` folders of the command that entered it: the
+    workspace root, and each ``cd`` / ``pushd`` target read from every folder
+    found before it that the ``cd`` may run in (see :func:`_run_folders`),
+    also with the values of the variables the command sets. With a loop or a
+    function, which may run a ``cd`` after a later one, in any order. Each
+    ``cd`` counts once on the way to a folder. A target only the run knows
+    adds none, nor do ``cd -`` and ``popd``, which return to one of them.
+    :class:`shell_syntax.TooManyValues` past :data:`_FOLDERS_CAP` folders."""
     root = posixpath.normpath(workspace_root.replace("\\", "/"))
-    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
-    for found in commands:
-        if found.name not in shell_syntax.FOLDER_COMMANDS:
-            continue
-        target = _folder_target(found)
-        if target is None:
-            continue
-        for value in _word_paths(*target, assigned):
-            starts = folders if len(folders) < _FOLDERS_CAP else [(root, ())]
-            for start in _run_folders(found.folders, list(starts), assigned):
-                entered = _folder_from(start, value)
-                if entered is not None and (entered, found.folders) not in folders:
-                    folders.append((entered, found.folders))
-    return folders
+    changes = [
+        (index, found, target)
+        for index, found in enumerate(commands)
+        if found.name in shell_syntax.FOLDER_COMMANDS
+        and (target := _folder_target(found)) is not None
+    ]
+    # Each folder, with the env -C folders it was entered under and the
+    # changes on the way to it.
+    entries: list[tuple[str, tuple[str, ...], frozenset[int]]] = [
+        (root, (), frozenset())
+    ]
+    repeats = bool(_REPEATS_RE.search(command))
+    changed = True
+    while changed:
+        changed = False
+        for index, found, target in changes:
+            for value in _word_paths(*target, assigned):
+                for folder, chain, used in list(entries):
+                    if index in used:
+                        continue
+                    starts = _run_folders(found.folders, [(folder, chain)], assigned)
+                    for start in starts:
+                        entered = _folder_from(start, value)
+                        entry = (entered, found.folders, used | {index})
+                        if entered is None or entry in entries:
+                            continue
+                        if len(entries) >= _FOLDERS_CAP:
+                            raise shell_syntax.TooManyValues(target[0])
+                        entries.append(entry)
+                        changed = True
+        changed = changed and repeats
+    return list(dict.fromkeys((folder, chain) for folder, chain, _ in entries))
 
 
 def _run_folders(
@@ -1660,7 +1684,7 @@ def _folder_removal_error(
     if not removals:
         return None
     assigned = shell_syntax.assigned_values(command)
-    folders = _possible_folders(commands, workspace_root, assigned)
+    folders = _possible_folders(command, commands, workspace_root, assigned)
     for found, operand, token in removals:
         if token is not None:
             operand_paths = _word_paths(operand, token, assigned)

@@ -1090,6 +1090,19 @@ def _simple_commands(
             continue
         name = re.split(r"[\\/]", value)[-1]
         args, heredocs = _command_arguments(command, words, index, in_backtick)
+        if name == "function":
+            # `function NAME [()] { BODY`: the body's first command is read
+            # as these words.
+            body = next(
+                (at + 1 for at, (arg, _) in enumerate(args) if arg in ("{", "(")),
+                len(args),
+            )
+            spans = [token for _, token in args[body:] if token is not None]
+            if spans:
+                nested.append(
+                    (command[int(spans[0]["start"]) : int(spans[-1]["end"])], (), ())
+                )
+            continue
         for each in _unwrap(name, args, (), nested):
             found.append(each)
             if each.name not in SHELL_NAMES:

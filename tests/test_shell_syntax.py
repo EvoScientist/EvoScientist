@@ -306,6 +306,11 @@ class TestSimpleCommands:
         assert removals
         assert all(each.folders == folders for each in removals)
 
+    def test_a_function_body_is_read_as_commands(self):
+        found = shell_syntax.simple_commands("function f { cd a; rm -rf x; }; f")
+        assert {each.name for each in found} >= {"cd", "rm", "f"}
+        assert "function" not in {each.name for each in found}
+
     def test_the_same_script_in_two_env_folders_is_read_in_both(self):
         found = shell_syntax.simple_commands("env -C a sh -c X; env -C b sh -c X")
         assert [each.folders for each in found if each.name == "X"] == [

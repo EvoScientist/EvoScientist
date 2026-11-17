@@ -1191,31 +1191,49 @@ class TestWorkspaceRemovalAndComments:
         monkeypatch.setattr(backends, "_is_windows", lambda: windows)
         commands = backends.shell_syntax.simple_commands("cd C:/W/skills")
         root = "C:/W" if windows else "/W"
-        folders = [f for f, _ in backends._possible_folders(commands, root, {})]
+        folders = [f for f, _ in backends._possible_folders("", commands, root, {})]
         assert folders[-1] == ("C:/W/skills" if windows else "/W/C:/W/skills")
 
     def test_the_folders_a_removal_is_read_from_are_capped(self):
-        command = "; ".join(f"cd d{i}" for i in range(20)) + "; rm -rf x"
+        command = "; ".join(f"cd d{i}" for i in range(5)) + "; rm -rf x"
         commands = backends.shell_syntax.simple_commands(command)
-        folders = [f for f, _ in backends._possible_folders(commands, "/W", {})]
+        folders = [
+            f for f, _ in backends._possible_folders(command, commands, "/W", {})
+        ]
         assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
-        # Past the cap, each later target is still read from the root.
-        assert "/W/d19" in folders
-        assert len(folders) < backends._FOLDERS_CAP + 20
+        assert len(folders) == 32
         assert validate_command(command, workspace_root="/W") is None
-        assert "protected folder" in validate_command(
-            command.replace("rm -rf x", "cd skills && rm -rf demo"),
-            ("/W/skills",),
+        # Past the cap, the folder a later cd enters is not known.
+        padded = "; ".join(f"cd a{i}" for i in range(7))
+        error = validate_command(
+            f"{padded}; cd .evoscientist; cd memories; rm -rf x",
+            ("/W/.evoscientist/memories",),
             workspace_root="/W",
         )
+        assert "may name more paths than the check follows" in error
 
-    def test_env_folders_keep_every_folder_past_the_cap(self):
-        command = "; ".join(f"cd d{i}" for i in range(7)) + "; cd skills; "
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "f(){ cd memories; }; cd .evoscientist; f; rm -rf x",
+            "for i in 1 2; do cd memories; cd .evoscientist; done; rm -rf x",
+            "function f { cd memories; }; cd .evoscientist; f; rm -rf x",
+            "function f() { cd memories; }; cd .evoscientist; f; rm -rf x",
+            "function f { rm -rf .evoscientist/memories/x; }; f",
+        ],
+    )
+    def test_a_cd_is_read_from_folders_a_later_cd_enters(self, command):
+        error = validate_command(
+            command, ("/W/.evoscientist/memories",), workspace_root="/W"
+        )
+        assert "protected folder" in error
+
+    def test_env_folders_may_not_multiply_the_folders_past_the_cap(self):
+        command = "; ".join(f"cd d{i}" for i in range(5)) + "; cd skills; "
         error = validate_command(
             command + "env -C . rm -rf demo", ("/W/skills",), workspace_root="/W"
         )
         assert "protected folder" in error
-        # An env -C folder with many values may not multiply them past it.
         values = "; ".join(f"T=v{i}" for i in range(4))
         error = validate_command(
             f'{values}; {command}env -C "$T" rm -rf demo',
