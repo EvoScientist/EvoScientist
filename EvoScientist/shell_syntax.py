@@ -921,8 +921,10 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     another variable set in *command* replaced by its values. A value with a
     substitution is only known when the command runs, so it is left out; any
     other ``$NAME`` (``$HOME``) stays as written. ``None`` for a variable with
-    more than :data:`_VALUES_CAP` values, or one set in part (``NAME+=value``,
-    ``NAME[i]=value``), whose values depend on the order it is set in."""
+    more than :data:`_VALUES_CAP` values, one with values known before the
+    run and values only the run knows (``X=build; X=$(cmd)``), or one set in
+    part (``NAME+=value``, ``NAME[i]=value``), whose values depend on the
+    order it is set in."""
     written: dict[str, list[str]] = {}
     in_part: set[str] = set()
     for head, value in _assignments(command):
@@ -950,21 +952,28 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
 
     def resolve_values(name: str) -> tuple[str, ...]:
         found: list[str] = []
+        run_only = False  # a value only the run knows
         for value in written[name]:
             if "$(" in value or "`" in value:
+                run_only = True
                 continue
             if not tokenize(value):
                 found.append("")
                 continue
             read = braced_value(value)
             if read is None:
+                run_only = True
                 continue
             others = (variable_references(value) & written.keys()) - pending
-            found.extend(
-                expand_references(read, {other: resolve(other) for other in others})
+            expanded = expand_references(
+                read, {other: resolve(other) for other in others}
             )
+            run_only = run_only or not expanded
+            found.extend(expanded)
         values = tuple(dict.fromkeys(found))
-        if len(values) > _VALUES_CAP:
+        # Checking only the known values of a variable that may also take
+        # one only the run knows would miss that one.
+        if len(values) > _VALUES_CAP or (run_only and values):
             raise TooManyValues(name)
         return values
 

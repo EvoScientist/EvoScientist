@@ -378,6 +378,11 @@ class TestSimpleCommands:
         ]
         assert env_rm.folders == ("${D}ills",)
 
+    def test_a_variable_with_known_and_run_only_values_has_none_to_read(self):
+        assert shell_syntax.assigned_values(
+            "X=build; X=$(echo skills); Y=a; Y=(b c); Z=a; Z=$R; R=`pwd`; S=$(pwd)"
+        ) == {"X": None, "Y": None, "Z": None, "R": (), "S": ()}
+
     def test_a_variable_set_in_part_has_no_values_to_read(self):
         # Its value depends on the order of the assignments.
         assert shell_syntax.assigned_values(

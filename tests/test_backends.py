@@ -1227,9 +1227,15 @@ class TestWorkspaceRemovalAndComments:
             "bash -c 'D=sk; D+=ills; rm -rf \"$D\"'",
             "D=sk; export D+=ills; rm -rf $D/x",
             'T=.; T+=.; cd "$T"',
+            # Known values and values only the run knows.
+            'X=build; X=$(echo skills); rm -rf "$X"',
+            'T=sub; T=$(echo /etc); cd "$T"',
+            "X=build; X=$Y; Y=`echo skills`; rm -rf $X/demo",
         ],
     )
-    def test_a_word_with_a_variable_set_in_part_is_refused(self, command):
+    def test_a_word_whose_variable_has_values_the_check_cannot_know_is_refused(
+        self, command
+    ):
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
         assert "may name more paths than the check follows" in error
 
