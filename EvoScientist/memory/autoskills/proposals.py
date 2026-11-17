@@ -915,14 +915,23 @@ def _is_regular_file(path: Path) -> bool:
 
 def copied_files(proposal_dir: Path) -> list[Path]:
     """The files an approval copies, relative to the draft folder, in POSIX text
-    order; an unreadable folder raises, so no draft is approved short of files."""
+    order; an unreadable folder raises, so no draft is approved short of files.
+
+    A file that is not a regular file (a FIFO, a device, a socket) is NOT
+    skipped: it raises, so the decision refuses the draft instead of quietly
+    installing a skill that is missing that file. Skipping it would also make
+    the content digest cover only the remaining files, so the digest check
+    would pass for an incomplete skill.
+    """
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
         base = Path(dirpath)
         for name in filenames:
             source_path = base / name
             if not _is_regular_file(source_path):
-                continue
+                raise OSError(
+                    f"Not a regular file in the proposal folder: {source_path}"
+                )
             relative = source_path.relative_to(proposal_dir)
             if relative.as_posix() in {"manifest.json", "RATIONALE.md"} or (
                 name.startswith(".") and name.endswith(".tmp")
@@ -981,9 +990,11 @@ def _read_regular_bytes(path: Path) -> bytes:
     the read. Opening a FIFO then blocks until a writer appears, which would
     hang the caller while it holds the proposal lock.
 
-    ``O_NONBLOCK`` makes the open of a FIFO fail instead of wait, and the
-    ``fstat`` afterwards confirms the opened file is still a regular file --
-    so a swapped-in device or pipe is rejected rather than read.
+    ``O_NONBLOCK`` makes the open of a FIFO not wait, and the ``fstat``
+    afterwards confirms the opened file is still a regular file -- so a
+    swapped-in device or pipe is rejected rather than read. The read of a
+    non-regular file is refused before any byte is consumed, so it can
+    neither block nor be mistaken for an empty file.
 
     ``O_BINARY`` keeps the read byte-exact: without it Windows opens in text
     mode and rewrites CRLF, which would change the digest of every file.
@@ -995,7 +1006,14 @@ def _read_regular_bytes(path: Path) -> bytes:
             raise OSError(f"Not a regular file: {path}")
         chunks: list[bytes] = []
         while True:
-            chunk = os.read(fd, _COMPARE_CHUNK)
+            try:
+                chunk = os.read(fd, _COMPARE_CHUNK)
+            except OSError as exc:
+                # A non-regular file can still be open here on some
+                # platforms: refuse it rather than read it as empty.
+                if exc.errno == errno.EAGAIN:
+                    raise OSError(f"Not a regular file: {path}") from exc
+                raise
             if not chunk:
                 break
             chunks.append(chunk)

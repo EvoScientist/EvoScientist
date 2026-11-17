@@ -120,9 +120,10 @@ def test_a_draft_file_swapped_for_a_fifo_never_blocks_the_digest(tmp_path):
 def test_a_fifo_replaced_after_the_check_never_blocks_the_digest(tmp_path):
     """The FIFO can appear AFTER the regular-file check has passed.
 
-    ``copied_files`` stats each path and skips what is not a regular file, but
-    the file can be replaced between that check and the read. This test
-    replaces the file in between, which is the window CodeRabbit reported.
+    The file can be replaced between the check and the read. The digest read
+    must then refuse it -- neither block on it nor read it as an empty file,
+    because a digest over zero files would pass the "content changed" check
+    for a skill that is missing that file.
     """
     from EvoScientist.memory.autoskills import proposals as proposals_module
 
@@ -135,17 +136,6 @@ def test_a_fifo_replaced_after_the_check_never_blocks_the_digest(tmp_path):
     original = target.read_bytes()
     target.unlink()
     os.mkfifo(target)
-
-    def swap_back() -> None:
-        # Wait until the reader has already passed its stat check, then put a
-        # FIFO (not a regular file) where the read is about to happen.
-        import time
-
-        time.sleep(0.5)
-        # Leave the FIFO in place: the reader must not block on it.
-
-    swapper = threading.Thread(target=swap_back, daemon=True)
-    swapper.start()
 
     outcome: dict[str, object] = {}
 
@@ -163,6 +153,35 @@ def test_a_fifo_replaced_after_the_check_never_blocks_the_digest(tmp_path):
     assert "error" in outcome, "a FIFO should be refused, not read"
     assert isinstance(outcome["error"], OSError)
     assert original  # the submitted content existed before the swap
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="FIFO creation is not available on this platform"
+)
+def test_a_draft_with_a_fifo_is_refused_not_installed_short(tmp_path):
+    """A non-regular file must not be silently skipped.
+
+    Skipping it would install a skill that is missing that file, and the
+    content digest would cover only the remaining files -- so the digest
+    check would pass for an incomplete skill.
+    """
+    memory_dir = tmp_path / "memories"
+    skills_dir = tmp_path / "skills"
+    _submit(memory_dir, skills_dir)
+
+    proposal_dir = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (proposal_dir / "SKILL.md").unlink()
+    os.mkfifo(proposal_dir / "SKILL.md")
+
+    result = approve_skill_proposal(
+        memory_dir,
+        "focused-validation",
+        skills_dir=skills_dir,
+        workspace_dir=Path(skills_dir).parent,
+    )
+
+    assert result.get("approved") is not True, result
+    assert not (skills_dir / "focused-validation").exists()
 
 
 def test_the_digest_read_is_byte_exact_on_crlf_files(tmp_path):
