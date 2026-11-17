@@ -449,6 +449,20 @@ def test_quoted_assigned_tmp_names_the_workspace_tmp(tmp_path, command):
     assert converted == f"{expected}OUT={_assignment_root(tmp_path)}/tmp/x"
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('OUT=/tmp/"out file"; cd sub', 'OUT={root}/tmp/"out file"; cd sub'),
+        ("OUT=/results/x.csv; cd sub", "OUT={root}/results/x.csv; cd sub"),
+    ],
+)
+def test_assigned_value_spellings_name_the_workspace(tmp_path, command, expected):
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results/x.csv").touch()
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == expected.format(root=_assignment_root(tmp_path))
+
+
 def test_assigned_tmp_stays_relative_when_the_root_needs_quoting(tmp_path):
     # An unquoted $OUT would split at the space in the root.
     root = tmp_path / "my ws"
