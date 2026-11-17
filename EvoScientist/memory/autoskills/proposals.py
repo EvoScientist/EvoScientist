@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -21,6 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from filelock import FileLock
 
 from ... import paths
 
@@ -106,6 +110,95 @@ def _processed_root(memory_dir: str | Path) -> Path:
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
     """Return the real directory exposed as `/autoskill-proposals/` to agents."""
     return _proposal_root(memory_dir)
+
+
+def _locked_proposal(*, submit: bool = False):
+    """Serialize lifecycle changes across processes using a sibling lock file."""
+
+    def decorate(function):
+        signature = inspect.signature(function)
+
+        @functools.wraps(function)
+        def wrapped(*args, **kwargs):
+            arguments = signature.bind(*args, **kwargs)
+            arguments.apply_defaults()
+            values = arguments.arguments
+            memory_dir = values["memory_dir"]
+            if submit:
+                name = values["skill_name"]
+                if sanitize_skill_name(name) != name:
+                    return function(*args, **kwargs)
+                proposal_dir = _proposal_root(memory_dir) / name
+            else:
+
+                def lookup():
+                    if function.__name__ == "revert_skill_proposal":
+                        proposal = find_skill_proposal(
+                            memory_dir, values["proposal_id"]
+                        )
+                        return proposal.path if proposal else None
+                    return _proposal_dir_by_id(
+                        memory_dir,
+                        values["proposal_id"],
+                        workspace_dir=values["workspace_dir"],
+                        exact=values["exact"],
+                    )
+
+                proposal_dir = lookup()
+            if proposal_dir is None:
+                if function.__name__ == "revert_skill_proposal":
+                    return {
+                        "reverted": False,
+                        "proposal_id": values["proposal_id"],
+                        "error": "not_found",
+                    }
+                action = (
+                    "approved"
+                    if function.__name__ == "approve_skill_proposal"
+                    else "rejected"
+                )
+                return {
+                    action: False,
+                    "error": f"No unique proposal matching {values['proposal_id']!r}",
+                }
+            proposal_dir.parent.mkdir(parents=True, exist_ok=True)
+            with FileLock(str(proposal_dir.parent / f"{proposal_dir.name}.lock")):
+                if not submit and lookup() != proposal_dir:
+                    if function.__name__ == "revert_skill_proposal":
+                        return {
+                            "reverted": False,
+                            "proposal_id": values["proposal_id"],
+                            "error": "draft_changed",
+                        }
+                    action = (
+                        "approved"
+                        if function.__name__ == "approve_skill_proposal"
+                        else "rejected"
+                    )
+                    return {
+                        action: False,
+                        "error": "Proposal changed since it was read",
+                    }
+                if not submit:
+                    selected_manifest = _read_manifest(proposal_dir / "manifest.json")
+                    if (
+                        function.__name__ == "approve_skill_proposal"
+                        and selected_manifest is not None
+                        and selected_manifest.get("proposal_id") != proposal_dir.name
+                    ):
+                        return {
+                            "approved": False,
+                            "proposal_id": selected_manifest.get("proposal_id"),
+                            "error": "Proposal folder, id and skill name must match",
+                        }
+                    values["proposal_id"] = proposal_dir.name
+                    if "exact" in values:
+                        values["exact"] = True
+                return function(*arguments.args, **arguments.kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 def sanitize_skill_name(name: str) -> str | None:
@@ -831,10 +924,24 @@ def copied_files(proposal_dir: Path) -> list[Path]:
             if not _is_regular_file(source_path):
                 continue
             relative = source_path.relative_to(proposal_dir)
-            if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+            if relative.as_posix() in {"manifest.json", "RATIONALE.md"} or (
+                name.startswith(".") and name.endswith(".tmp")
+            ):
                 continue
             files.append(relative)
     return sorted(files, key=lambda relative: relative.as_posix())
+
+
+def _draft_digest(proposal_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for relative in copied_files(proposal_dir):
+        name = relative.as_posix().encode("utf-8")
+        content = (proposal_dir / relative).read_bytes()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
@@ -923,6 +1030,7 @@ def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     return None
 
 
+@_locked_proposal(submit=True)
 def submit_autoskill_proposal(
     *,
     memory_dir: str | Path,
@@ -1092,6 +1200,7 @@ def submit_autoskill_proposal(
         "updated_at": _version_stamp(existing.get("updated_at") if existing else None),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
+        "content_digest": _draft_digest(proposal_dir),
     }
     if normalized_operation == "update":
         manifest["target_skill_name"] = skill_name
@@ -1528,6 +1637,7 @@ def _record_approval(
         manifest.pop("workspace_shadow", None)
 
 
+@_locked_proposal()
 def approve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
@@ -1587,6 +1697,19 @@ def approve_skill_proposal(
         }
     if failure is not None:
         return failure
+    try:
+        if manifest.get("content_digest") != _draft_digest(proposal_dir):
+            return {
+                "approved": False,
+                "proposal_id": manifest.get("proposal_id"),
+                "error": "Proposal content changed since submission; resubmit it for review",
+            }
+    except (OSError, ValueError) as exc:
+        return {
+            "approved": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "error": f"Could not read proposal content: {exc}",
+        }
     assert target.path is not None
     assert target.scope is not None
     skill_name = str(manifest["skill_name"]).strip()
@@ -1628,9 +1751,20 @@ def approve_skill_proposal(
             f"Could not install the skill: {exc}", changed=False, leftover=None
         )
     try:
-        if created and base_skill_dir is not None:
-            shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
-        blocked_path = _copy_proposed_skill(proposal_dir, destination)
+        # Install a verified snapshot: agent file writes do not take our lock.
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary)
+            for relative in copied_files(proposal_dir):
+                target_file = snapshot / relative
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(proposal_dir / relative, target_file)
+            if _draft_digest(snapshot) != manifest.get("content_digest"):
+                raise ValueError(
+                    "Proposal content changed since submission; resubmit it for review"
+                )
+            if created and base_skill_dir is not None:
+                shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
+            blocked_path = _copy_proposed_skill(snapshot, destination)
         if blocked_path is None:
             _record_approval(
                 manifest,
@@ -1815,6 +1949,7 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
     )
 
 
+@_locked_proposal()
 def revert_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
@@ -1899,6 +2034,7 @@ def revert_skill_proposal(
     }
 
 
+@_locked_proposal()
 def reject_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
