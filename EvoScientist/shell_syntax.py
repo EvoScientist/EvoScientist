@@ -844,6 +844,8 @@ _RUN_SETTER_NAMES = frozenset({"read", "mapfile", "readarray", "getopts", "let"}
 # set any variable.
 CODE_RUNNER_NAMES = frozenset({"eval", "source", "."})
 _NAME_RE = re.compile(r"[A-Za-z_]\w*")
+# A printf `%n` conversion, with its flags, width, precision and length.
+_PRINTF_N_RE = re.compile(r"%[-+ #0'*\d.]*(?:hh|h|ll|l|L|q|j|z|t)?n")
 
 
 def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
@@ -910,7 +912,7 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
         elif each.name == "printf":
             # `%n` writes the count printed so far into a variable named by
             # an argument; which one is not followed.
-            if any("%" in word and re.search(r"%[^%a-zA-Z]*n", word) for word in words):
+            if any(_PRINTF_N_RE.search(word.replace("%%", "")) for word in words):
                 opaque = True
             for at, word in enumerate(words):
                 destination = None
@@ -1041,7 +1043,7 @@ def braced_value(word: str) -> str | None:
     return str(tokens[0]["value"])
 
 
-def assigned_values(command: str) -> AssignedValues:
+def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
     """The values *command* sets each variable to with plain assignments
     (see :func:`assignments`), in any order, as the shell reads them: quotes
     removed, and a ``$NAME`` of another variable set in *command* replaced by
@@ -1054,8 +1056,12 @@ def assigned_values(command: str) -> AssignedValues:
     refers back to it (``D=$D/x``) or reads a variable with an operator
     (``${D%/}``), one with more than :data:`_VALUES_CAP` values, one with
     values known before the run and values only the run knows
-    (``X=build; X=$(cmd)``), or one whose value names such a variable."""
+    (``X=build; X=$(cmd)``), or one whose value names such a variable.
+    With *plain_only*, each variable is read from its plain assignments
+    alone, however else the command sets it."""
     found, other, opaque = _variables(command)
+    if plain_only:  # the plain `=` values alone, however else it is set
+        other, opaque = set(), False
     written: dict[str, list[str]] = {}
     for head, value in found:
         name = _assigned_name(head)
@@ -1109,10 +1115,13 @@ def assigned_values(command: str) -> AssignedValues:
             names = variable_references(value) & (written.keys() | other)
             known = {each: resolve(each) for each in names}
             if any(known[each] is None for each in names):
-                if any(each in partial for each in names if known[each] is None):
-                    raise UnknownValues(name)
-                run_only = True  # it names a variable only the run sets
-                continue
+                # Only the run knows it; just the run's value when the value
+                # is that variable alone (`D=$R`), else known in part.
+                raise UnknownValues(
+                    name,
+                    re.fullmatch(r"\$\{\w+\}", read) is None
+                    or any(each in partial for each in names if known[each] is None),
+                )
             expanded = expand_references(read, known)
             run_only = run_only or not expanded
             found.extend(expanded)

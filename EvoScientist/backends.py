@@ -1343,6 +1343,7 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
         ) and not _under_any(path, allow_prefixes)
 
     assigned = shell_syntax.assigned_values(command) if "$" in command else {}
+    plain: shell_syntax.AssignedValues | None = None
     for found in shell_syntax.simple_commands(command):
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
@@ -1368,9 +1369,18 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
         except shell_syntax.UnknownValues as exc:
             if exc.partial:  # the values it may have are not all checked
                 raise
-            # Only the run knows it, as for a variable the command does not
-            # set; the rm check refuses it in front of a recursive rm.
-            continue
+            # The run may also set it (`read D`, `source`): what the run sets
+            # is read as written, as for a variable the command does not set
+            # (the rm check refuses it in front of a recursive rm), and its
+            # plain `=` values are still checked.
+            if plain is None:
+                plain = shell_syntax.assigned_values(command, plain_only=True)
+            try:
+                values = shell_syntax.word_values(arg, path, plain)
+            except shell_syntax.UnknownValues as plain_exc:
+                if plain_exc.partial:
+                    raise
+                continue
         for value in values or ():
             if (
                 _is_home_word(value)
@@ -1479,12 +1489,24 @@ def _possible_folders(
 _OUT_OF_ORDER_NAMES = frozenset({"for", "select", "done", "function"})
 
 
-def _runs_out_of_order(commands: list[shell_syntax.SimpleCommand]) -> bool:
-    """Whether *commands* may run a command again or before one written
-    ahead of it (a function definition is a command named ``function``, see
-    :func:`shell_syntax.simple_commands`), so that the folders they may run
-    in are not read in order."""
-    return any(found.name in _OUT_OF_ORDER_NAMES for found in commands)
+# A function definition in text the parser does not read as code.
+_FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
+
+
+def _runs_out_of_order(
+    command: str, commands: list[shell_syntax.SimpleCommand]
+) -> bool:
+    """Whether *command* (its *commands*) may run a command again or before
+    one written ahead of it (a function definition is a command named
+    ``function``, see :func:`shell_syntax.simple_commands`), so that the
+    folders it may run in are not read in order. A string run as code
+    (``eval``, ``source``) is not parsed, so a definition in its text counts
+    too."""
+    if any(found.name in _OUT_OF_ORDER_NAMES for found in commands):
+        return True
+    return any(
+        found.name in shell_syntax.CODE_RUNNER_NAMES for found in commands
+    ) and bool(_FUNCTION_TEXT_RE.search(command))
 
 
 def _run_folders(
@@ -1740,7 +1762,8 @@ def _folder_removal_error(
         found.name == "shopt" and "cdable_vars" in found.args for found in commands
     )
     if relative and (
-        hides_folder_changes or (changes_folder and _runs_out_of_order(commands))
+        hides_folder_changes
+        or (changes_folder and _runs_out_of_order(command, commands))
     ):
         return (
             "Command blocked: the folder each recursive rm runs in is not "

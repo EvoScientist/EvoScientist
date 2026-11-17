@@ -1226,6 +1226,8 @@ class TestWorkspaceRemovalAndComments:
             "for i in 1 2; do cd memories; cd .evoscientist; done; rm -rf x",
             "for i in 1 2; { cd memories; cd .evoscientist; }; rm -rf x",
             'for d in .evoscientist memories; do cd "$d"; done; rm -rf x',
+            # A function defined in a string run as code.
+            'eval "f() { cd memories; }"; cd .evoscientist; f; rm -rf x',
             "while true; do cd x; done; rm -rf build",
             "shopt -s cdable_vars; S=.evoscientist/memories; cd S; rm -rf x",
             'for d in */; do (cd "$d" && rm -rf build); done',
@@ -1251,6 +1253,9 @@ class TestWorkspaceRemovalAndComments:
             "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; rm -rf build",
             'OUT=build; rm -rf "${OUT:?}"/*',
             "OUT=build; printf '%s\\n' done; rm -rf \"$OUT\"",
+            "OUT=build; printf '%d%%\\n' 50; rm -rf \"$OUT\"",
+            'eval "$(conda shell.bash hook)"; cd build; rm -rf dist',
+            'read f; d=$f; cd "$d"',
             'X=${X:-build}; rm -rf "$X"',
             # A variable used only inside a substitution: read as written.
             'read f; cd "$(dirname "$f")"',
@@ -1374,6 +1379,10 @@ class TestWorkspaceRemovalAndComments:
             "read D; rm -rf $D",
             # A cd to such a variable in front of a recursive rm.
             'read d; cd "$d"; rm -rf skills',
+            # A value made from a variable only the run sets.
+            'read R; D=skills$R; rm -rf "$D"',
+            'read R; D=$R; rm -rf "$D"',
+            'read R; D=$HOME$R; cd "$D"',
             'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
             # Read as the shell reads the words, and through a nameref.
             'D=x; declare -n R=D; R=skills; rm -rf "$D"',
@@ -1781,6 +1790,9 @@ class TestSandboxCommandChecks:
             ("T=src; T=.; cd $T$T", "'cd $T$T'"),
             ('T=".. "; cd $T', "'cd $T'"),
             ("bash -c 'T=.; cd \"$T$T\"'", "'cd \"$T$T\"'"),
+            # Also set another way: its plain values are still checked.
+            ('D=/; eval :; cd "$D"', "'cd \"$D\"'"),
+            ('D=.; false && read D; cd "$D$D"', "'cd \"$D$D\"'"),
         ],
     )
     def test_cd_to_a_variable_set_in_the_command_is_checked(
