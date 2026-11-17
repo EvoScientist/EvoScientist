@@ -746,13 +746,50 @@ def build_ask_user_resume(interrupt_id: str, payload: dict) -> "Command":
     return Command(resume={interrupt_id: payload})
 
 
-_THREAD_RUN_LOCKS: dict[str, tuple[int, asyncio.Lock]] = {}
+class _ThreadRunLock:
+    """The lock that serialises the runs of one thread.
+
+    ``asyncio.Lock`` cannot be awaited from two event loops, and the local
+    path can be driven from more than one: ``_run_streaming`` creates its
+    own runtime when the caller does not supply one, and a program may drive
+    the same graph from two OS threads. A ``threading.Lock`` has no loop
+    affinity, so one instance serialises them all.
+
+    It is polled rather than blocked on, so a waiting run never ties up a
+    worker thread and a cancelled wait leaves nothing held.
+
+    ``_refs`` counts the holders AND the waiters. The entry stays in the
+    registry while it is not zero: an evicted lock that someone still holds
+    would let a new caller take a SECOND lock for the same thread, which is
+    the race the lock exists to prevent.
+    """
+
+    _POLL_SECONDS = 0.01
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._refs = 0
+
+    def acquire_nowait(self) -> bool:
+        """Take the lock if it is free; False while someone holds it."""
+        return self._lock.acquire(blocking=False)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    async def wait_and_acquire(self) -> None:
+        """Wait for the lock and take it."""
+        while not self.acquire_nowait():
+            await asyncio.sleep(self._POLL_SECONDS)
+
+
+_THREAD_RUN_LOCKS: dict[str, _ThreadRunLock] = {}
 _THREAD_RUN_LOCKS_GUARD = threading.Lock()
 _THREAD_RUN_LOCKS_MAX = 64
 
 
-def thread_run_lock(thread_id: str) -> asyncio.Lock:
-    """The lock that serialises the runs of one thread.
+def thread_run_lock(thread_id: str) -> _ThreadRunLock:
+    """Register and return the lock for one thread.
 
     Two clients that resume the SAME thread at once would otherwise both
     write their answer into the checkpoint. The graph would end up with
@@ -763,32 +800,43 @@ def thread_run_lock(thread_id: str) -> asyncio.Lock:
     second resume waits for the first to finish and then sees the state the
     first one left behind.
 
-    The lock is bound to the event loop that first awaits it, so the entry
-    records that loop and a new one is made when a different loop asks for
-    the same thread -- a lock cannot be awaited from two loops.
+    The scope is the process. The local path's checkpoint is either
+    in-process or served by the LangGraph dev server, which serialises the
+    runs of a thread itself; two processes do not share a local checkpoint.
+    The server gateway posts to that server and does not use this lock.
+
+    The returned lock holds a reference: release it with
+    :func:`release_thread_run_lock` once the run is over.
     """
-    try:
-        loop_id = id(asyncio.get_running_loop())
-    except RuntimeError:
-        loop_id = 0
     with _THREAD_RUN_LOCKS_GUARD:
         entry = _THREAD_RUN_LOCKS.get(thread_id)
-        if entry is None or entry[0] != loop_id:
-            lock = asyncio.Lock()
-            _THREAD_RUN_LOCKS[thread_id] = (loop_id, lock)
-            return lock
-        # Move to the end so the oldest idle thread is evicted first.
-        _THREAD_RUN_LOCKS[thread_id] = (loop_id, entry[1])
-        lock = entry[1]
-        if len(_THREAD_RUN_LOCKS) > _THREAD_RUN_LOCKS_MAX:
-            for key, (_, held) in list(_THREAD_RUN_LOCKS.items()):
-                if key == thread_id:
-                    continue
-                if not held.locked():
-                    del _THREAD_RUN_LOCKS[key]
-                if len(_THREAD_RUN_LOCKS) <= _THREAD_RUN_LOCKS_MAX:
-                    break
-        return lock
+        if entry is None:
+            entry = _ThreadRunLock()
+            _THREAD_RUN_LOCKS[thread_id] = entry
+        entry._refs += 1
+        _evict_unused_locks(thread_id)
+        return entry
+
+
+def release_thread_run_lock(thread_id: str, entry: _ThreadRunLock) -> None:
+    """Give the lock back and drop the reference taken for it."""
+    with _THREAD_RUN_LOCKS_GUARD:
+        entry._refs -= 1
+        if entry._refs <= 0 and _THREAD_RUN_LOCKS.get(thread_id) is entry:
+            del _THREAD_RUN_LOCKS[thread_id]
+
+
+def _evict_unused_locks(keep: str) -> None:
+    """Drop the entries nobody holds or waits for, oldest first."""
+    if len(_THREAD_RUN_LOCKS) <= _THREAD_RUN_LOCKS_MAX:
+        return
+    for key, entry in list(_THREAD_RUN_LOCKS.items()):
+        if key == keep:
+            continue
+        if entry._refs <= 0:
+            del _THREAD_RUN_LOCKS[key]
+        if len(_THREAD_RUN_LOCKS) <= _THREAD_RUN_LOCKS_MAX:
+            break
 
 
 _SSH_OPTIONS_WITH_VALUE = {

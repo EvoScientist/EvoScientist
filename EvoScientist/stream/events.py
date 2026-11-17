@@ -1536,10 +1536,15 @@ async def stream_agent_events(
     # scheduled: the model is never called again and the turn produces no
     # response at all. The second run waits for the first to finish and then
     # sees the state the first one left behind.
-    from ..backends import thread_run_lock
+    from ..backends import release_thread_run_lock, thread_run_lock
 
     thread_lock = thread_run_lock(thread_id)
-    await thread_lock.acquire()
+    try:
+        await thread_lock.wait_and_acquire()
+    except BaseException:
+        # A cancelled wait holds nothing: give the reference back.
+        release_thread_run_lock(thread_id, thread_lock)
+        raise
     inner = _stream_agent_events_locked(
         agent,
         message,
@@ -1555,12 +1560,19 @@ async def stream_agent_events(
         async for _event in inner:
             yield _event
     finally:
-        # The inner generator holds the run's event-sink token. It must be
-        # closed HERE, where the token was created: left to the event loop's
-        # finalizer it would be closed in another context, and resetting the
-        # token there raises "was created in a different Context".
-        await inner.aclose()
-        thread_lock.release()
+        try:
+            # The inner generator holds the run's event-sink token. It must be
+            # closed HERE, where the token was created: left to the event
+            # loop's finalizer it would be closed in another context, and
+            # resetting the token there raises "was created in a different
+            # Context".
+            await inner.aclose()
+        finally:
+            # The release must not depend on the close above: a cancellation
+            # during the close would otherwise strand the lock and every
+            # later run of this thread would wait forever.
+            thread_lock.release()
+            release_thread_run_lock(thread_id, thread_lock)
 
 
 async def _stream_agent_events_locked(
