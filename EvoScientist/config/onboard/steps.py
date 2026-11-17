@@ -830,17 +830,29 @@ def _step_model(
     # Get models for the selected provider. A live custom-openai endpoint
     # lists its own ids; an empty or failed probe keeps the registry defaults.
     if provider == "custom-openai":
-        # The URL and the key must come from the SAME source. The runtime
-        # gives the environment precedence over the saved config (the saved
-        # value only fills in what the environment does not set), so probing
-        # a saved URL with an environment key would send that key to an
-        # endpoint the user is no longer using.
-        base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL") or (
-            config.custom_openai_base_url
-        )
-        api_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or (
-            getattr(config, "custom_openai_api_key", "")
-        )
+        # The URL and the key must belong to the SAME endpoint.
+        #
+        # The runtime resolves each field on its own, environment first, so a
+        # user who sets only the URL in the environment ends up with the
+        # environment's URL and the saved config's key. Probing that
+        # combination would send the saved key to an endpoint it does not
+        # belong to.
+        #
+        # So the probe pairs them by WHO names the endpoint:
+        #   - the environment names it: the environment's key is the one for
+        #     it, and the saved key is never sent there;
+        #   - the saved config names it: the saved key is the one for it, and
+        #     the environment key is the fallback for a wizard that has the
+        #     URL but has not written the key back yet.
+        # A key is never sent to an endpoint it was not configured for.
+        env_url = os.environ.get("CUSTOM_OPENAI_BASE_URL") or ""
+        env_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or ""
+        saved_url = config.custom_openai_base_url or ""
+        saved_key = getattr(config, "custom_openai_api_key", "") or ""
+        if env_url:
+            base_url, api_key = env_url, env_key
+        else:
+            base_url, api_key = saved_url, (saved_key or env_key)
         discovered = list_custom_openai_models(base_url, api_key)
         entries = [(name, name) for name in discovered]
         if not entries:
