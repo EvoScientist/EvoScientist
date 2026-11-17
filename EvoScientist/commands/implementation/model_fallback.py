@@ -191,6 +191,8 @@ class ModelFallbackCommand(Command):
         entries = await list_model_picker_entries(
             getattr(cfg, "ollama_base_url", None),
             include_custom_ollama=True,
+            custom_openai_base_url=getattr(cfg, "custom_openai_base_url", None),
+            custom_openai_api_key=getattr(cfg, "custom_openai_api_key", None),
         )
 
         result = await ctx.ui.wait_for_model_pick(

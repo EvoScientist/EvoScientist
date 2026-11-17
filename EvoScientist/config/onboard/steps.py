@@ -15,6 +15,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from questionary import Choice
 
 from ...llm import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, get_models_for_provider
+from ...llm.custom_openai_discovery import list_custom_openai_models
 from ...llm.ollama_discovery import validate_ollama_connection
 from ...paths import Workspace
 from ..settings import EvoScientistConfig
@@ -826,8 +827,19 @@ def _step_model(
             console.print(f"  [dim]Using default: {model}[/dim]")
         return model
 
-    # Get models for the selected provider
-    entries = get_models_for_provider(provider)
+    # Get models for the selected provider. A live custom-openai endpoint
+    # lists its own ids; an empty or failed probe keeps the registry defaults.
+    if provider == "custom-openai":
+        discovered = list_custom_openai_models(
+            config.custom_openai_base_url,
+            getattr(config, "custom_openai_api_key", "")
+            or os.environ.get("CUSTOM_OPENAI_API_KEY", ""),
+        )
+        entries = [(name, name) for name in discovered]
+        if not entries:
+            entries = get_models_for_provider(provider)
+    else:
+        entries = get_models_for_provider(provider)
 
     if not entries:
         # Custom / unknown provider: direct text input.

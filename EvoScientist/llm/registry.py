@@ -334,8 +334,16 @@ async def list_model_picker_entries(
     ollama_base_url: str | None,
     *,
     include_custom_ollama: bool,
+    custom_openai_base_url: str | None = None,
+    custom_openai_api_key: str | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Return model picker entries, optionally including local Ollama models."""
+    """Return model picker entries, optionally including live endpoint models.
+
+    Ollama rows are appended. When ``custom_openai_base_url`` is set and the
+    endpoint lists models, those names replace the static ``custom-openai``
+    defaults in place (the group stays where the registry put it). An empty
+    or failed probe keeps the defaults, so the picker still opens offline.
+    """
     entries = list_models_by_provider()
     if ollama_base_url:
         from .ollama_discovery import discover_ollama_models
@@ -347,6 +355,38 @@ async def list_model_picker_entries(
             entries.append((detected_name, detected_name, "ollama"))
         if include_custom_ollama:
             entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    if custom_openai_base_url:
+        from .custom_openai_discovery import discover_custom_openai_models
+
+        discovered = await discover_custom_openai_models(
+            custom_openai_base_url,
+            custom_openai_api_key,
+            timeout=1.5,
+        )
+        if discovered:
+            # In place, not appended: the custom-openai group keeps the
+            # position it has in the static registry. Repeated rows collapse
+            # to the first, matching list_models_by_provider.
+            replacement = [(name, name, "custom-openai") for name in discovered]
+            seen_names: set[str] = set()
+            unique: list[tuple[str, str, str]] = []
+            for row in replacement:
+                if row[0] in seen_names:
+                    continue
+                seen_names.add(row[0])
+                unique.append(row)
+            merged: list[tuple[str, str, str]] = []
+            inserted = False
+            for row in entries:
+                if row[2] == "custom-openai":
+                    if not inserted:
+                        merged.extend(unique)
+                        inserted = True
+                    continue
+                merged.append(row)
+            if not inserted:
+                merged.extend(unique)
+            entries = merged
     return entries
 
 
