@@ -38,7 +38,7 @@ SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
 SHELL_C_OPTION_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 # Commands that run the command named by their first operand.
 WRAPPER_NAMES = frozenset(
-    {"env", "nohup", "timeout", "xargs", "exec", "command", "nice", "setsid"}
+    {"env", "nohup", "timeout", "xargs", "exec", "command", "builtin", "nice", "setsid"}
 )
 # Wrapper operands before the command: a duration or niceness (`5`, `1.5m`).
 _WRAPPER_VALUE_RE = re.compile(r"-?\d+(\.\d+)?[smhd]?")
@@ -732,10 +732,11 @@ def _unwrap(
             continue
         if name == "env" and assigned is not None:
             arg, token = rest[position - 1]
-            raw = str(token["raw"]) if token is not None else arg
-            assignment = ASSIGNMENT_RE.match(raw)
-            if assignment is not None:
-                assigned.append((raw[: assignment.end() - 1], raw[assignment.end() :]))
+            declared = _declared_assignment(
+                str(token["raw"]) if token is not None else arg
+            )
+            if declared is not None:
+                assigned.append(declared)
                 continue
         if name == "command" and value in ("-v", "-V"):
             return found  # only looks the name up
@@ -828,27 +829,61 @@ DECLARATION_NAMES = frozenset({"export", "local", "declare", "typeset", "readonl
 def assignments(command: str) -> list[tuple[str, str]]:
     """``(name, value as written)`` of each variable *command* sets with
     ``NAME=value``: alone, before a command, as an argument of ``export`` /
-    ``local`` / ``declare``, and in the code it runs (see
+    ``local`` / ``declare`` or ``env``, and in the code it runs (see
     :func:`simple_commands`)."""
-    return [(_assigned_name(head), value) for head, value in _assignments(command)]
+    return [(_assigned_name(head), value) for head, value in _variables(command)[0]]
 
 
-def _assignments(command: str) -> list[tuple[str, str]]:
-    """:func:`assignments`, each with what is written before its ``=``
-    (``NAME``, ``NAME+`` or ``NAME[i]``)."""
+# Declaration options that only export or mark read-only; any other (`-n`,
+# `-a`, `-i`) changes what the value means.
+_DECLARATION_OPTION_RE = re.compile(r"[-+][A-Za-z]+")
+_PLAIN_DECLARATION_OPTION_RE = re.compile(r"[-+][xrg]+")
+# Builtins that set the variables named in their arguments from what the run
+# reads or prints.
+_RUN_SETTER_NAMES = frozenset({"read", "mapfile", "readarray", "getopts", "let"})
+_NAME_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _variables(command: str) -> tuple[list[tuple[str, str]], set[str]]:
+    """The ``NAME=value`` assignments of *command* (see :func:`assignments`),
+    each with what is written before its ``=`` (``NAME``, ``NAME+`` or
+    ``NAME[i]``), with each word of a ``for NAME in WORDS`` loop whose words
+    are written out; and the variables it sets any other way (``read``,
+    ``printf -v``, ``declare -n``, ``${NAME:=value}``, a loop over words the
+    run makes)."""
     found: list[tuple[str, str]] = []
+    other: set[str] = set()
     for each in _simple_commands(command, set(), (), found):
-        # `for NAME in WORDS`: NAME takes each word.
-        if each.name in ("for", "select") and each.args[1:2] == ("in",):
-            name = each.args[0]
-            found.extend((name, word) for word in each.args[2:] if word != "do")
-        if each.name in DECLARATION_NAMES:
-            found.extend(
-                declared
-                for declared in map(_declared_assignment, each.args)
-                if declared is not None
+        args = each.args
+        if each.name in ("for", "select") and args:
+            words = [word for word in args[2:] if word != "do"]
+            if args[1:2] == ("in",) and not any(re.search("[$`]", w) for w in words):
+                found.extend((args[0], word) for word in words)
+            else:
+                other.add(args[0])
+        elif each.name in DECLARATION_NAMES:
+            plain = all(
+                _PLAIN_DECLARATION_OPTION_RE.fullmatch(arg)
+                for arg in args
+                if _DECLARATION_OPTION_RE.fullmatch(arg)
             )
-    return found
+            for arg in args:
+                declared = _declared_assignment(arg)
+                if declared is not None:
+                    found.append(declared)
+                if not plain:
+                    head = declared[0] if declared is not None else arg
+                    other.add(_assigned_name(head))
+        elif each.name in _RUN_SETTER_NAMES:
+            other.update(_assigned_name(arg) for arg in args)
+        elif each.name == "printf":
+            for at, arg in enumerate(args):
+                if arg == "-v" and at + 1 < len(args):
+                    other.add(args[at + 1])
+                elif arg.startswith("-v") and len(arg) > 2:
+                    other.add(arg[2:])
+    other.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
+    return found, {name for name in other if _NAME_RE.fullmatch(name)}
 
 
 def _declared_assignment(arg: str) -> tuple[str, str] | None:
@@ -880,8 +915,10 @@ _OPERATOR_REFERENCE_RE = re.compile(
 _VALUES_CAP = 16
 
 
-class TooManyValues(ValueError):
-    """A word may read as more values than :data:`_VALUES_CAP`; *word* is it."""
+class UnknownValues(ValueError):
+    """A word may read as values the check does not follow: more than
+    :data:`_VALUES_CAP`, or of a variable set in a way it does not follow
+    (see :func:`assigned_values`); *word* is it."""
 
     def __init__(self, word: str) -> None:
         super().__init__(word)
@@ -937,83 +974,74 @@ def braced_value(word: str) -> str | None:
 
 
 def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
-    """The values *command* sets each variable to (see :func:`assignments`),
-    in any order, as the shell reads them: quotes removed, and a ``$NAME`` of
-    a variable set in *command* replaced by its values, its own included
-    (``D=.evoscientist; D=$D/memories``), as often as there are assignments
-    that refer to one. A value with a substitution is only known when the
-    command runs, so it is left out; any other ``$NAME`` (``$HOME``) stays as
-    written. ``None`` for a variable with more than :data:`_VALUES_CAP`
-    values, one with values known before the run and values only the run
-    knows (``X=build; X=$(cmd)``), one set in part (``NAME+=value``,
-    ``NAME[i]=value``), whose values depend on the order it is set in, or
-    one whose value names such a variable."""
+    """The values *command* sets each variable to with plain assignments
+    (see :func:`assignments`), in any order, as the shell reads them: quotes
+    removed, and a ``$NAME`` of another variable set in *command* replaced by
+    its values. A value with a substitution is only known when the command
+    runs, so it is left out; any other ``$NAME`` (``$HOME``) stays as
+    written. ``None`` for a variable whose values the check does not follow:
+    one set any other way (see :func:`_variables`), set in part
+    (``NAME+=value``, ``NAME[i]=value``) or to an array, one whose value
+    refers back to it (``D=$D/x``) or reads a variable with an operator
+    (``${D%/}``), one with more than :data:`_VALUES_CAP` values, one with
+    values known before the run and values only the run knows
+    (``X=build; X=$(cmd)``), or one whose value names such a variable."""
+    found, other = _variables(command)
     written: dict[str, list[str]] = {}
-    in_part: set[str] = set()
-    for head, value in _assignments(command):
+    for head, value in found:
         name = _assigned_name(head)
         written.setdefault(name, []).append(value)
         if head != name or value.startswith("("):  # an array too
-            in_part.add(name)
-    # Each value as the shell reads it, with the variables it names that the
-    # command sets; None when only the run knows it.
-    reads: dict[str, list[tuple[str, set[str]] | None]] = {}
-    for name, values in written.items():
-        reads[name] = []
-        for value in values:
-            read = (
-                None
-                if "$(" in value or "`" in value
-                else braced_value(value)
-                if tokenize(value)
-                else ""
-            )
-            refs = variable_references(value) & written.keys()
-            reads[name].append(None if read is None else (read, refs))
-    resolved: dict[str, tuple[str, ...] | None] = {
-        name: None if name in in_part else () for name in written
-    }
+            other.add(name)
+    resolved: dict[str, tuple[str, ...] | None] = dict.fromkeys(other)
+    pending: set[str] = set()
 
-    def expand(read: str, refs: set[str]) -> list[str]:
-        return expand_references(read, {ref: resolved[ref] for ref in refs})
+    def resolve(name: str) -> tuple[str, ...] | None:
+        if name in resolved:
+            return resolved[name]
+        if name in pending:  # it refers back to itself
+            raise UnknownValues(name)
+        pending.add(name)
+        try:
+            values: tuple[str, ...] | None = resolve_values(name)
+        except UnknownValues:
+            values = None
+        pending.discard(name)
+        resolved[name] = values
+        return values
 
-    # Each pass fills in one more step of a chain of assignments.
-    rounds = 1 + sum(
-        1 for each in reads.values() for read in each if read is not None and read[1]
-    )
-    for _ in range(rounds):
-        changed = False
-        for name, each in reads.items():
-            if resolved[name] is None:
-                continue
-            found = list(resolved[name])
-            try:
-                for read in each:
-                    if read is not None:
-                        found.extend(expand(*read))
-            except TooManyValues:
-                found = None
-            values = None if found is None else tuple(dict.fromkeys(found))
-            if values is not None and len(values) > _VALUES_CAP:
-                values = None
-            if values != resolved[name]:
-                resolved[name], changed = values, True
-        if not changed:
-            break
-    # Checking only the known values of a variable that may also take one
-    # only the run knows would miss that one.
-    changed = True
-    while changed:
-        changed = False
-        for name, each in reads.items():
-            if not resolved[name]:
-                continue
-            try:
-                run_only = any(read is None or not expand(*read) for read in each)
-            except TooManyValues:
+    def resolve_values(name: str) -> tuple[str, ...]:
+        found: list[str] = []
+        run_only = False  # a value only the run knows
+        for value in written[name]:
+            if any(
+                (match.group(1) or match.group(2)) in written.keys() | other
+                for match in _OPERATOR_REFERENCE_RE.finditer(value)
+            ):
+                raise UnknownValues(name)
+            if "$(" in value or "`" in value:
                 run_only = True
-            if run_only:
-                resolved[name], changed = None, True
+                continue
+            if not tokenize(value):
+                found.append("")
+                continue
+            read = braced_value(value)
+            if read is None:
+                run_only = True
+                continue
+            names = variable_references(value) & (written.keys() | other)
+            expanded = expand_references(read, {each: resolve(each) for each in names})
+            run_only = run_only or not expanded
+            found.extend(expanded)
+        values = tuple(dict.fromkeys(found))
+        # Checking only the known values of a variable that may also take one
+        # only the run knows would miss that one.
+        if len(values) > _VALUES_CAP or (run_only and values):
+            raise UnknownValues(name)
+        return values
+
+    for name in written:
+        resolve(name)
     return resolved
 
 
@@ -1022,8 +1050,8 @@ def expand_references(
 ) -> list[str]:
     """*text* with each ``$NAME`` / ``${NAME}`` of a variable in *values*
     replaced by each of its values; empty when one of them has none.
-    :class:`TooManyValues` past :data:`_VALUES_CAP` combinations, or for a
-    variable with too many values (``None``)."""
+    :class:`UnknownValues` past :data:`_VALUES_CAP` combinations, or for a
+    variable whose values are not followed (``None``)."""
     results = [""]
     last = 0
     for match in _REFERENCE_RE.finditer(text):
@@ -1033,7 +1061,7 @@ def expand_references(
         literal = text[last : match.start()]
         options = values[name]
         if options is None or len(results) * len(options) > _VALUES_CAP:
-            raise TooManyValues(text)
+            raise UnknownValues(text)
         results = [result + literal + value for result in results for value in options]
         last = match.end()
     return [result + text[last:] for result in results]
@@ -1048,15 +1076,15 @@ def word_values(
     one it names has no value known before the command runs; callers then
     read the word as written. A value of a name outside double quotes is
     split into the words it makes (``D="x skills"; rm -rf $D``).
-    :class:`TooManyValues` (naming *word*) when it may read as more than
-    :data:`_VALUES_CAP` values, when the command sets ``IFS``, which changes
-    how such a value splits, or when it reads one with an index or an
-    operator (``${D[@]}``, ``${D%/}``)."""
+    :class:`UnknownValues` (naming *word*) when it may read as more than
+    :data:`_VALUES_CAP` values, names a variable whose values are not
+    followed, reads one with an index or an operator (``${D[@]}``,
+    ``${D%/}``), or splits one while the command sets ``IFS``."""
     if any(
         (match.group(1) or match.group(2)) in assigned
         for match in _OPERATOR_REFERENCE_RE.finditer(word)
     ):
-        raise TooManyValues(word)
+        raise UnknownValues(word)
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
@@ -1067,11 +1095,11 @@ def word_values(
         if (match.group(1) or match.group(2)) in names
     )
     if unquoted and "IFS" in assigned:
-        raise TooManyValues(word)
+        raise UnknownValues(word)
     try:
         values = expand_references(value, {name: assigned[name] for name in names})
-    except TooManyValues:
-        raise TooManyValues(word) from None
+    except UnknownValues:
+        raise UnknownValues(word) from None
     if unquoted:
         values = [field for each in values for field in each.split() or [each]]
     return values

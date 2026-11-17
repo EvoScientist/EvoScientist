@@ -1271,13 +1271,14 @@ def _outside_removal_error(operand: str) -> str:
     )
 
 
-def _too_many_values_error(word: str) -> str:
-    """The refusal of a command whose *word* may read as more values, or run
-    in more folders, than the check follows."""
+def _unknown_values_error(word: str) -> str:
+    """The refusal of a command whose *word* may name paths the check does
+    not follow (see :class:`shell_syntax.UnknownValues`)."""
     return (
-        f"Command blocked: '{word}' may name more paths than the check follows, "
-        f"with the values of the variables this command sets or the folders "
-        f"it may run in. Write the path out instead."
+        f"Command blocked: '{word}' may name paths the check does not follow: "
+        f"it uses a variable this command sets other than with a plain "
+        f"NAME=value, or has too many values or folders to check. Write the "
+        f"path out instead."
     )
 
 
@@ -1399,58 +1400,56 @@ def _folder_from(folder: str, target: str) -> str | None:
     return posixpath.normpath(f"{folder}/{target}")
 
 
-# A loop, or a function, which may run a `cd` again after a later one.
-_REPEATS_RE = re.compile(r"\b(?:done|function)\b|\w\s*\(\s*\)")
-
-
 def _possible_folders(
-    command: str,
     commands: list[shell_syntax.SimpleCommand],
     workspace_root: str,
     assigned: dict[str, tuple[str, ...] | None],
 ) -> list[tuple[str, tuple[str, ...]]]:
-    """The folders the commands of *command* (its *commands*) may run in,
+    """The folders the commands of one command may run in, read in order,
     each with the ``env -C`` folders of the command that entered it: the
     workspace root, and each ``cd`` / ``pushd`` target read from every folder
     found before it that the ``cd`` may run in (see :func:`_run_folders`),
-    also with the values of the variables the command sets. With a loop or a
-    function, which may run a ``cd`` after a later one, in any order. Each
-    ``cd`` counts once on the way to a folder. A target only the run knows
-    adds none, nor do ``cd -`` and ``popd``, which return to one of them.
-    :class:`shell_syntax.TooManyValues` past :data:`_FOLDERS_CAP` folders."""
+    also with the values of the variables the command sets. A target only the
+    run knows adds none, nor do ``cd -`` and ``popd``, which return to one of
+    them. :class:`shell_syntax.UnknownValues` past :data:`_FOLDERS_CAP`
+    folders."""
     root = posixpath.normpath(workspace_root.replace("\\", "/"))
-    changes = [
-        (index, found, target)
-        for index, found in enumerate(commands)
-        if found.name in shell_syntax.FOLDER_COMMANDS
-        and (target := _folder_target(found)) is not None
-    ]
-    # Each folder, with the env -C folders it was entered under and the
-    # changes on the way to it.
-    entries: list[tuple[str, tuple[str, ...], frozenset[int]]] = [
-        (root, (), frozenset())
-    ]
-    repeats = bool(_REPEATS_RE.search(command))
-    changed = True
-    while changed:
-        changed = False
-        for index, found, target in changes:
-            for value in _word_paths(*target, assigned):
-                for folder, chain, used in list(entries):
-                    if index in used:
-                        continue
-                    starts = _run_folders(found.folders, [(folder, chain)], assigned)
-                    for start in starts:
-                        entered = _folder_from(start, value)
-                        entry = (entered, found.folders, used | {index})
-                        if entered is None or entry in entries:
-                            continue
-                        if len(entries) >= _FOLDERS_CAP:
-                            raise shell_syntax.TooManyValues(target[0])
-                        entries.append(entry)
-                        changed = True
-        changed = changed and repeats
-    return list(dict.fromkeys((folder, chain) for folder, chain, _ in entries))
+    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
+    for found in commands:
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        target = _folder_target(found)
+        if target is None:
+            continue
+        for value in _word_paths(*target, assigned):
+            for start in _run_folders(found.folders, list(folders), assigned):
+                entered = _folder_from(start, value)
+                if entered is None or (entered, found.folders) in folders:
+                    continue
+                if len(folders) >= _FOLDERS_CAP:
+                    raise shell_syntax.UnknownValues(target[0])
+                folders.append((entered, found.folders))
+    return folders
+
+
+# Commands that run other commands again or out of order: a loop (`done`, or
+# `for` with a `{ }` body), a function, a trap, an alias or eval.
+_OUT_OF_ORDER_NAMES = frozenset(
+    {"for", "select", "done", "function", "trap", "alias", "eval"}
+)
+# A function definition: `NAME()` or `function NAME`.
+_FUNCTION_RE = re.compile(r"\(\s*\)|\bfunction\s")
+
+
+def _runs_out_of_order(
+    command: str, commands: list[shell_syntax.SimpleCommand]
+) -> bool:
+    """Whether *command* (its *commands*) may run a command again or before
+    one written ahead of it, so that the folders it may run in are not read
+    in order."""
+    return bool(_FUNCTION_RE.search(command)) or any(
+        found.name in _OUT_OF_ORDER_NAMES for found in commands
+    )
 
 
 def _run_folders(
@@ -1463,7 +1462,7 @@ def _run_folders(
     of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
     with the rest of *chain* applied. An ``env -C`` folder only the run knows
     keeps the folder it is read from, as a ``cd`` to it does
-    (``env -C "$(pwd)"``). :class:`shell_syntax.TooManyValues` when ``env -C``
+    (``env -C "$(pwd)"``). :class:`shell_syntax.UnknownValues` when ``env -C``
     folders with many values would take them past :data:`_FOLDERS_CAP`."""
     reached: list[str] = []
     for folder, entered_under in folders:
@@ -1480,11 +1479,11 @@ def _run_folders(
                 )
             )
             if len(starts) > _FOLDERS_CAP:
-                raise shell_syntax.TooManyValues(folder_word)
+                raise shell_syntax.UnknownValues(folder_word)
         reached.extend(starts)
     reached = list(dict.fromkeys(reached))
     if len(reached) > max(_FOLDERS_CAP, len(folders)):
-        raise shell_syntax.TooManyValues(chain[-1])
+        raise shell_syntax.UnknownValues(chain[-1])
     return reached
 
 
@@ -1692,8 +1691,23 @@ def _folder_removal_error(
     ]
     if not removals:
         return None
+    relative = any(
+        not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+        for _found, operand, token in removals
+        for path in [_removal_target(token) if token is not None else operand]
+    )
+    changes_folder = any(
+        found.name in shell_syntax.FOLDER_COMMANDS for found in commands
+    )
+    if relative and changes_folder and _runs_out_of_order(command, commands):
+        return (
+            "Command blocked: it changes folder and has a loop, a function, "
+            "trap, alias or eval, so the folder each recursive rm runs in is "
+            "not followed. Run the rm as a command of its own, or name its "
+            "path from the workspace root."
+        )
     assigned = shell_syntax.assigned_values(command)
-    folders = _possible_folders(command, commands, workspace_root, assigned)
+    folders = _possible_folders(commands, workspace_root, assigned)
     for found, operand, token in removals:
         if token is not None:
             operand_paths = _word_paths(operand, token, assigned)
@@ -1779,8 +1793,8 @@ def validate_command(
             outside = _cd_target_outside(
                 command, (workspace_root,) if workspace_root else ()
             )
-        except shell_syntax.TooManyValues as exc:
-            return _too_many_values_error(exc.word)
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
         if outside is not None:
             return (
                 f"Command blocked: '{outside}' leaves the workspace. "
@@ -1842,8 +1856,8 @@ def validate_command(
             refusal = _folder_removal_error(
                 command, commands, workspace_root, protected
             )
-        except shell_syntax.TooManyValues as exc:
-            refusal = _too_many_values_error(exc.word)
+        except shell_syntax.UnknownValues as exc:
+            refusal = _unknown_values_error(exc.word)
         if refusal is not None:
             return refusal
 

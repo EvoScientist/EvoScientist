@@ -1039,11 +1039,11 @@ class TestWorkspaceRemovalAndComments:
             'D=sk; rm -rf "$D"ills',
             'A=sk; D="$A"ills; rm -rf $D',
             'D=sk; env -C "$D"ills rm -rf x',
-            "B=skills; A=$B; B=$A; rm -rf $A",
             'D="x skills"; rm -rf $D',
             'for d in skills x; do rm -rf "$d"; done',
             "env D=skills sh -c 'rm -rf \"$D\"'",
-            'for d in x; do cd "$d" && rm -rf demo; done; for d in skills; do :; done',
+            "env 'D=skills' sh -c 'rm -rf \"$D\"'",
+            "builtin export D=skills; rm -rf $D",
             "env --chdir=skills/demo rm -rf x",
             "env -C . sh -c 'rm -rf skills'",
             'D=skills; env -C "$D" rm -rf x',
@@ -1106,7 +1106,6 @@ class TestWorkspaceRemovalAndComments:
             "rm -r .evoscientist",
             "rm -rf .evoscientist/memories/$(date +%F)",
             "cd .evoscientist && rm -rf memories",
-            'D=.evoscientist; D=$D/memories; rm -rf "$D/old"',
             'D="x .evoscientist"; rm -rf $D',
             # A cd runs under its own env -C folders.
             "env -C .evoscientist sh -c 'cd memories; rm -rf profile'",
@@ -1159,7 +1158,6 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf ./$(printf build)",
             'for d in build dist; do rm -rf "$d"; done',
             'for f in *.log; do rm -rf "$f"; done',
-            'for d in */; do (cd "$d" && rm -rf build); done',
         ],
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
@@ -1197,15 +1195,13 @@ class TestWorkspaceRemovalAndComments:
         monkeypatch.setattr(backends, "_is_windows", lambda: windows)
         commands = backends.shell_syntax.simple_commands("cd C:/W/skills")
         root = "C:/W" if windows else "/W"
-        folders = [f for f, _ in backends._possible_folders("", commands, root, {})]
+        folders = [f for f, _ in backends._possible_folders(commands, root, {})]
         assert folders[-1] == ("C:/W/skills" if windows else "/W/C:/W/skills")
 
     def test_the_folders_a_removal_is_read_from_are_capped(self):
         command = "; ".join(f"cd d{i}" for i in range(5)) + "; rm -rf x"
         commands = backends.shell_syntax.simple_commands(command)
-        folders = [
-            f for f, _ in backends._possible_folders(command, commands, "/W", {})
-        ]
+        folders = [f for f, _ in backends._possible_folders(commands, "/W", {})]
         assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
         assert len(folders) == 32
         assert validate_command(command, workspace_root="/W") is None
@@ -1216,21 +1212,47 @@ class TestWorkspaceRemovalAndComments:
             ("/W/.evoscientist/memories",),
             workspace_root="/W",
         )
-        assert "may name more paths than the check follows" in error
+        assert "may name paths the check does not follow" in error
 
     @pytest.mark.parametrize(
         "command",
         [
             "f(){ cd memories; }; cd .evoscientist; f; rm -rf x",
-            "for i in 1 2; do cd memories; cd .evoscientist; done; rm -rf x",
+            "f:() { cd memories; }; cd .evoscientist; f:; rm -rf x",
             "function f { cd memories; }; cd .evoscientist; f; rm -rf x",
-            "function f() { cd memories; }; cd .evoscientist; f; rm -rf x",
-            "function f { rm -rf .evoscientist/memories/x; }; f",
+            "for i in 1 2; do cd memories; cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; { cd memories; cd .evoscientist; }; rm -rf x",
+            'for d in .evoscientist memories; do cd "$d"; done; rm -rf x',
+            "while true; do cd x; done; rm -rf build",
+            "trap 'cd memories' DEBUG; cd .evoscientist; rm -rf x",
+            "alias c='cd memories'; cd .evoscientist; c; rm -rf x",
+            "eval 'cd memories'; cd x; rm -rf y",
+            'for d in */; do (cd "$d" && rm -rf build); done',
         ],
     )
-    def test_a_cd_is_read_from_folders_a_later_cd_enters(self, command):
+    def test_a_folder_change_the_check_cannot_read_in_order_is_refused(self, command):
         error = validate_command(
             command, ("/W/.evoscientist/memories",), workspace_root="/W"
+        )
+        assert "the folder each recursive rm runs in is not followed" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # No cd, or no relative operand: read as before.
+            "for d in build dist; do rm -rf $d; done",
+            "f(){ make; }; f; rm -rf build",
+            "for i in 1 2; do cd x; done; rm -rf /W/build",
+        ],
+    )
+    def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
+        assert validate_command(command, ("/W/skills",), workspace_root="/W") is None
+
+    def test_a_function_body_is_read(self):
+        error = validate_command(
+            "function f { rm -rf .evoscientist/memories/x; }; f",
+            ("/W/.evoscientist/memories",),
+            workspace_root="/W",
         )
         assert "protected folder" in error
 
@@ -1246,7 +1268,7 @@ class TestWorkspaceRemovalAndComments:
             ("/W/skills",),
             workspace_root="/W",
         )
-        assert "'${T}' may name more paths than the check follows" in error
+        assert "'${T}' may name paths the check does not follow" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -1280,13 +1302,24 @@ class TestWorkspaceRemovalAndComments:
             "D=x; rm -rf ${D:-skills}",
             # IFS changes how an unquoted value splits.
             "IFS=:; D=x:skills; rm -rf $D",
+            # A value that refers back to its own variable.
+            'D=.evoscientist; D=$D/memories; rm -rf "$D/old"',
+            "B=skills; A=$B; B=$A; rm -rf $A",
+            "T=.; T=$T.; cd $T",
+            # A variable set other than with a plain NAME=value.
+            "D=x; printf -v D skills; rm -rf $D",
+            "declare -n D=E; E=skills; rm -rf $D",
+            ": ${D:=skills}; rm -rf $D",
+            "read D; rm -rf $D",
+            'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
+            'D=skills; E=${D%/}; rm -rf "$E"',
         ],
     )
     def test_a_word_whose_variable_has_values_the_check_cannot_know_is_refused(
         self, command
     ):
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
-        assert "may name more paths than the check follows" in error
+        assert "may name paths the check does not follow" in error
 
     @pytest.mark.parametrize(
         ("tail", "word"),
@@ -1301,11 +1334,11 @@ class TestWorkspaceRemovalAndComments:
         many = "; ".join(f"T=a{i}" for i in range(16)) if word else "P=a"
         command = f"{many}; {tail}"
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
-        assert "more paths than the check follows" in error
+        assert "may name paths the check does not follow" in error
         # Within the cap, each value is checked.
         fewer = command.replace("T=a15; ", "")
         fewer = fewer.replace("U=; U=x; ", "").replace("$U", "")
-        assert "more paths than the check follows" not in validate_command(
+        assert "may name paths the check does not follow" not in validate_command(
             fewer, ("/W/skills",), workspace_root="/W"
         )
 
@@ -1669,7 +1702,6 @@ class TestSandboxCommandChecks:
             ("export T=/etc; pushd ${T}", "'pushd ${T}'"),
             ('A=..; B=$A; cd "$B"', "'cd \"$B\"'"),
             ("T=src; T=..; cd $T", "'cd $T'"),
-            ("T=.; T=$T.; cd $T", "'cd $T'"),
             ('T=".. "; cd $T', "'cd $T'"),
             ("bash -c 'T=..; cd \"$T\"'", "'cd \"$T\"'"),
         ],

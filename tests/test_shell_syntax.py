@@ -344,35 +344,48 @@ class TestSimpleCommands:
             "B": (),
             "C": (),
         }
-        # A name that only refers back to itself starts from the environment.
-        assert shell_syntax.assigned_values("A=$A/x") == {"A": ()}
-        assert shell_syntax.assigned_values("A=$B; B=$A") == {"A": (), "B": ()}
 
-    def test_a_name_that_refers_back_to_itself_is_followed(self):
+    def test_a_name_that_refers_back_to_itself_is_not_followed(self):
+        assert shell_syntax.assigned_values("A=$A/x") == {"A": None}
         assert shell_syntax.assigned_values("D=.evoscientist; D=$D/memories") == {
-            "D": (".evoscientist", ".evoscientist/memories")
+            "D": None
         }
-        assert shell_syntax.assigned_values("T=.; T=$T.") == {"T": (".", "..")}
-        # In a cycle, whichever name is read first.
         assert shell_syntax.assigned_values("B=skills; A=$B; B=$A") == {
-            "B": ("skills",),
-            "A": ("skills",),
+            "A": None,
+            "B": None,
         }
-        # A name that grows on every pass has too many values.
-        chain = "; ".join(["D=a"] + ["D=$D/$D"] * 4)
-        assert shell_syntax.assigned_values(chain) == {"D": None}
+        # A chain without a cycle is followed.
+        assert shell_syntax.assigned_values("A=..; B=$A/x") == {
+            "A": ("..",),
+            "B": ("../x",),
+        }
+
+    def test_variables_set_other_ways_are_not_followed(self):
+        assert shell_syntax.assigned_values(
+            "printf -v P x; read -r R; declare -n N=E; : ${S:=x}; "
+            "for L in $X; do :; done; export -x E=a; builtin export B=b"
+        ) == {
+            "P": None,
+            "R": None,
+            "N": None,
+            "S": None,
+            "L": None,
+            "E": ("a",),
+            "B": ("b",),
+        }
+        assert shell_syntax.assigned_values("env 'Q=a b' ls") == {"Q": ("a b",)}
 
     def test_more_values_than_the_cap_are_reported(self):
         values = dict.fromkeys("VWXYZ", ("a", "b"))
         assert len(shell_syntax.expand_references("$V$W$X$Y", values)) == 16
-        with pytest.raises(shell_syntax.TooManyValues):
+        with pytest.raises(shell_syntax.UnknownValues):
             shell_syntax.expand_references("$V$W$X$Y$Z", values)
         assigned = shell_syntax.assigned_values(
             "; ".join(f"T=a{i}" for i in range(17)) + "; U=$T/x; V=1"
         )
         # Only the words that name them are refused.
         assert assigned == {"T": None, "U": None, "V": ("1",)}
-        with pytest.raises(shell_syntax.TooManyValues) as raised:
+        with pytest.raises(shell_syntax.UnknownValues) as raised:
             shell_syntax.word_values('"$U"', "$U", assigned)
         assert raised.value.word == '"$U"'
         assert shell_syntax.word_values("$V", "$V", assigned) == ["1"]
@@ -403,7 +416,7 @@ class TestSimpleCommands:
         assigned = {"D": ("x .evoscientist",)}
         assert shell_syntax.word_values("$D", "$D", assigned) == ["x", ".evoscientist"]
         assert shell_syntax.word_values('"$D"', "$D", assigned) == ["x .evoscientist"]
-        with pytest.raises(shell_syntax.TooManyValues):
+        with pytest.raises(shell_syntax.UnknownValues):
             shell_syntax.word_values("$D", "$D", {**assigned, "IFS": (":",)})
         assert shell_syntax.word_values('"$D"', "$D", {**assigned, "IFS": (":",)})
 
@@ -411,7 +424,7 @@ class TestSimpleCommands:
         assert shell_syntax.assigned_values(
             "for d in skills x; do :; done; env -i E='a b' ls; L=(a b)"
         ) == {"d": ("skills", "x"), "E": ("a b",), "L": None}
-        with pytest.raises(shell_syntax.TooManyValues):
+        with pytest.raises(shell_syntax.UnknownValues):
             shell_syntax.word_values('"${d%/}"', "${d%/}", {"d": ("x",)})
         assert shell_syntax.word_values('"${e%/}"', "${e%/}", {"d": ("x",)}) is None
 
