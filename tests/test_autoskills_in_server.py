@@ -467,10 +467,12 @@ def test_autoskills_setting_without_record_asks_configured_port(monkeypatch, tmp
     from EvoScientist.langgraph_dev import registration
 
     probed, posted = _fake_server(monkeypatch, tmp_path, record_port=None)
+    config = _config()
+    config.langgraph_dev_port = 16123
 
-    assert registration.apply_autoskills_settings(_config()) is None
-    assert probed == ["http://127.0.0.1:6174"]
-    assert posted == ["http://127.0.0.1:6174/api/autoskills/reconcile"]
+    assert registration.apply_autoskills_settings(config) is None
+    assert probed == ["http://127.0.0.1:16123"]
+    assert posted == ["http://127.0.0.1:16123/api/autoskills/reconcile"]
 
 
 @pytest.mark.parametrize(
