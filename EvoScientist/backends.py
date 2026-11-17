@@ -1308,12 +1308,21 @@ def _bare_cd_goes_home() -> bool:
 
 def _folder_target(
     found: shell_syntax.SimpleCommand,
+    assigned: dict[str, tuple[str, ...] | None] | None = None,
 ) -> tuple[str, dict[str, object] | None] | None:
-    """The target of a ``cd`` / ``pushd`` as written, with its token; ``None``
+    """The target of a ``cd`` / ``pushd`` as written, with its token: the
+    first argument that is not an option as the shell reads it (``"-P"`` is
+    one, and so is ``$O`` when every value *assigned* to it is); ``None``
     when it names none."""
     for arg, token in zip(found.args, found.tokens, strict=True):
-        if not (arg.startswith("-") and arg != "-"):
-            return arg, token
+        value = str(token["value"]) if token is not None else arg
+        if value.startswith("-") and value != "-":
+            continue
+        if assigned and "$" in arg:
+            values = shell_syntax.word_values(arg, value, assigned)
+            if values and all(each.startswith("-") and each != "-" for each in values):
+                continue
+        return arg, token
     return None
 
 
@@ -1329,11 +1338,11 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
             path.startswith("/") or (_is_windows() and bool(_DRIVE_PATH_RE.match(path)))
         ) and not _under_any(path, allow_prefixes)
 
-    assigned: dict[str, tuple[str, ...] | None] | None = None
+    assigned = shell_syntax.assigned_values(command) if "$" in command else {}
     for found in shell_syntax.simple_commands(command):
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        target = _folder_target(found)
+        target = _folder_target(found, assigned)
         if target is None:
             if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
@@ -1345,15 +1354,23 @@ def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | N
             return f"{found.name} {arg}"
         if "$" not in arg:
             continue
-        if assigned is None:
-            assigned = shell_syntax.assigned_values(command)
-        for value in shell_syntax.word_values(arg, path, assigned) or ():
+        values = shell_syntax.word_values(arg, path, assigned)
+        for value in values or ():
             if (
                 _is_home_word(value)
                 or absolute_outside(value)
                 or ".." in re.split(r"[\\/]", value)
             ):
                 return f"{found.name} {arg}"
+        # An empty value outside quotes leaves no argument: a bare cd.
+        if (
+            found.name == "cd"
+            and values
+            and not re.search("[\"']", arg)
+            and any(not value.strip() for value in values)
+            and _bare_cd_goes_home()
+        ):
+            return f"{found.name} {arg}"
     return None
 
 
@@ -1421,7 +1438,7 @@ def _possible_folders(
     for found in commands:
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        target = _folder_target(found)
+        target = _folder_target(found, assigned)
         if target is None:
             continue
         for value in _word_paths(*target, assigned):
@@ -1473,7 +1490,8 @@ def _run_folders(
             continue
         starts = [folder]
         for folder_word in chain[len(entered_under) :]:
-            values = shell_syntax.word_values(folder_word, folder_word, assigned)
+            # One argument already: its value is not split again.
+            values = shell_syntax.word_values(f'"{folder_word}"', folder_word, assigned)
             starts = list(
                 dict.fromkeys(
                     _folder_from(start, value.replace("\\", "/")) or start

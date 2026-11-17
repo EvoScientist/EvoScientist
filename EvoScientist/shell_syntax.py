@@ -869,12 +869,17 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
             opaque = True
         elif each.name in ("for", "select") and args:
             loop_words = [word for word in args[2:] if word != "do"]
+            # A word with an expansion, or a brace expansion, makes other words.
             if words[1:2] == ["in"] and not any(
-                re.search("[$`]", word) for word in loop_words
+                re.search("[$`{]", word) for word in loop_words
             ):
                 found.extend((words[0], word) for word in loop_words)
             else:
                 other.add(words[0])
+            if each.name == "select":
+                other.add("REPLY")
+        elif each.name == "unset":
+            other.update(words)
         elif each.name in DECLARATION_NAMES:
             declared = [_declared_assignment(arg) for arg in args]
             plain = all(
@@ -898,12 +903,21 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
                     other.add(_assigned_name(head))
         elif each.name in _RUN_SETTER_NAMES:
             other.update(_assigned_name(word) for word in words)
+            # The variable set when no name is given.
+            other.add("MAPFILE" if each.name in ("mapfile", "readarray") else "REPLY")
+            if any("$" in word or "`" in word for word in words):
+                opaque = True  # a name only the run knows
         elif each.name == "printf":
             for at, word in enumerate(words):
+                destination = None
                 if word == "-v" and at + 1 < len(words):
-                    other.add(words[at + 1])
+                    destination = words[at + 1]
                 elif word.startswith("-v") and len(word) > 2:
-                    other.add(word[2:])
+                    destination = word[2:]
+                if destination is not None:
+                    other.add(destination)
+                    if "$" in destination or "`" in destination:
+                        opaque = True  # a name only the run knows
     other.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
     return found, {name for name in other if _NAME_RE.fullmatch(name)}, opaque
 

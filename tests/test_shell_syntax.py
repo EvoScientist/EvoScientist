@@ -367,6 +367,7 @@ class TestSimpleCommands:
         ) == {
             "P": None,
             "R": None,
+            "REPLY": None,  # read sets it when it names no variable
             "N": None,
             "S": None,
             "L": None,
@@ -374,6 +375,9 @@ class TestSimpleCommands:
             "B": ("b",),
         }
         assert shell_syntax.assigned_values("env 'Q=a b' ls") == {"Q": ("a b",)}
+        assert shell_syntax.assigned_values(
+            "D=x; unset D; for B in {a,b}; do :; done; mapfile"
+        ) == {"D": None, "B": None, "MAPFILE": None}
         # A nameref or eval may set any of them.
         assert shell_syntax.assigned_values("D=x; declare -n R=D") == {
             "D": None,
@@ -383,6 +387,7 @@ class TestSimpleCommands:
         assert shell_syntax.assigned_values('D=x; printf "-v" D y; read "E"') == {
             "D": None,
             "E": None,
+            "REPLY": None,
         }
 
     def test_more_values_than_the_cap_are_reported(self):

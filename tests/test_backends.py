@@ -1036,6 +1036,9 @@ class TestWorkspaceRemovalAndComments:
             'D=skills; cd "$D/demo" && rm -rf x',
             "env -C skills rm -rf demo",
             "env -C build -C skills rm -rf demo",
+            # Options as the shell reads them.
+            'cd "-P" skills; rm -rf demo',
+            "O=-P; cd $O skills; rm -rf demo",
             'D=sk; rm -rf "$D"ills',
             'A=sk; D="$A"ills; rm -rf $D',
             'D=sk; env -C "$D"ills rm -rf x',
@@ -1252,6 +1255,18 @@ class TestWorkspaceRemovalAndComments:
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
         assert validate_command(command, ("/W/skills",), workspace_root="/W") is None
 
+    def test_an_env_folder_from_a_quoted_variable_is_one_folder(self):
+        error = validate_command(
+            "D='my skills'; env -C \"$D\" rm -rf demo",
+            ("/W/my skills",),
+            workspace_root="/W",
+        )
+        assert "read from 'my skills'" in error
+
+    def test_an_empty_unquoted_cd_target_is_a_bare_cd(self):
+        error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
+        assert "'cd $D' leaves the workspace" in error
+
     def test_a_function_body_is_read(self):
         error = validate_command(
             "function f { rm -rf .evoscientist/memories/x; }; f",
@@ -1323,6 +1338,10 @@ class TestWorkspaceRemovalAndComments:
             'D=x; printf "-v" D skills; rm -rf $D',
             'D=x; read "D"; rm -rf $D',
             'D=x; mapfile -t "D"; rm -rf $D',
+            'D=build; N=D; printf -v "$N" skills; rm -rf "$D"',
+            'D=build; unset D; rm -rf "${D}skills"',
+            'for d in {skills,build}; do rm -rf "$d"; done',
+            "REPLY=build; read <<'EOF'\nskills\nEOF\nrm -rf \"$REPLY\"",
             'printf -v "IFS" X; D="a skills"; rm -rf $D',
         ],
     )
@@ -1735,6 +1754,8 @@ class TestSandboxCommandChecks:
             'cd "$(pwd)"',
             'T=$(dirname x); cd "$T"',
             'cd "$WORKDIR"',
+            # A quoted empty value stays an argument: cd stays put.
+            'D=; cd "$D"; ls',
         ],
     )
     def test_cd_to_a_variable_inside_the_workspace_passes(self, command):
