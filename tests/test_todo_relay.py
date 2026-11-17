@@ -1,5 +1,6 @@
 """The todo list a channel gets: only a list ``write_todos`` accepted, sent
-once per turn at its successful result, from every path that relays it."""
+once per approval round at its successful result, from every path that
+relays it."""
 
 from __future__ import annotations
 
@@ -55,6 +56,24 @@ def _record(sent: list):
     return lambda items: sent.append([item["content"] for item in items])
 
 
+def _two_rounds(pause: dict):
+    """A turn whose first round writes A and then pauses (*pause*), and whose
+    second round has a write of B the tool rejects."""
+    calls = 0
+
+    async def _stream(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            for event in [*_write("t1", "A"), pause]:
+                yield event
+            return
+        for event in [*_write("t2", "B", success=False), *_END]:
+            yield event
+
+    return _stream
+
+
 class TestRichLoop:
     @pytest.fixture(autouse=True)
     def _quiet(self, monkeypatch):
@@ -74,6 +93,25 @@ class TestRichLoop:
             _state=display_mod.StreamState(),
         )
         assert sent == expected
+
+    def test_a_rejected_write_after_a_pause_resends_nothing(self, monkeypatch):
+        """The turn's state keeps the first list across the approval pause,
+        while the sent flag resets per round."""
+        from tests.fakes.common import interrupt_event
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+        sent: list = []
+        display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            on_todo=_record(sent),
+            gateway=FakeGraphGateway(stream=_two_rounds(interrupt_event(1))),
+            _state=display_mod.StreamState(),
+        )
+        assert sent == [["A"]]
 
 
 class TestTui:
@@ -130,12 +168,33 @@ class TestStandaloneConsumer:
     async def test_the_accepted_list_is_sent(
         self, monkeypatch, workspace, writes, expected
     ):
+        sent = await self._run(monkeypatch, workspace, events=_turn(writes))
+        assert sent == [_listed(c) for [c] in expected]
+
+    async def test_a_rejected_write_after_a_pause_resends_nothing(
+        self, monkeypatch, workspace
+    ):
+        import EvoScientist.channels.consumer as consumer_mod
+
+        async def _answer(_questions, _io, timeout=0):
+            return {"answers": ["yes"], "status": "answered"}
+
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _answer)
+        ask = {
+            "type": "ask_user",
+            "interrupt_id": "ask-1",
+            "questions": [{"question": "Continue?"}],
+        }
+        sent = await self._run(monkeypatch, workspace, stream=_two_rounds(ask))
+        assert sent == [_listed("A")]
+
+    @staticmethod
+    async def _run(monkeypatch, workspace, **gateway) -> list[str]:
         from EvoScientist.channels.bus.events import InboundMessage
-        from EvoScientist.channels.consumer import _format_todo_list
         from tests.test_channel_media_forwarding import _consumer
 
         sent: list[str] = []
-        consumer = _consumer(workspace, FakeGraphGateway(events=_turn(writes)))
+        consumer = _consumer(workspace, FakeGraphGateway(**gateway))
         channel = consumer.manager.get_channel("stub")
 
         async def record(_sender, content, _metadata=None):
@@ -144,7 +203,10 @@ class TestStandaloneConsumer:
         monkeypatch.setattr(channel, "send_todo_message", record)
         msg = InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
         await consumer._stream_with_hitl(msg, channel, "t1", msg.session_key)
+        return sent
 
-        assert sent == [
-            _format_todo_list([{"status": "pending", "content": c}]) for [c] in expected
-        ]
+
+def _listed(content: str) -> str:
+    from EvoScientist.channels.consumer import _format_todo_list
+
+    return _format_todo_list([{"status": "pending", "content": content}])

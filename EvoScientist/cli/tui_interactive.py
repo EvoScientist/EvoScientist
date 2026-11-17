@@ -2370,7 +2370,7 @@ def run_textual_interactive(
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
                             # Update todo from results; the first Task List
-                            # panel goes above the call that wrote it.
+                            # panel goes above its call.
                             if (
                                 result_name in ("write_todos", "read_todos")
                                 and state.todo_items

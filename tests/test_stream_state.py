@@ -419,6 +419,23 @@ class TestTodoCaptureFromArgs:
         self._write(state, "tc2", [{"status": "bogus", "content": "B"}], success=False)
         assert state.todo_items == first
 
+    def test_parallel_writes_without_results_keep_previous_list(self):
+        """Parallel write_todos calls are answered before the tools run, so
+        no result arrives for either; the list stays."""
+        state = StreamState()
+        first = [{"status": "todo", "content": "A"}]
+        self._write(state, "tc1", first)
+        for call_id in ("tc2", "tc3"):
+            state.handle_event(
+                {
+                    "type": "tool_call",
+                    "id": call_id,
+                    "name": "write_todos",
+                    "args": {"todos": [{"status": "todo", "content": call_id}]},
+                }
+            )
+        assert state.todo_items == first
+
     def test_rejected_first_write_leaves_no_list(self):
         state = StreamState()
         self._write(state, "tc1", [{"status": "bogus", "content": "B"}], success=False)
