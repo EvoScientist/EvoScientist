@@ -1041,6 +1041,9 @@ class TestWorkspaceRemovalAndComments:
             'D=sk; env -C "$D"ills rm -rf x',
             "B=skills; A=$B; B=$A; rm -rf $A",
             'D="x skills"; rm -rf $D',
+            'for d in skills x; do rm -rf "$d"; done',
+            "env D=skills sh -c 'rm -rf \"$D\"'",
+            'for d in x; do cd "$d" && rm -rf demo; done; for d in skills; do :; done',
             "env --chdir=skills/demo rm -rf x",
             "env -C . sh -c 'rm -rf skills'",
             'D=skills; env -C "$D" rm -rf x',
@@ -1154,6 +1157,9 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf skill* {build,dist}",
             "rm -rf build/$(date +%F)",
             "rm -rf ./$(printf build)",
+            'for d in build dist; do rm -rf "$d"; done',
+            'for f in *.log; do rm -rf "$f"; done',
+            'for d in */; do (cd "$d" && rm -rf build); done',
         ],
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
@@ -1253,6 +1259,10 @@ class TestWorkspaceRemovalAndComments:
             'X=build; X=$(echo skills); rm -rf "$X"',
             'T=sub; T=$(echo /etc); cd "$T"',
             "X=build; X=$Y; Y=`echo skills`; rm -rf $X/demo",
+            # An array, or a value read with an index or an operator.
+            'dirs=(skills x); rm -rf "${dirs[@]}"',
+            'D=skills/; rm -rf "${D%/}"',
+            "D=x; rm -rf ${D:-skills}",
             # IFS changes how an unquoted value splits.
             "IFS=:; D=x:skills; rm -rf $D",
         ],

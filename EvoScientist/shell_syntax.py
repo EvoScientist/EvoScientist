@@ -685,12 +685,15 @@ def _unwrap(
     via: tuple[str, ...],
     scripts: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
     folders: tuple[str, ...] = (),
+    assigned: list[tuple[str, str]] | None = None,
 ) -> list[SimpleCommand]:
     """The command and, through wrappers such as ``env`` or ``xargs``, the
     commands it runs, in the ``env -C`` *folders* they run in (the last
     ``-C`` of each ``env``, as GNU ``env`` changes folder once). Strings that
     ``env -S`` splits are read in place and also go to *scripts*, with the
-    wrappers and folders they run under, to be read as shell code."""
+    wrappers and folders they run under, to be read as shell code. The
+    ``NAME=value`` words of ``env`` go to *assigned* (see
+    :func:`assignments`)."""
     found = [
         SimpleCommand(
             name,
@@ -727,6 +730,13 @@ def _unwrap(
         if value in takes_value:
             position += 1
             continue
+        if name == "env" and assigned is not None:
+            arg, token = rest[position - 1]
+            raw = str(token["raw"]) if token is not None else arg
+            assignment = ASSIGNMENT_RE.match(raw)
+            if assignment is not None:
+                assigned.append((raw[: assignment.end() - 1], raw[assignment.end() :]))
+                continue
         if name == "command" and value in ("-v", "-V"):
             return found  # only looks the name up
         if (
@@ -736,7 +746,9 @@ def _unwrap(
         ):
             continue
         inner = re.split(r"[\\/]", value)[-1]
-        return found + _unwrap(inner, rest[position:], (*via, name), scripts, folders)
+        return found + _unwrap(
+            inner, rest[position:], (*via, name), scripts, folders, assigned
+        )
     return found
 
 
@@ -826,6 +838,10 @@ def _assignments(command: str) -> list[tuple[str, str]]:
     (``NAME``, ``NAME+`` or ``NAME[i]``)."""
     found: list[tuple[str, str]] = []
     for each in _simple_commands(command, set(), (), found):
+        # `for NAME in WORDS`: NAME takes each word.
+        if each.name in ("for", "select") and each.args[1:2] == ("in",):
+            name = each.args[0]
+            found.extend((name, word) for word in each.args[2:] if word != "do")
         if each.name in DECLARATION_NAMES:
             found.extend(
                 declared
@@ -856,6 +872,10 @@ def _assigned_name(word: str) -> str:
 
 
 _REFERENCE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+# `${NAME` with an index or an operator: `${D[@]}`, `${D:-x}`, `${#D}`, `${!D}`.
+_OPERATOR_REFERENCE_RE = re.compile(
+    r"\$\{(?:[#!]([A-Za-z_]\w*)|([A-Za-z_]\w*)(?![\w}]))"
+)
 # Most values one word is read with, so a long chain of assignments stays cheap.
 _VALUES_CAP = 16
 
@@ -933,7 +953,7 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     for head, value in _assignments(command):
         name = _assigned_name(head)
         written.setdefault(name, []).append(value)
-        if head != name:
+        if head != name or value.startswith("("):  # an array too
             in_part.add(name)
     # Each value as the shell reads it, with the variables it names that the
     # command sets; None when only the run knows it.
@@ -1029,8 +1049,14 @@ def word_values(
     read the word as written. A value of a name outside double quotes is
     split into the words it makes (``D="x skills"; rm -rf $D``).
     :class:`TooManyValues` (naming *word*) when it may read as more than
-    :data:`_VALUES_CAP` values, or when the command sets ``IFS``, which
-    changes how such a value splits."""
+    :data:`_VALUES_CAP` values, when the command sets ``IFS``, which changes
+    how such a value splits, or when it reads one with an index or an
+    operator (``${D[@]}``, ``${D%/}``)."""
+    if any(
+        (match.group(1) or match.group(2)) in assigned
+        for match in _OPERATOR_REFERENCE_RE.finditer(word)
+    ):
+        raise TooManyValues(word)
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
@@ -1103,7 +1129,7 @@ def _simple_commands(
                     (command[int(spans[0]["start"]) : int(spans[-1]["end"])], (), ())
                 )
             continue
-        for each in _unwrap(name, args, (), nested):
+        for each in _unwrap(name, args, (), nested, (), assigned):
             found.append(each)
             if each.name not in SHELL_NAMES:
                 continue

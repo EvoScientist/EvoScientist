@@ -407,6 +407,14 @@ class TestSimpleCommands:
             shell_syntax.word_values("$D", "$D", {**assigned, "IFS": (":",)})
         assert shell_syntax.word_values('"$D"', "$D", {**assigned, "IFS": (":",)})
 
+    def test_loop_words_and_env_assignments_are_values(self):
+        assert shell_syntax.assigned_values(
+            "for d in skills x; do :; done; env -i E='a b' ls; L=(a b)"
+        ) == {"d": ("skills", "x"), "E": ("a b",), "L": None}
+        with pytest.raises(shell_syntax.TooManyValues):
+            shell_syntax.word_values('"${d%/}"', "${d%/}", {"d": ("x",)})
+        assert shell_syntax.word_values('"${e%/}"', "${e%/}", {"d": ("x",)}) is None
+
     def test_a_variable_set_in_part_has_no_values_to_read(self):
         # Its value depends on the order of the assignments.
         assert shell_syntax.assigned_values(
