@@ -908,6 +908,10 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
             if any("$" in word or "`" in word for word in words):
                 opaque = True  # a name only the run knows
         elif each.name == "printf":
+            # `%n` writes the count printed so far into a variable named by
+            # an argument; which one is not followed.
+            if any("%" in word and re.search(r"%[^%a-zA-Z]*n", word) for word in words):
+                opaque = True
             for at, word in enumerate(words):
                 destination = None
                 if word == "-v" and at + 1 < len(words):
@@ -915,7 +919,7 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
                 elif word.startswith("-v") and len(word) > 2:
                     destination = word[2:]
                 if destination is not None:
-                    other.add(destination)
+                    other.add(_assigned_name(destination))  # `D[0]` sets D
                     if "$" in destination or "`" in destination:
                         opaque = True  # a name only the run knows
     other.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
@@ -949,7 +953,7 @@ _OPERATOR_REFERENCE_RE = re.compile(
     r"\$\{(?:[#!]([A-Za-z_]\w*)|([A-Za-z_]\w*)(?![\w}]))"
 )
 # `${NAME:?message}` / `${NAME?message}`: NAME's value, or an error.
-_CHECKED_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_]\w*):?\?[^}]*\}")
+_CHECKED_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_]\w*):?\?[^${}`]*\}")
 # Most values one word is read with, so a long chain of assignments stays cheap.
 _VALUES_CAP = 16
 

@@ -1250,6 +1250,7 @@ class TestWorkspaceRemovalAndComments:
             'cd build && python -c "main()" && rm -rf dist',
             "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; rm -rf build",
             'OUT=build; rm -rf "${OUT:?}"/*',
+            "OUT=build; printf '%s\\n' done; rm -rf \"$OUT\"",
             'X=${X:-build}; rm -rf "$X"',
             # A variable used only inside a substitution: read as written.
             'read f; cd "$(dirname "$f")"',
@@ -1381,6 +1382,9 @@ class TestWorkspaceRemovalAndComments:
             'D=x; read "D"; rm -rf $D',
             'D=x; mapfile -t "D"; rm -rf $D',
             'D=build; N=D; printf -v "$N" skills; rm -rf "$D"',
+            "D=build; printf -v 'D[0]' skills; rm -rf \"$D\"",
+            "D=a0skills; printf '%n' IFS; rm -rf $D",
+            'D=skills; rm -rf "${D:?${M}}"',
             'D=build; unset D; rm -rf "${D}skills"',
             'for d in {skills,build}; do rm -rf "$d"; done',
             "REPLY=build; read <<'EOF'\nskills\nEOF\nrm -rf \"$REPLY\"",
