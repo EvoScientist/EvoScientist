@@ -990,6 +990,9 @@ _BRACE_WORD_MAX_BRACES = 256  # `{` in one word
 _BRACE_WORD_MAX_CHARS = 1 << 16  # length of one word that has a `{`
 _BRACE_INT_SEQUENCE_RE = re.compile(r"[+-]?\d+\.\.[+-]?\d+(?:\.\.[+-]?\d+)?")
 _BRACE_CHAR_SEQUENCE_RE = re.compile(r"(.)\.\.(.)(?:\.\.[+-]?\d+)?", re.DOTALL)
+# Expansion only joins text the word already has, so a `..` part needs
+# `..` in the word or a `.` next to `{`, `,` or `}`.
+_BRACE_MAY_BUILD_DOTDOT_RE = re.compile(r"\.\.|[{},]\.|\.[{},]")
 
 
 class _BraceExpansionTooLarge(Exception):
@@ -1083,7 +1086,11 @@ def _has_traversal_component(command: str) -> bool:
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         # Brace expansion can build `..` (`/tmp/{..,a}/x`, `/tmp/.{.,a}/x`).
-        words = _expand_braces(token) if "{" in token else [token]
+        words = (
+            _expand_braces(token)
+            if "{" in token and _BRACE_MAY_BUILD_DOTDOT_RE.search(token)
+            else [token]
+        )
         if words is None:
             return True
         if any(".." in PurePosixPath(word).parts for word in words):

@@ -1,5 +1,6 @@
 """Quoted and attached paths name the same workspace files as bare paths."""
 
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -711,6 +712,10 @@ def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
     assert "'..' path traversal" in error
 
 
+_JSON_ROWS = json.dumps([{"id": i, "v": i / 2} for i in range(13)])
+_JSON_POINTS = json.dumps([{"x": i, "y": i, "z": i} for i in range(8)])
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -721,6 +726,9 @@ def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
         "for i in {1..100000}; do echo $i; done",
         "cat ./file{1,2}.txt",
         "cat ./{{a,b},c}/x",
+        # JSON arguments: many `{...}` but no `.` next to a brace.
+        f"curl -s -d '{_JSON_ROWS}' https://example.com/api",
+        f"python plot.py --points '{_JSON_POINTS}'",
     ],
 )
 def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
@@ -733,9 +741,9 @@ def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
     "word",
     [
         "{\x00..\U0010ffff}",  # a character range too big to expand
-        "a{b,c}" * 20,  # 2**20 words
-        "{" * 50_000 + "}" * 50_000,  # too many braces to scan
-        "x" * 70_000 + "{a,b}",  # too long to expand
+        "a{b,.c}" * 20,  # 2**20 words
+        "{" * 50_000 + "}" * 50_000 + ".",  # too many braces to scan
+        "x" * 70_000 + "{a,.b}",  # too long to expand
     ],
 )
 def test_brace_words_too_big_to_expand_are_refused(word):
