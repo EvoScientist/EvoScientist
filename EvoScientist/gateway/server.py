@@ -626,13 +626,36 @@ class LangGraphServerThreadStore(ThreadStore):
         return cloned_thread_id
 
 
-def _task_agent_name(data: Mapping[str, Any]) -> str | None:
-    """The sub-agent name deepagents stamps on a task event, if any."""
+def _lifecycle_graph_name(data: Mapping[str, Any] | None) -> str | None:
+    """The sub-agent name a lifecycle start event carries, if any.
+
+    LangGraph's lifecycle transformer sets ``graph_name`` on a nested run's
+    start event to the run's own ``lc_agent_name`` when that run is a
+    sub-agent, and to the namespace segment otherwise. The server's stream
+    suppresses the raw ``tasks`` events that carry the same name in their
+    metadata, so this is where the name actually arrives.
+    """
+    if data is None:
+        return None
+    name = data.get("graph_name")
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
+
+
+def _task_agent_name(data: Mapping[str, Any] | None) -> str | None:
+    """The sub-agent name a task event carries in its metadata, if any."""
+    if data is None:
+        return None
     metadata = _as_raw_map(data.get("metadata"))
     if metadata is None:
         return None
     name = metadata.get("lc_agent_name")
-    return name if isinstance(name, str) and name else None
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
 
 
 @dataclass(slots=True)
@@ -642,53 +665,45 @@ class _ServerSubagentTracker:
     emitter: StreamEventEmitter
     registry: _SubagentRegistry
     _active: dict[tuple[str, ...], tuple[str, str | None]] = field(default_factory=dict)
-    # Paths whose start event waits for the task event carrying the real name.
-    _unannounced: set[tuple[str, ...]] = field(default_factory=set)
-    # Paths named by task metadata; the first task event wins, like LangGraph.
-    _named: set[tuple[str, ...]] = field(default_factory=set)
+    # Paths that already announced their start: a late event must not start
+    # them again, and must not rename them.
+    _announced: set[tuple[str, ...]] = field(default_factory=set)
+    # Paths whose child already ended. A late event for one of these must not
+    # announce a second start with no matching end; a fresh lifecycle start
+    # for the same path is a new child and re-arms it.
+    _ended: set[tuple[str, ...]] = field(default_factory=set)
 
     def process(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
         namespace = tuple(_event_namespace(event))
         method = event.get("method")
         params = _as_raw_map(event.get("params"))
         data = _as_raw_map(params.get("data")) if params is not None else None
-        if data is None:
-            if not namespace:
-                return []
-            return self._ensure_registered(namespace[:1], tool_call_id=None)
 
-        events: list[dict[str, Any]] = []
         if method == "lifecycle":
-            phase = data.get("event")
+            phase = data.get("event") if data is not None else None
             if phase == "started" and namespace:
-                if len(namespace) > 1:
-                    events.extend(
-                        self._ensure_registered(namespace[:1], tool_call_id=None)
-                    )
-                # The task event with ``lc_agent_name`` may arrive after this
-                # one, so hold the start until the name is known.
+                # A nested run announces its own name in ``graph_name``: the
+                # server's lifecycle transformer copies the sub-agent's
+                # ``lc_agent_name`` there when the nested run is a sub-agent.
+                # Without it the name falls back to the namespace segment,
+                # which is the tool name -- so a sync sub-agent showed up as
+                # "tools" (#791).
+                self._ended.discard(namespace)
                 events.extend(
                     self._ensure_registered(
-                        namespace, tool_call_id=None, announce=False
+                        namespace,
+                        tool_call_id=None,
+                        name=_lifecycle_graph_name(data),
                     )
                 )
             elif phase in ("completed", "failed") and namespace:
-                events.extend(
-                    self._ensure_registered(namespace[:1], tool_call_id=None)
-                )
                 events.extend(self._end(namespace))
-            elif namespace:
-                events.extend(
-                    self._ensure_registered(namespace[:1], tool_call_id=None)
-                )
-            return events
-
-        if method == "tasks":
-            if "result" in data:
-                if namespace:
-                    events.extend(
-                        self._ensure_registered(namespace[:1], tool_call_id=None)
-                    )
+        elif method == "tasks":
+            if namespace in self._ended:
+                # The child already ended; this event is late.
+                return []
+            if data is not None and "result" in data:
                 # A result that carries interrupts is a child that only paused.
                 events.extend(
                     self._end_triggered_child(
@@ -698,32 +713,21 @@ class _ServerSubagentTracker:
                     )
                 )
             elif namespace:
-                if len(namespace) > 1:
-                    events.extend(
-                        self._ensure_registered(namespace[:1], tool_call_id=None)
-                    )
-                # A task call names its child: prefer deepagents' name over the
-                # ``tools:<id>`` namespace segment and fall back when absent.
+                # A task event names the child too, but the server's stream
+                # suppresses those events, so this is only a fallback.
                 events.extend(
                     self._ensure_registered(
                         namespace,
                         tool_call_id=None,
-                        agent_name=_task_agent_name(data),
+                        name=_task_agent_name(data) if data is not None else None,
                     )
                 )
-            return events
-
-        if namespace:
+        elif namespace:
             events.extend(self._ensure_registered(namespace[:1], tool_call_id=None))
-            # Content for a child that never got a task event: its start now
-            # falls back to the namespace segment.
-            events.extend(self._announce_pending(namespace))
         return events
 
     def finish(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for path in tuple(self._active):
-            events.extend(self._announce(path))
         for path in sorted(
             self._active.keys(), key=lambda item: len(item), reverse=True
         ):
@@ -736,72 +740,42 @@ class _ServerSubagentTracker:
         path: tuple[str, ...],
         *,
         tool_call_id: str | None,
-        agent_name: str | None = None,
-        announce: bool = True,
+        name: str | None = None,
     ) -> list[dict[str, Any]]:
         if not path:
             return []
+        active = self._active.get(path)
+        if active is not None:
+            # Already announced: the start is not repeated and the name is not
+            # rewritten, so a late event cannot rename a child the user
+            # already sees.
+            return []
         fallback_name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
         trigger_call_id = tool_call_id or parsed_tool_call_id
-        active = self._active.get(path)
-        if active is None:
-            name = agent_name or fallback_name
-            self._active[path] = (name, trigger_call_id)
-            self.registry.register(path, name)
-            if agent_name is not None:
-                self._named.add(path)
-            if not announce:
-                self._unannounced.add(path)
-                return []
-            return [self._start_event(path, name, trigger_call_id)]
-
-        name, active_call_id = active
-        if agent_name is not None and path not in self._named:
-            # The task event just told us the child's own name.
-            self._named.add(path)
-            self._active[path] = (agent_name, active_call_id)
-            self.registry.register(path, agent_name)
-            name = agent_name
-        if not announce or path not in self._unannounced:
-            return []
-        self._unannounced.discard(path)
-        return [self._start_event(path, name, active_call_id)]
-
-    def _start_event(
-        self, path: tuple[str, ...], name: str, tool_call_id: str | None
-    ) -> dict[str, Any]:
-        return self.emitter.subagent_start(
-            name,
-            "",
-            instance_id=":".join(path),
-            tool_call_id=tool_call_id or "",
-        ).data
-
-    def _announce(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
-        if path not in self._unannounced:
-            return []
-        self._unannounced.discard(path)
-        name, tool_call_id = self._active[path]
-        return [self._start_event(path, name, tool_call_id)]
-
-    def _announce_pending(self, namespace: tuple[str, ...]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        for path in tuple(self._unannounced):
-            if namespace[: len(path)] == path:
-                events.extend(self._announce(path))
-        return events
+        resolved = name or fallback_name
+        instance_id = ":".join(path)
+        self._active[path] = (resolved, trigger_call_id)
+        self._announced.add(path)
+        self.registry.register(path, resolved)
+        return [
+            self.emitter.subagent_start(
+                resolved,
+                "",
+                instance_id=instance_id,
+                tool_call_id=trigger_call_id or "",
+            ).data
+        ]
 
     def _end(
         self, path: tuple[str, ...], *, paused: bool = False
     ) -> list[dict[str, Any]]:
-        events = self._announce(path)
         active = self._active.pop(path, None)
         if active is None:
-            return events
+            return []
+        self._ended.add(path)
         name, _tool_call_id = active
         end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
-        events.append(end.data)
-        return events
+        return [end.data]
 
     def _end_triggered_child(
         self,
