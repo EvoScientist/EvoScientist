@@ -1394,15 +1394,17 @@ def _possible_folders(
     commands: list[shell_syntax.SimpleCommand],
     workspace_root: str,
     assigned: dict[str, tuple[str, ...] | None],
-) -> list[str]:
+) -> list[tuple[str, tuple[str, ...]]]:
     """The folders the commands of one command may run in, whatever their
-    order: the workspace root, and each ``cd`` / ``pushd`` target read from
-    every folder found before it, also with the values of the variables the
-    command sets. Past :data:`_FOLDERS_CAP` folders, a target is only read
-    from the workspace root. A target only the run knows adds none, nor do
-    ``cd -`` and ``popd``, which return to one of them."""
+    order, each with the ``env -C`` folders of the command that entered it:
+    the workspace root, and each ``cd`` / ``pushd`` target read from every
+    folder found before it that the ``cd`` may run in (see
+    :func:`_run_folders`), also with the values of the variables the command
+    sets. Past :data:`_FOLDERS_CAP` folders, a target is only read from the
+    workspace root. A target only the run knows adds none, nor do ``cd -``
+    and ``popd``, which return to one of them."""
     root = posixpath.normpath(workspace_root.replace("\\", "/"))
-    folders = [root]
+    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
     for found in commands:
         if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
@@ -1410,38 +1412,47 @@ def _possible_folders(
         if target is None:
             continue
         for value in _word_paths(*target, assigned):
-            for folder in list(folders):
-                if len(folders) >= _FOLDERS_CAP and folder != root:
-                    continue
-                entered = _folder_from(folder, value)
-                if entered is not None and entered not in folders:
-                    folders.append(entered)
+            starts = folders if len(folders) < _FOLDERS_CAP else [(root, ())]
+            for start in _run_folders(found.folders, list(starts), assigned):
+                entered = _folder_from(start, value)
+                if entered is not None and (entered, found.folders) not in folders:
+                    folders.append((entered, found.folders))
     return folders
 
 
-def _env_folders(
-    found: shell_syntax.SimpleCommand,
-    folders: list[str],
+def _run_folders(
+    chain: tuple[str, ...],
+    folders: list[tuple[str, tuple[str, ...]]],
     assigned: dict[str, tuple[str, ...] | None],
 ) -> list[str]:
-    """The folders *found* runs in, from each of *folders*, after the
-    ``env -C`` folders it runs under; one only the run knows keeps the folder
-    it is read from, as a ``cd`` to it does (``env -C "$(pwd)"``).
-    :class:`shell_syntax.TooManyValues` when an ``env -C`` folder with many
-    values would take them past :data:`_FOLDERS_CAP`."""
-    for folder_word in found.folders:
-        values = shell_syntax.word_values(folder_word, folder_word, assigned)
-        reached = list(
-            dict.fromkeys(
-                _folder_from(folder, value.replace("\\", "/")) or folder
-                for folder in folders
-                for value in (values or [folder_word])
+    """The folders a command under the ``env -C`` folders *chain* may run in:
+    each of *folders* (see :func:`_possible_folders`) entered under the start
+    of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
+    with the rest of *chain* applied. An ``env -C`` folder only the run knows
+    keeps the folder it is read from, as a ``cd`` to it does
+    (``env -C "$(pwd)"``). :class:`shell_syntax.TooManyValues` when ``env -C``
+    folders with many values would take them past :data:`_FOLDERS_CAP`."""
+    reached: list[str] = []
+    for folder, entered_under in folders:
+        if chain[: len(entered_under)] != entered_under:
+            continue
+        starts = [folder]
+        for folder_word in chain[len(entered_under) :]:
+            values = shell_syntax.word_values(folder_word, folder_word, assigned)
+            starts = list(
+                dict.fromkeys(
+                    _folder_from(start, value.replace("\\", "/")) or start
+                    for start in starts
+                    for value in (values or [folder_word])
+                )
             )
-        )
-        if len(reached) > max(_FOLDERS_CAP, len(folders)):
-            raise shell_syntax.TooManyValues(folder_word)
-        folders = reached
-    return folders
+            if len(starts) > _FOLDERS_CAP:
+                raise shell_syntax.TooManyValues(folder_word)
+        reached.extend(starts)
+    reached = list(dict.fromkeys(reached))
+    if len(reached) > max(_FOLDERS_CAP, len(folders)):
+        raise shell_syntax.TooManyValues(chain[-1])
+    return reached
 
 
 def _removes_protected(
@@ -1662,7 +1673,7 @@ def _folder_removal_error(
                 for written in shell_syntax.word_values(operand, operand, assigned)
                 or [operand]
             ]
-        for folder in _env_folders(found, folders, assigned):
+        for folder in _run_folders(found.folders, folders, assigned):
             for path in operand_paths:
                 relative = not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
                 if relative:
@@ -1670,7 +1681,7 @@ def _folder_removal_error(
                 if _removes_protected(path, workspace_root, protected):
                     return _protected_removal_error(
                         operand,
-                        _workspace_folder(folder, folders[0]) if relative else None,
+                        _workspace_folder(folder, folders[0][0]) if relative else None,
                     )
     return None
 

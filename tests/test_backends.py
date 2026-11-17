@@ -1101,6 +1101,10 @@ class TestWorkspaceRemovalAndComments:
             "rm -r .evoscientist",
             "rm -rf .evoscientist/memories/$(date +%F)",
             "cd .evoscientist && rm -rf memories",
+            # A cd runs under its own env -C folders.
+            "env -C .evoscientist sh -c 'cd memories; rm -rf profile'",
+            "env -C .evoscientist sh -c 'cd memories && env -C . rm -rf profile'",
+            "env -C .evoscientist bash -c 'D=memories; cd $D; rm -rf x'",
             "D=$(date +%F); rm -rf .evoscientist/memories/$D",
             'D=$(date +%F); rm -rf ".evoscientist/memories/$D"',
         ],
@@ -1133,6 +1137,9 @@ class TestWorkspaceRemovalAndComments:
             "env -C build sh -c 'rm -rf skills' && echo done",
             "nohup env -C build rm -rf skills",
             "env -C build env -C sub rm -rf skills",
+            # A cd runs under its own env -C folders, before it changes folder.
+            "env -C build sh -c 'cd skills && rm -rf demo'",
+            "env -C x sh -c 'cd skills'; rm -rf demo",
             "cd build && rm -rf demo",
             "cd build && rm -rf *",
             "cd src; cd -; rm -rf build",
@@ -1179,13 +1186,14 @@ class TestWorkspaceRemovalAndComments:
     def test_a_drive_target_is_absolute_only_on_windows(self, monkeypatch, windows):
         monkeypatch.setattr(backends, "_is_windows", lambda: windows)
         commands = backends.shell_syntax.simple_commands("cd C:/W/skills")
-        folders = backends._possible_folders(commands, "C:/W" if windows else "/W", {})
+        root = "C:/W" if windows else "/W"
+        folders = [f for f, _ in backends._possible_folders(commands, root, {})]
         assert folders[-1] == ("C:/W/skills" if windows else "/W/C:/W/skills")
 
     def test_the_folders_a_removal_is_read_from_are_capped(self):
         command = "; ".join(f"cd d{i}" for i in range(20)) + "; rm -rf x"
         commands = backends.shell_syntax.simple_commands(command)
-        folders = backends._possible_folders(commands, "/W", {})
+        folders = [f for f, _ in backends._possible_folders(commands, "/W", {})]
         assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
         # Past the cap, each later target is still read from the root.
         assert "/W/d19" in folders
