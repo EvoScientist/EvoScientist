@@ -713,9 +713,7 @@ class TestSynchronousFallback:
     def test_primary_without_api_key_uses_a_fallback_with_one(self, monkeypatch):
         """The missing-key check sits inside the chain (#782): a keyless
         primary fails at once and the next model still gets the turn."""
-        from EvoScientist.middleware.error_normalization import (
-            MissingApiKeyMiddleware,
-        )
+        from EvoScientist.llm.patches import _check_api_key
         from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
 
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -736,11 +734,14 @@ class TestSynchronousFallback:
             called.append(request.model)
             return AI_RESPONSE
 
-        guard = MissingApiKeyMiddleware()
+        def guarded_call(request):
+            _check_api_key(request.model)
+            return provider_call(request)
+
         with patch("EvoScientist.llm.models.get_chat_model", return_value=fallback):
             result = ModelFallbackMiddleware().wrap_model_call(
                 request_for(primary),
-                lambda request: guard.wrap_model_call(request, provider_call),
+                guarded_call,
             )
 
         assert result is AI_RESPONSE
