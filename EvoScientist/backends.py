@@ -728,6 +728,24 @@ def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     return Command(resume={interrupt_id: {"decisions": decisions}})
 
 
+def build_ask_user_resume(interrupt_id: str, payload: dict) -> "Command":
+    """Build an ask_user resume Command keyed by interrupt_id.
+
+    Same requirement as :func:`build_hitl_resume`: when the agent calls
+    ``ask_user`` twice in one message (parallel tool calls), both interrupts
+    are pending at once and a flat ``Command(resume=payload)`` raises
+    ``RuntimeError: When there are multiple pending interrupts …``. Keying
+    by the id of the event the client actually displayed answers that
+    interrupt and re-parks the rest; they re-emit on the next stream and
+    are drained one at a time. LangGraph unwraps ``{id: value}`` to
+    ``value`` inside the node, so ``_parse_answers`` sees the payload
+    unchanged. Safe for N=1 too.
+    """
+    from langgraph.types import Command
+
+    return Command(resume={interrupt_id: payload})
+
+
 _SSH_OPTIONS_WITH_VALUE = {
     "-B",
     "-b",

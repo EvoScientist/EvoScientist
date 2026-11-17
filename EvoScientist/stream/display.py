@@ -2008,7 +2008,22 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
+                # Keep the FIRST ask_user of the round pending: with parallel
+                # calls every pending interrupt emits its own event, and the
+                # last one would otherwise overwrite the first (the TUI and
+                # channels consumers stop at their first ask_user event too,
+                # so every client asks in the same order). The skipped
+                # sibling is not lost — it re-emits on the resume stream,
+                # and keyed resumes (build_ask_user_resume) drain the
+                # pendings one at a time.
+                pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
+                if (
+                    event_type == "ask_user"
+                    and pending_ask_user_before is not None
+                    and state.pending_ask_user is not pending_ask_user_before
+                ):
+                    state.pending_ask_user = pending_ask_user_before
 
                 # Relay thinking to channel when transitioning away from
                 # thinking phase.  Uses content comparison so that replayed
@@ -2291,13 +2306,16 @@ def _run_streaming(
                         )
                     except _StreamPromptCancelled:
                         return _stopped_response()
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from ..backends import build_ask_user_resume
 
+                interrupt_id = str(
+                    state.pending_ask_user.get("interrupt_id") or "default"
+                )
                 state.pending_ask_user = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
-                message = Command(resume=result)
+                message = build_ask_user_resume(interrupt_id, result)
                 approve_all_carry = turn_granted or _session_auto_approve
                 continue
 
