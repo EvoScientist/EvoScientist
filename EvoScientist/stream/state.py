@@ -262,10 +262,9 @@ class StreamState:
                         if parsed:
                             self.todo_items = parsed
             elif result_name == "read_todos":
-                if event.get("success", True):
-                    parsed = _parse_todo_items(result_content)
-                    if parsed:
-                        self.todo_items = parsed
+                parsed = _parse_todo_items(result_content)
+                if parsed:
+                    self.todo_items = parsed
 
         elif event_type == "subagent_start":
             name = event["name"]
