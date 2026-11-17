@@ -121,3 +121,30 @@ async def test_tui_task_list_goes_above_the_call_that_wrote_it(monkeypatch, work
     await run_turn(monkeypatch, workspace, [_turn([("A", True)])], prepare=watch_chat)
 
     assert orders[-1] == [TodoWidget, ToolCallWidget]
+
+
+class TestStandaloneConsumer:
+    """``EvoSci channel --agent`` relays through ``InboundConsumer``."""
+
+    @pytest.mark.parametrize(("writes", "expected"), CASES)
+    async def test_the_accepted_list_is_sent(
+        self, monkeypatch, workspace, writes, expected
+    ):
+        from EvoScientist.channels.bus.events import InboundMessage
+        from EvoScientist.channels.consumer import _format_todo_list
+        from tests.test_channel_media_forwarding import _consumer
+
+        sent: list[str] = []
+        consumer = _consumer(workspace, FakeGraphGateway(events=_turn(writes)))
+        channel = consumer.manager.get_channel("stub")
+
+        async def record(_sender, content, _metadata=None):
+            sent.append(content)
+
+        monkeypatch.setattr(channel, "send_todo_message", record)
+        msg = InboundMessage(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        await consumer._stream_with_hitl(msg, channel, "t1", msg.session_key)
+
+        assert sent == [
+            _format_todo_list([{"status": "pending", "content": c}]) for [c] in expected
+        ]

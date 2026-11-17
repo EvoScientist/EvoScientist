@@ -559,6 +559,8 @@ class InboundConsumer:
                 final_content = ""
                 thinking_buffer: list[str] = []
                 todo_sent = False
+                # write_todos args by call id, sent once the call succeeds.
+                pending_todos: dict[str, list] = {}
                 subagent_text_buffers: dict[str, tuple[str, list[str]]] = {}
                 thinking_sent = False
                 interrupt_data = None
@@ -634,7 +636,18 @@ class InboundConsumer:
                         elif event_type == "tool_call":
                             if event.get("name") == "write_todos" and not todo_sent:
                                 todos = event.get("args", {}).get("todos", [])
-                                if todos and channel:
+                                if todos:
+                                    pending_todos[event.get("id")] = todos
+
+                        elif event_type == "tool_result":
+                            if event.get("name") == "write_todos":
+                                todos = pending_todos.pop(event.get("id"), None)
+                                if (
+                                    todos
+                                    and channel
+                                    and not todo_sent
+                                    and event.get("success", True)
+                                ):
                                     await _flush_thinking_buffer()
                                     await channel.send_todo_message(
                                         msg.sender_id,
