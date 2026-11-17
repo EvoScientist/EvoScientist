@@ -35,6 +35,7 @@ from .patches import (
 )
 from .registry import (
     _ANTHROPIC_ROUTED_PROVIDERS,
+    _CUSTOM_ENDPOINT_PROVIDERS,
     _MODEL_ENTRIES,
     _OPENAI_ROUTED_PROVIDERS,
     _THINKING_CAPABLE_PROVIDERS,
@@ -497,16 +498,21 @@ def get_chat_model(
     # Routers keep to their own entries: another provider's id may name an
     # older or different model there.
     #
-    # A caller that NAMED a provider only wants that provider's models. The
-    # global registry fallback below would rewrite a name into another
-    # provider's id (``qwen3.5-27b`` -> ``qwen/qwen3.5-27b`` at atlascloud),
-    # which the named provider does not serve -- a custom endpoint that listed
-    # ``qwen3.5-27b`` rejects the rewritten id (issue #713).
+    # A CUSTOM endpoint serves the ids it was asked for, so a name given
+    # with one must be sent as written: the global registry fallback would
+    # rewrite it into another provider's id (``qwen3.5-27b`` ->
+    # ``qwen/qwen3.5-27b`` at atlascloud), which the endpoint does not
+    # serve -- an endpoint that listed ``qwen3.5-27b`` rejects the
+    # rewritten id (issue #713).
+    #
+    # The other providers keep the fallback: their short names are their
+    # own registry entries, so rewriting one into another provider's id
+    # is what their configuration already relies on.
     if (
         model_id is None
         and model in MODELS
         and provider not in ("openrouter", "requesty")
-        and provider is None
+        and provider not in _CUSTOM_ENDPOINT_PROVIDERS
     ):
         model_id, default_provider = MODELS[model]
         provider = provider or default_provider

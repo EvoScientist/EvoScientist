@@ -12,6 +12,10 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 
 from __future__ import annotations
 
+# A picker mounts one row per model, so a huge listing would make it
+# unusable. The cap keeps the list usable and the response bounded.
+_MAX_MODELS = 500
+
 
 def _models_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/models"
@@ -32,7 +36,9 @@ def _names_from_body(body: object) -> list[str]:
 
     The ids are stripped and de-duplicated in the order the endpoint listed
     them: a blank id is not a model, and the same model twice would show up
-    twice in a picker.
+    twice in a picker. The list is capped at ``_MAX_MODELS``: a picker mounts
+    one row per model, so an endpoint that serves tens of thousands of ids
+    would leave the user with an unusable list.
     """
     from ..config.provider_keys import _listed_models
 
@@ -47,6 +53,8 @@ def _names_from_body(body: object) -> list[str]:
             continue
         seen.add(name)
         names.append(name)
+        if len(names) >= _MAX_MODELS:
+            break
     return names
 
 
@@ -61,6 +69,9 @@ def list_custom_openai_models(
     Returns the endpoint's model ids, or ``[]`` on any failure (no base URL,
     non-200, timeout, connect error, non-JSON, or a body that is not a model
     list). Never raises — the wizard must still open when the endpoint is down.
+
+    The listing is bounded: an endpoint that serves tens of thousands of ids
+    would otherwise fill the picker with one row each and make it unusable.
     """
     if not base_url:
         return []
@@ -92,17 +103,26 @@ async def discover_custom_openai_models(
     or ``[]`` on any failure. Never raises — the picker must always open,
     even when the endpoint is down. An empty ``base_url`` returns ``[]``
     without an HTTP call.
+
+    The timeout is a TOTAL deadline, not just an inactivity timeout: an
+    endpoint that trickles a byte at a time would otherwise keep the
+    connection alive indefinitely and the picker would never open.
     """
     if not base_url:
         return []
 
     try:
+        import asyncio
+
         import httpx
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(
-                _models_url(base_url),
-                headers=_auth_headers(api_key),
+            resp = await asyncio.wait_for(
+                client.get(
+                    _models_url(base_url),
+                    headers=_auth_headers(api_key),
+                ),
+                timeout=timeout,
             )
         if resp.status_code != 200:
             return []

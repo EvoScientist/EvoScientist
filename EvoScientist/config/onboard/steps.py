@@ -830,11 +830,18 @@ def _step_model(
     # Get models for the selected provider. A live custom-openai endpoint
     # lists its own ids; an empty or failed probe keeps the registry defaults.
     if provider == "custom-openai":
-        discovered = list_custom_openai_models(
-            config.custom_openai_base_url,
-            getattr(config, "custom_openai_api_key", "")
-            or os.environ.get("CUSTOM_OPENAI_API_KEY", ""),
+        # The URL and the key must come from the SAME source. The runtime
+        # gives the environment precedence over the saved config (the saved
+        # value only fills in what the environment does not set), so probing
+        # a saved URL with an environment key would send that key to an
+        # endpoint the user is no longer using.
+        base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL") or (
+            config.custom_openai_base_url
         )
+        api_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or (
+            getattr(config, "custom_openai_api_key", "")
+        )
+        discovered = list_custom_openai_models(base_url, api_key)
         entries = [(name, name) for name in discovered]
         if not entries:
             entries = get_models_for_provider(provider)
