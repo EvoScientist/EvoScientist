@@ -441,6 +441,27 @@ class TestTodoCaptureFromArgs:
         self._write(state, "tc1", [{"status": "bogus", "content": "B"}], success=False)
         assert state.todo_items == []
 
+    def test_accepted_empty_write_clears_the_list(self):
+        state = StreamState()
+        self._write(state, "tc1", [{"status": "todo", "content": "A"}])
+        self._write(state, "tc2", [])
+        assert state.todo_items == []
+
+    def test_call_without_todos_takes_the_list_from_the_result(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "write_todos", "args": {}}
+        )
+        state.handle_event(
+            {
+                "type": "tool_result",
+                "id": "tc1",
+                "name": "write_todos",
+                "content": "Updated todo list to [{'content': 'A', 'status': 'todo'}]",
+            }
+        )
+        assert state.todo_items == [{"content": "A", "status": "todo"}]
+
     def test_capture_from_tool_result_fallback(self):
         """write_todos tool_result should also update todo_items."""
         import json

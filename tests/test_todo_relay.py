@@ -35,6 +35,36 @@ def _write(call_id: str, content: str, success: bool = True) -> list[dict]:
     ]
 
 
+def _clear(call_id: str) -> list[dict]:
+    """An accepted write that empties the list."""
+    return [
+        {
+            "type": "tool_call",
+            "id": call_id,
+            "name": "write_todos",
+            "args": {"todos": []},
+        },
+        {
+            "type": "tool_result",
+            "id": call_id,
+            "name": "write_todos",
+            "content": "Updated todo list to []",
+            "success": True,
+        },
+    ]
+
+
+# (the round after A and a pause, the lists the channel gets in the turn)
+SECOND_ROUNDS = [
+    pytest.param(_write("t2", "B"), [["A"], ["B"]], id="accepted"),
+    pytest.param(_write("t2", "B", success=False), [["A"]], id="rejected"),
+    pytest.param(_clear("t2"), [["A"]], id="cleared"),
+    pytest.param(
+        [*_clear("t2"), *_write("t3", "B")], [["A"], ["B"]], id="cleared_then_accepted"
+    ),
+]
+
+
 # (writes as (content, success), the lists the channel gets)
 CASES = [
     pytest.param([("A", True)], [["A"]], id="one_write"),
@@ -56,9 +86,9 @@ def _record(sent: list):
     return lambda items: sent.append([item["content"] for item in items])
 
 
-def _two_rounds(pause: dict):
+def _two_rounds(pause: dict, second: list[dict]):
     """A turn whose first round writes A and then pauses (*pause*), and whose
-    second round has a write of B the tool rejects."""
+    second round streams *second*."""
     calls = 0
 
     async def _stream(_request):
@@ -68,7 +98,7 @@ def _two_rounds(pause: dict):
             for event in [*_write("t1", "A"), pause]:
                 yield event
             return
-        for event in [*_write("t2", "B", success=False), *_END]:
+        for event in [*second, *_END]:
             yield event
 
     return _stream
@@ -94,9 +124,12 @@ class TestRichLoop:
         )
         assert sent == expected
 
-    def test_a_rejected_write_after_a_pause_resends_nothing(self, monkeypatch):
-        """The turn's state keeps the first list across the approval pause,
-        while the sent flag resets per round."""
+    @pytest.mark.parametrize(("second", "expected"), SECOND_ROUNDS)
+    def test_each_round_sends_its_first_accepted_list(
+        self, monkeypatch, second, expected
+    ):
+        """The turn's state spans the approval pause, while the sent flag
+        resets per round."""
         from tests.fakes.common import interrupt_event
 
         monkeypatch.setattr(display_mod, "_session_auto_approve", True)
@@ -108,10 +141,10 @@ class TestRichLoop:
             show_thinking=False,
             interactive=True,
             on_todo=_record(sent),
-            gateway=FakeGraphGateway(stream=_two_rounds(interrupt_event(1))),
+            gateway=FakeGraphGateway(stream=_two_rounds(interrupt_event(1), second)),
             _state=display_mod.StreamState(),
         )
-        assert sent == [["A"]]
+        assert sent == expected
 
 
 class TestTui:
@@ -130,6 +163,40 @@ class TestTui:
             monkeypatch, workspace, [_turn(writes)], on_todo_cb=_record(sent)
         )
         assert sent == expected
+
+    @pytest.mark.parametrize(("second", "expected"), SECOND_ROUNDS)
+    async def test_each_round_sends_its_first_accepted_list(
+        self, monkeypatch, workspace, second, expected
+    ):
+        from tests.fakes.tui import approval_interrupt, run_turn
+
+        sent: list = []
+        await run_turn(
+            monkeypatch,
+            workspace,
+            [[*_write("t1", "A"), approval_interrupt(1)], [*second, *_END]],
+            prepare=lambda app: setattr(app, "_hitl_auto_approve", True),
+            on_todo_cb=_record(sent),
+        )
+        assert sent == expected
+
+
+async def test_tui_task_list_empties_when_the_list_is_cleared(monkeypatch, workspace):
+    pytest.importorskip("textual")
+    from EvoScientist.cli.widgets.todo_widget import TodoWidget
+    from tests.fakes.tui import run_turn
+
+    shown: list = []
+    update_items = TodoWidget.update_items
+
+    def record(self, items):
+        shown.append(list(items))
+        update_items(self, items)
+
+    monkeypatch.setattr(TodoWidget, "update_items", record)
+    await run_turn(monkeypatch, workspace, [[*_write("t1", "A"), *_clear("t2"), *_END]])
+
+    assert shown == [[]]
 
 
 async def test_tui_task_list_goes_above_the_call_that_wrote_it(monkeypatch, workspace):
@@ -171,8 +238,9 @@ class TestStandaloneConsumer:
         sent = await self._run(monkeypatch, workspace, events=_turn(writes))
         assert sent == [_listed(c) for [c] in expected]
 
-    async def test_a_rejected_write_after_a_pause_resends_nothing(
-        self, monkeypatch, workspace
+    @pytest.mark.parametrize(("second", "expected"), SECOND_ROUNDS)
+    async def test_each_round_sends_its_first_accepted_list(
+        self, monkeypatch, workspace, second, expected
     ):
         import EvoScientist.channels.consumer as consumer_mod
 
@@ -185,8 +253,8 @@ class TestStandaloneConsumer:
             "interrupt_id": "ask-1",
             "questions": [{"question": "Continue?"}],
         }
-        sent = await self._run(monkeypatch, workspace, stream=_two_rounds(ask))
-        assert sent == [_listed("A")]
+        sent = await self._run(monkeypatch, workspace, stream=_two_rounds(ask, second))
+        assert sent == [_listed(c) for [c] in expected]
 
     @staticmethod
     async def _run(monkeypatch, workspace, **gateway) -> list[str]:
