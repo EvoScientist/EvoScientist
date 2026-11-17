@@ -1098,3 +1098,66 @@ class TestSandboxDangerousMode:
             ),
         )
         assert _queued_media(await _consumer_turn(consumer)) == []
+
+
+class TestChannelAttachmentPropagation:
+    def test_serve_channel_handler_passes_received_media(self, monkeypatch, workspace):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from EvoScientist.cli.commands import _serve_process_message
+        from EvoScientist.runtime import AsyncRuntime
+        from tests.fakes.serve import runtime_state
+
+        msg = ChannelMessage(
+            msg_id="serve-received-media",
+            content="read these attachments",
+            sender="user",
+            channel_type="imessage",
+            chat_id="chat",
+            media=[str(workspace.root / "fig.png"), str(workspace.root / "a.png")],
+        )
+        state = runtime_state()
+        with (
+            AsyncRuntime(thread_name="test-serve-received-media") as runtime,
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("EvoScientist.cli.commands.build_metadata", return_value={}),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"
+            ) as stream,
+        ):
+            state.async_runtime = runtime
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg, runtime_state=state, model="model", show_thinking=False
+            )
+        stream.assert_called_once()
+        assert stream.call_args.kwargs["received_media"] == msg.media
+
+    async def test_tui_channel_handler_passes_received_media(
+        self, monkeypatch, workspace
+    ):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from tests.fakes.tui import capture_app
+
+        app = await capture_app(monkeypatch, workspace)
+        msg = ChannelMessage(
+            msg_id="tui-received-media",
+            content="read these attachments",
+            sender="user",
+            channel_type="imessage",
+            chat_id="chat",
+            media=[str(workspace.root / "fig.png"), str(workspace.root / "a.png")],
+        )
+        stream = AsyncMock(return_value="ok")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            monkeypatch.setattr(
+                app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
+            )
+            monkeypatch.setattr(app, "_stream_with_widgets", stream)
+            _register_channel_request(msg)
+            await app._process_channel_message(msg)
+        stream.assert_awaited_once()
+        assert stream.call_args.kwargs["received_media"] == msg.media
