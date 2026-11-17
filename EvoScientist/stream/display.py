@@ -1868,7 +1868,8 @@ def _run_streaming(
             deduplication across resume/HITL cycles so the same thinking
             is not replayed, but genuinely new thinking is still sent.
         on_todo: Optional sync callback receiving todo items list.
-            Called once, at the first successful write_todos result.
+            Called at most once per round, at the first successful
+            write_todos result that leaves a non-empty list.
         on_file_write: Optional sync callback receiving the real filesystem path
             when the agent or a sub-agent writes or reads a media file
             (image/pdf/audio/video) via write_file or read_file.

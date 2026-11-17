@@ -2120,6 +2120,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                    _todo_sent = False
                 _hitl_round += 1
                 events = None
                 try:
@@ -2371,9 +2372,8 @@ def run_textual_interactive(
                                 await _collapse_completed_tools()
                             # Update todo from results; the first Task List
                             # panel goes above its call.
-                            if (
-                                result_name in ("write_todos", "read_todos")
-                                and state.todo_items
+                            if result_name in ("write_todos", "read_todos") and (
+                                state.todo_items or todo_w is not None
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)

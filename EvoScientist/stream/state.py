@@ -235,8 +235,8 @@ class StreamState:
 
             # Hold write_todos args until the call succeeds.
             if tool_name == "write_todos":
-                todos = tool_args.get("todos", [])
-                if isinstance(todos, list) and todos:
+                todos = tool_args.get("todos")
+                if isinstance(todos, list):
                     self._pending_todos[tool_id] = todos
 
         elif event_type == "tool_result":
