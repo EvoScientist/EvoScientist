@@ -1251,6 +1251,12 @@ class TestWorkspaceRemovalAndComments:
             "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; rm -rf build",
             'OUT=build; rm -rf "${OUT:?}"/*',
             'X=${X:-build}; rm -rf "$X"',
+            # A variable used only inside a substitution: read as written.
+            'read f; cd "$(dirname "$f")"',
+            "find . -name setup.py | while read -r f; do "
+            '(cd "$(dirname "$f")" && pip install -e .); done',
+            'for f in $(git ls-files "*.egg-info"); do '
+            'rm -rf "$(dirname "$f")/build"; done',
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):

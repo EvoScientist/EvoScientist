@@ -967,7 +967,9 @@ class UnknownValues(ValueError):
 def _references(word: str) -> list[tuple[re.Match[str], bool]]:
     """The ``$NAME`` / ``${NAME}`` of a word as written that the shell
     expands (outside single quotes and not escaped), each with whether it is
-    inside double quotes."""
+    inside double quotes. A name inside a ``$(...)`` or backtick
+    substitution is the substitution's, whose output only the run knows, so
+    it is not one of them."""
     found: list[tuple[re.Match[str], bool]] = []
     quote: str | None = None
     index = 0
@@ -982,6 +984,18 @@ def _references(word: str) -> list[tuple[re.Match[str], bool]]:
             quote = "'"
         elif char == '"':
             quote = None if quote == '"' else '"'
+        elif char == "$" and word.startswith("$(", index):
+            end = matching_paren(word, index + 2)
+            if end is None:
+                break
+            index = end
+        elif char == "`":
+            end = word.find("`", index + 1)
+            while end != -1 and word[end - 1] == "\\":
+                end = word.find("`", end + 1)
+            if end == -1:
+                break
+            index = end
         elif char == "$":
             match = _REFERENCE_RE.match(word, index)
             if match is not None:

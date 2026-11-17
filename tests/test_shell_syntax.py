@@ -461,6 +461,11 @@ class TestSimpleCommands:
         assert shell_syntax.word_values("$OTHER", "$OTHER", assigned) is None
         assert shell_syntax.word_values("$U", "$U", assigned) == []
 
+    def test_a_name_inside_a_substitution_is_not_the_words_own(self):
+        assert shell_syntax.variable_references('"$(dirname "$f")"') == set()
+        assert shell_syntax.variable_references("`echo $f`/$D") == {"D"}
+        assert shell_syntax.variable_references('"$(echo "$(cat $x)")"$y') == {"y"}
+
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")
         assert kill.args == ("`pgrep -f python`",)
