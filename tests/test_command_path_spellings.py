@@ -702,6 +702,10 @@ def test_folder_name_ending_in_a_symbol_inside_workspace_runs(tmp_path, folder):
         "cat /tmp/{.,a}./etc/passwd",
         "cat /tmp/{a,{b,..}}/x",
         "cat /tmp/.{-../}/etc/passwd",
+        # Glued to an option or assignment (checked per expanded word).
+        "make CFLAGS=-I{..,x}/include",
+        "env PYTHONPATH=a:{..,b}/lib python x.py",
+        "gcc -I{a,..}/include x.c",
     ],
 )
 def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
