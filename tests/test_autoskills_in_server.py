@@ -446,8 +446,8 @@ def test_autoskills_setting_says_when_recorded_server_does_not_answer(
 
 
 def test_autoskills_setting_leaves_a_starting_server_alone(monkeypatch, tmp_path):
-    """A server still starting does not answer yet, and needs no request: it
-    sets every project up with the saved settings before it serves."""
+    """A server still starting that does not answer yet gets no reconcile
+    request and no note, as without a server."""
     from EvoScientist.langgraph_dev import registration, server_record
 
     probed, posted = _fake_server(

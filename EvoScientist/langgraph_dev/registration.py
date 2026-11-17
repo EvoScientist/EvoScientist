@@ -392,9 +392,9 @@ def apply_autoskills_settings(config: object) -> str | None:
     """Ask the running server (the one its record names, else the one
     *config* names) to reconcile every project's AutoSkills cron with the
     settings just saved; a note when it could not, also when a recorded
-    server does not answer. Without a running server each project follows at
-    its next setup; so does a server still starting, which sets every project
-    up with the saved settings before it serves."""
+    server does not answer. Without a running server, or with one still
+    starting that does not answer yet, each project follows at its next
+    setup."""
     from . import server_record
     from .manager import is_langgraph_dev_running, read_record
     from .sdk import configured_langgraph_dev_url
