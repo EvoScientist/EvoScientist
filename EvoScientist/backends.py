@@ -1425,17 +1425,17 @@ def _env_folders(
     assigned: dict[str, tuple[str, ...] | None],
 ) -> list[str]:
     """The folders *found* runs in, from each of *folders*, after the
-    ``env -C`` folders it runs under; empty when only the run knows one.
+    ``env -C`` folders it runs under; one only the run knows keeps the folder
+    it is read from, as a ``cd`` to it does (``env -C "$(pwd)"``).
     :class:`shell_syntax.TooManyValues` when an ``env -C`` folder with many
     values would take them past :data:`_FOLDERS_CAP`."""
     for folder_word in found.folders:
         values = shell_syntax.word_values(folder_word, folder_word, assigned)
         reached = list(
             dict.fromkeys(
-                entered
+                _folder_from(folder, value.replace("\\", "/")) or folder
                 for folder in folders
                 for value in (values or [folder_word])
-                if (entered := _folder_from(folder, value.replace("\\", "/")))
             )
         )
         if len(reached) > max(_FOLDERS_CAP, len(folders)):

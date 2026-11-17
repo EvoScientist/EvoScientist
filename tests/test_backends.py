@@ -1045,6 +1045,10 @@ class TestWorkspaceRemovalAndComments:
             "X=$(true); rm -rf skills/$X",
             "X=`true`; rm -rf skills/$X",
             "X=$(true); cd skills && rm -rf demo$X",
+            # An env -C folder only the run knows keeps the one it is read from.
+            'env -C "$(pwd)" rm -rf skills',
+            "X=$(pwd); env -C $X rm -rf skills",
+            "cd skills; env -C `mktemp -d` rm -rf demo",
         ],
     )
     @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
