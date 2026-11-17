@@ -638,9 +638,10 @@ class ProactiveServe:
         thread there comes first. *rows* come from
         ``sessions.latest_origin_checkpoints``, newest first: per thread, the
         stored folders and channel origin of its newest checkpoint that has an
-        origin, and its newest stored flag; they stand in when a restart that
-        lost the dev server's state lost the metadata, and the flag is written
-        back then.
+        origin, and its newest stored flag; they stand in when a restart lost
+        the dev server's state (a hard kill before its periodic flush, or a
+        missing or unloadable ``.langgraph_ops.pckl``), and the flag is
+        written back then.
         A flag still on the server wins over a stored one. The restored thread
         stays a candidate until serve's thread changes or its fresh thread has
         its first turn.
