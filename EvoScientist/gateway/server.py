@@ -644,6 +644,41 @@ def _lifecycle_graph_name(data: Mapping[str, Any] | None) -> str | None:
     return stripped or None
 
 
+def _lifecycle_is_subagent(data: Mapping[str, Any] | None) -> bool:
+    """Whether the lifecycle event names a real sub-agent.
+
+    LangGraph's lifecycle transformer sets ``cause`` to a ``toolCall`` only
+    when the nested run is a sub-agent -- a plain nested graph gets the
+    namespace segment as its ``graph_name`` and no cause. The cause is
+    therefore what tells the two apart.
+
+    The cause only appears when the transformer saw the tool call that
+    started the run, so its ABSENCE does not prove the run is not a
+    sub-agent: the delivered payload for a real sub-agent often carries
+    ``graph_name`` and ``trigger_call_id`` and no cause at all. Use the
+    cause only where it is decisive.
+    """
+    if data is None:
+        return False
+    cause = _as_raw_map(data.get("cause"))
+    if cause is None:
+        return False
+    return cause.get("type") == "toolCall"
+
+
+def _lifecycle_trigger_call_id(data: Mapping[str, Any] | None) -> str | None:
+    """The tool call that started a nested run, if the event names it.
+
+    Each nested run carries its own trigger id, so it tells a replacement
+    child apart from the one it replaced: a completion that belongs to the
+    old child does not close the new one.
+    """
+    if data is None:
+        return None
+    trigger = data.get("trigger_call_id")
+    return trigger if isinstance(trigger, str) and trigger else None
+
+
 def _task_agent_name(data: Mapping[str, Any] | None) -> str | None:
     """The sub-agent name a task event carries in its metadata, if any."""
     if data is None:
@@ -665,9 +700,6 @@ class _ServerSubagentTracker:
     emitter: StreamEventEmitter
     registry: _SubagentRegistry
     _active: dict[tuple[str, ...], tuple[str, str | None]] = field(default_factory=dict)
-    # Paths that already announced their start: a late event must not start
-    # them again, and must not rename them.
-    _announced: set[tuple[str, ...]] = field(default_factory=set)
     # Paths whose child already ended. A late event for one of these must not
     # announce a second start with no matching end; a fresh lifecycle start
     # for the same path is a new child and re-arms it.
@@ -694,11 +726,17 @@ class _ServerSubagentTracker:
                     self._ensure_registered(
                         namespace,
                         tool_call_id=None,
-                        name=_lifecycle_graph_name(data),
+                        name=self._lifecycle_name(namespace, data),
+                        trigger_call_id=_lifecycle_trigger_call_id(data),
                     )
                 )
             elif phase in ("completed", "failed") and namespace:
-                events.extend(self._end(namespace))
+                events.extend(
+                    self._end(
+                        namespace,
+                        trigger_call_id=_lifecycle_trigger_call_id(data),
+                    )
+                )
         elif method == "tasks":
             if namespace in self._ended:
                 # The child already ended; this event is late.
@@ -732,8 +770,33 @@ class _ServerSubagentTracker:
             self._active.keys(), key=lambda item: len(item), reverse=True
         ):
             events.extend(self._end(path))
+        self._active.clear()
+        self._ended.clear()
         self.registry.close()
         return events
+
+    def _lifecycle_name(
+        self, namespace: tuple[str, ...], data: Mapping[str, Any] | None
+    ) -> str | None:
+        """The name to announce for a nested run the lifecycle event names.
+
+        The transformer's ``graph_name`` is the sub-agent's own name when the
+        nested run is a sub-agent, and the namespace segment when it is a
+        plain nested graph. The two are told apart by the ``cause`` the
+        transformer adds for a sub-agent -- but only where that is decisive:
+        a name that DIFFERS from the namespace segment is certainly the
+        sub-agent's own name, while a name that MATCHES it is the tool name
+        and the cause says whether a sub-agent is behind it.
+        """
+        graph_name = _lifecycle_graph_name(data)
+        if graph_name is None:
+            return None
+        fallback, _parsed = self._parse_namespace_segment(namespace[-1])
+        if graph_name != fallback:
+            return graph_name
+        if _lifecycle_is_subagent(data):
+            return graph_name
+        return None
 
     def _ensure_registered(
         self,
@@ -741,6 +804,7 @@ class _ServerSubagentTracker:
         *,
         tool_call_id: str | None,
         name: str | None = None,
+        trigger_call_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not path:
             return []
@@ -751,29 +815,41 @@ class _ServerSubagentTracker:
             # already sees.
             return []
         fallback_name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
-        trigger_call_id = tool_call_id or parsed_tool_call_id
+        resolved_trigger = trigger_call_id or tool_call_id or parsed_tool_call_id
         resolved = name or fallback_name
         instance_id = ":".join(path)
-        self._active[path] = (resolved, trigger_call_id)
-        self._announced.add(path)
+        self._active[path] = (resolved, resolved_trigger)
         self.registry.register(path, resolved)
         return [
             self.emitter.subagent_start(
                 resolved,
                 "",
                 instance_id=instance_id,
-                tool_call_id=trigger_call_id or "",
+                tool_call_id=resolved_trigger or "",
             ).data
         ]
 
     def _end(
-        self, path: tuple[str, ...], *, paused: bool = False
+        self,
+        path: tuple[str, ...],
+        *,
+        paused: bool = False,
+        trigger_call_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        active = self._active.pop(path, None)
+        active = self._active.get(path)
         if active is None:
             return []
+        name, active_trigger = active
+        if (
+            trigger_call_id is not None
+            and active_trigger is not None
+            and trigger_call_id != active_trigger
+        ):
+            # The completion belongs to an earlier child that used this
+            # namespace: it must not close the one that replaced it.
+            return []
+        self._active.pop(path, None)
         self._ended.add(path)
-        name, _tool_call_id = active
         end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
         return [end.data]
 
