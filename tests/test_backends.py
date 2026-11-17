@@ -1301,8 +1301,9 @@ class TestWorkspaceRemovalAndComments:
     @pytest.mark.parametrize(
         "command",
         [
-            "D=..; rm -rf $D/x",
-            "cd skills/demo && D=..; rm -rf $D",
+            # `..` made from `.`: a literal `..` is refused before this check.
+            "D=.; rm -rf $D$D/x",
+            "cd skills/demo && D=.; rm -rf $D$D",
             "D=/opt/data; rm -rf $D",
             "D=/W; rm -rf $D",
             "for d in /opt/data; do rm -rf $d; done",
@@ -1732,16 +1733,17 @@ class TestSandboxCommandChecks:
         ("command", "shown"),
         [
             ('TARGET=/etc; cd "$TARGET" && cat passwd', "'cd \"$TARGET\"'"),
-            ('T=..; cd "$T"', "'cd \"$T\"'"),
-            ("T=..; cd $T && ls", "'cd $T'"),
+            # `..` made from `.`: a literal `..` is refused before this check.
+            ('T=.; cd "$T$T"', "'cd \"$T$T\"'"),
+            ("T=.; cd $T$T && ls", "'cd $T$T'"),
             ('T=$HOME; cd "$T"', "'cd \"$T\"'"),
             ('T=~; cd "$T"', "'cd \"$T\"'"),
-            ('T=..; cd "$T/sub"', "'cd \"$T/sub\"'"),
+            ('T=.; cd "$T$T/sub"', "'cd \"$T$T/sub\"'"),
             ("export T=/etc; pushd ${T}", "'pushd ${T}'"),
-            ('A=..; B=$A; cd "$B"', "'cd \"$B\"'"),
-            ("T=src; T=..; cd $T", "'cd $T'"),
+            ('A=.; B=$A$A; cd "$B"', "'cd \"$B\"'"),
+            ("T=src; T=.; cd $T$T", "'cd $T$T'"),
             ('T=".. "; cd $T', "'cd $T'"),
-            ("bash -c 'T=..; cd \"$T\"'", "'cd \"$T\"'"),
+            ("bash -c 'T=.; cd \"$T$T\"'", "'cd \"$T$T\"'"),
         ],
     )
     def test_cd_to_a_variable_set_in_the_command_is_checked(
@@ -1758,7 +1760,7 @@ class TestSandboxCommandChecks:
             "OUT=results; cd $OUT && ls",
             'T=src; cd "$T/sub"',
             "T=/W/src; cd $T",
-            "T=..; cd '$T'",
+            "T=.; cd '$T$T'",
             'cd "$(pwd)"',
             'T=$(dirname x); cd "$T"',
             'cd "$WORKDIR"',
