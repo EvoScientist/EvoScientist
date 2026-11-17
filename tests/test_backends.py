@@ -1290,6 +1290,23 @@ class TestWorkspaceRemovalAndComments:
         error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
         assert "'cd $D' leaves the workspace" in error
 
+    def test_a_variable_set_before_source_is_refused_naming_source(self):
+        error = validate_command(
+            'D=build; source .venv/bin/activate; rm -rf "$D"',
+            ("/W/skills",),
+            workspace_root="/W",
+        )
+        assert "runs source, . or eval" in error
+        # With no variable, the same source passes.
+        assert (
+            validate_command(
+                "source .venv/bin/activate && rm -rf build",
+                ("/W/skills",),
+                workspace_root="/W",
+            )
+            is None
+        )
+
     def test_a_function_body_is_read(self):
         error = validate_command(
             "function f { rm -rf .evoscientist/memories/x; }; f",

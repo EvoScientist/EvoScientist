@@ -1277,8 +1277,9 @@ def _unknown_values_error(word: str) -> str:
     return (
         f"Command blocked: '{word}' may name paths the check does not follow: "
         f"it uses a variable this command sets other than with a plain "
-        f"NAME=value, or with too many values to check. Write the path out "
-        f"instead."
+        f"NAME=value (read, printf -v, a loop over words the run makes, or any "
+        f"variable once the command runs source, . or eval), or one with too "
+        f"many values to check. Write the path out instead."
     )
 
 
