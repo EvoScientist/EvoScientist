@@ -393,14 +393,16 @@ def apply_autoskills_settings(config: object) -> str | None:
     *config* names) to reconcile every project's AutoSkills cron with the
     settings just saved; a note when it could not, also when a recorded
     server does not answer. Without a running server each project follows at
-    its next setup."""
+    its next setup; so does a server still starting, which sets every project
+    up with the saved settings before it serves."""
+    from . import server_record
     from .manager import is_langgraph_dev_running, read_record
     from .sdk import configured_langgraph_dev_url
 
     record = read_record()
     url = record.url if record is not None else configured_langgraph_dev_url(config)
     if not is_langgraph_dev_running(base_url=url):
-        if record is None:
+        if record is None or record.phase == server_record.STARTING:
             return None
         return _not_applied(f"the EvoScientist server at {url} did not answer")
     try:

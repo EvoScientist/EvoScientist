@@ -370,11 +370,11 @@ def test_autoskills_setting_reports_projects_not_rescheduled(monkeypatch):
     assert "/a: bad timezone" in registration.apply_autoskills_settings(_config())
 
 
-def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True):
-    """The server's record (on *record_port*, or none) and its HTTP side;
-    the URLs probed and the ones POSTed to."""
+def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True, phase=None):
+    """The server's record (on *record_port*, or none; in *phase*, by default
+    serving) and its HTTP side; the URLs probed and the ones POSTed to."""
     from EvoScientist import local_secret, paths
-    from EvoScientist.langgraph_dev import manager, registration
+    from EvoScientist.langgraph_dev import manager, registration, server_record
 
     home = tmp_path / "server"
     home.mkdir()
@@ -383,7 +383,12 @@ def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True):
     record = (
         None
         if record_port is None
-        else manager.ServerRecord(pid=42, port=record_port, host="127.0.0.1")
+        else manager.ServerRecord(
+            pid=42,
+            port=record_port,
+            host="127.0.0.1",
+            phase=phase or server_record.SERVING,
+        )
     )
     monkeypatch.setattr(manager, "read_record", lambda **_k: record)
     probed, posted = [], []
@@ -436,6 +441,24 @@ def test_autoskills_setting_says_when_recorded_server_does_not_answer(
 
     assert "server at http://127.0.0.1:7000 did not answer" in note
     assert "Could not reach" not in note
+    assert probed == ["http://127.0.0.1:7000"]
+    assert posted == []
+
+
+def test_autoskills_setting_leaves_a_starting_server_alone(monkeypatch, tmp_path):
+    """A server still starting does not answer yet, and needs no request: it
+    sets every project up with the saved settings before it serves."""
+    from EvoScientist.langgraph_dev import registration, server_record
+
+    probed, posted = _fake_server(
+        monkeypatch,
+        tmp_path,
+        record_port=7000,
+        answers=False,
+        phase=server_record.STARTING,
+    )
+
+    assert registration.apply_autoskills_settings(_config()) is None
     assert probed == ["http://127.0.0.1:7000"]
     assert posted == []
 
