@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from EvoScientist.stream import display as display_mod
-from tests.fakes.common import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway, stub_consumer
 
 _END = [
     {"type": "text", "content": "finished"},
@@ -191,10 +191,9 @@ class TestStandaloneConsumer:
     @staticmethod
     async def _run(monkeypatch, workspace, **gateway) -> list[str]:
         from EvoScientist.channels.bus.events import InboundMessage
-        from tests.test_channel_media_forwarding import _consumer
 
         sent: list[str] = []
-        consumer = _consumer(workspace, FakeGraphGateway(**gateway))
+        consumer = stub_consumer(workspace, FakeGraphGateway(**gateway))
         channel = consumer.manager.get_channel("stub")
 
         async def record(_sender, content, _metadata=None):

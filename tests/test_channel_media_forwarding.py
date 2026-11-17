@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from EvoScientist.stream import display as display_mod
-from tests.fakes.common import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway, stub_consumer
 
 _END = [
     {"type": "text", "content": "finished"},
@@ -260,28 +260,6 @@ class TestTui:
         assert await self._run(monkeypatch, workspace, events) == rich
 
 
-def _consumer(workspace, gateway, **kwargs):
-    from EvoScientist.channels.bus.message_bus import MessageBus
-    from EvoScientist.channels.channel_manager import ChannelManager
-    from EvoScientist.channels.consumer import InboundConsumer
-    from tests.fakes.common import StubChannel
-
-    bus = MessageBus()
-    manager = ChannelManager(bus, media_dir=workspace.root / "media")
-    manager.register(StubChannel())
-    return InboundConsumer(
-        bus=bus,
-        manager=manager,
-        agent=MagicMock(),
-        thread_id="",
-        workspace=workspace,
-        graph_gateway=gateway,
-        inference_timeout=5.0,
-        drain_timeout=1.0,
-        **kwargs,
-    )
-
-
 async def _consumer_turn(consumer) -> list:
     """Run one turn and return everything it queued for the chat."""
     from EvoScientist.channels.bus.events import InboundMessage
@@ -304,7 +282,7 @@ class TestStandaloneConsumer:
     @staticmethod
     async def _run(workspace, events) -> list[str]:
         _make_files(workspace.root)
-        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         return _queued_media(await _consumer_turn(consumer))
 
     @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
@@ -329,7 +307,7 @@ class TestStandaloneConsumer:
     async def test_the_file_goes_out_before_the_reply(self, workspace):
         _make_files(workspace.root)
         events = _file_tool_turn("write_file", {"file_path": "/fig.png"})
-        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         queued = await _consumer_turn(consumer)
         assert [(out.content, out.media) for out in queued] == [
             ("", [str((workspace.root / "fig.png").resolve())]),
@@ -361,7 +339,7 @@ class TestConsumerTurnEnds:
             return outcome
 
         monkeypatch.setattr(consumer_mod, "resolve_approval", _resolve)
-        consumer = _consumer(workspace, FakeGraphGateway(stream=_stream))
+        consumer = stub_consumer(workspace, FakeGraphGateway(stream=_stream))
         return _queued_media(await _consumer_turn(consumer))
 
     @pytest.mark.parametrize(
@@ -439,7 +417,7 @@ class TestOnlySandboxFilesAreSent:
         (host / "passport.pdf").write_bytes(b"secret")
         monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
         events = _file_tool_turn("write_file", {"file_path": f"{host}/passport.pdf"})
-        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         assert _queued_media(await _consumer_turn(consumer)) == []
 
     def test_a_file_outside_the_work_folder_is_not_sent(self, tmp_path, monkeypatch):
@@ -518,7 +496,7 @@ class TestRoutedPaths:
                 tool_name, {"file_path": "/skills/demo/assets/logo.svg"}
             )
         )
-        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         assert _queued_media(await _consumer_turn(consumer)) == [str(primary.resolve())]
 
     @pytest.mark.parametrize("fallback", [False, True])
@@ -681,7 +659,7 @@ class TestRoutedPaths:
         (workspace.root / "memories").mkdir()
         (workspace.root / "memories" / "chart.png").write_bytes(b"decoy")
         events = _file_tool_turn("read_file", {"file_path": "/memories/chart.png"})
-        consumer = _consumer(workspace, FakeGraphGateway(events=events))
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         assert _queued_media(await _consumer_turn(consumer)) == [str(chart.resolve())]
 
 
@@ -851,7 +829,7 @@ class TestSandboxDangerousMode:
         monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
         events = _file_tool_turn("read_file", {"file_path": f"{host}/private.pdf"})
         gateway = FakeGraphGateway(events=events)
-        consumer = _consumer(
+        consumer = stub_consumer(
             workspace,
             gateway,
             dangerous=sandbox_dangerous_mode(
