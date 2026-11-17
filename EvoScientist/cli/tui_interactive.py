@@ -2350,21 +2350,6 @@ def run_textual_interactive(
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
                                     tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -2384,14 +2369,18 @@ def run_textual_interactive(
                             ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
-                            # Update todo from results
+                            # Update todo from results; the first Task List
+                            # panel goes above the call that wrote it.
                             if (
                                 result_name in ("write_todos", "read_todos")
                                 and state.todo_items
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tw is not None:
+                                        await container.mount(todo_w, before=tw)
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
                             # Show "Analyzing results..." if all tools done, no text yet
