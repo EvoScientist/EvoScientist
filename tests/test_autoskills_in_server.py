@@ -370,6 +370,81 @@ def test_autoskills_setting_reports_projects_not_rescheduled(monkeypatch):
     assert "/a: bad timezone" in registration.apply_autoskills_settings(_config())
 
 
+def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True):
+    """The server's record (on *record_port*, or none) and its HTTP side;
+    the URLs probed and the ones POSTed to."""
+    from EvoScientist import local_secret, paths
+    from EvoScientist.langgraph_dev import manager, registration
+
+    home = tmp_path / "server"
+    home.mkdir()
+    (home / local_secret.FILE_NAME).write_text("s3cret\n")
+    monkeypatch.setattr(paths, "SERVER_HOME", home)
+    record = (
+        None
+        if record_port is None
+        else manager.ServerRecord(pid=42, port=record_port, host="127.0.0.1")
+    )
+    monkeypatch.setattr(manager, "read_record", lambda **_k: record)
+    probed, posted = [], []
+    monkeypatch.setattr(
+        manager,
+        "is_langgraph_dev_running",
+        lambda *, base_url, **_k: probed.append(base_url) or True,
+    )
+
+    def get(url, **_k):
+        if not answers:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(
+            200, json={"instance": local_secret.instance_of("s3cret")}
+        )
+
+    def post(url, **_k):
+        posted.append(url)
+        return httpx.Response(200, json={"projects": 1, "failed": []})
+
+    monkeypatch.setattr(registration.httpx, "get", get)
+    monkeypatch.setattr(registration.httpx, "post", post)
+    return probed, posted
+
+
+def test_autoskills_setting_asks_the_recorded_server(monkeypatch, tmp_path):
+    """A server recorded on another port than the configured one (``EvoSci
+    deploy --port 7000``) is the one asked."""
+    from EvoScientist.langgraph_dev import registration
+
+    probed, posted = _fake_server(monkeypatch, tmp_path, record_port=7000)
+
+    assert registration.apply_autoskills_settings(_config()) is None
+    assert posted == ["http://127.0.0.1:7000/api/autoskills/reconcile"]
+    assert probed == []
+
+
+def test_autoskills_setting_says_when_recorded_server_does_not_answer(
+    monkeypatch, tmp_path
+):
+    from EvoScientist.langgraph_dev import registration
+
+    _, posted = _fake_server(monkeypatch, tmp_path, record_port=7000, answers=False)
+
+    note = registration.apply_autoskills_settings(_config())
+
+    assert "Could not reach" in note
+    assert "http://127.0.0.1:7000" in note
+    assert posted == []
+
+
+def test_autoskills_setting_without_record_asks_configured_port(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import registration
+
+    probed, posted = _fake_server(monkeypatch, tmp_path, record_port=None)
+
+    assert registration.apply_autoskills_settings(_config()) is None
+    assert probed == ["http://127.0.0.1:6174"]
+    assert posted == ["http://127.0.0.1:6174/api/autoskills/reconcile"]
+
+
 @pytest.mark.parametrize(
     ("body", "reconciles"),
     [

@@ -20,18 +20,6 @@ import httpx
 from ..paths import Workspace
 from .boundary import is_loopback_host
 
-
-def running_server_url() -> str:
-    """The URL of the running server: its record when one exists, else the
-    configured ``langgraph_dev_port``."""
-    from ..config import get_config_value
-    from . import manager
-
-    record = manager.read_record()
-    if record is not None:
-        return record.url
-    return f"http://127.0.0.1:{get_config_value('langgraph_dev_port')}"
-
 # Seconds a registration may take: it restores the project's threads, which
 # reads every checkpoint in sessions.db.
 REGISTRATION_TIMEOUT = 120.0
@@ -315,25 +303,12 @@ def ensure_ccproxy(*, url: str) -> str | None:
     )
 
 
-def running_server_url(fallback: str) -> str:
-    """The URL of the running server: the one its record names when there is
-    a record, else *fallback* (the configured ``langgraph_dev_port``)."""
-    from .manager import manager
-
-    try:
-        record = manager.read_record()
-    except Exception:
-        record = None
-    url = getattr(record, "url", None) if record is not None else None
-    return str(url or fallback)
-
-
 def reconcile_autoskills(*, url: str) -> list[str]:
     """Ask the server at *url* to reconcile every served project's AutoSkills
     cron with its configuration (after ``/autoskills`` changed it); why each
     project that failed did. ``RegistrationError`` (or ``OlderServerError``)
     when it could not ask."""
-    url = running_server_url(url).rstrip("/")
+    url = url.rstrip("/")
     response = _post_with_secret(url, "/api/autoskills/reconcile", {}, what="reach")
     if response.status_code == 404:
         raise OlderServerError()
@@ -414,15 +389,17 @@ def exposure_messages(exposure: ServerExposure | None) -> list[str]:
 
 
 def apply_autoskills_settings(config: object) -> str | None:
-    """Ask the server *config* names, when it runs, to reconcile every
-    project's AutoSkills cron with the settings just saved; a note when it
-    could not. Without a running server each project follows at its next
-    setup."""
-    from .manager import is_langgraph_dev_running
+    """Ask the running server (the one its record names, else the one
+    *config* names) to reconcile every project's AutoSkills cron with the
+    settings just saved; a note when it could not, also when a recorded
+    server does not answer. Without a running server each project follows at
+    its next setup."""
+    from .manager import is_langgraph_dev_running, read_record
     from .sdk import configured_langgraph_dev_url
 
-    url = configured_langgraph_dev_url(config)
-    if not is_langgraph_dev_running(base_url=url):
+    record = read_record()
+    url = record.url if record is not None else configured_langgraph_dev_url(config)
+    if record is None and not is_langgraph_dev_running(base_url=url):
         return None
     try:
         failed = reconcile_autoskills(url=url)
