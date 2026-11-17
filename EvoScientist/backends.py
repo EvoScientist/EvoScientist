@@ -1262,6 +1262,15 @@ def _protected_removal_error(target: str, folder: str | None = None) -> str:
     )
 
 
+def _outside_removal_error(operand: str) -> str:
+    """The refusal of a recursive rm of *operand*, outside the workspace."""
+    return (
+        f"Command blocked: rm would remove '{operand}', which is "
+        f"outside the workspace or may expand there. Remove a "
+        f"path inside the workspace (e.g., './build')."
+    )
+
+
 def _too_many_values_error(word: str) -> str:
     """The refusal of a command whose *word* may read as more values, or run
     in more folders, than the check follows."""
@@ -1688,6 +1697,17 @@ def _folder_removal_error(
     for found, operand, token in removals:
         if token is not None:
             operand_paths = _word_paths(operand, token, assigned)
+            # A value of a variable the command sets, checked as a written
+            # path is: it may not climb with `..` or lie outside.
+            for path in operand_paths:
+                if path == _removal_target(token):
+                    continue
+                if ".." in path.split("/"):
+                    return _outside_removal_error(operand)
+                if (
+                    path.startswith("/") or _DRIVE_PATH_RE.match(path)
+                ) and _removal_problem(path, workspace_root, protected) == "outside":
+                    return _outside_removal_error(operand)
         else:
             # Glued to a substitution: whatever it expands to stays under the
             # literal folder written before it, or under the folder the rm
@@ -1817,11 +1837,7 @@ def validate_command(
                 if problem == "protected":
                     return _protected_removal_error(operand)
                 if problem is not None:
-                    return (
-                        f"Command blocked: rm would remove '{operand}', which is "
-                        f"outside the workspace or may expand there. Remove a "
-                        f"path inside the workspace (e.g., './build')."
-                    )
+                    return _outside_removal_error(operand)
         try:
             refusal = _folder_removal_error(
                 command, commands, workspace_root, protected

@@ -1251,6 +1251,21 @@ class TestWorkspaceRemovalAndComments:
     @pytest.mark.parametrize(
         "command",
         [
+            "D=..; rm -rf $D/x",
+            "cd skills/demo && D=..; rm -rf $D",
+            "D=/opt/data; rm -rf $D",
+            "D=/W; rm -rf $D",
+            "for d in /opt/data; do rm -rf $d; done",
+        ],
+    )
+    def test_a_removal_of_a_variable_value_outside_is_refused(self, command):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "outside the workspace" in error
+        assert validate_command("D=/W/build; rm -rf $D", workspace_root="/W") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             'D=sk; D+=ills; rm -rf "$D"',
             "bash -c 'D=sk; D+=ills; rm -rf \"$D\"'",
             "D=sk; export D+=ills; rm -rf $D/x",
