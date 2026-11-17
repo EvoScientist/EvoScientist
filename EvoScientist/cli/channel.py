@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from rich.panel import Panel
@@ -71,6 +71,7 @@ class ChannelMessage:
     bus_ref: Any = None  # MessageBus (for publishing outbound)
     chat_id: str = ""
     message_id: str | None = None
+    media: list[str] = field(default_factory=list)
 
 
 # Thread-safe queue: bus → main
@@ -1175,6 +1176,7 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     cm = ChannelMessage(
         msg_id=str(uuid.uuid4()),
         content=msg.content,
+        media=list(msg.media),
         sender=msg.sender_id,
         channel_type=msg.channel,
         metadata=msg.metadata,

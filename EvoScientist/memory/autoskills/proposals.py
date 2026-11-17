@@ -665,8 +665,8 @@ def installed_skills_read_once() -> Iterator[None]:
 
 def _visible_skills(roots: list[Path]) -> list[_NamedSkill]:
     """The skill folders the runtime sees in ``roots``, in its order, with names."""
-    # The merged runtime first hides lower-tier entries with the same resolved
-    # virtual path, then resolves duplicate frontmatter names in path order.
+    # The merged runtime first hides lower-tier entries with the same virtual
+    # path, then resolves duplicate frontmatter names in path order.
     visible: dict[str, Path] = {}
     for root in roots:
         if not root.exists():
@@ -680,9 +680,8 @@ def _visible_skills(roots: list[Path]) -> list[_NamedSkill]:
                 continue
             if not _resolves_within_root(entry / "SKILL.md", resolved_root):
                 continue
-            resolved_entry = entry.resolve()
-            virtual_path = resolved_entry.relative_to(resolved_root).as_posix()
-            visible.setdefault(virtual_path, resolved_entry)
+            # A linked folder is listed under its own name, not its target's.
+            visible.setdefault(entry.name, entry.resolve())
     return [
         (visible[virtual_path], _installed_skill_name(visible[virtual_path]))
         for virtual_path in sorted(visible, key=lambda name: f"/{name}/")
