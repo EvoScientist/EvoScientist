@@ -1266,9 +1266,9 @@ def _too_many_values_error(word: str) -> str:
     """The refusal of a command whose *word* may read as more values, or run
     in more folders, than the check follows."""
     return (
-        f"Command blocked: '{word}' may read as more than "
-        f"{shell_syntax._VALUES_CAP} values with the variables this command "
-        f"sets, more than the check follows. Write the path out instead."
+        f"Command blocked: '{word}' may name more paths than the check follows, "
+        f"with the values of the variables this command sets or the folders "
+        f"it may run in. Write the path out instead."
     )
 
 
@@ -1425,15 +1425,22 @@ def _env_folders(
     assigned: dict[str, tuple[str, ...] | None],
 ) -> list[str]:
     """The folders *found* runs in, from each of *folders*, after the
-    ``env -C`` folders it runs under; empty when only the run knows one."""
+    ``env -C`` folders it runs under; empty when only the run knows one.
+    :class:`shell_syntax.TooManyValues` when an ``env -C`` folder with many
+    values would take them past :data:`_FOLDERS_CAP`."""
     for folder_word in found.folders:
         values = shell_syntax.word_values(folder_word, folder_word, assigned)
-        folders = [
-            entered
-            for folder in folders
-            for value in (values or [folder_word])
-            if (entered := _folder_from(folder, value.replace("\\", "/")))
-        ][:_FOLDERS_CAP]
+        reached = list(
+            dict.fromkeys(
+                entered
+                for folder in folders
+                for value in (values or [folder_word])
+                if (entered := _folder_from(folder, value.replace("\\", "/")))
+            )
+        )
+        if len(reached) > max(_FOLDERS_CAP, len(folders)):
+            raise shell_syntax.TooManyValues(folder_word)
+        folders = reached
     return folders
 
 

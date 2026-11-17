@@ -1189,6 +1189,21 @@ class TestWorkspaceRemovalAndComments:
             workspace_root="/W",
         )
 
+    def test_env_folders_keep_every_folder_past_the_cap(self):
+        command = "; ".join(f"cd d{i}" for i in range(7)) + "; cd skills; "
+        error = validate_command(
+            command + "env -C . rm -rf demo", ("/W/skills",), workspace_root="/W"
+        )
+        assert "protected folder" in error
+        # An env -C folder with many values may not multiply them past it.
+        values = "; ".join(f"T=v{i}" for i in range(4))
+        error = validate_command(
+            f'{values}; {command}env -C "$T" rm -rf demo',
+            ("/W/skills",),
+            workspace_root="/W",
+        )
+        assert "'$T' may name more paths than the check follows" in error
+
     @pytest.mark.parametrize(
         ("tail", "word"),
         [
@@ -1202,11 +1217,11 @@ class TestWorkspaceRemovalAndComments:
         many = "; ".join(f"T=a{i}" for i in range(16)) if word else "P=a"
         command = f"{many}; {tail}"
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
-        assert "more than 16 values" in error
+        assert "more paths than the check follows" in error
         # Within the cap, each value is checked.
         fewer = command.replace("T=a15; ", "")
         fewer = fewer.replace("U=; U=x; ", "").replace("$U", "")
-        assert "more than 16 values" not in validate_command(
+        assert "more paths than the check follows" not in validate_command(
             fewer, ("/W/skills",), workspace_root="/W"
         )
 
