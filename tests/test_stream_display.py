@@ -2,12 +2,16 @@
 
 from typing import Any, cast
 
+import pytest
 from rich.console import Console
 from rich.markdown import Markdown
 
 from EvoScientist.stream.display import (
     _fix_markdown_heading_spacing,
+    _render_subagent_section,
+    _render_tool_call_line,
     create_streaming_display,
+    format_tool_result_compact,
     resolve_final_status_footer,
 )
 from EvoScientist.stream.state import SubAgentState
@@ -131,6 +135,138 @@ def test_streaming_display_pairs_root_tool_results_by_id():
     assert "execute(python b.py)" in rendered
     assert rendered.index("execute(python a.py)") < rendered.index("Running")
     assert rendered.index("execute(python b.py)") < rendered.index("result from b")
+
+
+@pytest.mark.parametrize("is_final", [False, True], ids=["streaming", "final"])
+def test_rich_rows_follow_the_result_verdict(is_final):
+    """A row takes the event's ``success``, not a guess from the text."""
+    tool_calls = [
+        {"id": "tc-mcp", "name": "lookup_dataset", "args": {"name": "iris"}},
+        {"id": "tc-ok", "name": "execute", "args": {"command": "python check.py"}},
+    ]
+    tool_results = [
+        {
+            "id": "tc-mcp",
+            "name": "lookup_dataset",
+            "content": "dataset not found: iris",
+            "success": False,
+        },
+        {
+            "id": "tc-ok",
+            "name": "execute",
+            "content": "Error: a line the script printed\n"
+            "[Command succeeded with exit code 0]",
+            "success": True,
+        },
+    ]
+
+    rendered = _render_text(
+        create_streaming_display(
+            tool_calls=tool_calls, tool_results=tool_results, is_final=is_final
+        )
+    )
+
+    # Only a failed row prints its output under it.
+    assert "dataset not found: iris" in rendered
+    assert "a line the script printed" not in rendered
+    rows = [
+        _render_tool_call_line(tc, tr)
+        for tc, tr in zip(tool_calls, tool_results, strict=True)
+    ]
+    assert [row.spans[0].style for row in rows] == ["bold red", "bold green"]
+    detail = format_tool_result_compact(
+        "lookup_dataset", "dataset not found: iris", success=False
+    )
+    assert detail[0].style == "red dim"
+
+
+def test_a_long_failed_result_shows_its_start_and_end():
+    """A failure may say why at its start or, for a command, at its end."""
+    content = "\n".join(f"line {i}" for i in range(30)) + "\n[stderr] Boom"
+    content += "\n\nExit code: 1\n[Command failed with exit code 1]"
+
+    def render(success):
+        rows = format_tool_result_compact("execute", content, success=success)
+        return "".join(_render_text(row) for row in rows)
+
+    failed = render(False)
+    passed = render(True)
+
+    assert failed.split("\n") == [
+        "  └ line 0",
+        "    line 1",
+        "    ... +29 lines",
+        "    line 29",
+        "    [stderr] Boom",
+        "    [Command failed with exit code 1]",
+        "",
+    ]
+    assert "line 4" in passed
+    assert "+29 lines" in passed
+    # An end with fewer non-blank lines than it has room for keeps them all.
+    sparse = "\n".join(["a", "b", "", "", "", "Exit code: 1", "[Command failed]"])
+    rows = format_tool_result_compact("execute", sparse, success=False)
+    assert "".join(_render_text(r) for r in rows).split("\n")[2:5] == [
+        "    ... +3 lines",
+        "    Exit code: 1",
+        "    [Command failed]",
+    ]
+    assert "Exit code: 1" not in passed
+
+
+def test_a_failed_command_end_skips_the_repeated_exit_code():
+    """The sandbox's exit code repeats deepagents' status line, so the end keeps the reason."""
+    pytest_run = "\n".join(
+        ["collected 12 items", "tests/test_a.py ......F....."]
+        + [f"detail {i}" for i in range(8)]
+        + [
+            "FAILED tests/test_a.py::test_x - AssertionError",
+            "1 failed, 11 passed in 0.12s",
+        ]
+    )
+    pytest_run += "\n\nExit code: 1\n[Command failed with exit code 1]"
+    rows = format_tool_result_compact("execute", pytest_run, success=False)
+    rendered = "".join(_render_text(row) for row in rows)
+
+    assert "FAILED tests/test_a.py::test_x - AssertionError" in rendered
+    assert "[Command failed with exit code 1]" in rendered
+    assert "Exit code: 1" not in rendered
+
+
+def test_a_failed_write_todos_shows_its_error():
+    """A rejected todo list is the call's error, not a checklist."""
+    error = (
+        "Error invoking tool 'write_todos' with kwargs {'todos': "
+        "[{'content': 'train baseline', 'status': 'done'}]} with error:\n"
+        " todos.0.status: Input should be 'pending', 'in_progress' or 'completed'"
+    )
+    todos = "Updated todo list to [{'content': 'train baseline', 'status': 'pending'}]"
+
+    def render(content, success):
+        rows = format_tool_result_compact("write_todos", content, success=success)
+        return "".join(_render_text(row) for row in rows)
+
+    assert "Input should be" in render(error, False)
+    assert "train baseline" in render(todos, True)
+    assert "1 pending" in render(todos, True)
+
+
+def test_a_failed_subagent_row_names_the_reason():
+    subagent = SubAgentState("code-agent", "install deps", "task:code", "task1")
+    subagent.is_active = True
+    subagent.add_tool_call("execute", {"command": "pip install foo"}, "sa1")
+    subagent.add_tool_result(
+        "execute",
+        "Collecting foo\n[stderr] ERROR: Failed building wheel for foo\n\n"
+        "Exit code: 1\n[Command failed with exit code 1]",
+        False,
+        "sa1",
+    )
+
+    rendered = "".join(_render_text(e) for e in _render_subagent_section(subagent))
+
+    assert "└ [Command failed with exit code 1]" in rendered
+    assert "Collecting foo" not in rendered
 
 
 def test_streaming_display_keeps_narration_visible_with_pending_normal_tool():

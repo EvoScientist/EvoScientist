@@ -3,6 +3,8 @@
 from EvoScientist.stream.utils import (
     _shorten_path,
     count_lines,
+    cut_middle,
+    failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
     has_args,
@@ -283,6 +285,185 @@ class TestTruncate:
         result = truncate("hello world", 5)
         assert result.startswith("hello")
         assert "truncated" in result
+
+
+class TestFailureSummary:
+    STATUS = "\n\nExit code: 1\n[Command failed with exit code 1]"
+
+    def test_longer_command_output_names_the_exit_status(self):
+        pip = (
+            "Collecting foo\n  Downloading foo-1.0.tar.gz\n"
+            "[stderr] ERROR: No matching distribution found for foo" + self.STATUS
+        )
+        assert failure_summary("execute", pip) == "[Command failed with exit code 1]"
+
+    def test_a_one_line_output_is_its_own_reason(self):
+        cat = "[stderr] cat: missing.txt: No such file or directory" + self.STATUS
+        assert failure_summary("execute", cat) == (
+            "cat: missing.txt: No such file or directory"
+        )
+        blocked = (
+            "Command blocked: contains '..' path traversal.\n"
+            "[Command failed with exit code 1]"
+        )
+        assert failure_summary("execute", blocked).startswith("Command blocked:")
+
+    def test_no_output_names_the_exit_status(self):
+        grep = "<no output>" + self.STATUS
+        assert failure_summary("execute", grep) == "[Command failed with exit code 1]"
+
+    def test_the_sandbox_timeout_notice_is_named(self):
+        timeout = (
+            "Error: Command timed out after 300 seconds.\n\n"
+            "Recovery \u2014 pick one:\n  1. Needs more time?\n  3. Report it back.\n"
+            "[Command failed with exit code 124]"
+        )
+        assert failure_summary("execute", timeout).startswith(
+            "Error: Command timed out"
+        )
+
+    def test_truncated_output_names_the_exit_status(self):
+        cut = (
+            "\n".join(str(i) for i in range(1, 50))
+            + "\n\n... Output truncated at 100000 bytes.\n\nExit code: 3\n"
+            "[Command failed with exit code 3]\n[Output was truncated due to size limits]"
+        )
+        assert failure_summary("execute", cut) == "[Command failed with exit code 3]"
+
+    def test_an_execute_call_that_never_ran_names_its_first_line(self):
+        invalid = (
+            "1 validation error for ExecuteSchema\ncommand\n  Field required\n"
+            "    For further information visit https://errors.pydantic.dev/v/missing"
+        )
+        assert failure_summary("execute", invalid) == (
+            "1 validation error for ExecuteSchema"
+        )
+
+    def test_an_interpreter_error_names_its_type_and_message(self):
+        result = (
+            "<stdout>\nloaded 3 files\n</stdout>\n"
+            "<error type=\"TypeError\">cannot read property 'score' of &lt;x&gt;\n"
+            "    at main (eval:3)</error>"
+        )
+        assert failure_summary("code_interpreter", result) == (
+            "TypeError: cannot read property 'score' of <x>"
+        )
+
+    def test_status_lines_inside_the_output_are_not_trusted(self):
+        echoed = (
+            "[Command failed with exit code 7]\n[stderr] boom"
+            "\n\nExit code: 2\n[Command failed with exit code 2]"
+        )
+        assert failure_summary("execute", echoed) == "[Command failed with exit code 2]"
+        two_lines = (
+            "starting job\nExit code: 0\n\nExit code: 3\n"
+            "[Command failed with exit code 3]"
+        )
+        assert failure_summary("execute", two_lines) == (
+            "[Command failed with exit code 3]"
+        )
+        for printed in (
+            "[Command failed with exit code 7]",
+            "Exit code: 0",
+            "[stderr] [Command failed with exit code 7]",
+            "[stderr] Exit code: 0",
+        ):
+            only = printed + "\n\nExit code: 2\n[Command failed with exit code 2]"
+            assert failure_summary("execute", only) == (
+                "[Command failed with exit code 2]"
+            )
+
+    def test_every_appended_line_is_stripped(self):
+        cut = (
+            "fatal: checksum mismatch\n\n... Output truncated at 100000 bytes.\n\n"
+            "Exit code: 3\n[Command failed with exit code 3]\n"
+            "[Output was truncated due to size limits]"
+        )
+        assert failure_summary("execute", cut) == "fatal: checksum mismatch"
+
+    def test_an_interpreter_message_stays_on_one_line(self):
+        result = '<error type="ValueError">bad&#10;second line</error>'
+        assert failure_summary("code_interpreter", result) == "ValueError: bad"
+
+    def test_an_interpreter_error_cut_from_its_tag_still_reads_as_one(self):
+        cut = (
+            "<stdout>\nrow 0: ok\n... (truncated) ...\n"
+            "very long detail\n    at main (eval:3)</error>"
+        )
+        assert failure_summary("code_interpreter", cut) == "error"
+
+    def test_other_tools_name_their_first_line(self):
+        error = "Error executing tool lookup: dataset not found\ndetails"
+        assert failure_summary("lookup", error) == (
+            "Error executing tool lookup: dataset not found"
+        )
+        assert failure_summary("lookup", "") == ""
+
+    def test_a_raised_tool_names_its_exception(self):
+        raised = (
+            "[TOOL ERROR] Tool 'lookup' failed with an exception:\n\n"
+            "ValueError: x\n\nYou may retry the tool call."
+        )
+        assert failure_summary("lookup", raised) == "ValueError: x"
+        assert failure_summary("execute", raised) == "ValueError: x"
+        assert failure_summary("code_interpreter", raised) == "ValueError: x"
+        header_only = "[TOOL ERROR] Tool 'lookup' failed with an exception:"
+        assert failure_summary("lookup", header_only) == header_only
+
+
+class TestCutMiddle:
+    def test_within_limit(self):
+        assert cut_middle("short", 10, 4) == "short"
+
+    def test_keeps_the_start_and_whole_last_lines(self):
+        text = "\n".join(f"line {i}" for i in range(100))
+        result = cut_middle(text, 200, 40)
+        head, marker, end = result.partition("\n... (truncated) ...\n")
+        assert marker
+        assert head == text[:160]
+        assert end.endswith("line 99")
+        assert end.split("\n")[0].startswith("line ")
+
+    def test_an_end_that_starts_on_a_line_keeps_that_line(self):
+        reason = "Error: disk full\n"
+        for filler in ("z", "\n"):
+            text = "x" * 400 + "\n" + reason + filler * (500 - len(reason))
+            assert "Error: disk full" in cut_middle(text, 800, 500)
+
+    def test_a_long_last_line_is_kept_in_part(self):
+        reason = "[stderr] ValueError: " + "detail " * 95 + "END"
+        text = "\n".join(f"line {i}" for i in range(200)) + "\n" + reason
+        text += "\nExit code: 1\n[Command failed with exit code 1]"
+        end = cut_middle(text, 2000, 500).partition("\n... (truncated) ...\n")[2]
+        assert not end.startswith("Exit code")
+        assert "[stderr] ValueError" not in end
+        assert "detail END\nExit code: 1" in end
+
+    def test_a_short_line_across_the_boundary_is_kept_whole(self):
+        reason = "[stderr] OSError: disk full"
+        filler = "\n".join(f"log {i:03d}" for i in range(400))
+        trailer = "".join(f"step {i}\n" for i in range(60))
+        trailer += "\nExit code: 1\n[Command failed with exit code 1]"
+        for into in (1, 10, 20):
+            text = filler + "\n" + reason + ("\n" + trailer)[: 500 - len(reason) + into]
+            assert text[len(text) - 500 :].startswith(reason[into:])
+            end = cut_middle(text, 2000, 500).partition("\n... (truncated) ...\n")[2]
+            assert end.startswith(reason)
+
+    def test_an_end_never_repeats_the_start(self):
+        text = "a" * 1450 + "\n" + "b" * 620
+        out = cut_middle(text, 2000, 500)
+        assert "... (truncated) ..." in out
+        assert out.count("b") <= text.count("b")
+
+    def test_a_line_right_after_the_head_is_kept(self):
+        reason = "[stderr] OSError: disk full\n"
+        text = "h" * 1499 + "\n" + reason + "t" * (2026 - 1500 - len(reason))
+        assert "[stderr] OSError: disk full" in cut_middle(text, 2000, 500)
+
+    def test_a_cut_that_hides_almost_nothing_is_not_made(self):
+        text = "h" * 1500 + "\n" + "e" * 599
+        assert cut_middle(text, 2000, 500) == text
 
 
 # === _shorten_path ===

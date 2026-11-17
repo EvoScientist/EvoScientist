@@ -24,7 +24,7 @@ EvoScientist (LangChain client)
     (both billed against your subscription quota, not API credits)
 ```
 
-- **Claude** (`anthropic_auth_mode: oauth`): `EvoSci` starts ccproxy automatically (or reuses a running instance on `ccproxy_port`) and points the Anthropic base URL at it.
+- **Claude** (`anthropic_auth_mode: oauth`): the background agent server starts ccproxy on `ccproxy_port` and stops it when it stops; a ccproxy you already run on that port is used instead, and left running. Sessions point the Anthropic base URL at it. `EvoSci server status` shows it.
 - **ChatGPT** (`openai_auth_mode: oauth`): EvoScientist opens OpenAI's sign-in page once, stores the token under `~/.evoscientist/auth/chatgpt.json`, and calls the Codex backend with it. No proxy and no Codex CLI are involved.
 
 ---
@@ -184,7 +184,8 @@ print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly:
 | OpenAI requests fail with a connection error to `127.0.0.1` right after upgrading | A background server started before the upgrade still routes OpenAI through ccproxy | `EvoSci server stop`, then start again |
 | `Run: ccproxy auth login claude_api` on startup | No Claude OAuth credentials on this machine | Run the login command shown |
 | `ccproxy is required for OAuth mode but not found` | OAuth extra not installed (Claude only) | `pip install 'evoscientist[oauth]'` |
-| ccproxy config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |
+| ccproxy config change has no effect | The background agent server's ccproxy predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | `EvoSci server stop`, then start again; check for a shadowing config file |
+| `ccproxy_port 8000 is in use by another program` | Another program, not a ccproxy that answers there, holds the port the server starts its ccproxy on | Stop it, or pick another port with `EvoSci config set ccproxy_port <port>` |
 
 **Debugging tip (Claude):** `ccproxy serve --port 8001 --log-level debug` on a spare port shows exactly what is forwarded upstream. **Warning:** debug logs print `Authorization` bearer tokens — never paste raw log lines anywhere. The same goes for `chatgpt.json`: it holds your ChatGPT tokens.
 

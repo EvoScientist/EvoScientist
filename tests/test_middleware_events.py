@@ -151,8 +151,8 @@ class TestNoOpSinkContract:
         sink.on_tool_selection(["x"], 1)
         sink.on_tool_selection_ended()
         sink.emit_fallback_notice("ignored")
+        sink.discard_tool_selection()
         assert sink.tool_selection_active is False
-        assert sink.tool_selection_pending() is False
         assert sink.consume_tool_selection() == (False, None)
 
 

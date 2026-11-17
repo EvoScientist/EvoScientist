@@ -73,6 +73,9 @@ class SessionEventSink:
         with self._lock:
             self._active = True
             self._total = total_tools
+            # A selection never shown no longer applies: this call may fail
+            # and keep every tool.
+            self._pending = None
 
     def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
         with self._lock:
@@ -93,10 +96,6 @@ class SessionEventSink:
         with self._lock:
             return self._active
 
-    def tool_selection_pending(self) -> bool:
-        with self._lock:
-            return bool(self._pending)
-
     def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
         with self._lock:
             pending = self._pending
@@ -112,3 +111,7 @@ class SessionEventSink:
                 self._last_emitted = list(pending)
                 return (True, list(pending))
             return (True, None)
+
+    def discard_tool_selection(self) -> None:
+        with self._lock:
+            self._pending = None

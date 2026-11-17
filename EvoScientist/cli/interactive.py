@@ -359,6 +359,23 @@ def _new_session_dirs(
 # =============================================================================
 
 
+def _print_turn_error(exc: Exception) -> None:
+    """Report a failed turn; the session stays open for the next prompt.
+
+    An authentication or missing-key error gets the onboarding hint. The turn
+    fails, as in the TUI, so ``/model`` can still switch to a model that has
+    a key (#782).
+    """
+    error_msg = str(exc).lower()
+    if "authentication" in error_msg or "api_key" in error_msg:
+        console.print("[red]Error: API key not configured.[/red]")
+        console.print(
+            "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
+        )
+    else:
+        console.print(f"[red]Error: {escape(str(exc))}[/red]")
+
+
 async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
     """Run one Rich CLI turn with a fresh, turn-local SIGINT policy.
 
@@ -431,6 +448,10 @@ def cmd_interactive(
         dirs: The session's workspace, and its run folder under
             ``--mode=run`` (``/new`` then moves to a fresh run folder)
     """
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         load_agent = partial(
@@ -455,10 +476,8 @@ def cmd_interactive(
         return
 
     from ..config import GatewaySurface, resolve_gateway_backend
-    from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.INTERACTIVE)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="interactive CLI")
 
     from .. import paths
 
@@ -1174,6 +1193,9 @@ def cmd_interactive(
                         sys.stdout.flush()
                         return
 
+                    from ..EvoScientist import file_tool_routes
+                    from ..gateway.runtime import sandbox_dangerous_mode
+
                     try:
                         ready_agent = await _await_agent_ready()
                         meta = build_metadata(state["dirs"], model)
@@ -1193,7 +1215,13 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
+                            received_media=msg.media,
                             work_dir=str(state["dirs"].work_dir),
+                            media_dir=state["dirs"].sandbox_media_dir,
+                            routes=file_tool_routes(state["dirs"].workspace),
+                            dangerous=sandbox_dangerous_mode(
+                                runtime_gateways.graph_gateway, config
+                            ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
@@ -1728,19 +1756,7 @@ def cmd_interactive(
                         state["running"] = False
                         break
                     except Exception as e:
-                        error_msg = str(e)
-                        if (
-                            "authentication" in error_msg.lower()
-                            or "api_key" in error_msg.lower()
-                        ):
-                            console.print("[red]Error: API key not configured.[/red]")
-                            console.print(
-                                "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
-                            )
-                            state["running"] = False
-                            break
-                        else:
-                            console.print(f"[red]Error: {escape(str(e))}[/red]")
+                        _print_turn_error(e)
             finally:
                 queue_task.cancel()
                 try:
@@ -1785,8 +1801,19 @@ def cmd_interactive(
             _channel_logger.debug("print_resume_hint failed", exc_info=True)
 
 
+# A single-shot prompt longer than this is echoed cut, with its length.
+_PROMPT_ECHO_LIMIT = 500
+
+
+def _prompt_echo(prompt: str) -> str:
+    """The prompt as shown before a single-shot run."""
+    if len(prompt) <= _PROMPT_ECHO_LIMIT:
+        return prompt
+    return f"{prompt[:_PROMPT_ECHO_LIMIT]}\u2026 ({len(prompt)} chars total)"
+
+
 def cmd_run(
-    agent: "CompiledStateGraph",
+    agent: "CompiledStateGraph | None",
     prompt: str,
     thread_id: str,
     show_thinking: bool = True,
@@ -1801,7 +1828,7 @@ def cmd_run(
     """Single-shot execution with streaming display.
 
     Args:
-        agent: Compiled agent graph
+        agent: Compiled agent graph; None when the langgraph server runs it
         prompt: User prompt
         thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels
@@ -1816,7 +1843,7 @@ def cmd_run(
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
     console.print(sep)
-    console.print(Text(f"> {prompt}"))
+    console.print(Text(f"> {_prompt_echo(prompt)}"))
     console.print(sep)
     console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(str(dirs.work_dir))}[/dim]")

@@ -19,7 +19,7 @@ from .context_editing import (
     create_context_editing_middleware,
 )
 from .context_overflow import ContextOverflowMapperMiddleware
-from .error_normalization import ErrorNormalizationMiddleware
+from .error_normalization import ErrorNormalizationMiddleware, MissingApiKeyMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     create_memory_middleware,
@@ -43,6 +43,7 @@ from .tool_error_handler import ToolErrorHandlerMiddleware
 from .tool_history_repair import ToolHistoryRepairMiddleware
 from .tool_selector import create_tool_selector_middleware
 from .utils import disable_thinking
+from .windows_paths import WindowsFilePathMiddleware
 
 __all__ = [
     "ActiveTeamMiddleware",
@@ -55,6 +56,7 @@ __all__ = [
     "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
+    "MissingApiKeyMiddleware",
     "ModelFallbackMiddleware",
     "ProactiveModeMiddleware",
     "Question",
@@ -64,6 +66,7 @@ __all__ = [
     "SkillsReloadMiddleware",
     "ToolErrorHandlerMiddleware",
     "ToolHistoryRepairMiddleware",
+    "WindowsFilePathMiddleware",
     "compute_context_editing_trigger",
     "create_active_team_middleware",
     "create_code_interpreter_middleware",

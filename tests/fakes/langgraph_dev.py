@@ -233,6 +233,9 @@ class Server:
         self.pid = pid
         self.exit_code: int | None = None
         self.records = True
+        # A start that records itself, then exits with ``exit_code`` (one
+        # whose ccproxy failed in its lifespan).
+        self.records_then_exits = False
         monkeypatch.setattr(manager, "_POLL_INTERVAL", 0.001)
         monkeypatch.setattr(manager, "_START_BUDGET", 0.2)
         monkeypatch.setattr(manager, "_DRAIN_WAIT", 0.1)
@@ -305,7 +308,7 @@ class Server:
         manager._PROCESS = proc
         if kwargs.get("job") is not None:
             kwargs["job"].started(proc)
-        if self.exit_code is None and self.records:
+        if self.records and (self.exit_code is None or self.records_then_exits):
             self.run(port=kwargs["port"], lasting=kwargs.get("lasting"))
         return proc
 

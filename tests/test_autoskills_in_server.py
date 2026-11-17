@@ -274,6 +274,50 @@ def test_autoskills_setting_reports_failed_reconcile(monkeypatch):
     assert "not now" in registration.apply_autoskills_settings(_config())
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (200, {"serving": True, "detail": None}, None),
+        (200, {"serving": False, "detail": "Run: ccproxy auth login"}, "auth login"),
+        (500, {}, "HTTP 500"),
+        (403, {"error": "local_secret_required"}, "local secret"),
+        (None, {}, "Could not reach"),
+    ],
+    ids=["serving", "reason", "error", "other_server", "unreachable"],
+)
+def test_ensure_ccproxy_client_reports_why_server_did_not_start_it(
+    monkeypatch, tmp_path, status, body, expected
+):
+    from EvoScientist import local_secret, paths
+    from EvoScientist.langgraph_dev import registration
+
+    home = tmp_path / "server"
+    home.mkdir()
+    (home / local_secret.FILE_NAME).write_text("s3cret\n")
+    monkeypatch.setattr(paths, "SERVER_HOME", home)
+    monkeypatch.setattr(
+        registration.httpx,
+        "get",
+        lambda _url, **_k: httpx.Response(
+            200, json={"instance": local_secret.instance_of("s3cret")}
+        ),
+    )
+
+    def post(url, **_k):
+        if status is None:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(registration.httpx, "post", post)
+
+    reason = registration.ensure_ccproxy(url="http://127.0.0.1:6174")
+
+    if expected is None:
+        assert reason is None
+    else:
+        assert expected in reason
+
+
 def test_reconcile_autoskills_client_posts_with_secret(monkeypatch, tmp_path):
     from EvoScientist import local_secret, paths
     from EvoScientist.langgraph_dev import registration
@@ -326,10 +370,119 @@ def test_autoskills_setting_reports_projects_not_rescheduled(monkeypatch):
     assert "/a: bad timezone" in registration.apply_autoskills_settings(_config())
 
 
+def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True, phase=None):
+    """The server's record (on *record_port*, or none; in *phase*, by default
+    serving) and its HTTP side; the URLs probed and the ones POSTed to."""
+    from EvoScientist import local_secret, paths
+    from EvoScientist.langgraph_dev import manager, registration, server_record
+
+    home = tmp_path / "server"
+    home.mkdir()
+    (home / local_secret.FILE_NAME).write_text("s3cret\n")
+    monkeypatch.setattr(paths, "SERVER_HOME", home)
+    record = (
+        None
+        if record_port is None
+        else manager.ServerRecord(
+            pid=42,
+            port=record_port,
+            host="127.0.0.1",
+            phase=phase or server_record.SERVING,
+        )
+    )
+    monkeypatch.setattr(manager, "read_record", lambda **_k: record)
+    probed, posted = [], []
+    monkeypatch.setattr(
+        manager,
+        "is_langgraph_dev_running",
+        lambda *, base_url, **_k: probed.append(base_url) or answers,
+    )
+
+    def get(url, **_k):
+        if not answers:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(
+            200, json={"instance": local_secret.instance_of("s3cret")}
+        )
+
+    def post(url, **_k):
+        posted.append(url)
+        return httpx.Response(200, json={"projects": 1, "failed": []})
+
+    monkeypatch.setattr(registration.httpx, "get", get)
+    monkeypatch.setattr(registration.httpx, "post", post)
+    return probed, posted
+
+
+def test_autoskills_setting_asks_the_recorded_server(monkeypatch, tmp_path):
+    """A server recorded on another port than the configured one (``EvoSci
+    deploy --port 7000``) is the one asked."""
+    from EvoScientist.langgraph_dev import registration
+
+    probed, posted = _fake_server(monkeypatch, tmp_path, record_port=7000)
+
+    assert registration.apply_autoskills_settings(_config()) is None
+    assert posted == ["http://127.0.0.1:7000/api/autoskills/reconcile"]
+    assert probed == ["http://127.0.0.1:7000"]
+
+
+def test_autoskills_setting_says_when_recorded_server_does_not_answer(
+    monkeypatch, tmp_path
+):
+    """The note comes from the short ``/ok`` check, not after the longer
+    instance request times out."""
+    from EvoScientist.langgraph_dev import registration
+
+    probed, posted = _fake_server(
+        monkeypatch, tmp_path, record_port=7000, answers=False
+    )
+
+    note = registration.apply_autoskills_settings(_config())
+
+    assert "server at http://127.0.0.1:7000 did not answer" in note
+    assert "Could not reach" not in note
+    assert probed == ["http://127.0.0.1:7000"]
+    assert posted == []
+
+
+def test_autoskills_setting_leaves_a_starting_server_alone(monkeypatch, tmp_path):
+    """A server still starting that does not answer yet gets no reconcile
+    request and no note, as without a server."""
+    from EvoScientist.langgraph_dev import registration, server_record
+
+    probed, posted = _fake_server(
+        monkeypatch,
+        tmp_path,
+        record_port=7000,
+        answers=False,
+        phase=server_record.STARTING,
+    )
+
+    assert registration.apply_autoskills_settings(_config()) is None
+    assert probed == ["http://127.0.0.1:7000"]
+    assert posted == []
+
+
+def test_autoskills_setting_without_record_asks_configured_port(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import registration
+
+    probed, posted = _fake_server(monkeypatch, tmp_path, record_port=None)
+    config = _config()
+    config.langgraph_dev_port = 16123
+
+    assert registration.apply_autoskills_settings(config) is None
+    assert probed == ["http://127.0.0.1:16123"]
+    assert posted == ["http://127.0.0.1:16123/api/autoskills/reconcile"]
+
+
 @pytest.mark.parametrize(
     ("body", "reconciles"),
     [
+        ({"memory_skill_synthesis_enabled": False}, True),
+        ({"memory_skill_synthesis_mode": "auto"}, True),
+        ({"memory_skill_synthesis_cadence": "nightly"}, True),
         ({"memory_skill_synthesis_time": "04:30"}, True),
+        ({"scheduler_default_timezone": "Asia/Tokyo"}, True),
         ({"show_thinking": False}, False),
     ],
 )

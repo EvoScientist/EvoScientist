@@ -32,6 +32,24 @@ def test_start_sets_server_process_env(monkeypatch, tmp_path, runtime_paths, inh
     assert captured["env"]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
 
 
+@pytest.mark.parametrize("inherited", [None, "", "0", "false"])
+def test_start_turns_off_langgraph_cli_analytics(
+    monkeypatch, tmp_path, runtime_paths, inherited
+):
+    """langgraph-cli sends usage data at every ``langgraph dev`` start unless
+    ``LANGGRAPH_CLI_NO_ANALYTICS`` is ``"1"``, so the server always gets it."""
+    if inherited is None:
+        monkeypatch.delenv("LANGGRAPH_CLI_NO_ANALYTICS", raising=False)
+    else:
+        monkeypatch.setenv("LANGGRAPH_CLI_NO_ANALYTICS", inherited)
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+
+    with pytest.raises(PopenAbort):
+        manager._spawn_server(port=16175)
+
+    assert captured["env"]["LANGGRAPH_CLI_NO_ANALYTICS"] == "1"
+
+
 def test_start_runs_server_in_server_home(monkeypatch, tmp_path, runtime_paths):
     """The server serves every registered project, so it gets no workspace of
     its own. The user's ``EVOSCIENTIST_WORKSPACE_DIR`` (Docker sets it) passes
@@ -93,18 +111,24 @@ def test_session_flag_reaches_only_server_it_owns(
     assert ("EVOSCIENTIST_DANGEROUS_MODE" in origins) is passed
 
 
-def test_auth_mode_flag_reaches_lasting_server(monkeypatch, tmp_path, runtime_paths):
+@pytest.mark.parametrize(
+    "env_key",
+    ["EVOSCIENTIST_OPENAI_AUTH_MODE", "EVOSCIENTIST_ANTHROPIC_AUTH_MODE"],
+)
+def test_auth_mode_flag_reaches_lasting_server(
+    monkeypatch, tmp_path, runtime_paths, env_key
+):
     """One server has one set of credentials: the session that starts it
-    picks them."""
+    picks them (with Anthropic's OAuth, the server starts its ccproxy)."""
     from EvoScientist.config import settings
 
-    monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
-    settings.record_env_origin("EVOSCIENTIST_OPENAI_AUTH_MODE", "cli")
+    monkeypatch.setenv(env_key, "oauth")
+    settings.record_env_origin(env_key, "cli")
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(PopenAbort):
         manager._spawn_server(port=16194)
 
-    assert captured["env"]["EVOSCIENTIST_OPENAI_AUTH_MODE"] == "oauth"
+    assert captured["env"][env_key] == "oauth"
 
 
 @pytest.mark.parametrize(
@@ -298,7 +322,7 @@ def test_node_for_mcp_servers_is_installed_before_start(monkeypatch):
     installed: list = []
     monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", installed.append)
 
-    manager._install_node_for_mcp(manager._Waits(None, None))
+    manager._install_node_for_mcp(manager._Waits(None, None, manager._START_BUDGET))
 
     assert installed == [servers]
 
@@ -312,7 +336,7 @@ def test_failing_node_check_does_not_block_start(monkeypatch, caplog):
     monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {"fs": None})
     monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", _fail)
 
-    manager._install_node_for_mcp(manager._Waits(None, None))
+    manager._install_node_for_mcp(manager._Waits(None, None, manager._START_BUDGET))
 
     assert "Could not check Node.js" in caplog.text
 

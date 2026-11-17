@@ -3,7 +3,8 @@
 A local client registers a project (``POST /api/workspaces``); once its setup
 is done it is recorded as registered, and served while its folder exists.
 Unregistering keeps the row, and everything the project owns, so the server
-still restores the project's threads.
+still restores the project's threads. A move to another folder replaces it,
+and is recorded in ``workspace_moves`` until it is done.
 """
 
 from __future__ import annotations
@@ -19,6 +20,15 @@ _TABLE = """
     CREATE TABLE IF NOT EXISTS workspaces (
         workspace_dir TEXT PRIMARY KEY,
         registered INTEGER NOT NULL
+    )
+"""
+
+
+_MOVES_TABLE = """
+    CREATE TABLE IF NOT EXISTS workspace_moves (
+        old TEXT PRIMARY KEY,
+        new TEXT NOT NULL,
+        done INTEGER NOT NULL DEFAULT 0
     )
 """
 
@@ -101,6 +111,77 @@ class Registry:
                 if known is None:
                     self._map_assistants(key)
                 self._loaded()[key] = registered
+
+    def forget(self, key: str) -> None:
+        """Remove *key*'s row: a move replaced it."""
+        with self._write_lock:
+            conn = self._connect()
+            try:
+                with conn:
+                    conn.execute(
+                        "DELETE FROM workspaces WHERE workspace_dir = ?", (key,)
+                    )
+            finally:
+                conn.close()
+            with self._lock:
+                self._loaded().pop(key, None)
+                self._assistants = {
+                    assistant_id: found
+                    for assistant_id, found in self._assistants.items()
+                    if found[1] != key
+                }
+
+    def pending_move(self) -> tuple[str, str] | None:
+        """The move recorded and not done yet: (old key, new key)."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(_MOVES_TABLE)
+            row = conn.execute(
+                "SELECT old, new FROM workspace_moves WHERE NOT done"
+            ).fetchone()
+        finally:
+            conn.close()
+        return (row[0], row[1]) if row else None
+
+    def record_move(self, old: str, new: str) -> None:
+        """Record the move of *old* to *new* before anything changes."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(_MOVES_TABLE)
+                conn.execute(
+                    "INSERT OR REPLACE INTO workspace_moves (old, new, done) "
+                    "VALUES (?, ?, 0)",
+                    (old, new),
+                )
+        finally:
+            conn.close()
+
+    def finish_move(self, old: str) -> None:
+        """Record the move of *old* as done; kept, so the same move asked
+        again (a client that gave up waiting) is answered as done."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(_MOVES_TABLE)
+                conn.execute(
+                    "UPDATE workspace_moves SET done = 1 WHERE old = ?", (old,)
+                )
+        finally:
+            conn.close()
+
+    def done_moves(self) -> list[tuple[str, str]]:
+        """The moves done: (old key, new key)."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(_MOVES_TABLE)
+            return conn.execute(
+                "SELECT old, new FROM workspace_moves WHERE done"
+            ).fetchall()
+        finally:
+            conn.close()
 
     def project_of_assistant(
         self, graph_id: str, assistant_id: object

@@ -95,6 +95,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
+    ("claude-fable-5-2", "claude-fable-5-2", "anthropic"),
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
     ("claude-sonnet-5-5", "claude-sonnet-5-5", "anthropic"),
@@ -132,6 +133,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
     ("mistral-large-2512", "mistral-large-2512", "opper"),
     # Google GenAI
+    ("gemini-4-hydrogen", "gemini-4-hydrogen", "google-genai"),
+    ("gemini-4-carbon", "gemini-4-carbon", "google-genai"),
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
     ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
@@ -165,6 +168,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
+    ("claude-fable-5.2", "anthropic/claude-fable-5.2", "openrouter"),
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),
@@ -173,6 +177,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-6.1-terra", "openai/gpt-6.1-terra", "openrouter"),
     ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
+    ("gemini-4-hydrogen", "google/gemini-4-hydrogen", "openrouter"),
+    ("gemini-4-carbon", "google/gemini-4-carbon", "openrouter"),
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
@@ -189,8 +195,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.7", "x-ai/grok-4.7", "openrouter"),
-    ("hy4-preview", "tencent/hy4-preview", "openrouter"),
-    ("hy3", "tencent/hy3", "openrouter"),
+    ("hy4", "tencent/hy4", "openrouter"),
     ("qwen3.8-max", "qwen/qwen3.8-max-0902", "openrouter"),
     ("qwen3.8-flash", "qwen/qwen3.8-flash", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),

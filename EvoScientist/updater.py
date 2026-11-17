@@ -307,7 +307,8 @@ def check_server(
             )
     if record is None and not is_langgraph_dev_running(port=port, host=host):
         go_on()
-        _stop_service_ccproxy(emit)
+        _stop_left_ccproxy(emit)
+        _stop_older_ccproxy(emit)
         return
     if record is not None:
         port, url = record.port, record.url
@@ -381,7 +382,7 @@ def check_server(
                 forget_restart()
             raise UpdateError("server_running", failed)
         emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
-        _stop_service_ccproxy(emit)
+        _stop_older_ccproxy(emit)
         return
     manual = manual_stop_command(port)
     message = (
@@ -392,18 +393,34 @@ def check_server(
     if confirm is not None and not opts.yes:
         if confirm(f"{message}\nUpdate anyway?"):
             go_on()
-            _stop_service_ccproxy(emit)
+            _stop_older_ccproxy(emit)
             return
         raise UpdateError("server_running", "Update cancelled.")
     raise UpdateError("server_running", f"{message} Nothing was changed.")
 
 
-def _stop_service_ccproxy(emit: Emitter) -> None:
-    """Stop the ccproxy EvoSci left running for its sessions: it runs from
-    the install the update replaces. The next session starts it again."""
+def _stop_older_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy an older release left running for its sessions: it
+    runs from the install the update replaces. The server starts its own."""
     from .ccproxy_manager import stop_recorded_ccproxy
 
     pid = stop_recorded_ccproxy()
+    if pid is not None:
+        emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
+
+
+def _stop_left_ccproxy(emit: Emitter) -> None:
+    """Stop the ccproxy a killed server left running (``kill -9``, out of
+    memory): its record still names it, and it would keep the update
+    waiting on a busy environment."""
+    from .config import get_effective_config
+    from .langgraph_dev import server_ccproxy, server_record
+    from .langgraph_dev.manager import RUNTIME
+
+    left = server_record.load_json(RUNTIME.record)
+    if not left:
+        return
+    pid = server_ccproxy.end_recorded(left, get_effective_config().ccproxy_port)
     if pid is not None:
         emit(make_event(STAGE, "running", message=f"Stopped ccproxy (pid {pid})"))
 
@@ -880,8 +897,9 @@ def _reader_gone() -> bool:
 
 
 def _server_tree() -> set[int]:
-    """The background agent service the update stops itself: the recorded
-    langgraph server and the recorded ccproxy, with their children."""
+    """The background agent server the update stops itself: the recorded
+    langgraph server (with the ccproxy it started) and the ccproxy an older
+    release recorded, with their children."""
     import psutil
 
     from .ccproxy_manager import recorded_ccproxy_running

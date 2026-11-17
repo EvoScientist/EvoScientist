@@ -188,18 +188,6 @@ def _server_gateway():
     return object.__new__(LangGraphServerGateway)
 
 
-def test_runs_in_process_goes_by_the_gateway_that_executes():
-    from types import SimpleNamespace
-
-    from EvoScientist.rubric_session import runs_in_process
-
-    assert runs_in_process(object()) is True
-    assert runs_in_process(_server_gateway()) is False
-    # A routing gateway is judged by the one it executes on.
-    assert runs_in_process(SimpleNamespace(execute_gateway=_server_gateway())) is False
-    assert runs_in_process(SimpleNamespace(execute_gateway=object())) is True
-
-
 def test_only_the_sessions_own_thread_on_the_local_gateway_is_marked():
     from EvoScientist.rubric_session import RubricSession, thread_run_extra
 

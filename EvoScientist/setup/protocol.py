@@ -126,8 +126,9 @@ class Emitter(Protocol):
 class JsonEmitter:
     """Write each event as one JSON line and flush, so a reader sees it at once.
 
-    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a piped stdout on
-    Windows uses the ANSI code page, which cannot encode every path.
+    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a
+    ``PYTHONIOENCODING`` the user set can still select the ANSI code page for a
+    piped stdout on Windows, which cannot encode every path.
     """
 
     def __init__(self, stream: TextIO | None = None) -> None:

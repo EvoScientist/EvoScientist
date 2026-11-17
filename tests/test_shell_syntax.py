@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from EvoScientist import shell_syntax
 
 
@@ -95,6 +97,39 @@ class TestWordsAndScripts:
             command.index("'")
         }
 
+    @pytest.mark.parametrize(
+        "options",
+        [
+            "-o pipefail",
+            "-O extglob",
+            "-euo pipefail",
+            "+o pipefail",
+            "-o pipefail -O extglob",
+            "-o pipefail -lc",
+        ],
+    )
+    def test_named_shell_options_are_skipped_before_the_script(self, options):
+        option_c = "" if options.endswith("-lc") else " -c"
+        command = f"timeout 5 bash {options}{option_c} 'cat /tmp/a'"
+        assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
+            command.index("'")
+        }
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -o",
+            "bash -O; echo x",
+            "bash -o pipefail",
+            "bash -c",
+            "bash -o pipefail; echo -c 'not a script'",
+        ],
+    )
+    def test_missing_named_option_or_script_does_not_consume_next_command(
+        self, command
+    ):
+        assert not shell_syntax.shell_script_words(shell_syntax.parse(command).tokens)
+
     def test_substitutions_in_double_quotes_are_converted(self):
         assert shell_syntax.rewrite_substitutions(
             "\"$(ls /a) and `cat /b`\" '$(ls /c)'",
@@ -161,6 +196,102 @@ class TestSimpleCommands:
         [rm, echo] = shell_syntax.simple_commands("rm -rf /a /b > /dev/null 2>&1; echo")
         assert rm.args == ("-rf", "/a", "/b")
         assert echo.args == ()
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("env -S 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -S'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -iS 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env --split-string='pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env --split 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -S 'kill -9' -1", ("kill", ("-9", "-1"))),
+            ("env -S 'pkill\\_-f x'", ("pkill", ("-f", "x"))),
+            ("env -S 'pkill\\c' -f worker", ("pkill", ("-f", "worker"))),
+            ("env -S 'kill -9\\c ignored' -1", ("kill", ("-9", "-1"))),
+            ("env -S 'sh -c \"echo safe\\npkill x\"'", ("pkill", ("x",))),
+            ("env -S 'echo a\\nb\\tc d'", ("echo", ("a'\n'b'\t'c", "d"))),
+            ("env -S \"echo 'a\\nb'\"", ("echo", ("'a\\nb'",))),
+            ("env -S '-i -S \"pkill x\"'", ("pkill", ("x",))),
+            (
+                "env -S 'cat \"name with space.txt\"'",
+                ("cat", ('"name with space.txt"',)),
+            ),
+            (
+                "env -S \"cat 'name with space.txt'\"",
+                ("cat", ("'name with space.txt'",)),
+            ),
+            (
+                "env -S 'cat name\\ with\\ space.txt'",
+                ("cat", ("name\\ with\\ space.txt",)),
+            ),
+            ("env -S \"cat 'a\\_b'\"", ("cat", ("'a\\_b'",))),
+        ],
+    )
+    def test_env_runs_the_words_it_splits(self, command, expected):
+        commands = shell_syntax.simple_commands(command)
+        assert expected in [(found.name, found.args) for found in commands]
+        assert all(found.via == ("env",) for found in commands[1:])
+
+    def test_env_split_strings_are_also_read_as_code(self):
+        assert ("pkill", ("env",)) in self._found("env -S 'a; pkill x'")
+        assert ("pkill", ("env",)) in self._found("env -S 'sh -c \"pkill x\"'")
+        # A bare `--` ends env's options; it is no `--split-string` prefix.
+        assert self._found("env -- pkill x") == [("env", ()), ("pkill", ("env",))]
+        assert self._found("env -u S python x.py") == [
+            ("env", ()),
+            ("python", ("env",)),
+        ]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "env -iC build pkill x",
+            "env --ch build pkill x",
+            "env -iu A pkill x",
+            "env -au pkill x",
+            "env -P bin pkill x",
+            "env --argv0 x pkill x",
+        ],
+    )
+    def test_env_options_take_their_value_clustered_or_shortened(self, command):
+        assert ("pkill", ("env",)) in self._found(command)
+
+    @pytest.mark.parametrize(
+        ("command", "names"),
+        [
+            ("rm a; cd b; rm c", ["rm"]),
+            ("bash -c 'rm a; cd b; rm c'; rm d", ["bash", "rm", "rm"]),
+            ('echo "$(cd b; rm a)"; rm c', ["echo", "rm"]),
+            ('bash -c "cd b; echo $(rm a)"', ["bash", "rm"]),
+            ("env -iC b sh -c 'rm a'; rm c", ["env", "rm"]),
+        ],
+    )
+    def test_starting_folder_commands_end_each_text_at_its_cd(self, command, names):
+        found = shell_syntax.starting_folder_commands(command)
+        assert [each.name for each in found] == names
+
+    def test_assignments_wherever_a_variable_is_set(self):
+        assert shell_syntax.assignments(
+            'A=1; B=$(ps aux | grep x) cmd; export C=`lsof -t`; local -r D="$(ps)" E'
+        ) == [
+            ("A", "1"),
+            ("B", "$(ps aux | grep x)"),
+            ("C", "`lsof -t`"),
+            ("D", '"$(ps)"'),
+        ]
+        assert shell_syntax.assignments("arr[0]=$(ps) n+=1") == [
+            ("arr", "$(ps)"),
+            ("n", "1"),
+        ]
+        assert sorted(
+            shell_syntax.assignments("bash -c 'P=$(pgrep x)'; echo $(Q=1)")
+        ) == [("P", "$(pgrep x)"), ("Q", "1")]
+        assert shell_syntax.assignments("echo A=1; FOO='x=1'") == [("FOO", "'x=1'")]
+        # Quoted names; the value keeps the quotes opened before the `=`.
+        assert shell_syntax.assignments(
+            "export \"P=$(lsof -t)\" 'Q'=$(ps) 'R=$(ps)' -x=1 \"$X\"=1"
+        ) == [("P", '"$(lsof -t)"'), ("Q", "''$(ps)"), ("R", "'$(ps)'")]
 
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")

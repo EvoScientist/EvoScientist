@@ -390,6 +390,7 @@ class GoalDrafter:
         from .model_fallback import ModelFallbackMiddleware
         from .model_retry import ModelCallBoundaryMiddleware
         from .rubric import _GraderCallBudget
+        from .windows_paths import WindowsFilePathMiddleware
 
         retry = self._model_retry
         self._agent = create_agent(
@@ -405,6 +406,8 @@ class GoalDrafter:
                     tool_token_limit_before_evict=None,
                     human_message_token_limit_before_evict=None,
                 ),
+                # The user's request can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 _GraderCallBudget(
                     max_calls=GOAL_DRAFTER_MAX_CALLS,
                     who="goal drafter",

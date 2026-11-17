@@ -203,6 +203,19 @@ class TestOAuthModeReconcile:
 
         assert config.openai_auth_mode == "oauth"
 
+    def test_reconcile_preserves_fallback_anthropic_oauth(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            model_fallbacks="claude-sonnet-4-5:anthropic",
+            anthropic_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.anthropic_auth_mode == "oauth"
+
 
 # =============================================================================
 # Test render_progress

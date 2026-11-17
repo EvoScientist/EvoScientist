@@ -767,7 +767,8 @@ class TestWorkspaceRemovalAndComments:
         self, command, tmp_workspace
     ):
         _command, error = prepare_sandbox_command(command, tmp_workspace)
-        assert "forbidden pattern" in error
+        expected = "path traversal" if "..''" in command else "forbidden pattern"
+        assert expected in error
 
     def test_memories_and_installed_skills_stay_protected(
         self, tmp_workspace, tmp_path, monkeypatch
@@ -860,6 +861,42 @@ class TestWorkspaceRemovalAndComments:
     def test_glued_hashes_and_line_continuations_hide_nothing(self, command):
         assert "'sudo' is not allowed" in validate_command(command)
 
+    @pytest.mark.parametrize("backslashes", [2, 4])
+    def test_a_newline_after_escaped_backslashes_ends_the_command(self, backslashes):
+        command = "echo x" + "\\" * backslashes + "\npkill x"
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo x\\\npkill x", "echo x\\\\\\\npkill x", "echo x\\\\ \\\n pkill x"],
+    )
+    def test_an_odd_backslash_before_a_newline_continues_the_line(self, command):
+        # The next line's words are arguments of echo, not a command.
+        assert validate_command(command) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo start # stop the old server \\\npkill -f uvicorn",
+            "python train.py \\\n  --lr 1e-3 \\\n  # --resume ckpt \\\npkill -f uvicorn",
+            "bash <<EOF # note \\\npkill x\nEOF",
+        ],
+    )
+    def test_a_backslash_ending_a_comment_continues_nothing(self, command):
+        assert "'pkill' is not allowed" in validate_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo x\\\\\nssh host 'cat /home/user/project/file'",
+            "echo ready # done \\\nssh host 'cat /home/user/project/file'",
+        ],
+    )
+    def test_ssh_after_a_line_ending_in_a_backslash_is_still_masked(
+        self, command, tmp_workspace
+    ):
+        assert prepare_sandbox_command(command, tmp_workspace) == (command, None)
+
     def test_cd_after_a_glued_hash_is_still_checked(self):
         assert "leaves the workspace" in validate_command(
             "echo $(date)#; cd /etc; ls", workspace_root="/W"
@@ -893,6 +930,10 @@ class TestWorkspaceRemovalAndComments:
             "rm --recursive --force /memories",
             "rm -rf -- /memories/profile",
             "cd . && rm -fr /",
+            "rm '-r' /skills/demo",
+            'rm "-rf" /skills/demo',
+            "rm -\\r /memories",
+            "rm --rec /memories",
         ],
     )
     def test_every_absolute_operand_of_a_recursive_rm_is_checked(
@@ -915,9 +956,157 @@ class TestWorkspaceRemovalAndComments:
     def test_recursive_removals_inside_the_workspace_pass(self, command, tmp_workspace):
         assert prepare_sandbox_command(command, tmp_workspace)[1] is None
 
+    @staticmethod
+    def _prepare_with_workspace_folders(command: str, workspace: str):
+        root = Path(workspace)
+        (root / "skills" / "demo").mkdir(parents=True, exist_ok=True)
+        # As the daemon builds it: no media folder of its own in the sandbox.
+        _command, error = prepare_sandbox_command(
+            command, workspace, skills_dir=root / "skills"
+        )
+        return error
+
     @pytest.mark.parametrize(
         "command",
-        ["rm -rf ~", "rm -rf $HOME/.cache/huggingface", 'rm -rf "${HOME}/.cache/pip"'],
+        [
+            "rm -rf skills",
+            "rm -rf ./skills/",
+            "rm -rf skills/demo",
+            "rm -rf build skills",
+            "echo hi; rm -rf skills",
+            "rm '-r' skills",
+            "bash -c 'rm -rf skills'",
+            "rm -rf skills/*",
+            "rm -rf 'skills/*'",
+            "rm -rf skills/$X",
+            "rm -rf skills/{a,b}",
+            "bash -c 'rm -rf skills'; cd build",
+            'echo "$(rm -rf skills)"; cd build',
+            "bash -c 'cd build'; rm -rf skills",
+            "echo cd; rm -rf skills",
+            "env -aC rm -rf skills",
+            "env -a -C rm -rf skills",
+            "bash -c 'cd build'; bash -c 'rm -rf skills'",
+            "env bash -c 'rm -rf skills'; env -C build ls",
+            "nohup cd build; rm -rf skills",
+            'command cd "$(rm -rf skills)"',
+            "cat <<EOF; cd build; ls\n$(rm -rf skills)\nEOF",
+            "bash -c 'cd build <<EOF\n$(rm -rf skills)\nEOF'",
+            'cd "$(rm -rf skills)"',
+            "bash -c 'cd build >\"$(rm -rf skills)\"'",
+            "bash -c 'cd build >$(rm -rf skills)'",
+            "bash -c 'cd $(rm -rf skills)'",
+            "bash -c 'cd `echo a; rm -rf skills`'",
+            'bash -c "cd build; echo $(rm -rf skills)"',
+            "bash <<EOF\ncd build\n$(rm -rf skills)\nEOF",
+            "env -C build make; rm -rf skills",
+            "env -iC build make; rm -rf skills",
+            "env make -C build; rm -rf skills",
+            "env FOO=1 tar -C out -xf a.tar; rm -rf skills",
+            "rm -rf skills/$(printf demo)",
+            "rm -rf skills/`printf demo`",
+            'rm -rf "skills"/$(date +%F)',
+            "rm -rf skills/`date +%Y/%m`",
+            "rm -rf 'sk'ills/$(printf demo)",
+        ],
+    )
+    @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
+    def test_relative_removals_of_protected_folders_are_refused(
+        self, command, folder, tmp_path
+    ):
+        workspace = tmp_path / folder
+        workspace.mkdir()
+        error = self._prepare_with_workspace_folders(command, str(workspace))
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command", ["rm -r .evoscientist", "rm -rf .evoscientist/memories/$(date +%F)"]
+    )
+    def test_relative_removals_of_memories_in_the_workspace_are_refused(
+        self, command, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(
+            paths, "MEMORIES_DIR", Path(tmp_workspace) / ".evoscientist" / "memories"
+        )
+        assert "protected folder" in prepare_sandbox_command(command, tmp_workspace)[1]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf build",
+            "rm -rf .",
+            "rm -rf skills2 skillset",
+            "rm -rf my\\ skills/x",
+            'rm -rf "my skills"',
+            "rm -rf $OUT",
+            'rm -rf "$OUT"/skills',
+            "rm skills/demo/x.py",
+            "cd build && rm -rf skills",
+            "pushd build && rm -rf skills",
+            "env -C build rm -rf skills",
+            "env -iC build rm -rf skills",
+            "env --chdir=build rm -rf skills",
+            "env --ch build rm -rf skills",
+            "env -iu X -C build rm -rf skills",
+            "env LANG=C -C build rm -rf skills",
+            "(cd build; rm -rf skills)",
+            "bash -c 'cd build && rm -rf skills'",
+            "bash -c 'cd EvoSkills && rm -rf skills/old'",
+            "timeout 60 bash -c 'cd build && rm -rf skills'",
+            "bash <<'EOF'\ncd build\nrm -rf skills\nEOF",
+            'echo "$(cd build && rm -rf skills)"',
+            "env -C build sh -c 'rm -rf skills' && echo done",
+            "nohup env -C build rm -rf skills",
+            'cd build && >"$(rm -rf skills)" echo hi',
+            "cd `mktemp -d` && rm -rf skills",
+            'cd build && echo "$(rm -rf skills)"',
+            "cd build && cat <<EOF\n$(rm -rf skills)\nEOF",
+            "rm -rf skill* {build,dist}",
+            "rm -rf build/$(date +%F)",
+            "rm -rf ./$(printf build)",
+        ],
+    )
+    def test_other_relative_removals_pass(self, command, tmp_workspace):
+        assert self._prepare_with_workspace_folders(command, tmp_workspace) is None
+
+    @pytest.mark.parametrize("bash", [False, True])
+    def test_relative_protected_removals_on_windows(self, monkeypatch, bash):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(
+            agent_shell, "agent_bash", lambda: object() if bash else None
+        )
+        ws = r"C:\Users\me\proj"
+        commands = ["rm -rf Skills", "rm -r -f ./SKILLS/demo"]
+        if bash:  # bash reads `sk\ills` as `skills`
+            commands.append("rm -rf sk\\ills/$(printf demo)")
+        else:  # cmd.exe keeps backslashes
+            commands.append("rm -r -f .\\skills\\demo")
+        for command in commands:
+            error = prepare_sandbox_command(command, ws, skills_dir=ws + r"\skills")[1]
+            assert "protected folder" in error, command
+
+    def test_an_escaped_folder_before_a_substitution_on_posix(
+        self, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        error = self._prepare_with_workspace_folders(
+            "rm -rf sk\\ills/$(printf demo)", tmp_workspace
+        )
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf ~",
+            "rm -rf $HOME/.cache/huggingface",
+            'rm -rf "${HOME}/.cache/pip"',
+            "rm -rf $USERPROFILE/x",
+            "rm -rf ${USERPROFILE}",
+            "rm -rf %USERPROFILE%",
+            'rm -rf "%USERPROFILE%\\Documents"',
+        ],
     )
     def test_removing_from_the_home_folder_is_refused(self, command, tmp_workspace):
         assert (
@@ -956,6 +1145,18 @@ class TestWorkspaceRemovalAndComments:
     def test_a_refusal_shows_the_matched_text(self):
         assert "'rm -rf /'" in validate_command("rm -rf /")
 
+    def test_a_long_run_of_slashes_after_home_is_checked_quickly(self, tmp_workspace):
+        started = time.monotonic()
+        for home in ("~", "$HOME"):
+            command = f"rm -rf {home}{'/' * 200}cache"
+            assert (
+                prepare_sandbox_command(
+                    command, tmp_workspace, virtual_mode=False, dangerous=True
+                )[1]
+                is None
+            )
+        assert time.monotonic() - started < 2
+
     @pytest.mark.parametrize(
         "command",
         [
@@ -965,6 +1166,25 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf ~",
             'rm -rf "$HOME"',
             "rm -r ${HOME}/*",
+            "rm '-r' ~",
+            'rm "-rf" /',
+            "rm -rf ~/.",
+            "rm -rf ~/./",
+            'rm -rf "$HOME"/.',
+            "rm -rf $HOME/.",
+            "rm -rf ~root",
+            "rm -rf ~root/",
+            "rm -rf ~john.doe-2/*",
+            "rm -rf $USERPROFILE",
+            'rm -rf "${USERPROFILE}"/',
+            "rm -rf %USERPROFILE%",
+            "rm -rf %userprofile%\\",
+            'rm -rf ~/""',
+            "rm -rf ~/''",
+            "rm -rf ~root/'.'",
+            "env -iC / rm -rf ~",
+            "rm -rf ~/.*",
+            "rm -rf $HOME/.*",
         ],
     )
     def test_dangerous_mode_never_removes_the_root_or_home(
@@ -976,8 +1196,33 @@ class TestWorkspaceRemovalAndComments:
         assert "refused in every mode" in error
 
     @pytest.mark.parametrize(
+        "command", ["rm -rf %USERPROFILE%\\*", "rm -rf %USERPROFILE%\\."]
+    )
+    def test_dangerous_mode_never_removes_home_under_cmd(self, command, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+        error = prepare_sandbox_command(
+            command, r"C:\Users\me\proj", virtual_mode=False, dangerous=True
+        )[1]
+        assert "refused in every mode" in error
+
+    @pytest.mark.parametrize(
         "command",
-        ["rm -fr /tmp/x", "rm -rf ~/build/cache", "rm -r '$HOME'", 'rm -rf "\\$HOME"'],
+        [
+            "rm -fr /tmp/x",
+            "rm -rf ~/build/cache",
+            "rm -r '$HOME'",
+            'rm -rf "\\$HOME"',
+            "rm -rf ~/project",
+            "rm -rf ~root/project",
+            "rm -rf $USERPROFILE/AppData/Local/x",
+            "rm -rf $USERPROFILE_BACKUP",
+            "rm -rf ~-",
+            'rm -rf "~"',
+            'rm -rf ~"root"',
+        ],
     )
     def test_dangerous_mode_removes_deeper_paths(self, command, tmp_workspace):
         assert (
@@ -1016,7 +1261,10 @@ class TestWorkspaceRemovalAndComments:
             command, tmp_workspace, guard_dangerous=True
         ) == (command, None)
 
-    def test_an_escaped_dollar_keeps_the_mount_rewrite(self):
+    def test_an_escaped_dollar_keeps_the_mount_rewrite(self, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
         assert convert_virtual_paths_in_command('cat "/skills/\\$schema.json"') == (
             "cat './skills/$schema.json'"
         )
@@ -1141,6 +1389,9 @@ class TestSandboxCommandChecks:
             ("pushd ~", "'pushd ~'"),
             ("pushd /usr", "'pushd /usr'"),
             ("bash -c 'cd ~ && ls'", "'cd ~'"),
+            ("cd $USERPROFILE && ls", "'cd $USERPROFILE'"),
+            ('cd "${USERPROFILE}/x"', "'cd \"${USERPROFILE}/x\"'"),
+            ("cd %USERPROFILE%", "'cd %USERPROFILE%'"),
         ],
     )
     def test_cd_home_leaves_the_workspace(self, command, shown, monkeypatch):
@@ -1157,6 +1408,7 @@ class TestSandboxCommandChecks:
             "cd ./src && cd -",
             "cd -P src",
             "cd $HOMEDIR",
+            "cd $USERPROFILE_DIR",
             "pushd src",
             "mkdir -p '$HOME' && cd '$HOME'",
             "cd '~'",
@@ -1947,6 +2199,95 @@ class TestDeleteBlocked:
         assert result.error is None
         assert not (tmp_path / "f.txt").exists()
 
+    @pytest.mark.parametrize("path", ["/", "/myproj"])
+    def test_sandbox_backend_refuses_deleting_the_workspace_root(self, tmp_path, path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (ws / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        result = backend.delete(path)
+        assert "workspace root" in result.error
+        assert (ws / "f.txt").exists()
+
+    def test_sandbox_backend_deletes_folder_named_like_the_workspace(self, tmp_path):
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "myproj" / "core.py").write_text("x = 1\n")
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        result = backend.delete("/myproj")
+        assert result.error is None
+        assert not (ws / "myproj").exists()
+        assert (ws / "README.md").exists()
+
+    def test_dangerous_backend_refuses_deleting_the_workspace_root(self, tmp_path):
+        (tmp_path / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(
+            root_dir=str(tmp_path), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(str(tmp_path))
+        assert "workspace root" in result.error
+        assert (tmp_path / "f.txt").exists()
+
+    def test_sandbox_backend_deletes_the_path_it_checked(self, tmp_path, monkeypatch):
+        """A folder named like the workspace that goes away while the delete
+        runs does not turn the delete into one of the workspace root."""
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolve = backend._resolve_path
+
+        def resolve_then_remove(key):
+            resolved = resolve(key)
+            if (ws / "myproj").exists():
+                (ws / "myproj").rmdir()
+            return resolved
+
+        monkeypatch.setattr(backend, "_resolve_path", resolve_then_remove)
+        result = backend.delete("/myproj")
+        assert "not found" in result.error
+        assert (ws / "README.md").exists()
+
+    @pytest.mark.parametrize("path", ["sub/..", ".."])
+    def test_dangerous_backend_refuses_deleting_the_workspace_or_above(
+        self, tmp_path, path
+    ):
+        ws = tmp_path / "parent" / "ws"
+        (ws / "sub").mkdir(parents=True)
+        (ws / "f.txt").write_text("x")
+        backend = CustomSandboxBackend(
+            root_dir=str(ws), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(f"{ws.as_posix()}/{path}")
+        assert "workspace root" in result.error
+        assert (ws / "f.txt").exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+    def test_dangerous_backend_refuses_deleting_the_workspace_through_a_symlink(
+        self, tmp_path
+    ):
+        real = tmp_path / "real"
+        (real / "ws").mkdir(parents=True)
+        (real / "ws" / "f.txt").write_text("x")
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(real / "ws"), virtual_mode=True, dangerous=True
+        )
+        result = backend.delete(str(link / "ws"))
+        assert "workspace root" in result.error
+        assert (real / "ws" / "f.txt").exists()
+
+    def test_sandbox_backend_raises_on_traversal_like_the_parent(self, tmp_path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (tmp_path / "outside.txt").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        with pytest.raises(ValueError, match="traversal"):
+            backend.delete("/../outside.txt")
+        assert (tmp_path / "outside.txt").exists()
+
 
 # === CustomSandboxBackend._resolve_path ===
 
@@ -1965,16 +2306,38 @@ class TestResolvePath:
         # Should resolve to root dir
         assert resolved == backend._resolve_path("/")
 
-    def test_system_path_with_workspace_marker(self, tmp_workspace):
+    def test_host_path_is_cut_at_the_workspace_folder_name(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/project/workspace/main.py")
-        assert Path(resolved).parts[-1] == "main.py"
+        assert resolved == Path(tmp_workspace, "main.py").resolve()
 
-    def test_system_path_without_workspace(self, tmp_workspace):
+    def test_host_path_ending_in_the_workspace_folder_name_is_the_root(
+        self, tmp_workspace
+    ):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
-        resolved = backend._resolve_path("/Users/someone/file.py")
-        # Falls back to basename
-        assert Path(resolved).parts[-1] == "file.py"
+        resolved = backend._resolve_path("/Users/someone/workspace")
+        assert resolved == backend._resolve_path("/")
+
+    @pytest.mark.parametrize(
+        "key",
+        ["/Users/someone/file.py", "/tmp/pool.jsonl", "/bin/run.sh", "/etc/app.conf"],
+    )
+    def test_system_folder_name_is_a_workspace_path(self, tmp_workspace, key):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        assert backend._resolve_path(key) == Path(tmp_workspace, key[1:]).resolve()
+
+    def test_workspace_name_inside_a_workspace_folder_is_kept(self, tmp_workspace):
+        """Only host-looking paths are cut at the workspace's folder name."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        resolved = backend._resolve_path("/data/workspace/main.py")
+        assert resolved == Path(tmp_workspace, "data", "workspace", "main.py").resolve()
+
+    @pytest.mark.parametrize("name", ["tmp", "home", "bin"])
+    def test_folder_named_like_its_system_named_workspace(self, tmp_path, name):
+        ws = tmp_path / name
+        ws.mkdir()
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path(f"/{name}/{name}") == (ws / name).resolve()
 
     def test_custom_workspace_name_prefix_stripped(self, tmp_path):
         """_resolve_path uses the actual dir name, not hardcoded 'workspace'."""
@@ -1985,14 +2348,56 @@ class TestResolvePath:
         assert Path(resolved).parts[-1] == "main.py"
         assert "my-project/my-project" not in str(resolved)
 
+    def test_workspace_name_prefix_stripped_without_such_folder(self, tmp_path):
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path("/myproj/core.py") == (ws / "core.py").resolve()
+        assert backend._resolve_path("/myproj") == backend._resolve_path("/")
+
+    def test_folder_named_like_the_workspace_is_kept(self, tmp_path):
+        """A workspace folder named like the workspace is that folder (#809).
+
+        The file tools pass a relative ``myproj/core.py`` as ``/myproj/core.py``.
+        """
+        ws = tmp_path / "myproj"
+        (ws / "myproj").mkdir(parents=True)
+        (ws / "myproj" / "core.py").write_text("x = 1\n")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolved = backend._resolve_path("/myproj/core.py")
+        assert resolved == (ws / "myproj" / "core.py").resolve()
+        assert backend.read("/myproj/core.py").error is None
+        listed = [entry["path"] for entry in backend.ls("/myproj").entries]
+        assert listed == ["/myproj/core.py"]
+
+    def test_folder_named_like_a_system_workspace_is_kept(self, tmp_path):
+        ws = tmp_path / "tmp"
+        (ws / "tmp").mkdir(parents=True)
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        resolved = backend._resolve_path("/tmp/core.py")
+        assert resolved == (ws / "tmp" / "core.py").resolve()
+
+    def test_file_named_like_the_workspace_is_reached_by_its_bare_name(self, tmp_path):
+        """``/myproj/...`` is still stripped, but a bare ``/myproj`` is now the
+        file: on main it was the workspace root, so deleting it wiped the
+        workspace."""
+        ws = tmp_path / "myproj"
+        ws.mkdir()
+        (ws / "myproj").write_text("x")
+        (ws / "README.md").write_text("x")
+        backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
+        assert backend._resolve_path("/myproj/core.py") == (ws / "core.py").resolve()
+        assert backend._resolve_path("/myproj") == (ws / "myproj").resolve()
+        assert backend.delete("/myproj").error is None
+        assert not (ws / "myproj").exists()
+        assert (ws / "README.md").exists()
+
     def test_custom_workspace_name_system_path(self, tmp_path):
         ws = tmp_path / "experiment-1"
         ws.mkdir()
         backend = CustomSandboxBackend(root_dir=str(ws), virtual_mode=True)
         resolved = backend._resolve_path("/Users/someone/experiment-1/data/out.csv")
-        # Cross-platform suffix check: ``str(Path)`` uses backslashes on
-        # Windows, so testing for the literal POSIX suffix is brittle.
-        assert Path(resolved).parts[-2:] == ("data", "out.csv")
+        assert resolved == (ws / "data" / "out.csv").resolve()
 
     def test_normal_virtual_path(self, tmp_workspace):
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
@@ -2037,6 +2442,91 @@ class TestResolvePath:
         """
         backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
         assert backend._resolve_path(tmp_workspace) == backend._resolve_path("/")
+
+
+class TestFileToolsMatchCommands:
+    """The file tools and commands name the same workspace file (#778)."""
+
+    @staticmethod
+    def _tool(backend, name, **args) -> str:
+        from types import SimpleNamespace
+
+        from deepagents.middleware.filesystem import FilesystemMiddleware
+
+        tools = {t.name: t for t in FilesystemMiddleware(backend=backend).tools}
+        out = tools[name].func(
+            runtime=SimpleNamespace(tool_call_id="c", state={}), **args
+        )
+        if hasattr(out, "update"):
+            out = out.update["messages"][0]
+        return str(out.content)
+
+    @pytest.mark.parametrize(
+        "key", ["/tmp/pool.jsonl", "./tmp/pool.jsonl", "tmp/pool.jsonl"]
+    )
+    def test_file_tools_read_a_file_under_tmp(self, tmp_workspace, key):
+        Path(tmp_workspace, "tmp").mkdir()
+        Path(tmp_workspace, "tmp", "pool.jsonl").write_text("row\n")
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        assert "row" in self._tool(backend, "read_file", file_path=key)
+
+    @pytest.mark.parametrize("folder", ["tmp", "bin", "etc", "var", "home", "Users"])
+    @pytest.mark.parametrize("lead", ["/", ""])
+    def test_file_tools_write_under_a_system_folder_name(
+        self, tmp_workspace, folder, lead
+    ):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(
+            backend, "write_file", file_path=f"{lead}{folder}/new/a.txt", content="hi"
+        )
+        assert Path(tmp_workspace, folder, "new", "a.txt").read_text() == "hi"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+    @pytest.mark.parametrize(
+        "key", ["/tmp/pool.jsonl", "./tmp/pool.jsonl", "tmp/pool.jsonl"]
+    )
+    def test_file_tools_read_what_a_command_wrote_under_tmp(self, tmp_workspace, key):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        backend.execute("echo row > /tmp/pool.jsonl")
+        assert "row" in self._tool(backend, "read_file", file_path=key)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+    @pytest.mark.parametrize("folder", ["tmp", "bin", "etc", "var", "home", "Users"])
+    def test_command_reads_what_a_file_tool_wrote(self, tmp_workspace, folder):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(
+            backend, "write_file", file_path=f"/{folder}/new/a.txt", content="hi"
+        )
+        assert backend.execute(f"cat /{folder}/new/a.txt").output.strip() == "hi"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell")
+    def test_quoted_relative_path_reads_what_a_file_tool_wrote(self, tmp_workspace):
+        """A quoted ``./tmp/...`` names the file ``write_file("/tmp/...")`` wrote."""
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(backend, "write_file", file_path="/tmp/pool.jsonl", content="row")
+        assert backend.execute('cat "./tmp/pool.jsonl"').output.strip() == "row"
+
+    def test_non_virtual_mode_needs_dangerous(self, tmp_workspace):
+        """Non-virtual resolution would pass host paths through as-is."""
+        with pytest.raises(ValueError, match="requires dangerous=True"):
+            CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=False)
+
+    def test_host_path_does_not_answer_with_a_workspace_file(self, tmp_workspace):
+        Path(tmp_workspace, "data.csv").write_text("workspace copy")
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        result = self._tool(
+            backend, "read_file", file_path="/Users/alice/Downloads/data.csv"
+        )
+        assert "not found" in result
+        assert "workspace copy" not in result
+
+    def test_paths_with_one_file_name_stay_apart(self, tmp_workspace):
+        backend = CustomSandboxBackend(root_dir=tmp_workspace, virtual_mode=True)
+        self._tool(backend, "write_file", file_path="/tmp/notes.md", content="tmp")
+        self._tool(backend, "write_file", file_path="/Users/n/notes.md", content="home")
+        assert Path(tmp_workspace, "tmp", "notes.md").read_text() == "tmp"
+        assert Path(tmp_workspace, "Users", "n", "notes.md").read_text() == "home"
+        assert not Path(tmp_workspace, "notes.md").exists()
 
 
 class TestResolvePathDangerous:
@@ -2689,6 +3179,86 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
 
 
+# === '..' traversal through option and assignment spellings (issue #825) ===
+
+
+class TestTraversalOptionSpellings:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=../out.txt",
+            "python s.py -o../out.txt",
+            "OUT=../out.txt python s.py",
+            "python s.py '--output=../out.txt'",
+            "python s.py -o'../out.txt'",
+            "python s.py --output=..",
+            "bash -c 'python s.py --output=../out.txt'",
+            "bash -c 'python s.py -o\"../out.txt\"'",
+            "python s.py -vo../out.txt",
+            "make CFLAGS=-I../include",
+            "CPPFLAGS=-I../include ./configure",
+            "# '\necho \"$(python s.py -o'../out.txt')\"",
+            '# "\necho "`python s.py -o\'../out.txt\'`"',
+            "cat <<EOF\n$(python s.py -o'../out.txt')\nEOF",
+            "cat <<EOF\n'$(python s.py -o'../out.txt')'\nEOF",
+            "echo \"$(python s.py -o'../out.txt')\"",
+            "echo \"`python s.py -o'../out.txt'`\"",
+            'echo "$(echo "$(python s.py -o\'../out.txt\')")"',
+            'export PATH="$PATH:../bin"',
+            "pytest --override-ini=cache_dir=../cache",
+            "PYTHONPATH=$PYTHONPATH:../src python s.py",
+            "python train.py trainer.default_root_dir=../runs",
+            "python train.py +trainer.default_root_dir=../runs",
+            "gcc main.c -Wl,-rpath=../lib -o main",
+            "cmake -DCMAKE_INSTALL_PREFIX:PATH=../install .",
+            "cmake -B build -D CMAKE_INSTALL_PREFIX:PATH=../install",
+            "gcc -Wl,-rpath,../lib main.c",
+            "make PREFIX:=../install",
+            "make PREFIX::=../install",
+            "make PREFIX!=../install",
+            "python train.py ++trainer.default_root_dir=../runs",
+            "bazel build --action_env=PATH=../bin //x",
+            'OUT[0]=../outside; cat "${OUT[0]}"',
+        ],
+    )
+    def test_glued_traversal_spellings_are_blocked(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=out.txt",
+            "python s.py -oout.txt",
+            "OUT=out.txt python s.py",
+            "python s.py --output=foo..bar.txt",
+            "python s.py -ofoo..bar.txt",
+            "echo foo..bar.txt",
+            "bash -c 'python s.py --output=out.txt'",
+            "bash -c 'echo hello'",
+            "bash \"-c\" 'echo hello'",
+            "sed -i 's/a=../b/' f.txt",
+            "sed -i 's,dir=../,dir=./,' cfg.ini",
+            "grep -F '=../' cfg.ini",
+            "sed 's:dir=../:dir=./:' cfg.ini",
+            "git log --format=%h:..:%s",
+            "scp host:../data.csv .",
+            "cat <<'EOF'\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            'cat <<"EOF"\n"`python s.py -o\'../out.txt\'`"\nEOF',
+            "cat <<\\EOF\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            "cat <<EOF\n$(python s.py -o'out.txt')\nEOF",
+            "echo \"$(python s.py -o'out.txt')\"",
+            "echo \"`python s.py -o'out.txt'`\"",
+            "echo '$(python s.py -o\"../out.txt\")' ",
+            "echo \"\\$(python s.py -o'../out.txt')\"",
+            "curl 'https://x.org/a?b=../c'",
+        ],
+    )
+    def test_benign_glued_spellings_still_allowed(self, command):
+        assert validate_command(command) is None
+
+
 # === Pipeline command validation ===
 
 
@@ -2758,6 +3328,24 @@ class TestProcessKillByName:
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
             "env 'RUN_NAME=test train' pkill -f train",
+            "env -S 'pkill -f x'",
+            "env -S'pkill -f x'",
+            "env --split-string='pkill -f x'",
+            "env -iS 'pkill -f x'",
+            "env -S 'sh -c \"pkill x\"'",
+            "env -S 'a; pkill x'",
+            "env -S 'pkill\\c' -f worker",
+            "env -S 'sh -c \"echo safe\\npkill x\"'",
+            "env -iC . pkill -f x",
+            "env --ch . pkill -f x",
+            "env -iu FOO pkill -f x",
+            "env -au pkill -f x",
+            "env -aSx pkill -f x",
+            "env --env0-from vars pkill -f x",
+            "env --unset X pkill -f x",
+            "env --chdir=build pkill -f x",
+            # The env string's words must not hide an outer word at the same offset.
+            'echo  "$(pkill x)"; env -S \'sh -c "echo hi"\'',
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
@@ -2792,11 +3380,39 @@ class TestProcessKillByName:
             'kill -- "-$PGID"',
             'kill -9 "-1"',
             'kill "0"',
+            "PID=$(lsof -t -i :8000); kill $PID",
+            "PID=`lsof -t -i :8000`; kill $PID",
+            "export PID=$(lsof -t -i :8000); kill $PID",
+            'PID="$(lsof -t -i :8000)" && kill -9 "$PID"',
+            "PID=$(fuser 8000/tcp); kill ${PID}",
+            "PIDS=$(ps aux | grep python | awk '{print $2}'); kill $PIDS",
+            "pids[0]=$(ps -o pid= -C python); kill ${pids[@]}",
+            "bash -c 'P=$(lsof -t -i :8000); kill $P'",
+            "ps aux | grep python | awk '{print $2}' | while read p; do kill -9 $p; done",
+            "lsof -t -i :8000 | while read -r p; do kill $p; done",
+            "while read p; do kill $p; done < <(lsof -t -i :8000)",
+            "read p < <(lsof -t -i :8000); kill $p",
+            "lsof -t -i :8000 | while read -r -p 'pid?' p; do kill $p; done",
+            "ps -o pid= | while read; do kill $REPLY; done",
+            "read -a ids < <(lsof -t -i :8000); kill ${ids[@]}",
+            "for p in $(ps aux | grep python | awk '{print $2}'); do kill $p; done",
+            "for p in `lsof -t -i :8000`; do kill $p; done",
+            "env -S 'kill -9 -1'",
+            "env -S 'kill -9' -1",
+            "mapfile -t pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "readarray -t -d '' pids < <(lsof -t -i :8000); kill ${pids[@]}",
+            "lsof -t -i :8000 | { mapfile; kill ${MAPFILE[@]}; }",
+            "lsof -t -i :8000 | while read -- p; do kill $p; done",
+            'export "PID=$(lsof -t -i :8000)"; kill "$PID"',
+            "declare 'PID'=$(lsof -t -i :8000); kill $PID",
+            "read 'p[0]' < <(lsof -t -i :8000); kill \"${p[0]}\"",
+            "read p[i] < <(lsof -t -i :8000); kill ${p[i]}",
         ],
     )
     @pytest.mark.parametrize("dangerous", [False, True])
     def test_kills_of_looked_up_ids_are_blocked(self, command, dangerous):
-        assert "pgrep, ps, lsof" in validate_command(command, dangerous=dangerous)
+        error = validate_command(command, dangerous=dangerous)
+        assert "pgrep, pidof, ps, lsof, fuser" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -2839,6 +3455,20 @@ class TestProcessKillByName:
             "ps aux | grep pkill",
             "cat > n.md <<'EOF'\npkill is blocked\nEOF",
             "cat > n.md <<'EOF'\n$(pkill -f x)\nEOF",
+            "PID=$(cat server.pid); ps -p $PID && kill $PID",
+            "PID=$(cat server.pid); kill $PID",
+            "sleep 5 & PID=$!; kill $PID",
+            "for p in 123 456; do kill $p; done",
+            "lsof -i :8000; PID=$(cat pid); kill $PID",
+            "PIDS=$(lsof -t -i :8000); echo $PIDS; kill $OTHER",
+            "while read p; do kill $p; done < logs/pids",
+            "mapfile -t pids < logs/pids; kill ${pids[@]}",
+            "export 'PID=$(lsof -t)'; kill $PID",
+            "PS1='$(ps)'; kill $PS1",
+            "env -S 'python -u x.py'",
+            "env -S 'cat \"name with space.txt\"'",
+            "env -S \"cat 'name with space.txt'\"",
+            "env -S 'cat name\\ with\\ space.txt'",
         ],
     )
     def test_kill_by_pid_and_mentions_stay_allowed(self, command):
@@ -2927,13 +3557,11 @@ class TestAbsolutePathDetection:
         """Virtual paths like /main.py should still pass (not a system prefix)."""
         assert validate_command("python /main.py") is None
 
-    def test_safe_env_equals_dev(self):
-        """dd-style if=/dev/zero — the = prevents matching."""
-        # dd itself is blocked by BLOCKED_COMMANDS, but the /dev path
-        # should not trigger the absolute-path check due to = prefix
+    def test_extract_all_paths_reports_attached_device_path(self):
+        """Attached file operands no longer bypass system-path validation."""
         from EvoScientist.backends import _extract_all_paths
 
-        assert _extract_all_paths("if=/dev/zero") == []
+        assert _extract_all_paths("if=/dev/zero") == ["/dev/zero"]
 
     def test_safe_system_executable(self):
         """Running a system binary by absolute path should pass."""

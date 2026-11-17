@@ -29,7 +29,7 @@ from ..sessions import (
     ThreadBindingError,
     thread_binding,
 )
-from . import registry
+from . import registry, server_ccproxy
 from .folder_check import (
     ProjectNotServedError,
     RunFolderMismatchError,
@@ -217,7 +217,8 @@ def served_graph(graph_id: str) -> Callable[..., Awaitable[Any]]:
     and its request (``folder_check.resolve_folders``), refusing an access
     this server must not serve, and hands them to the checkpointer to stamp.
     A system cron's run refused because its project's folder is missing
-    deletes the cron (``server_crons.drop_system_cron``).
+    deletes the cron (``server_crons.drop_system_cron``). A run start first
+    checks the server's ccproxy (``server_ccproxy.ensure_serving``).
     """
 
     async def factory(config: dict[str, Any], runtime: ServerRuntime) -> Any:
@@ -238,6 +239,11 @@ def served_graph(graph_id: str) -> Callable[..., Awaitable[Any]]:
                 raise
             status = 409 if isinstance(exc, RunFolderMismatchError) else 503
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        if runtime.access_context == "threads.create_run" and server_ccproxy.needed():
+            # ccproxy is started before a run when it is not running; when it
+            # cannot be and a configured model is Anthropic's, the run fails
+            # with the reason.
+            await asyncio.to_thread(server_ccproxy.ensure_serving)
         # Set here, in the access's own task, so the checkpoint writes of the
         # run or update that follow see it; a value set in the worker thread
         # would stay there.
