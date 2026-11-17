@@ -1212,7 +1212,7 @@ class TestWorkspaceRemovalAndComments:
             ("/W/.evoscientist/memories",),
             workspace_root="/W",
         )
-        assert "may name paths the check does not follow" in error
+        assert "more than 64 folders" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -1227,6 +1227,10 @@ class TestWorkspaceRemovalAndComments:
             "trap 'cd memories' DEBUG; cd .evoscientist; rm -rf x",
             "alias c='cd memories'; cd .evoscientist; c; rm -rf x",
             "eval 'cd memories'; cd x; rm -rf y",
+            "eval cd .evoscientist/memories; rm -rf x",
+            "trap 'cd .evoscientist/memories' DEBUG; rm -rf x",
+            ". ./setup.sh; rm -rf x",
+            "shopt -s cdable_vars; S=.evoscientist/memories; cd S; rm -rf x",
             'for d in */; do (cd "$d" && rm -rf build); done',
         ],
     )
@@ -1268,7 +1272,7 @@ class TestWorkspaceRemovalAndComments:
             ("/W/skills",),
             workspace_root="/W",
         )
-        assert "'${T}' may name paths the check does not follow" in error
+        assert "more than 64 folders" in error
 
     @pytest.mark.parametrize(
         "command",
@@ -1313,6 +1317,13 @@ class TestWorkspaceRemovalAndComments:
             "read D; rm -rf $D",
             'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
             'D=skills; E=${D%/}; rm -rf "$E"',
+            # Read as the shell reads the words, and through a nameref.
+            'D=x; declare -n R=D; R=skills; rm -rf "$D"',
+            'declare "-n" D=P; P=skills; rm -rf $D',
+            'D=x; printf "-v" D skills; rm -rf $D',
+            'D=x; read "D"; rm -rf $D',
+            'D=x; mapfile -t "D"; rm -rf $D',
+            'printf -v "IFS" X; D="a skills"; rm -rf $D',
         ],
     )
     def test_a_word_whose_variable_has_values_the_check_cannot_know_is_refused(

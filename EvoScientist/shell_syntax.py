@@ -836,61 +836,84 @@ def assignments(command: str) -> list[tuple[str, str]]:
 
 # Declaration options that only export or mark read-only; any other (`-n`,
 # `-a`, `-i`) changes what the value means.
-_DECLARATION_OPTION_RE = re.compile(r"[-+][A-Za-z]+")
 _PLAIN_DECLARATION_OPTION_RE = re.compile(r"[-+][xrg]+")
 # Builtins that set the variables named in their arguments from what the run
 # reads or prints.
 _RUN_SETTER_NAMES = frozenset({"read", "mapfile", "readarray", "getopts", "let"})
+# Builtins that run a string as shell code later or elsewhere, where it may
+# set any variable or change folder.
+STRING_CODE_NAMES = frozenset({"eval", "trap", "alias", "source", "."})
 _NAME_RE = re.compile(r"[A-Za-z_]\w*")
 
 
-def _variables(command: str) -> tuple[list[tuple[str, str]], set[str]]:
+def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
     """The ``NAME=value`` assignments of *command* (see :func:`assignments`),
     each with what is written before its ``=`` (``NAME``, ``NAME+`` or
     ``NAME[i]``), with each word of a ``for NAME in WORDS`` loop whose words
-    are written out; and the variables it sets any other way (``read``,
-    ``printf -v``, ``declare -n``, ``${NAME:=value}``, a loop over words the
-    run makes)."""
+    are written out; the variables it sets any other way (``read``,
+    ``printf -v``, ``declare -a``, ``${NAME:=value}``, a loop over words the
+    run makes); and whether it may set any variable at all: with a nameref
+    (``declare -n``), which writes through to another, or a builtin that runs
+    a string as code (see :data:`STRING_CODE_NAMES`). Options and names are
+    read as the shell reads them (``declare "-n"``, ``read "D"``)."""
     found: list[tuple[str, str]] = []
     other: set[str] = set()
+    opaque = False
     for each in _simple_commands(command, set(), (), found):
         args = each.args
-        if each.name in ("for", "select") and args:
-            words = [word for word in args[2:] if word != "do"]
-            if args[1:2] == ("in",) and not any(re.search("[$`]", w) for w in words):
-                found.extend((args[0], word) for word in words)
+        words = [
+            _word_value(arg, token)
+            for arg, token in zip(args, each.tokens, strict=True)
+        ]
+        if each.name in STRING_CODE_NAMES:
+            opaque = True
+        elif each.name in ("for", "select") and args:
+            loop_words = [word for word in args[2:] if word != "do"]
+            if words[1:2] == ["in"] and not any(
+                re.search("[$`]", word) for word in loop_words
+            ):
+                found.extend((words[0], word) for word in loop_words)
             else:
-                other.add(args[0])
+                other.add(words[0])
         elif each.name in DECLARATION_NAMES:
+            declared = [_declared_assignment(arg) for arg in args]
             plain = all(
-                _PLAIN_DECLARATION_OPTION_RE.fullmatch(arg)
-                for arg in args
-                if _DECLARATION_OPTION_RE.fullmatch(arg)
+                each_declared is not None
+                or _NAME_RE.fullmatch(word)
+                or _PLAIN_DECLARATION_OPTION_RE.fullmatch(word)
+                for each_declared, word in zip(declared, words, strict=True)
             )
-            for arg in args:
-                declared = _declared_assignment(arg)
-                if declared is not None:
-                    found.append(declared)
+            if not plain and any(
+                (word.startswith(("-", "+")) and "n" in word)
+                or "$" in word
+                or "`" in word
+                for word in words
+            ):
+                opaque = True  # a nameref, or options only the run knows
+            for each_declared, word in zip(declared, words, strict=True):
+                if each_declared is not None:
+                    found.append(each_declared)
                 if not plain:
-                    head = declared[0] if declared is not None else arg
+                    head = each_declared[0] if each_declared is not None else word
                     other.add(_assigned_name(head))
         elif each.name in _RUN_SETTER_NAMES:
-            other.update(_assigned_name(arg) for arg in args)
+            other.update(_assigned_name(word) for word in words)
         elif each.name == "printf":
-            for at, arg in enumerate(args):
-                if arg == "-v" and at + 1 < len(args):
-                    other.add(args[at + 1])
-                elif arg.startswith("-v") and len(arg) > 2:
-                    other.add(arg[2:])
+            for at, word in enumerate(words):
+                if word == "-v" and at + 1 < len(words):
+                    other.add(words[at + 1])
+                elif word.startswith("-v") and len(word) > 2:
+                    other.add(word[2:])
     other.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
-    return found, {name for name in other if _NAME_RE.fullmatch(name)}
+    return found, {name for name in other if _NAME_RE.fullmatch(name)}, opaque
 
 
 def _declared_assignment(arg: str) -> tuple[str, str] | None:
     """``(what is written before the =, value as written)`` of a
     ``NAME=value`` argument of a declaration builtin, quoted or not
-    (``"PID=$(lsof -t)"``, ``'PID'=x``). The quotes opened before the ``=`` stay on the value, so a substitution
-    in it still runs exactly when the shell would run it."""
+    (``"PID=$(lsof -t)"``, ``'PID'=x``). The quotes opened before the ``=``
+    stay on the value, so a substitution in it still runs exactly when the
+    shell would run it."""
     equals = arg.find("=")
     if equals <= 0:
         return None
@@ -980,19 +1003,22 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     its values. A value with a substitution is only known when the command
     runs, so it is left out; any other ``$NAME`` (``$HOME``) stays as
     written. ``None`` for a variable whose values the check does not follow:
-    one set any other way (see :func:`_variables`), set in part
+    one set any other way (see :func:`_variables`), every one when the
+    command may set any variable (a nameref, ``eval``), one set in part
     (``NAME+=value``, ``NAME[i]=value``) or to an array, one whose value
     refers back to it (``D=$D/x``) or reads a variable with an operator
     (``${D%/}``), one with more than :data:`_VALUES_CAP` values, one with
     values known before the run and values only the run knows
     (``X=build; X=$(cmd)``), or one whose value names such a variable."""
-    found, other = _variables(command)
+    found, other, opaque = _variables(command)
     written: dict[str, list[str]] = {}
     for head, value in found:
         name = _assigned_name(head)
         written.setdefault(name, []).append(value)
         if head != name or value.startswith("("):  # an array too
             other.add(name)
+    if opaque:  # any of them may be set some other way
+        other.update(written)
     resolved: dict[str, tuple[str, ...] | None] = dict.fromkeys(other)
     pending: set[str] = set()
 

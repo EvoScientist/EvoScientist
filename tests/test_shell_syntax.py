@@ -362,7 +362,7 @@ class TestSimpleCommands:
 
     def test_variables_set_other_ways_are_not_followed(self):
         assert shell_syntax.assigned_values(
-            "printf -v P x; read -r R; declare -n N=E; : ${S:=x}; "
+            "printf -v P x; read -r R; declare -a N=E; : ${S:=x}; "
             "for L in $X; do :; done; export -x E=a; builtin export B=b"
         ) == {
             "P": None,
@@ -374,6 +374,16 @@ class TestSimpleCommands:
             "B": ("b",),
         }
         assert shell_syntax.assigned_values("env 'Q=a b' ls") == {"Q": ("a b",)}
+        # A nameref or eval may set any of them.
+        assert shell_syntax.assigned_values("D=x; declare -n R=D") == {
+            "D": None,
+            "R": None,
+        }
+        assert shell_syntax.assigned_values("D=x; eval y") == {"D": None}
+        assert shell_syntax.assigned_values('D=x; printf "-v" D y; read "E"') == {
+            "D": None,
+            "E": None,
+        }
 
     def test_more_values_than_the_cap_are_reported(self):
         values = dict.fromkeys("VWXYZ", ("a", "b"))

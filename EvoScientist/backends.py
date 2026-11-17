@@ -1277,8 +1277,8 @@ def _unknown_values_error(word: str) -> str:
     return (
         f"Command blocked: '{word}' may name paths the check does not follow: "
         f"it uses a variable this command sets other than with a plain "
-        f"NAME=value, or has too many values or folders to check. Write the "
-        f"path out instead."
+        f"NAME=value, or with too many values to check. Write the path out "
+        f"instead."
     )
 
 
@@ -1375,6 +1375,10 @@ def _literal_folder(operand: str) -> str | None:
 _FOLDERS_CAP = 64
 
 
+class _TooManyFolders(Exception):
+    """A command may run in more folders than :data:`_FOLDERS_CAP`."""
+
+
 def _word_paths(
     word: str,
     token: dict[str, object] | None,
@@ -1411,8 +1415,7 @@ def _possible_folders(
     found before it that the ``cd`` may run in (see :func:`_run_folders`),
     also with the values of the variables the command sets. A target only the
     run knows adds none, nor do ``cd -`` and ``popd``, which return to one of
-    them. :class:`shell_syntax.UnknownValues` past :data:`_FOLDERS_CAP`
-    folders."""
+    them. :class:`_TooManyFolders` past :data:`_FOLDERS_CAP` folders."""
     root = posixpath.normpath(workspace_root.replace("\\", "/"))
     folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
     for found in commands:
@@ -1427,15 +1430,15 @@ def _possible_folders(
                 if entered is None or (entered, found.folders) in folders:
                     continue
                 if len(folders) >= _FOLDERS_CAP:
-                    raise shell_syntax.UnknownValues(target[0])
+                    raise _TooManyFolders
                 folders.append((entered, found.folders))
     return folders
 
 
 # Commands that run other commands again or out of order: a loop (`done`, or
-# `for` with a `{ }` body), a function, a trap, an alias or eval.
+# `for` with a `{ }` body), a function, or a string run as code.
 _OUT_OF_ORDER_NAMES = frozenset(
-    {"for", "select", "done", "function", "trap", "alias", "eval"}
+    {"for", "select", "done", "function"} | shell_syntax.STRING_CODE_NAMES
 )
 # A function definition: `NAME()` or `function NAME`.
 _FUNCTION_RE = re.compile(r"\(\s*\)|\bfunction\s")
@@ -1462,8 +1465,8 @@ def _run_folders(
     of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
     with the rest of *chain* applied. An ``env -C`` folder only the run knows
     keeps the folder it is read from, as a ``cd`` to it does
-    (``env -C "$(pwd)"``). :class:`shell_syntax.UnknownValues` when ``env -C``
-    folders with many values would take them past :data:`_FOLDERS_CAP`."""
+    (``env -C "$(pwd)"``). :class:`_TooManyFolders` when ``env -C`` folders
+    with many values would take them past :data:`_FOLDERS_CAP`."""
     reached: list[str] = []
     for folder, entered_under in folders:
         if chain[: len(entered_under)] != entered_under:
@@ -1479,11 +1482,11 @@ def _run_folders(
                 )
             )
             if len(starts) > _FOLDERS_CAP:
-                raise shell_syntax.UnknownValues(folder_word)
+                raise _TooManyFolders
         reached.extend(starts)
     reached = list(dict.fromkeys(reached))
     if len(reached) > max(_FOLDERS_CAP, len(folders)):
-        raise shell_syntax.UnknownValues(chain[-1])
+        raise _TooManyFolders
     return reached
 
 
@@ -1699,12 +1702,22 @@ def _folder_removal_error(
     changes_folder = any(
         found.name in shell_syntax.FOLDER_COMMANDS for found in commands
     )
-    if relative and changes_folder and _runs_out_of_order(command, commands):
+    # A string run as code, or `cd NAME` entering the folder in $NAME, may
+    # change folder where no cd is written.
+    hides_folder_changes = any(
+        found.name in shell_syntax.STRING_CODE_NAMES
+        or (found.name == "shopt" and "cdable_vars" in found.args)
+        for found in commands
+    )
+    if relative and (
+        hides_folder_changes
+        or (changes_folder and _runs_out_of_order(command, commands))
+    ):
         return (
-            "Command blocked: it changes folder and has a loop, a function, "
-            "trap, alias or eval, so the folder each recursive rm runs in is "
-            "not followed. Run the rm as a command of its own, or name its "
-            "path from the workspace root."
+            "Command blocked: the folder each recursive rm runs in is not "
+            "followed, as the command changes folder in a loop or a function, "
+            "or runs a string as code (eval, trap, alias, source). Run the rm "
+            "as a command of its own, or name its path from the workspace root."
         )
     assigned = shell_syntax.assigned_values(command)
     folders = _possible_folders(commands, workspace_root, assigned)
@@ -1858,6 +1871,12 @@ def validate_command(
             )
         except shell_syntax.UnknownValues as exc:
             refusal = _unknown_values_error(exc.word)
+        except _TooManyFolders:
+            refusal = (
+                f"Command blocked: it may change into more than {_FOLDERS_CAP} "
+                f"folders, more than the check follows. Split it into shorter "
+                f"commands."
+            )
         if refusal is not None:
             return refusal
 
