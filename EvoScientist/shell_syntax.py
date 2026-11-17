@@ -843,6 +843,14 @@ _REFERENCE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _VALUES_CAP = 16
 
 
+class TooManyValues(ValueError):
+    """A word may read as more values than :data:`_VALUES_CAP`; *word* is it."""
+
+    def __init__(self, word: str) -> None:
+        super().__init__(word)
+        self.word = word
+
+
 def variable_references(word: str) -> set[str]:
     """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
     outside single quotes and not escaped."""
@@ -868,22 +876,32 @@ def variable_references(word: str) -> set[str]:
     return names
 
 
-def assigned_values(command: str) -> dict[str, tuple[str, ...]]:
+def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     """The values *command* sets each variable to (see :func:`assignments`),
     in any order, as the shell reads them: quotes removed, and a ``$NAME`` of
     another variable set in *command* replaced by its values. A value with a
     substitution is only known when the command runs, so it is left out; any
-    other ``$NAME`` (``$HOME``) stays as written."""
+    other ``$NAME`` (``$HOME``) stays as written. ``None`` for a variable with
+    more than :data:`_VALUES_CAP` values."""
     written: dict[str, list[str]] = {}
     for name, value in assignments(command):
         written.setdefault(name, []).append(value)
-    resolved: dict[str, tuple[str, ...]] = {}
+    resolved: dict[str, tuple[str, ...] | None] = {}
     pending: set[str] = set()  # a reference back to one stays as written
 
-    def resolve(name: str) -> tuple[str, ...]:
+    def resolve(name: str) -> tuple[str, ...] | None:
         if name in resolved:
             return resolved[name]
         pending.add(name)
+        try:
+            found = resolve_values(name)
+        except TooManyValues:
+            found = None
+        pending.discard(name)
+        resolved[name] = found
+        return found
+
+    def resolve_values(name: str) -> tuple[str, ...]:
         found: list[str] = []
         for value in written[name]:
             if "$(" in value or "`" in value:
@@ -901,17 +919,21 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...]]:
                     {other: resolve(other) for other in others},
                 )
             )
-        pending.discard(name)
-        resolved[name] = tuple(dict.fromkeys(found))[:_VALUES_CAP]
-        return resolved[name]
+        values = tuple(dict.fromkeys(found))
+        if len(values) > _VALUES_CAP:
+            raise TooManyValues(name)
+        return values
 
     return {name: resolve(name) for name in written}
 
 
-def expand_references(text: str, values: dict[str, tuple[str, ...]]) -> list[str]:
+def expand_references(
+    text: str, values: dict[str, tuple[str, ...] | None]
+) -> list[str]:
     """*text* with each ``$NAME`` / ``${NAME}`` of a variable in *values*
-    replaced by each of its values (at most a few combinations); empty when
-    one of them has none."""
+    replaced by each of its values; empty when one of them has none.
+    :class:`TooManyValues` past :data:`_VALUES_CAP` combinations, or for a
+    variable with too many values (``None``)."""
     results = [""]
     last = 0
     for match in _REFERENCE_RE.finditer(text):
@@ -919,25 +941,30 @@ def expand_references(text: str, values: dict[str, tuple[str, ...]]) -> list[str
         if name not in values:
             continue
         literal = text[last : match.start()]
-        results = [
-            result + literal + value for result in results for value in values[name]
-        ][:_VALUES_CAP]
+        options = values[name]
+        if options is None or len(results) * len(options) > _VALUES_CAP:
+            raise TooManyValues(text)
+        results = [result + literal + value for result in results for value in options]
         last = match.end()
     return [result + text[last:] for result in results]
 
 
 def word_values(
-    word: str, value: str, assigned: dict[str, tuple[str, ...]]
+    word: str, value: str, assigned: dict[str, tuple[str, ...] | None]
 ) -> list[str] | None:
     """The values a word reads as with the variables *assigned* in its command
     (see :func:`assigned_values`): *value* is the word as the shell reads it,
     *word* as written. ``None`` when it names none of them, and empty when
     one it names has no value known before the command runs; callers then
-    read the word as written."""
+    read the word as written. :class:`TooManyValues` (naming *word*) when it
+    may read as more than :data:`_VALUES_CAP` values."""
     names = variable_references(word) & assigned.keys()
     if not names:
         return None
-    return expand_references(value, {name: assigned[name] for name in names})
+    try:
+        return expand_references(value, {name: assigned[name] for name in names})
+    except TooManyValues:
+        raise TooManyValues(word) from None
 
 
 def _simple_commands(

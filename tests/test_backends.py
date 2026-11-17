@@ -1189,6 +1189,27 @@ class TestWorkspaceRemovalAndComments:
             workspace_root="/W",
         )
 
+    @pytest.mark.parametrize(
+        ("tail", "word"),
+        [
+            ('T=$HOME; cd "$T"', '"$T"'),
+            ('T=skills; rm -rf "$T"', '"$T"'),
+            ('P=$HOME; Q=; Q=x; R=; R=x; S=; S=x; U=; U=x; cd "$P$Q$R$S$U"', None),
+            ('P=skills; Q=; Q=x; R=; R=x; S=; S=x; U=; U=x; rm -rf "$P$Q$R$S$U"', None),
+        ],
+    )
+    def test_a_word_with_more_values_than_the_check_reads_is_refused(self, tail, word):
+        many = "; ".join(f"T=a{i}" for i in range(16)) if word else "P=a"
+        command = f"{many}; {tail}"
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "more than 16 values" in error
+        # Within the cap, each value is checked.
+        fewer = command.replace("T=a15; ", "")
+        fewer = fewer.replace("U=; U=x; ", "").replace("$U", "")
+        assert "more than 16 values" not in validate_command(
+            fewer, ("/W/skills",), workspace_root="/W"
+        )
+
     @pytest.mark.parametrize("bash", [False, True])
     def test_relative_protected_removals_on_windows(self, monkeypatch, bash):
         from EvoScientist import agent_shell

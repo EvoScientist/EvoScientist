@@ -343,11 +343,20 @@ class TestSimpleCommands:
             "B": ("$A",),
         }
 
-    def test_the_values_of_one_word_are_capped(self):
+    def test_more_values_than_the_cap_are_reported(self):
         values = dict.fromkeys("VWXYZ", ("a", "b"))
-        expanded = shell_syntax.expand_references("$V$W$X$Y$Z", values)
-        assert len(expanded) == shell_syntax._VALUES_CAP
-        assert expanded[0] == "aaaaa"
+        assert len(shell_syntax.expand_references("$V$W$X$Y", values)) == 16
+        with pytest.raises(shell_syntax.TooManyValues):
+            shell_syntax.expand_references("$V$W$X$Y$Z", values)
+        assigned = shell_syntax.assigned_values(
+            "; ".join(f"T=a{i}" for i in range(17)) + "; U=$T/x; V=1"
+        )
+        # Only the words that name them are refused.
+        assert assigned == {"T": None, "U": None, "V": ("1",)}
+        with pytest.raises(shell_syntax.TooManyValues) as raised:
+            shell_syntax.word_values('"$U"', "$U", assigned)
+        assert raised.value.word == '"$U"'
+        assert shell_syntax.word_values("$V", "$V", assigned) == ["1"]
 
     def test_word_values_follow_unquoted_references_only(self):
         assigned = {"T": ("..", "sub"), "U": ()}
