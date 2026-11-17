@@ -308,8 +308,21 @@ class TestSimpleCommands:
 
     def test_a_function_body_is_read_as_commands(self):
         found = shell_syntax.simple_commands("function f { cd a; rm -rf x; }; f")
-        assert {each.name for each in found} >= {"cd", "rm", "f"}
-        assert "function" not in {each.name for each in found}
+        assert {each.name for each in found} >= {"cd", "rm", "f", "function"}
+
+    @pytest.mark.parametrize(
+        ("command", "defines"),
+        [
+            ("f() { cd a; }; f", True),
+            ("g () ( cd b )", True),
+            ("bash -c 'f() { cd a; }'", True),
+            ('python -c "main()"', False),
+            ('git commit -m "rename function foo"', False),
+        ],
+    )
+    def test_a_function_definition_is_a_command_named_function(self, command, defines):
+        names = {each.name for each in shell_syntax.simple_commands(command)}
+        assert ("function" in names) is defines
 
     def test_the_same_script_in_two_env_folders_is_read_in_both(self):
         found = shell_syntax.simple_commands("env -C a sh -c X; env -C b sh -c X")

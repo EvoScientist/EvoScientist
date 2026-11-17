@@ -1241,6 +1241,14 @@ def _simple_commands(
             continue
         name = re.split(r"[\\/]", value)[-1]
         args, heredocs = _command_arguments(command, words, index, in_backtick)
+        # A function definition, `function NAME` or `NAME ( )`, is reported
+        # as a command named `function`, as its body may run any number of
+        # times, in any order with the commands around it.
+        if name == "function" or [
+            (str(token["type"]), str(token["value"]))
+            for token in tokens[index + 1 : index + 3]
+        ] == [("op", "("), ("op", ")")]:
+            found.append(SimpleCommand("function", (), (), ()))
         if name == "function":
             # `function NAME [()] { BODY`: the body's first command is read
             # as these words.

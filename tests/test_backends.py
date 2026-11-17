@@ -1261,6 +1261,10 @@ class TestWorkspaceRemovalAndComments:
             'for X in $(ls -d */); do cd "$X"; done',
             'git ls-files | while read f; do cd "$f"; done',
             'D=pkg; source .venv/bin/activate; cd "$D" && pytest',
+            # The word "function" or "()" in quoted text or a here-doc.
+            'cd pkg && rm -rf build && git commit -m "rename function foo"',
+            "cat > notes.md <<'EOF'\nThe helper function parses args.\nEOF\n"
+            "cd x && rm -rf build",
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):

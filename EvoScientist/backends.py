@@ -1476,19 +1476,14 @@ def _possible_folders(
 # Commands that run other commands again or out of order: a loop (`done`, or
 # `for` with a `{ }` body) or a function.
 _OUT_OF_ORDER_NAMES = frozenset({"for", "select", "done", "function"})
-# A function definition: `NAME() {` or `NAME() (`, or `function NAME`.
-_FUNCTION_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
 
 
-def _runs_out_of_order(
-    command: str, commands: list[shell_syntax.SimpleCommand]
-) -> bool:
-    """Whether *command* (its *commands*) may run a command again or before
-    one written ahead of it, so that the folders it may run in are not read
-    in order."""
-    return bool(_FUNCTION_RE.search(command)) or any(
-        found.name in _OUT_OF_ORDER_NAMES for found in commands
-    )
+def _runs_out_of_order(commands: list[shell_syntax.SimpleCommand]) -> bool:
+    """Whether *commands* may run a command again or before one written
+    ahead of it (a function definition is a command named ``function``, see
+    :func:`shell_syntax.simple_commands`), so that the folders they may run
+    in are not read in order."""
+    return any(found.name in _OUT_OF_ORDER_NAMES for found in commands)
 
 
 def _run_folders(
@@ -1744,8 +1739,7 @@ def _folder_removal_error(
         found.name == "shopt" and "cdable_vars" in found.args for found in commands
     )
     if relative and (
-        hides_folder_changes
-        or (changes_folder and _runs_out_of_order(command, commands))
+        hides_folder_changes or (changes_folder and _runs_out_of_order(commands))
     ):
         return (
             "Command blocked: the folder each recursive rm runs in is not "
