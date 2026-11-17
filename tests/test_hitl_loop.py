@@ -1092,12 +1092,23 @@ class TestConsumerSessionGrantReachesTheGraph:
         reply holds the text after it and the todo list is relayed per stream."""
 
         def _todos(call_id, *items):
-            return {
-                "type": "tool_call",
-                "id": call_id,
-                "name": "write_todos",
-                "args": {"todos": [{"content": i, "status": "pending"} for i in items]},
-            }
+            return [
+                {
+                    "type": "tool_call",
+                    "id": call_id,
+                    "name": "write_todos",
+                    "args": {
+                        "todos": [{"content": i, "status": "pending"} for i in items]
+                    },
+                },
+                {
+                    "type": "tool_result",
+                    "id": call_id,
+                    "name": "write_todos",
+                    "content": "Updated todo list",
+                    "success": True,
+                },
+            ]
 
         calls = 0
 
@@ -1106,7 +1117,8 @@ class TestConsumerSessionGrantReachesTheGraph:
             calls += 1
             if calls == 1:
                 yield {"type": "thinking", "content": "thinking before."}
-                yield _todos("t1", "step one")
+                for event in _todos("t1", "step one"):
+                    yield event
                 yield {"type": "text", "content": "before the question."}
                 yield {
                     "type": "ask_user",
@@ -1115,7 +1127,8 @@ class TestConsumerSessionGrantReachesTheGraph:
                 }
                 return
             yield {"type": "thinking", "content": "thinking after."}
-            yield _todos("t2", "step one", "step two")
+            for event in _todos("t2", "step one", "step two"):
+                yield event
             yield {"type": "text", "content": "after the question."}
             yield {"type": "done", "content": "after the question."}
 

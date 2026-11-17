@@ -1903,7 +1903,8 @@ def _run_streaming(
             deduplication across resume/HITL cycles so the same thinking
             is not replayed, but genuinely new thinking is still sent.
         on_todo: Optional sync callback receiving todo items list.
-            Called once when write_todos tool_call is detected.
+            Called at most once per round, at the first successful
+            write_todos result that leaves a non-empty list.
         on_file_write: Optional sync callback receiving the real filesystem path
             when the agent or a sub-agent writes or reads a media file
             (image/pdf/audio/video) via write_file or read_file.
@@ -2025,12 +2026,14 @@ def _run_streaming(
                         on_thinking(current)
                         _sent_thinking_text = current
 
-                # Send todo list to channel on first write_todos tool_call
+                # Send the todo list to the channel at the first successful
+                # write_todos result (a rejected list is never sent)
                 if (
                     on_todo
                     and not _todo_sent
-                    and event_type == "tool_call"
+                    and event_type == "tool_result"
                     and event.get("name") == "write_todos"
+                    and event.get("success", True)
                     and state.todo_items
                 ):
                     on_todo(state.todo_items)
