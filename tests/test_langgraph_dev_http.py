@@ -196,9 +196,7 @@ def test_custom_openai_models_replace_defaults_in_place():
         ("fake-agent", "fake-agent", "custom-openai"),
         *rest[insert_at:],
     ]
-    expected = [
-        {"name": n, "model_id": m, "provider": p} for n, m, p in expected_rows
-    ]
+    expected = [{"name": n, "model_id": m, "provider": p} for n, m, p in expected_rows]
 
     with (
         patch(

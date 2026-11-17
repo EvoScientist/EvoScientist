@@ -1166,7 +1166,9 @@ class TestModelCommandCustomOpenaiPicker:
         custom_rows = [(n, mid, p) for (n, mid, p) in entries if p == "custom-openai"]
         assert custom_rows == [("fake-agent", "fake-agent", "custom-openai")]
         # Replacing the static group keeps its place; it is not appended.
-        first_custom = next(i for i, row in enumerate(entries) if row[2] == "custom-openai")
+        first_custom = next(
+            i for i, row in enumerate(entries) if row[2] == "custom-openai"
+        )
         assert any(row[2] != "custom-openai" for row in entries[first_custom + 1 :])
 
     async def test_picker_keeps_static_defaults_when_discovery_empty(self):
