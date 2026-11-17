@@ -917,11 +917,8 @@ def copied_files(proposal_dir: Path) -> list[Path]:
     """The files an approval copies, relative to the draft folder, in POSIX text
     order; an unreadable folder raises, so no draft is approved short of files.
 
-    A file that is not a regular file (a FIFO, a device, a socket) is NOT
-    skipped: it raises, so the decision refuses the draft instead of quietly
-    installing a skill that is missing that file. Skipping it would also make
-    the content digest cover only the remaining files, so the digest check
-    would pass for an incomplete skill.
+    An entry that is not a regular file (a symlink, a FIFO, a device) is
+    skipped, not refused: it is not a skill file the approval would install.
     """
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
@@ -929,9 +926,7 @@ def copied_files(proposal_dir: Path) -> list[Path]:
         for name in filenames:
             source_path = base / name
             if not _is_regular_file(source_path):
-                raise OSError(
-                    f"Not a regular file in the proposal folder: {source_path}"
-                )
+                continue
             relative = source_path.relative_to(proposal_dir)
             if relative.as_posix() in {"manifest.json", "RATIONALE.md"} or (
                 name.startswith(".") and name.endswith(".tmp")

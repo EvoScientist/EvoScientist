@@ -134,20 +134,34 @@ def test_a_fifo_replaced_after_the_check_never_blocks_the_digest(tmp_path):
     proposal_dir = autoskill_proposals_dir(memory_dir) / "focused-validation"
     target = proposal_dir / "SKILL.md"
     original = target.read_bytes()
-    target.unlink()
-    os.mkfifo(target)
 
-    outcome: dict[str, object] = {}
+    # The exact window CodeRabbit reported: the file is listed as a regular
+    # file, and is replaced with a FIFO AFTER that listing and BEFORE the
+    # read. Without the protection the read opens the FIFO in blocking mode
+    # and waits for a writer that never comes.
+    real_copied_files = proposals_module.copied_files
 
-    def run() -> None:
-        try:
-            outcome["result"] = proposals_module._draft_digest(proposal_dir)
-        except BaseException as exc:
-            outcome["error"] = exc
+    def listing_then_swap(directory):
+        files = real_copied_files(directory)
+        target.unlink()
+        os.mkfifo(target)
+        return files
 
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(timeout=20)
+    proposals_module.copied_files = listing_then_swap
+    try:
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                outcome["result"] = proposals_module._draft_digest(proposal_dir)
+            except BaseException as exc:
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout=20)
+    finally:
+        proposals_module.copied_files = real_copied_files
 
     assert not worker.is_alive(), "the digest read blocked on a FIFO"
     assert "error" in outcome, "a FIFO should be refused, not read"
@@ -158,30 +172,41 @@ def test_a_fifo_replaced_after_the_check_never_blocks_the_digest(tmp_path):
 @pytest.mark.skipif(
     not hasattr(os, "mkfifo"), reason="FIFO creation is not available on this platform"
 )
-def test_a_draft_with_a_fifo_is_refused_not_installed_short(tmp_path):
-    """A non-regular file must not be silently skipped.
+def test_a_fifo_in_the_draft_is_skipped_and_never_blocks(tmp_path):
+    """A FIFO present before the decision is skipped, and never blocks.
 
-    Skipping it would install a skill that is missing that file, and the
-    content digest would cover only the remaining files -- so the digest
-    check would pass for an incomplete skill.
+    The upstream contract is that an entry that is not a regular file is
+    skipped, not refused: it is not a skill file the approval installs.
     """
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
     _submit(memory_dir, skills_dir)
 
     proposal_dir = autoskill_proposals_dir(memory_dir) / "focused-validation"
-    (proposal_dir / "SKILL.md").unlink()
-    os.mkfifo(proposal_dir / "SKILL.md")
+    os.mkfifo(proposal_dir / "fifo")
 
-    result = approve_skill_proposal(
-        memory_dir,
-        "focused-validation",
-        skills_dir=skills_dir,
-        workspace_dir=Path(skills_dir).parent,
-    )
+    outcome: dict[str, object] = {}
 
-    assert result.get("approved") is not True, result
-    assert not (skills_dir / "focused-validation").exists()
+    def run() -> None:
+        try:
+            outcome["result"] = approve_skill_proposal(
+                memory_dir,
+                "focused-validation",
+                skills_dir=skills_dir,
+                workspace_dir=Path(skills_dir).parent,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+
+    assert not worker.is_alive(), "the decision blocked on a FIFO"
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"].get("approved") is True, outcome["result"]
+    installed = skills_dir / "focused-validation"
+    assert sorted(p.name for p in installed.iterdir()) == ["SKILL.md"]
 
 
 def test_the_digest_read_is_byte_exact_on_crlf_files(tmp_path):
