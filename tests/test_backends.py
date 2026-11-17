@@ -1210,6 +1210,19 @@ class TestWorkspaceRemovalAndComments:
         assert "'$T' may name more paths than the check follows" in error
 
     @pytest.mark.parametrize(
+        "command",
+        [
+            'D=sk; D+=ills; rm -rf "$D"',
+            "bash -c 'D=sk; D+=ills; rm -rf \"$D\"'",
+            "D=sk; export D+=ills; rm -rf $D/x",
+            'T=.; T+=.; cd "$T"',
+        ],
+    )
+    def test_a_word_with_a_variable_set_in_part_is_refused(self, command):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "may name more paths than the check follows" in error
+
+    @pytest.mark.parametrize(
         ("tail", "word"),
         [
             ('T=$HOME; cd "$T"', '"$T"'),

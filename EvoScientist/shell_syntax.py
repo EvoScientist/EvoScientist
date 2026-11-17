@@ -810,6 +810,12 @@ def assignments(command: str) -> list[tuple[str, str]]:
     ``NAME=value``: alone, before a command, as an argument of ``export`` /
     ``local`` / ``declare``, and in the code it runs (see
     :func:`simple_commands`)."""
+    return [(_assigned_name(head), value) for head, value in _assignments(command)]
+
+
+def _assignments(command: str) -> list[tuple[str, str]]:
+    """:func:`assignments`, each with what is written before its ``=``
+    (``NAME``, ``NAME+`` or ``NAME[i]``)."""
     found: list[tuple[str, str]] = []
     for each in _simple_commands(command, set(), (), found):
         if each.name in DECLARATION_NAMES:
@@ -822,9 +828,9 @@ def assignments(command: str) -> list[tuple[str, str]]:
 
 
 def _declared_assignment(arg: str) -> tuple[str, str] | None:
-    """``(name, value as written)`` of a ``NAME=value`` argument of a
-    declaration builtin, quoted or not (``"PID=$(lsof -t)"``, ``'PID'=x``).
-    The quotes opened before the ``=`` stay on the value, so a substitution
+    """``(what is written before the =, value as written)`` of a
+    ``NAME=value`` argument of a declaration builtin, quoted or not
+    (``"PID=$(lsof -t)"``, ``'PID'=x``). The quotes opened before the ``=`` stay on the value, so a substitution
     in it still runs exactly when the shell would run it."""
     equals = arg.find("=")
     if equals <= 0:
@@ -833,7 +839,7 @@ def _declared_assignment(arg: str) -> tuple[str, str] | None:
     name = re.sub(r"[\"'\\]", "", head)
     if ASSIGNMENT_RE.fullmatch(f"{name}=") is None:
         return None
-    return _assigned_name(name), re.sub(r"[^\"']", "", head) + arg[equals + 1 :]
+    return name, re.sub(r"[^\"']", "", head) + arg[equals + 1 :]
 
 
 def _assigned_name(word: str) -> str:
@@ -885,16 +891,24 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     another variable set in *command* replaced by its values. A value with a
     substitution is only known when the command runs, so it is left out; any
     other ``$NAME`` (``$HOME``) stays as written. ``None`` for a variable with
-    more than :data:`_VALUES_CAP` values."""
+    more than :data:`_VALUES_CAP` values, or one set in part (``NAME+=value``,
+    ``NAME[i]=value``), whose values depend on the order it is set in."""
     written: dict[str, list[str]] = {}
-    for name, value in assignments(command):
+    in_part: set[str] = set()
+    for head, value in _assignments(command):
+        name = _assigned_name(head)
         written.setdefault(name, []).append(value)
+        if head != name:
+            in_part.add(name)
     resolved: dict[str, tuple[str, ...] | None] = {}
     pending: set[str] = set()  # a reference back to one stays as written
 
     def resolve(name: str) -> tuple[str, ...] | None:
         if name in resolved:
             return resolved[name]
+        if name in in_part:
+            resolved[name] = None
+            return None
         pending.add(name)
         try:
             found = resolve_values(name)
@@ -1004,7 +1018,8 @@ def _simple_commands(
             if assigned is not None:
                 end = _command_word_end(tokens, index, in_backtick)
                 text = command[int(token["start"]) : int(tokens[end - 1]["end"])]
-                assigned.append((_assigned_name(text), text[assignment.end() :]))
+                written = text[: assignment.end() - 1]
+                assigned.append((written, text[assignment.end() :]))
             continue
         name = re.split(r"[\\/]", value)[-1]
         args, heredocs = _command_arguments(command, words, index, in_backtick)

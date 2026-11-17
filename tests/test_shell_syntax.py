@@ -361,6 +361,12 @@ class TestSimpleCommands:
         assert raised.value.word == '"$U"'
         assert shell_syntax.word_values("$V", "$V", assigned) == ["1"]
 
+    def test_a_variable_set_in_part_has_no_values_to_read(self):
+        # Its value depends on the order of the assignments.
+        assert shell_syntax.assigned_values(
+            "D=sk; D+=ills; export E+=x; a[0]=x; F=$D/y; G=1"
+        ) == {"D": None, "E": None, "a": None, "F": None, "G": ("1",)}
+
     def test_word_values_follow_unquoted_references_only(self):
         assigned = {"T": ("..", "sub"), "U": ()}
         assert shell_syntax.word_values('"$T/x"', "$T/x", assigned) == [
