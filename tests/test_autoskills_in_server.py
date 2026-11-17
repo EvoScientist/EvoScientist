@@ -390,7 +390,7 @@ def _fake_server(monkeypatch, tmp_path, *, record_port, answers=True):
     monkeypatch.setattr(
         manager,
         "is_langgraph_dev_running",
-        lambda *, base_url, **_k: probed.append(base_url) or True,
+        lambda *, base_url, **_k: probed.append(base_url) or answers,
     )
 
     def get(url, **_k):
@@ -418,20 +418,25 @@ def test_autoskills_setting_asks_the_recorded_server(monkeypatch, tmp_path):
 
     assert registration.apply_autoskills_settings(_config()) is None
     assert posted == ["http://127.0.0.1:7000/api/autoskills/reconcile"]
-    assert probed == []
+    assert probed == ["http://127.0.0.1:7000"]
 
 
 def test_autoskills_setting_says_when_recorded_server_does_not_answer(
     monkeypatch, tmp_path
 ):
+    """The note comes from the short ``/ok`` check, not after the longer
+    instance request times out."""
     from EvoScientist.langgraph_dev import registration
 
-    _, posted = _fake_server(monkeypatch, tmp_path, record_port=7000, answers=False)
+    probed, posted = _fake_server(
+        monkeypatch, tmp_path, record_port=7000, answers=False
+    )
 
     note = registration.apply_autoskills_settings(_config())
 
-    assert "Could not reach" in note
-    assert "http://127.0.0.1:7000" in note
+    assert "server at http://127.0.0.1:7000 did not answer" in note
+    assert "Could not reach" not in note
+    assert probed == ["http://127.0.0.1:7000"]
     assert posted == []
 
 

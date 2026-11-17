@@ -399,18 +399,25 @@ def apply_autoskills_settings(config: object) -> str | None:
 
     record = read_record()
     url = record.url if record is not None else configured_langgraph_dev_url(config)
-    if record is None and not is_langgraph_dev_running(base_url=url):
-        return None
+    if not is_langgraph_dev_running(base_url=url):
+        if record is None:
+            return None
+        return _not_applied(f"the EvoScientist server at {url} did not answer")
     try:
         failed = reconcile_autoskills(url=url)
     except (RegistrationError, ServerUnusableError) as exc:
-        return (
-            "Could not ask the background agent server to apply it; each "
-            f"project follows when the server next sets it up: {exc}"
-        )
+        return _not_applied(exc)
     if failed:
         return "AutoSkills was not rescheduled for: " + "; ".join(failed)
     return None
+
+
+def _not_applied(reason: object) -> str:
+    """The note when the server could not be asked to apply the settings."""
+    return (
+        "Could not ask the background agent server to apply it; each "
+        f"project follows when the server next sets it up: {reason}"
+    )
 
 
 def move_folder(old: Workspace, new: Workspace, *, url: str) -> dict[str, Any]:
