@@ -1530,6 +1530,58 @@ async def stream_agent_events(
     # A run that ended before its first output leaves its selection behind.
     events.discard_tool_selection()
 
+    # One run per thread at a time. Two clients that resume the SAME thread
+    # at once would otherwise both write their answer into the checkpoint,
+    # and the graph would end up with every answer recorded and no node
+    # scheduled: the model is never called again and the turn produces no
+    # response at all. The second run waits for the first to finish and then
+    # sees the state the first one left behind.
+    from ..backends import thread_run_lock
+
+    thread_lock = thread_run_lock(thread_id)
+    await thread_lock.acquire()
+    inner = _stream_agent_events_locked(
+        agent,
+        message,
+        thread_id,
+        metadata=metadata,
+        media=media,
+        events=events,
+        configurable_extra=configurable_extra,
+        rubric=rubric,
+        goal_request=goal_request,
+    )
+    try:
+        async for _event in inner:
+            yield _event
+    finally:
+        # The inner generator holds the run's event-sink token. It must be
+        # closed HERE, where the token was created: left to the event loop's
+        # finalizer it would be closed in another context, and resetting the
+        # token there raises "was created in a different Context".
+        await inner.aclose()
+        thread_lock.release()
+
+
+async def _stream_agent_events_locked(
+    agent: Any,
+    message: GraphRunInput,
+    thread_id: str,
+    metadata: dict[str, Any] | None = None,
+    media: list[str] | None = None,
+    events: "ToolSelectionView | None" = None,
+    configurable_extra: dict[str, Any] | None = None,
+    rubric: str | None = None,
+    goal_request: dict[str, Any] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """The run itself, with the thread's run lock already held."""
+    if events is None:
+        from .sink import SessionEventSink
+
+        events = SessionEventSink()
+    # A run that ended before its first output leaves its selection behind.
+    events.discard_tool_selection()
+
     # Single assembly point for the run config (see gateway.types). No
     # per-run model/limit overrides on the local path: the local agent is
     # rebuilt on model switches and binds recursion_limit at construction

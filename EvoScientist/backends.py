@@ -746,6 +746,51 @@ def build_ask_user_resume(interrupt_id: str, payload: dict) -> "Command":
     return Command(resume={interrupt_id: payload})
 
 
+_THREAD_RUN_LOCKS: dict[str, tuple[int, asyncio.Lock]] = {}
+_THREAD_RUN_LOCKS_GUARD = threading.Lock()
+_THREAD_RUN_LOCKS_MAX = 64
+
+
+def thread_run_lock(thread_id: str) -> asyncio.Lock:
+    """The lock that serialises the runs of one thread.
+
+    Two clients that resume the SAME thread at once would otherwise both
+    write their answer into the checkpoint. The graph would end up with
+    every answer recorded and no node scheduled: the model is never called
+    again and the turn produces no response at all.
+
+    One run per thread at a time is what the graph expects anyway, so the
+    second resume waits for the first to finish and then sees the state the
+    first one left behind.
+
+    The lock is bound to the event loop that first awaits it, so the entry
+    records that loop and a new one is made when a different loop asks for
+    the same thread -- a lock cannot be awaited from two loops.
+    """
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_id = 0
+    with _THREAD_RUN_LOCKS_GUARD:
+        entry = _THREAD_RUN_LOCKS.get(thread_id)
+        if entry is None or entry[0] != loop_id:
+            lock = asyncio.Lock()
+            _THREAD_RUN_LOCKS[thread_id] = (loop_id, lock)
+            return lock
+        # Move to the end so the oldest idle thread is evicted first.
+        _THREAD_RUN_LOCKS[thread_id] = (loop_id, entry[1])
+        lock = entry[1]
+        if len(_THREAD_RUN_LOCKS) > _THREAD_RUN_LOCKS_MAX:
+            for key, (_, held) in list(_THREAD_RUN_LOCKS.items()):
+                if key == thread_id:
+                    continue
+                if not held.locked():
+                    del _THREAD_RUN_LOCKS[key]
+                if len(_THREAD_RUN_LOCKS) <= _THREAD_RUN_LOCKS_MAX:
+                    break
+        return lock
+
+
 _SSH_OPTIONS_WITH_VALUE = {
     "-B",
     "-b",
