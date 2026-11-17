@@ -339,12 +339,23 @@ class TestSimpleCommands:
             "B": (),
             "C": (),
         }
-        # A name that refers back to itself stays as written.
-        assert shell_syntax.assigned_values("A=$A/x") == {"A": ("${A}/x",)}
-        assert shell_syntax.assigned_values("A=$B; B=$A") == {
-            "A": ("${A}",),
-            "B": ("${A}",),
+        # A name that only refers back to itself starts from the environment.
+        assert shell_syntax.assigned_values("A=$A/x") == {"A": ()}
+        assert shell_syntax.assigned_values("A=$B; B=$A") == {"A": (), "B": ()}
+
+    def test_a_name_that_refers_back_to_itself_is_followed(self):
+        assert shell_syntax.assigned_values("D=.evoscientist; D=$D/memories") == {
+            "D": (".evoscientist", ".evoscientist/memories")
         }
+        assert shell_syntax.assigned_values("T=.; T=$T.") == {"T": (".", "..")}
+        # In a cycle, whichever name is read first.
+        assert shell_syntax.assigned_values("B=skills; A=$B; B=$A") == {
+            "B": ("skills",),
+            "A": ("skills",),
+        }
+        # A name that grows on every pass has too many values.
+        chain = "; ".join(["D=a"] + ["D=$D/$D"] * 4)
+        assert shell_syntax.assigned_values(chain) == {"D": None}
 
     def test_more_values_than_the_cap_are_reported(self):
         values = dict.fromkeys("VWXYZ", ("a", "b"))

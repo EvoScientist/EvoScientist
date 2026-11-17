@@ -918,13 +918,15 @@ def braced_value(word: str) -> str | None:
 def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
     """The values *command* sets each variable to (see :func:`assignments`),
     in any order, as the shell reads them: quotes removed, and a ``$NAME`` of
-    another variable set in *command* replaced by its values. A value with a
-    substitution is only known when the command runs, so it is left out; any
-    other ``$NAME`` (``$HOME``) stays as written. ``None`` for a variable with
-    more than :data:`_VALUES_CAP` values, one with values known before the
-    run and values only the run knows (``X=build; X=$(cmd)``), or one set in
-    part (``NAME+=value``, ``NAME[i]=value``), whose values depend on the
-    order it is set in."""
+    a variable set in *command* replaced by its values, its own included
+    (``D=.evoscientist; D=$D/memories``), as often as there are assignments
+    that refer to one. A value with a substitution is only known when the
+    command runs, so it is left out; any other ``$NAME`` (``$HOME``) stays as
+    written. ``None`` for a variable with more than :data:`_VALUES_CAP`
+    values, one with values known before the run and values only the run
+    knows (``X=build; X=$(cmd)``), one set in part (``NAME+=value``,
+    ``NAME[i]=value``), whose values depend on the order it is set in, or
+    one whose value names such a variable."""
     written: dict[str, list[str]] = {}
     in_part: set[str] = set()
     for head, value in _assignments(command):
@@ -932,52 +934,66 @@ def assigned_values(command: str) -> dict[str, tuple[str, ...] | None]:
         written.setdefault(name, []).append(value)
         if head != name:
             in_part.add(name)
-    resolved: dict[str, tuple[str, ...] | None] = {}
-    pending: set[str] = set()  # a reference back to one stays as written
-
-    def resolve(name: str) -> tuple[str, ...] | None:
-        if name in resolved:
-            return resolved[name]
-        if name in in_part:
-            resolved[name] = None
-            return None
-        pending.add(name)
-        try:
-            found = resolve_values(name)
-        except TooManyValues:
-            found = None
-        pending.discard(name)
-        resolved[name] = found
-        return found
-
-    def resolve_values(name: str) -> tuple[str, ...]:
-        found: list[str] = []
-        run_only = False  # a value only the run knows
-        for value in written[name]:
-            if "$(" in value or "`" in value:
-                run_only = True
-                continue
-            if not tokenize(value):
-                found.append("")
-                continue
-            read = braced_value(value)
-            if read is None:
-                run_only = True
-                continue
-            others = (variable_references(value) & written.keys()) - pending
-            expanded = expand_references(
-                read, {other: resolve(other) for other in others}
+    # Each value as the shell reads it, with the variables it names that the
+    # command sets; None when only the run knows it.
+    reads: dict[str, list[tuple[str, set[str]] | None]] = {}
+    for name, values in written.items():
+        reads[name] = []
+        for value in values:
+            read = (
+                None
+                if "$(" in value or "`" in value
+                else braced_value(value)
+                if tokenize(value)
+                else ""
             )
-            run_only = run_only or not expanded
-            found.extend(expanded)
-        values = tuple(dict.fromkeys(found))
-        # Checking only the known values of a variable that may also take
-        # one only the run knows would miss that one.
-        if len(values) > _VALUES_CAP or (run_only and values):
-            raise TooManyValues(name)
-        return values
+            refs = variable_references(value) & written.keys()
+            reads[name].append(None if read is None else (read, refs))
+    resolved: dict[str, tuple[str, ...] | None] = {
+        name: None if name in in_part else () for name in written
+    }
 
-    return {name: resolve(name) for name in written}
+    def expand(read: str, refs: set[str]) -> list[str]:
+        return expand_references(read, {ref: resolved[ref] for ref in refs})
+
+    # Each pass fills in one more step of a chain of assignments.
+    rounds = 1 + sum(
+        1 for each in reads.values() for read in each if read is not None and read[1]
+    )
+    for _ in range(rounds):
+        changed = False
+        for name, each in reads.items():
+            if resolved[name] is None:
+                continue
+            found = list(resolved[name])
+            try:
+                for read in each:
+                    if read is not None:
+                        found.extend(expand(*read))
+            except TooManyValues:
+                found = None
+            values = None if found is None else tuple(dict.fromkeys(found))
+            if values is not None and len(values) > _VALUES_CAP:
+                values = None
+            if values != resolved[name]:
+                resolved[name], changed = values, True
+        if not changed:
+            break
+    # Checking only the known values of a variable that may also take one
+    # only the run knows would miss that one.
+    changed = True
+    while changed:
+        changed = False
+        for name, each in reads.items():
+            if not resolved[name]:
+                continue
+            try:
+                run_only = any(read is None or not expand(*read) for read in each)
+            except TooManyValues:
+                run_only = True
+            if run_only:
+                resolved[name], changed = None, True
+    return resolved
 
 
 def expand_references(
