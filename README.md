@@ -138,6 +138,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 > Looking for ready-to-use research skills? Check out [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — powered by [**EvoScientist**](https://github.com/EvoScientist/EvoScientist)'s engine and installable skills, the entire end-to-end research lifecycle is covered out of the box. [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) are also compatible with other CLI coding agents.
 
 ## 🔥 News
+- **[14 Nov 2026]** 🍎 The **EvoScientist desktop app** is out for macOS (Apple silicon)! [**Download**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg) 👈
 - **[03 Nov 2026]** 🖥️ The **EvoScientist desktop app** is out for Windows! [**Download**](https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-Setup.exe) 👈
 - **[03 Jun 2026]** 🥈 Ranked #2 overall — and 🥇 #1 among `GPT-5.4`-based agents — on [ResearchClawBench](https://github.com/InternScience/ResearchClawBench) (Agent Mode)! [**Leaderboard**](https://internscience.github.io/ResearchClawBench-Home/) 👈
 - **[18 Apr 2026]** 🥇 Ranked #1 on [DeepResearch Bench](https://deepresearch-bench.github.io/) at submission time! [**Leaderboard**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
@@ -223,15 +224,15 @@ Download it for your platform:
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-dark.svg">
   <img alt="Download for Windows" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-windows-light.svg" width="220" height="44">
-</picture></a>&nbsp;<picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-dark.svg">
-  <img alt="macOS coming soon" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-macos-coming-soon-light.svg" width="220" height="44">
-</picture>
+</picture></a>&nbsp;<a href="https://github.com/EvoScientist/EvoScientist-WebUI/releases/latest/download/EvoScientist-arm64.dmg"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-dark.svg">
+  <img alt="Download for macOS" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/button-download-macos-light.svg" width="220" height="44">
+</picture></a>
 </p>
 
 > [!NOTE]
-> The installer is not signed yet: Windows SmartScreen may ask you to confirm (More info → Run anyway).
+> The macOS app is for Apple silicon on macOS 13 or later, signed and notarized. The Windows installer is not signed yet: Windows SmartScreen may ask you to confirm (More info → Run anyway).
 
 ### Quick Install
 
