@@ -1172,7 +1172,12 @@ def _merge_runs_config_kwargs(
         # the main run resolves the same provider-less name. A provider from
         # another source (the server's config-default, or the caller's own
         # request) would be a provider that does not serve this model.
-        merged_configurable.pop("model_provider", None)
+        #
+        # The provider is set to None rather than removed: LangGraph merges
+        # the child assistant's SAVED config into the run, so a missing key
+        # lets that saved provider back in and the inconsistent pair is
+        # rebuilt. An explicit None overrides it.
+        merged_configurable["model_provider"] = None
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     if isinstance(kwargs.get("assistant_id"), str):

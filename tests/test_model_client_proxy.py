@@ -164,7 +164,13 @@ async def test_child_run_on_a_provider_less_model_sends_no_provider(
             await result
     finally:
         patches._caller_configurable.reset(token)
-    assert create.call_args.kwargs["config"]["configurable"] == {"model": "gpt-6.1-sol"}
+    # The provider is present-and-None, not absent: LangGraph merges the
+    # child assistant's SAVED config into the run, and a missing key lets that
+    # saved provider back in -- rebuilding the pair the fix removes.
+    assert create.call_args.kwargs["config"]["configurable"] == {
+        "model": "gpt-6.1-sol",
+        "model_provider": None,
+    }
 
 
 @pytest.mark.parametrize("config", [None, "invalid", {"configurable": None}])
@@ -242,4 +248,6 @@ def test_a_child_run_created_from_a_granted_call_has_no_approval_key(monkeypatch
         client.runs.create(thread_id="child", assistant_id="agent")
     finally:
         patches._caller_configurable.reset(token)
-    assert create.call_args.kwargs["config"] == {"configurable": {"model": "m"}}
+    assert create.call_args.kwargs["config"] == {
+        "configurable": {"model": "m", "model_provider": None}
+    }
