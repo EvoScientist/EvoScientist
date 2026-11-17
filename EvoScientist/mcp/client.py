@@ -958,7 +958,9 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     log, so ``ensure_server`` runs this before spawning instead. The
     server, which outlives sessions, only puts on its PATH a private Node that
     a session or ``EvoSci setup`` installed since it started, at its first MCP
-    load: the tool cache keeps that load while ``mcp.yaml`` is unchanged.
+    load — but a server whose load failed is retried on a later load, so a
+    Node installed since then is picked up on the next run without
+    restarting the server.
     """
     missing = [
         name
@@ -1261,8 +1263,9 @@ async def _load_tools(
 
     hint = "Run 'EvoSci setup' to install Node.js"
     if paths.SERVER_PROCESS:
-        # The server keeps this load until it restarts.
-        hint += ", then 'EvoSci server stop' (the next session starts it again)"
+        # A failed server is retried on a later run, so a Node installed
+        # since this load is picked up without restarting the server.
+        hint += " — the server retries this server on a later run"
     skipped: dict[str, list] = {}
     for name in unresolved:
         _report("start", name)
