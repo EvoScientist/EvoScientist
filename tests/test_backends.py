@@ -1270,7 +1270,9 @@ class TestWorkspaceRemovalAndComments:
         )
         assert "protected folder" in error
 
-    def test_an_empty_unquoted_cd_target_is_a_bare_cd(self):
+    def test_an_empty_unquoted_cd_target_is_a_bare_cd(self, monkeypatch):
+        # A POSIX shell; cmd.exe's bare cd only prints the folder.
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
         error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
         assert "'cd $D' leaves the workspace" in error
 
