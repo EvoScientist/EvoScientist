@@ -259,7 +259,7 @@ class TestSimpleCommands:
 
     def test_assignments_wherever_a_variable_is_set(self):
         assert shell_syntax.assignments(
-            'A=1; B=$(ps aux | grep x) cmd; export C=`lsof -t`; local -r D="$(ps)" E'
+            'A=1; B=$(ps aux | grep x) :; export C=`lsof -t`; local -r D="$(ps)" E'
         ) == [
             ("A", "1"),
             ("B", "$(ps aux | grep x)"),
@@ -387,7 +387,7 @@ class TestSimpleCommands:
             "E": ("a",),
             "B": ("b",),
         }
-        assert shell_syntax.assigned_values("env 'Q=a b' ls") == {"Q": ("a b",)}
+        assert shell_syntax.assigned_values("env 'Q=a b' sh -c :") == {"Q": ("a b",)}
         assert shell_syntax.assigned_values(
             "D=x; unset D; for B in {a,b}; do :; done; mapfile"
         ) == {"D": None, "B": None, "MAPFILE": None}
@@ -448,9 +448,38 @@ class TestSimpleCommands:
             shell_syntax.word_values("$D", "$D", {**assigned, "IFS": (":",)})
         assert shell_syntax.word_values('"$D"', "$D", {**assigned, "IFS": (":",)})
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "D=x :",
+            "D=x export E",
+            "D=x declare E",
+            "D=x cd .",
+            "f() { :; }; D=x f",
+            "D=x bash -c :",
+            "D=x xargs sh -c :",
+            "env D=x bash -c :",
+            "D=x env -S 'ls'",
+            "D=x time :",
+        ],
+    )
+    def test_an_assignment_before_a_builtin_or_shell_code_counts(self, command):
+        assert shell_syntax.assigned_values(command) == {"D": ("x",)}
+        assert shell_syntax.assigned_values("D=x eval :") == {"D": None}
+
+    @pytest.mark.parametrize(
+        "command",
+        ["IFS= read -r line", "D=x python y.py", "D=x A=y true", "env D=x python y.py"],
+    )
+    def test_an_assignment_before_any_other_command_is_that_commands_only(
+        self, command
+    ):
+        assert "D" not in shell_syntax.assigned_values(command)
+        assert "IFS" not in shell_syntax.assigned_values(command)
+
     def test_loop_words_and_env_assignments_are_values(self):
         assert shell_syntax.assigned_values(
-            "for d in skills x; do :; done; env -i E='a b' ls; L=(a b)"
+            "for d in skills x; do :; done; env -i E='a b' bash x.sh; L=(a b)"
         ) == {"d": ("skills", "x"), "E": ("a b",), "L": None}
         with pytest.raises(shell_syntax.UnknownValues):
             shell_syntax.word_values('"${d%/}"', "${d%/}", {"d": ("x",)})

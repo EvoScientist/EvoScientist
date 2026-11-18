@@ -708,6 +708,8 @@ def _unwrap(
     takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
     outer_folders = folders  # one env changes folder once, to its last -C
     rest = list(args)
+    env_assigned: list[tuple[str, str]] = []
+    scripts_before = len(scripts)
     position = 0
     while position < len(rest):
         value = _word_value(*rest[position])
@@ -736,7 +738,7 @@ def _unwrap(
                 str(token["raw"]) if token is not None else arg
             )
             if declared is not None:
-                assigned.append(declared)
+                env_assigned.append(declared)
                 continue
         if name == "command" and value in ("-v", "-V"):
             return found  # only looks the name up
@@ -747,9 +749,14 @@ def _unwrap(
         ):
             continue
         inner = re.split(r"[\\/]", value)[-1]
-        return found + _unwrap(
-            inner, rest[position:], (*via, name), scripts, folders, assigned
-        )
+        runs = _unwrap(inner, rest[position:], (*via, name), scripts, folders, assigned)
+        if (
+            assigned is not None
+            and env_assigned
+            and _keeps_prefix(runs, len(scripts) > scripts_before, "")
+        ):
+            assigned.extend(env_assigned)  # only the code it runs sees them
+        return found + runs
     return found
 
 
@@ -1234,6 +1241,45 @@ def word_values(
     return values
 
 
+# Builtins after which a `NAME=value` written before them stays set (POSIX
+# special builtins, and bash's own in POSIX mode).
+SPECIAL_BUILTIN_NAMES = frozenset(
+    {
+        ":", ".", "break", "continue", "eval", "exec", "exit", "export",
+        "readonly", "return", "set", "shift", "source", "times", "trap", "unset",
+    }
+)  # fmt: skip
+
+
+def _keeps_prefix(
+    unwrapped: list[SimpleCommand], adds_scripts: bool, command: str
+) -> bool:
+    """Whether a ``NAME=value`` written before a command, which sets the
+    variable for that command only, still counts as one the shell sets:
+    before a special builtin, a declaration, ``cd`` / ``pushd`` (which read
+    ``HOME`` and ``CDPATH``) or a function, which keep or read it in this
+    shell, or before a command that runs shell code the check reads, where
+    the code sees it (``D=x bash -c 'rm -rf "$D"'``). Before any other
+    command (``IFS= read``, ``OUT=x python``) the shell's own variable is
+    unchanged."""
+    name = unwrapped[0].name
+    return (
+        adds_scripts
+        or name in SPECIAL_BUILTIN_NAMES
+        or name in DECLARATION_NAMES
+        or name in ("cd", "pushd")
+        or re.search(
+            rf"(?:^|[\s;&|(){{}}]){re.escape(name)}\s*\(\s*\)|\bfunction\s+{re.escape(name)}\b",
+            command,
+        )
+        is not None
+        or any(
+            each.name in SHELL_NAMES or each.name in SPECIAL_BUILTIN_NAMES
+            for each in unwrapped
+        )
+    )
+
+
 def _simple_commands(
     command: str,
     seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
@@ -1254,6 +1300,8 @@ def _simple_commands(
     # `env -S` string's words carry offsets into that string, not *command*.
     script_tokens: set[int] = set()
     code_bodies: set[int] = set()  # read as code, not again for substitutions
+    # Assignments written before a command name, by the index of its token.
+    prefix: dict[int, list[tuple[str, str]]] = {}
     in_backtick = False
     for index, (token, is_name) in enumerate(
         zip(tokens, words.name_flags, strict=True)
@@ -1261,7 +1309,11 @@ def _simple_commands(
         value = str(token["value"])
         if token["type"] == "op" and value == "`":
             in_backtick = not in_backtick
-        if not is_name or value in COMMAND_PREFIX_WORDS:
+        if not is_name:
+            continue
+        if value in COMMAND_PREFIX_WORDS:
+            if index in prefix:  # `D=x time cmd`: before the command after it
+                prefix[index + 1] = prefix.pop(index)
             continue
         assignment = ASSIGNMENT_RE.match(str(token["raw"]))
         if assignment is not None:
@@ -1269,10 +1321,19 @@ def _simple_commands(
                 end = _command_word_end(tokens, index, in_backtick)
                 text = command[int(token["start"]) : int(tokens[end - 1]["end"])]
                 written = text[: assignment.end() - 1]
-                assigned.append((written, text[assignment.end() :]))
+                chain = [*prefix.pop(index, []), (written, text[assignment.end() :])]
+                if (
+                    end < len(tokens)
+                    and words.name_flags[end]
+                    and tokens[end]["type"] == "word"
+                ):
+                    prefix[end] = chain
+                else:
+                    assigned.extend(chain)  # alone, not before a command
             continue
         name = re.split(r"[\\/]", value)[-1]
         args, heredocs = _command_arguments(command, words, index, in_backtick)
+        before = prefix.pop(index, [])
         # A function definition, `function NAME` or `NAME ( )`, is reported
         # as a command named `function`, as its body may run any number of
         # times, in any order with the commands around it.
@@ -1294,7 +1355,15 @@ def _simple_commands(
                     (command[int(spans[0]["start"]) : int(spans[-1]["end"])], (), ())
                 )
             continue
-        for each in _unwrap(name, args, (), nested, (), assigned):
+        scripts_before = len(nested)
+        unwrapped = _unwrap(name, args, (), nested, (), assigned)
+        if (
+            assigned is not None
+            and before
+            and _keeps_prefix(unwrapped, len(nested) > scripts_before, command)
+        ):
+            assigned.extend(before)
+        for each in unwrapped:
             found.append(each)
             if each.name not in SHELL_NAMES:
                 continue
@@ -1318,6 +1387,10 @@ def _simple_commands(
                     nested.append(
                         (text[: text.rfind("\n") + 1], each.via, each.folders)
                     )
+
+    if assigned is not None:
+        for chain in prefix.values():  # before no command name the parser marks
+            assigned.extend(chain)
 
     def collect(body: str) -> tuple[str, bool]:
         nested.append((body, (), ()))  # runs before the command it is in

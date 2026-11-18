@@ -1271,10 +1271,28 @@ class TestWorkspaceRemovalAndComments:
             'cd pkg && rm -rf build && git commit -m "rename function foo"',
             "cat > notes.md <<'EOF'\nThe helper function parses args.\nEOF\n"
             "cd x && rm -rf build",
+            # NAME=value before a regular command is set for that command only.
+            'OUT=results; while IFS= read -r f; do echo "$f"; done < l.txt; '
+            "cd $OUT && ls",
+            'OUT=build; while IFS= read -r l; do echo "$l"; done < f.txt; rm -rf $OUT',
+            'OUT=build; env OUT=$(mktemp -d) python x.py; rm -rf "$OUT"',
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
         assert validate_command(command, ("/W/skills",), workspace_root="/W") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'D=skills :; rm -rf "$D"',
+            'f() { :; }; D=skills f; rm -rf "$D"',
+            "D=skills bash -c 'rm -rf \"$D\"'",
+            "env D=skills bash -c 'rm -rf \"$D\"'",
+        ],
+    )
+    def test_an_assignment_before_a_builtin_or_shell_code_counts(self, command):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "protected" in error
 
     def test_an_env_folder_from_a_quoted_variable_is_one_folder(self):
         error = validate_command(
