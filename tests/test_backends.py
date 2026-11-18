@@ -1318,6 +1318,10 @@ class TestWorkspaceRemovalAndComments:
             'f() { :; }; D=skills f; rm -rf "$D"',
             "D=skills bash -c 'rm -rf \"$D\"'",
             "env D=skills bash -c 'rm -rf \"$D\"'",
+            # A newline ends the assignment's command, as `;` does.
+            'D=skills\nrm -rf "$D"',
+            'D=skills # note\nrm -rf "$D"',
+            'D=skills\nif true; then rm -rf "$D"; fi',
         ],
     )
     def test_an_assignment_before_a_builtin_or_shell_code_counts(self, command):

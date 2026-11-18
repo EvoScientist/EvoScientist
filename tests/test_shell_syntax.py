@@ -510,6 +510,12 @@ class TestSimpleCommands:
         assert shell_syntax.assigned_values("D=x eval :") == {"D": None}
 
     @pytest.mark.parametrize(
+        "command", ["D=x\nls", "D=x # note\nls", "D=x\nif :; then :; fi"]
+    )
+    def test_an_assignment_on_a_line_of_its_own_counts(self, command):
+        assert shell_syntax.assigned_values(command) == {"D": ("x",)}
+
+    @pytest.mark.parametrize(
         "command",
         ["IFS= read -r line", "D=x python y.py", "D=x A=y true", "env D=x python y.py"],
     )

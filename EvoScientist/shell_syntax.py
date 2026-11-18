@@ -1430,6 +1430,11 @@ def _simple_commands(
                     end < len(tokens)
                     and words.name_flags[end]
                     and tokens[end]["type"] == "word"
+                    # A newline ends the command, as `;` does.
+                    and command_newline(
+                        command, int(tokens[end - 1]["end"]), int(tokens[end]["start"])
+                    )
+                    is None
                 ):
                     prefix[end] = chain
                 else:
