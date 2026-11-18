@@ -40,6 +40,9 @@ class _FakeSocket:
             self._file = open(address, "wb")
         self.address = address
 
+    def listen(self, backlog=1):
+        self._state["calls"].append(("listen", backlog))
+
     def connect(self, address):
         raise OSError(errno.ECONNREFUSED, "no")
 
@@ -111,9 +114,12 @@ def test_a_platform_without_the_abstract_namespace_falls_back(fake_sockets, tmp_
 
     proposals._ProposalLock(_proposal_dir(tmp_path))._acquire_posix()
 
-    assert len(fake_sockets["calls"]) == 2, fake_sockets["calls"]
+    assert len(fake_sockets["calls"]) == 3, fake_sockets["calls"]
     assert isinstance(fake_sockets["calls"][1], str)
     assert fake_sockets["calls"][1].endswith(".sock")
+    # The holder listens, so a contender can tell a live lock from a dead
+    # one's leftover file.
+    assert fake_sockets["calls"][2] == ("listen", 64)
 
 
 def test_a_replaced_fallback_name_is_refused(fake_sockets, tmp_path, monkeypatch):
@@ -126,7 +132,8 @@ def test_a_replaced_fallback_name_is_refused(fake_sockets, tmp_path, monkeypatch
         lock._acquire_posix()
 
     # The replaced name was retried a bounded number of times, not forever.
-    assert len(fake_sockets["calls"]) <= 8, fake_sockets["calls"]
+    # Each attempt binds and listens, so the calls come in pairs.
+    assert len(fake_sockets["calls"]) <= 14, fake_sockets["calls"]
 
 
 @pytest.mark.skipif(
@@ -195,6 +202,51 @@ def test_a_long_home_directory_still_yields_a_bindable_path(tmp_path, monkeypatc
     path = proposals._socket_path("0123456789abcdef0123456789abcdef")
 
     assert len(str(path).encode("utf-8")) <= proposals._SUN_PATH_MAX
+
+
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"), reason="this platform has no POSIX socket"
+)
+def test_a_live_holder_is_not_stolen(tmp_path, monkeypatch):
+    """A second acquirer waits for a live holder instead of taking the name.
+
+    A socket that is bound but not listening refuses connections exactly
+    like a dead one, so a contender reading that refusal would take the
+    name while the first acquirer still holds it -- two holders, one
+    draft. The holder listens, so the difference is visible.
+    """
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_base", lambda: Path("evtest"))
+
+    real_bind = socket.socket.bind
+
+    def refuse_abstract(sock, address):
+        if isinstance(address, bytes) and address.startswith(b"\0"):
+            raise OSError(errno.EAFNOSUPPORT, "no abstract namespace")
+        return real_bind(sock, address)
+
+    monkeypatch.setattr(socket.socket, "bind", refuse_abstract)
+
+    folder = _proposal_dir(tmp_path)
+    holder = proposals._ProposalLock(folder)._acquire_posix()
+
+    acquired = threading.Event()
+
+    def contend() -> None:
+        other = proposals._ProposalLock(folder)._acquire_posix()
+        acquired.set()
+        other.close()
+
+    worker = threading.Thread(target=contend, daemon=True)
+    worker.start()
+    try:
+        assert not acquired.wait(1.5), "the contender took a live holder's name"
+        holder.close()
+        assert acquired.wait(10.0), "the contender never got the lock"
+    finally:
+        holder.close()
 
 
 def test_the_fallback_path_fits_a_unix_socket(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ import secrets
 import shutil
 import socket
 import stat
+import struct
 import sys
 import tempfile
 import threading
@@ -253,7 +254,13 @@ def _socket_is_live(path: Path) -> bool:
     """Whether a socket file still has a holder behind it.
 
     A holder that died leaves the file behind, and the next bind would find
-    the name taken forever. A refused connection means nothing is listening.
+    the name taken forever. A refused connection means nothing is listening:
+    the holder died, or it was never listening.
+
+    So the holder LISTENS. A socket that is bound but not listening refuses
+    connections exactly like a dead one, and a second acquirer reading that
+    refusal would take the name while the first still holds it -- two
+    holders, one draft.
     """
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(1.0)
@@ -266,17 +273,74 @@ def _socket_is_live(path: Path) -> bool:
     return True
 
 
+def _peer_is_this_process(probe: socket.socket) -> bool:
+    """Whether the socket on the other end of a connection is our own.
+
+    Linux answers with SO_PEERCRED, which names the peer's pid; the BSDs
+    answer with getpeereid, which names the peer's user.
+    """
+    peer_cred = getattr(socket, "SO_PEERCRED", None)
+    if peer_cred is not None:
+        try:
+            raw = probe.getsockopt(socket.SOL_SOCKET, peer_cred, 12)
+        except OSError:
+            return False
+        return struct.unpack("i", raw[:4])[0] == os.getpid()
+    getpeereid = getattr(socket, "getpeereid", None)
+    if getpeereid is not None:
+        try:
+            euid, egid = getpeereid(probe)
+        except OSError:
+            return False
+        return euid == os.geteuid() and egid == os.getegid()
+    return False
+
+
 def _socket_is_ours(path: Path, held: socket.socket) -> bool:
     """Whether the path still names the socket this process holds.
 
     The name is a path on the platforms without an abstract namespace, so a
-    shell can unlink it and bind a socket of its own there. The inode of the
-    path and the inode of the descriptor have to be the same one.
+    shell can unlink it and bind a socket of its own there. The holder checks
+    that the path still names the socket it holds, so a replaced path is
+    refused rather than trusted.
+
+    There are two ways to ask, because the two platforms answer
+    differently. The inode of the path and the inode of the descriptor are
+    the same one where the socket file *is* the socket (macOS). On Linux
+    they are not, so the peer is asked instead: the holder listens, so
+    connecting to the path reaches this process's own socket, and the
+    credentials name this pid.
     """
     try:
-        return os.stat(path).st_ino == os.fstat(held.fileno()).st_ino
+        if os.stat(path).st_ino == os.fstat(held.fileno()).st_ino:
+            return True
+    except OSError:
+        pass
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1.0)
+    try:
+        probe.connect(str(path))
     except OSError:
         return False
+    try:
+        ours = _peer_is_this_process(probe)
+    finally:
+        probe.close()
+    if ours:
+        # The check queued a connection on our own socket; take it, so the
+        # backlog stays free for the contender that asks next.
+        _drain_one(held)
+    return ours
+
+
+def _drain_one(held: socket.socket) -> None:
+    """Accept and close one queued connection, if there is one."""
+    held.settimeout(0.5)
+    try:
+        accepted, _ = held.accept()
+    except OSError:
+        return
+    accepted.close()
 
 
 class _ProposalLock:
@@ -368,6 +432,10 @@ class _ProposalLock:
             held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 held.bind(str(path))
+                # The holder listens, so a second acquirer can tell a live
+                # lock from a dead one's leftover file. The backlog is roomy
+                # because a contender's probe queues a connection on it.
+                held.listen(64)
             except OSError as exc:
                 held.close()
                 if exc.errno != errno.EADDRINUSE:
