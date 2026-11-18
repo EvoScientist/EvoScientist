@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import errno
 import socket
+import time
 from pathlib import Path
 
 import pytest
@@ -305,13 +306,36 @@ def test_a_real_holder_answers_every_probe(tmp_path, monkeypatch):
     path = proposals._socket_path(lock._name)
     holder = lock._acquire_posix()
     try:
+        # A burst of probes: the queue may fill for a moment while the
+        # holder is accepting, and that is fine -- what matters is that the
+        # queue does not STAY full.
         for _ in range(200):
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.settimeout(5.0)
+            probe.settimeout(1.0)
             try:
                 probe.connect(str(path))
+            except OSError:
+                pass
             finally:
                 probe.close()
+
+        # So a later probe is answered: the holder drained the queue.
+        deadline = time.monotonic() + 10.0
+        while True:
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(1.0)
+            try:
+                probe.connect(str(path))
+                break
+            except OSError as exc:
+                if time.monotonic() > deadline:
+                    raise AssertionError(
+                        "the holder's accept queue stayed full: "
+                        f"{exc}; a contender would read that as a dead holder"
+                    ) from exc
+            finally:
+                probe.close()
+            time.sleep(0.05)
     finally:
         holder.close()
 
