@@ -22,31 +22,6 @@ from EvoScientist.llm.custom_openai_discovery import (
 _LISTING = {"data": [{"id": "fake-agent"}, {"id": "other-model"}]}
 
 
-class _ClientThroughGet:
-    """Stands in for ``httpx.Client`` and performs the request with ``httpx.get``.
-
-    The probe uses a client so it can close it and abort a request that
-    outlives the deadline. The tests below patch ``httpx.get``, so the fake
-    client defers to it and their assertions keep their meaning.
-    """
-
-    def __init__(self, **kwargs: object) -> None:
-        self.kwargs = kwargs
-
-    def get(self, url: str, **kwargs: object):
-        return httpx.get(url, **kwargs)
-
-    def close(self) -> None:
-        pass
-
-
-@pytest.fixture(autouse=True)
-def _probe_uses_a_client():
-    """The sync probe builds a client; the tests patch the request itself."""
-    with patch("httpx.Client", _ClientThroughGet):
-        yield
-
-
 def _response(status_code: int = 200, body: object = None, *, json_error: bool = False):
     resp = MagicMock()
     resp.status_code = status_code
@@ -57,69 +32,126 @@ def _response(status_code: int = 200, body: object = None, *, json_error: bool =
     return resp
 
 
+def _patch_get(response=None, *, side_effect=None):
+    """Patch the client's request; return the patcher and what it recorded."""
+    seen: dict[str, object] = {}
+
+    async def fake_get(self, url, headers=None, **kwargs):
+        seen["url"] = url
+        seen["headers"] = headers
+        if side_effect is not None:
+            raise side_effect
+        return response
+
+    return patch.object(httpx.AsyncClient, "get", fake_get), seen
+
+
 class TestListCustomOpenaiModels:
-    """Sync probe — the wizard calls this while questionary is blocking."""
+    """Sync probe - the wizard calls this while questionary is blocking."""
 
     def test_empty_base_url_returns_empty_without_http(self):
-        with patch("httpx.get") as get:
+        patcher, seen = _patch_get(_response())
+        with patcher:
             assert list_custom_openai_models("") == []
             assert list_custom_openai_models(None) == []
-        get.assert_not_called()
+        assert seen == {}
 
     def test_200_returns_ids(self):
-        with patch("httpx.get", return_value=_response()) as get:
+        patcher, seen = _patch_get(_response())
+        with patcher:
             names = list_custom_openai_models("https://llm.test/v1", "sk-test")
         assert names == ["fake-agent", "other-model"]
-        args, kwargs = get.call_args
-        assert args[0] == "https://llm.test/v1/models"
-        assert kwargs["headers"] == {"Authorization": "Bearer sk-test"}
+        assert seen["url"] == "https://llm.test/v1/models"
+        assert seen["headers"] == {"Authorization": "Bearer sk-test"}
 
     def test_empty_key_sends_no_authorization(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
-        with patch("httpx.get", return_value=_response()) as get:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-sho...leak")
+        patcher, seen = _patch_get(_response())
+        with patcher:
             names = list_custom_openai_models("https://llm.test/v1", "")
         assert names == ["fake-agent", "other-model"]
-        assert get.call_args.kwargs["headers"] == {}
+        assert seen["headers"] == {}
 
     def test_whitespace_key_sends_no_authorization(self):
-        with patch("httpx.get", return_value=_response()) as get:
+        patcher, seen = _patch_get(_response())
+        with patcher:
             list_custom_openai_models("https://llm.test/v1", "   ")
-        assert get.call_args.kwargs["headers"] == {}
+        assert seen["headers"] == {}
 
     def test_non_200_returns_empty(self):
         for status in (401, 404, 500):
-            with patch("httpx.get", return_value=_response(status)):
+            patcher, _ = _patch_get(_response(status))
+            with patcher:
                 assert list_custom_openai_models("https://llm.test/v1", "sk") == []
 
     def test_timeout_returns_empty(self):
-        with patch("httpx.get", side_effect=httpx.TimeoutException("timed out")):
+        patcher, _ = _patch_get(side_effect=httpx.TimeoutException("timed out"))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_connect_error_returns_empty(self):
-        with patch("httpx.get", side_effect=httpx.ConnectError("refused")):
+        patcher, _ = _patch_get(side_effect=httpx.ConnectError("refused"))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_malformed_json_returns_empty(self):
-        with patch("httpx.get", return_value=_response(json_error=True)):
+        patcher, _ = _patch_get(_response(json_error=True))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_missing_data_returns_empty(self):
-        with patch("httpx.get", return_value=_response(body={"unexpected": []})):
+        patcher, _ = _patch_get(_response(body={"unexpected": []}))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_data_not_a_list_returns_empty(self):
-        with patch("httpx.get", return_value=_response(body={"data": "nope"})):
+        patcher, _ = _patch_get(_response(body={"data": "nope"}))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_drops_entries_without_id(self):
         body = {"data": [{"id": "fake-agent"}, {"id": ""}, {}, "bare"]}
-        with patch("httpx.get", return_value=_response(body=body)):
+        patcher, _ = _patch_get(_response(body=body))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == ["fake-agent"]
 
     def test_trailing_slash_stripped_from_url(self):
-        with patch("httpx.get", return_value=_response(body={"data": []})) as get:
+        patcher, seen = _patch_get(_response(body={"data": []}))
+        with patcher:
             assert list_custom_openai_models("https://llm.test/v1/") == []
-        assert get.call_args.args[0] == "https://llm.test/v1/models"
+        assert seen["url"] == "https://llm.test/v1/models"
+
+    def test_a_timed_out_probe_leaves_no_worker_running(self):
+        """An endpoint that never answers does not leave a thread behind.
+
+        The deadline cancels the request, so the worker ends with it. A probe
+        that only stopped waiting would leave the thread and its connection
+        behind, and every further probe would leave another one.
+        """
+        import asyncio
+        import threading
+        import time
+
+        async def never_answers(self, url, headers=None, **kwargs):
+            await asyncio.sleep(3600)
+
+        def never_answers_sync(self, url, headers=None, **kwargs):
+            time.sleep(3600)
+
+        before = threading.active_count()
+        with (
+            patch.object(httpx.AsyncClient, "get", never_answers),
+            patch.object(httpx.Client, "get", never_answers_sync),
+        ):
+            assert (
+                list_custom_openai_models("https://llm.test/v1", "sk", timeout=0.2)
+                == []
+            )
+
+        deadline = time.monotonic() + 5.0
+        while threading.active_count() > before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert threading.active_count() <= before
 
 
 class TestDiscoverCustomOpenaiModels:

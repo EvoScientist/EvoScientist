@@ -13,7 +13,6 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 from __future__ import annotations
 
 import threading
-from typing import Any
 
 # A picker mounts one row per model, so a huge listing would make it
 # unusable. The cap keeps the list usable and the response bounded.
@@ -79,8 +78,14 @@ def list_custom_openai_models(
     The call has a TOTAL deadline, not just HTTPX's inactivity timeout.
     HTTPX's timeout limits the wait for each chunk, so an endpoint that
     sends a chunk every few seconds without ever finishing would keep the
-    wizard waiting indefinitely. The request runs in a daemon thread and the
-    caller stops waiting once the deadline passes.
+    wizard waiting indefinitely.
+
+    The probe runs in a daemon thread, because the wizard is blocking and
+    the request must not. That thread runs the async probe, whose deadline
+    CANCELS the request: when the deadline passes the request is aborted
+    and the thread ends with it. A probe that only stopped waiting would
+    leave the thread and its connection behind, and every further probe
+    would leave another one.
 
     The listing is bounded: an endpoint that serves tens of thousands of ids
     would otherwise fill the picker with one row each and make it unusable.
@@ -89,43 +94,25 @@ def list_custom_openai_models(
         return []
 
     names: list[str] = []
-    failed: list[BaseException] = []
-    client_holder: dict[str, Any] = {}
 
     def fetch() -> None:
-        try:
-            import httpx
+        import asyncio
 
-            client = httpx.Client(timeout=timeout)
-            client_holder["client"] = client
-            try:
-                resp = client.get(
-                    _models_url(base_url),
-                    headers=_auth_headers(api_key),
-                )
-                if resp.status_code == 200:
-                    names.extend(_names_from_body(resp.json()))
-            finally:
-                client.close()
-        except BaseException as exc:
-            failed.append(exc)
+        try:
+            found = asyncio.run(
+                discover_custom_openai_models(base_url, api_key, timeout=timeout)
+            )
+        except BaseException:
+            found = []
+        names.extend(found)
 
     worker = threading.Thread(target=fetch, daemon=True)
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        # The endpoint is trickling the response: give up on it, and close
-        # the client so the request is aborted rather than left running and
-        # buffering into a connection nobody reads.
-        client = client_holder.get("client")
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
+        # The probe's own deadline cancels the request, so the thread ends
+        # when the cancellation lands. This is the grace for that.
         worker.join(0.5)
-        return []
-    if failed:
         return []
     return names
 

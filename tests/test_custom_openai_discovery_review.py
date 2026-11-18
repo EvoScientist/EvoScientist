@@ -408,28 +408,29 @@ def test_the_environment_key_wins_over_an_expired_saved_key(monkeypatch):
 def test_the_timed_out_request_is_aborted(monkeypatch):
     """A timed-out probe must not leave the request running.
 
-    The worker thread is still waiting when the deadline passes; it keeps
-    its connection and buffers into it. Closing the client aborts the
-    request.
+    The deadline cancels the request, so the worker ends with it instead of
+    keeping its connection and buffering into it. A probe that only stopped
+    waiting would leave the request running.
     """
+    import asyncio
     import time
 
     import httpx
 
     from EvoScientist.llm import custom_openai_discovery as discovery
 
-    closed: list[bool] = []
+    cancelled: list[bool] = []
 
-    class _SlowClient(httpx.Client):
-        def get(self, *args, **kwargs):
-            time.sleep(5)
+    class _SlowClient(httpx.AsyncClient):
+        async def get(self, *args, **kwargs):
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
             raise AssertionError("the deadline did not fire")
 
-        def close(self) -> None:
-            closed.append(True)
-            super().close()
-
-    monkeypatch.setattr(httpx, "Client", _SlowClient)
+    monkeypatch.setattr(httpx, "AsyncClient", _SlowClient)
 
     started = time.monotonic()
     names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
@@ -437,7 +438,7 @@ def test_the_timed_out_request_is_aborted(monkeypatch):
 
     assert names == []
     assert elapsed < 2.0, elapsed
-    assert closed, "the client was not closed, so the request kept running"
+    assert cancelled, "the request was not cancelled, so it kept running"
 
 
 def test_a_malformed_saved_url_does_not_stop_the_probe(monkeypatch):
