@@ -360,24 +360,26 @@ def test_b4_approval_copies_through_the_checked_descriptor(tmp_path, monkeypatch
     _draft(memory_dir, "probe-skill", "Reviewed body.")
     _submit(memory_dir, skills_dir)
     draft = autoskill_proposals_dir(memory_dir) / "probe-skill"
-    live = str(draft / "SKILL.md")
-    opens: list[str] = []
-    real_open = os.open
+    live = os.fsdecode(draft / "SKILL.md")
 
-    def counting(path, flags, *args, **kwargs):
-        # The stub replaces the whole ``os.open``, so it has to accept every
-        # call convention the standard library uses -- ``dir_fd`` among them,
-        # which POSIX callers pass and Windows does not.
-        text = os.fsdecode(path)
-        if text == live:
-            opens.append(text)
-        return real_open(path, flags, *args, **kwargs)
+    # The copy must read the live draft through the descriptor that proved
+    # it regular, so it may not open it a second time. ``_open_regular`` is
+    # that one open, so the copy is watched there: counting every
+    # ``os.open`` would also count the validation scan and the digest read,
+    # and the count differs between platforms.
+    copied: list[str] = []
 
-    monkeypatch.setattr(proposals.os, "open", counting)
+    real_copy = proposals._copy_regular_file
+
+    def recording_copy(source, target):
+        copied.append(os.fsdecode(source))
+        return real_copy(source, target)
+
+    monkeypatch.setattr(proposals, "_copy_regular_file", recording_copy)
     monkeypatch.setattr(proposals, "_notify_approved_skill", lambda: None)
     result = _approve(memory_dir, skills_dir)
     assert result["approved"] is True, result
-    assert opens.count(live) == 1, opens
+    assert copied.count(live) == 1, copied
 
 
 def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
