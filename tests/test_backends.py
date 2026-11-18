@@ -1748,6 +1748,19 @@ class TestWorkspaceRemovalAndComments:
                 'nohup sh -c "python3 ./src/train.py > ./logs/t.log" &',
             ),
             ('cd src && bash -c "ls /results"', 'cd src && bash -c "ls /W/results"'),
+            ('sh -c -- "cat /tmp/x"', 'sh -c -- "cat ./tmp/x"'),
+            ('bash -login -c "cat /tmp/x"', 'bash -login -c "cat ./tmp/x"'),
+            ('zsh -opipefail -c "cat /tmp/x"', 'zsh -opipefail -c "cat ./tmp/x"'),
+            ('bash -c -e "cat /tmp/x"', 'bash -c -e "cat ./tmp/x"'),
+            (
+                'bash --rcfile ./rc -lc "cat /tmp/x"',
+                'bash --rcfile ./rc -lc "cat ./tmp/x"',
+            ),
+            (
+                'bash --init-file ./rc -c "cat /tmp/x"',
+                'bash --init-file ./rc -c "cat ./tmp/x"',
+            ),
+            ('sh -O extglob -c "cat /tmp/x"', 'sh -O extglob -c "cat ./tmp/x"'),
         ],
     )
     def test_shell_c_scripts_are_rewritten(self, command, expected):
@@ -3686,6 +3699,86 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
 
 
+# === '..' traversal through option and assignment spellings (issue #825) ===
+
+
+class TestTraversalOptionSpellings:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=../out.txt",
+            "python s.py -o../out.txt",
+            "OUT=../out.txt python s.py",
+            "python s.py '--output=../out.txt'",
+            "python s.py -o'../out.txt'",
+            "python s.py --output=..",
+            "bash -c 'python s.py --output=../out.txt'",
+            "bash -c 'python s.py -o\"../out.txt\"'",
+            "python s.py -vo../out.txt",
+            "make CFLAGS=-I../include",
+            "CPPFLAGS=-I../include ./configure",
+            "# '\necho \"$(python s.py -o'../out.txt')\"",
+            '# "\necho "`python s.py -o\'../out.txt\'`"',
+            "cat <<EOF\n$(python s.py -o'../out.txt')\nEOF",
+            "cat <<EOF\n'$(python s.py -o'../out.txt')'\nEOF",
+            "echo \"$(python s.py -o'../out.txt')\"",
+            "echo \"`python s.py -o'../out.txt'`\"",
+            'echo "$(echo "$(python s.py -o\'../out.txt\')")"',
+            'export PATH="$PATH:../bin"',
+            "pytest --override-ini=cache_dir=../cache",
+            "PYTHONPATH=$PYTHONPATH:../src python s.py",
+            "python train.py trainer.default_root_dir=../runs",
+            "python train.py +trainer.default_root_dir=../runs",
+            "gcc main.c -Wl,-rpath=../lib -o main",
+            "cmake -DCMAKE_INSTALL_PREFIX:PATH=../install .",
+            "cmake -B build -D CMAKE_INSTALL_PREFIX:PATH=../install",
+            "gcc -Wl,-rpath,../lib main.c",
+            "make PREFIX:=../install",
+            "make PREFIX::=../install",
+            "make PREFIX!=../install",
+            "python train.py ++trainer.default_root_dir=../runs",
+            "bazel build --action_env=PATH=../bin //x",
+            'OUT[0]=../outside; cat "${OUT[0]}"',
+        ],
+    )
+    def test_glued_traversal_spellings_are_blocked(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=out.txt",
+            "python s.py -oout.txt",
+            "OUT=out.txt python s.py",
+            "python s.py --output=foo..bar.txt",
+            "python s.py -ofoo..bar.txt",
+            "echo foo..bar.txt",
+            "bash -c 'python s.py --output=out.txt'",
+            "bash -c 'echo hello'",
+            "bash \"-c\" 'echo hello'",
+            "sed -i 's/a=../b/' f.txt",
+            "sed -i 's,dir=../,dir=./,' cfg.ini",
+            "grep -F '=../' cfg.ini",
+            "sed 's:dir=../:dir=./:' cfg.ini",
+            "git log --format=%h:..:%s",
+            "scp host:../data.csv .",
+            "cat <<'EOF'\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            'cat <<"EOF"\n"`python s.py -o\'../out.txt\'`"\nEOF',
+            "cat <<\\EOF\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            "cat <<EOF\n$(python s.py -o'out.txt')\nEOF",
+            "echo \"$(python s.py -o'out.txt')\"",
+            "echo \"`python s.py -o'out.txt'`\"",
+            "echo '$(python s.py -o\"../out.txt\")' ",
+            "echo \"\\$(python s.py -o'../out.txt')\"",
+            "curl 'https://x.org/a?b=../c'",
+        ],
+    )
+    def test_benign_glued_spellings_still_allowed(self, command):
+        assert validate_command(command) is None
+
+
 # === Pipeline command validation ===
 
 
@@ -3754,6 +3847,30 @@ class TestProcessKillByName:
             "timeout 30 sh <<'EOF'\npkill -f train\nEOF",
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
+            "bash -euo pipefail -c 'pkill -f x'",
+            "bash -o pipefail -c 'pkill -f x'",
+            "bash -c -e 'pkill -f x'",
+            "zsh -O -c 'pkill -f x'",
+            "zsh -opipefail -c 'pkill -f x'",
+            "zsh -onomatch -c 'pkill -f x'",
+            "bash -oO pipefail extglob -c 'pkill -f x'",
+            "zsh --emulate sh -c 'pkill -f x'",
+            # +c turns on command mode like -c; it is not undone by +
+            "bash +c 'pkill -f x'",
+            "zsh +c 'pkill -f x'",
+            "zsh -c +c 'pkill -f x'",
+            "sh +ec 'pkill -f x'",
+            "bash +s script.sh <<'EOF'\npkill -f x\nEOF",
+            "bash -c -- 'pkill -f x'",
+            "bash --login -c 'pkill -f x'",
+            "bash -posix -c 'pkill -f x'",
+            "sh -noprofile -norc -c 'pkill -f x'",
+            "bash -rcfile ./rc -c 'pkill -f x'",
+            "bash -posix + -c 'pkill -f x'",
+            "zsh -s + -c 'echo hi' <<'EOF'\npkill -f x\nEOF",
+            "bash -e -rcfile 'pkill -f x' -c 'echo hi'",
+            "bash +rcfile 'pkill -f x' -c 'echo hi'",
+            "zsh -rcfile 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
             "env -S 'pkill -f x'",
             "env -S'pkill -f x'",

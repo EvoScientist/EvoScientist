@@ -983,20 +983,63 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
+# ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
+_GLUED_VALUE_PREFIX_RE = re.compile(
+    r"\+{0,2}[\w.-]+(?:\[[^]]*\])?(?::[A-Z]+)?[+:?!]*=|-[A-Za-z]+,?"
+)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    decoded = (
-        str(token["value"])
-        for token in shell_syntax.parse(command).tokens
-        if token["type"] == "word"
-    )
+    parsed = shell_syntax.parse(command)
+    tokens = parsed.tokens
+    decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
+        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
+        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+        value = token
+        for _ in range(4):
+            glued = _GLUED_VALUE_PREFIX_RE.match(value)
+            if glued is None:
+                break
+            value = value[glued.end() :]
+            entries = [value] if glued[0].startswith("-") else value.split(":")
+            if any(".." in PurePosixPath(entry).parts for entry in entries):
+                return True
+
+    # The substitution helper reads shell words, not whole commands: comments
+    # and literal heredoc bodies must not affect its quote tracking.
+    def check_substitution(inner: str) -> tuple[str, bool]:
+        return inner, _has_traversal_component(inner)
+
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                str(token["raw"]), check_substitution
+            )
+            if traversal:
+                return True
+    for start, end, expands in parsed.bodies:
+        if expands:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                command[start:end], check_substitution, heredoc=True
+            )
+            if traversal:
+                return True
+    # A shell's script (bash -c '...') is a command line of its own: check
+    # inside it too, the way _extract_all_paths recurses into script words.
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) in scripts:
+            if _has_traversal_component(str(token["value"])):
+                return True
     return False
 
 
@@ -2416,6 +2459,11 @@ def _convert_command_paths(
         "media_dirs": media_dirs,
     }
     scripts = shell_syntax.shell_script_words(words.tokens)
+    # A variable can be read after a cd or in another folder, so its value names
+    # the workspace path, unless that path needs quoting ($VAR would split).
+    anchor_values = (
+        bool(workspace_root) and _platform_quote(workspace_root)[0] not in "'\""
+    )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
@@ -2423,6 +2471,9 @@ def _convert_command_paths(
             continue
         raw = command[start:end]
         absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        value_absolute = absolute or (
+            anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
+        )
         script = raw[1:-1]
         if (
             start in scripts
@@ -2450,7 +2501,7 @@ def _convert_command_paths(
             )
             uses_tmp = uses_tmp or tmp
         elif quoted:
-            anchor = workspace_root if absolute else None
+            anchor = workspace_root if value_absolute else None
 
             def replace_quoted(
                 match: re.Match[str], anchor: str | None = anchor
@@ -2505,7 +2556,7 @@ def _convert_command_paths(
                 rewritten, tmp = _rewrite_path_word(
                     head.group(0),
                     **rules,
-                    absolute=absolute,
+                    absolute=value_absolute,
                     attached=attached is not None,
                 )
                 if rewritten is not None:
@@ -2525,7 +2576,7 @@ def _convert_command_paths(
                 continue
             prefix, path = attached
             rewritten, tmp = _rewrite_path_word(
-                path, **rules, absolute=absolute, attached=True
+                path, **rules, absolute=value_absolute, attached=True
             )
             uses_tmp = uses_tmp or tmp
             replacement = prefix + rewritten if rewritten is not None else None
@@ -2564,9 +2615,11 @@ def convert_virtual_paths_in_command(
 
     Words starting with ``/`` are paths. A quoted whole path, or an option
     or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
-    mapped when it names ``/tmp``, a mount or a workspace file. Search lists
-    such as ``PATH``, other quoted text and here-document bodies are data
-    (``print(6 / 3)``), except commands substituted inside double quotes.
+    mapped when it names ``/tmp``, a mount or a workspace file; an assignment's
+    value maps to the workspace path itself, as words after a ``cd`` do, unless
+    that path needs quoting. Search lists such as ``PATH``, other quoted text
+    and here-document bodies are data (``print(6 / 3)``), except commands
+    substituted inside double quotes.
     """
     return _convert_command_paths(
         command, workspace_name, skills_dir, media_dirs, workspace_root
