@@ -235,18 +235,31 @@ def _socket_path(name: str) -> Path:
 
 
 def _temporary_lock_directory() -> Path:
-    """A per-user directory in the system's temporary directory.
+    """A private directory in the system's temporary directory.
 
-    The system's temporary directory is already per-user on Windows; on
-    POSIX it is shared, so the directory carries the user's id and the
-    private mode.
+    The system's temporary directory is already per-user on Windows and on
+    macOS; on POSIX it can be shared, so the directory carries the user's
+    id and the private mode.
+
+    Two things are checked rather than assumed. A directory that is already
+    there and belongs to somebody else is NOT ours: the lock sockets in it
+    would be theirs to unlink and rebind, and a forged socket that accepts
+    connections would stall every contender. And a mode we could not set is
+    not private. Both fail loudly -- a lock that silently trusts the wrong
+    directory is worse than no lock.
     """
     uid = getattr(os, "getuid", None)
     label = f"evoskill-{uid()}" if uid is not None else "evoskill-user"
     directory = Path(tempfile.gettempdir()) / label
     directory.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(directory, 0o700)
+    os.chmod(directory, 0o700)
+    if uid is not None:
+        owner = os.stat(directory).st_uid
+        if owner != uid():
+            raise OSError(
+                f"The proposal lock directory {directory} belongs to another "
+                f"user, so the lock cannot be held there"
+            )
     return directory
 
 
@@ -323,24 +336,36 @@ def _socket_is_ours(path: Path, held: socket.socket) -> bool:
     except OSError:
         return False
     try:
-        ours = _peer_is_this_process(probe)
+        return _peer_is_this_process(probe)
     finally:
         probe.close()
-    if ours:
-        # The check queued a connection on our own socket; take it, so the
-        # backlog stays free for the contender that asks next.
-        _drain_one(held)
-    return ours
 
 
-def _drain_one(held: socket.socket) -> None:
-    """Accept and close one queued connection, if there is one."""
-    held.settimeout(0.5)
-    try:
-        accepted, _ = held.accept()
-    except OSError:
-        return
-    accepted.close()
+def _drain_forever(held: socket.socket) -> None:
+    """Accept and close the contenders' probes, so the queue never fills.
+
+    A socket that is bound and listening but whose accept queue is full
+    refuses new connections on macOS -- exactly like the leftover file of a
+    holder that died. A contender reading that refusal would take the name
+    from a live holder, which is the one thing the lock exists to prevent.
+
+    So the holder drains its queue. "Refused" then means "nobody is home".
+    """
+
+    def drain() -> None:
+        while True:
+            try:
+                connection, _ = held.accept()
+            except OSError:
+                return
+            try:
+                connection.close()
+            except OSError:
+                return
+
+    threading.Thread(
+        target=drain, daemon=True, name="evoskill-proposal-lock-drain"
+    ).start()
 
 
 class _ProposalLock:
@@ -449,6 +474,7 @@ class _ProposalLock:
                     path.unlink()
                 continue
             if _socket_is_ours(path, held):
+                _drain_forever(held)
                 return held
             # The name was taken over between the bind and this check. The
             # lock is not trusted, and the takeover is bounded: a name that

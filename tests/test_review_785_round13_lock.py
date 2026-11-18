@@ -43,6 +43,10 @@ class _FakeSocket:
     def listen(self, backlog=1):
         self._state["calls"].append(("listen", backlog))
 
+    def accept(self):
+        self._state["accepts"] += 1
+        raise OSError(errno.EAGAIN, "nothing to accept")
+
     def connect(self, address):
         raise OSError(errno.ECONNREFUSED, "no")
 
@@ -63,7 +67,7 @@ class _FakeSocket:
 @pytest.fixture
 def fake_sockets(monkeypatch, tmp_path):
     """Replace the POSIX socket with one the test can steer."""
-    state = {"calls": [], "fail": []}
+    state = {"calls": [], "fail": [], "accepts": 0}
     locks = tmp_path / "locks"
     locks.mkdir()
     monkeypatch.setattr(socket, "socket", lambda *a, **k: _FakeSocket(state, *a))
@@ -134,6 +138,27 @@ def test_a_replaced_fallback_name_is_refused(fake_sockets, tmp_path, monkeypatch
     # The replaced name was retried a bounded number of times, not forever.
     # Each attempt binds and listens, so the calls come in pairs.
     assert len(fake_sockets["calls"]) <= 14, fake_sockets["calls"]
+
+
+def test_the_holder_accepts_on_the_fallback_socket(fake_sockets, tmp_path):
+    """The holder accepts, so its queue cannot fill up.
+
+    A socket that is bound and listening but whose accept queue is full
+    refuses new connections on macOS -- exactly like the leftover file of a
+    holder that died. A contender reading that refusal takes the name from a
+    live holder, so the holder has to drain its queue.
+    """
+    import time
+
+    fake_sockets["fail"] = [errno.EAFNOSUPPORT]
+    lock = proposals._ProposalLock(_proposal_dir(tmp_path))
+    lock._acquire_posix()
+
+    deadline = time.monotonic() + 5.0
+    while fake_sockets["accepts"] == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert fake_sockets["accepts"] > 0, "the holder never accepted a connection"
 
 
 @pytest.mark.skipif(
@@ -242,9 +267,51 @@ def test_a_live_holder_is_not_stolen(tmp_path, monkeypatch):
     worker = threading.Thread(target=contend, daemon=True)
     worker.start()
     try:
-        assert not acquired.wait(1.5), "the contender took a live holder's name"
+        # Long enough for the contenders' probes to fill an accept queue: a
+        # queue that stays full makes a live holder look dead.
+        assert not acquired.wait(5.0), "the contender took a live holder's name"
         holder.close()
         assert acquired.wait(10.0), "the contender never got the lock"
+    finally:
+        holder.close()
+
+
+@pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"), reason="this platform has no POSIX socket"
+)
+def test_a_real_holder_answers_every_probe(tmp_path, monkeypatch):
+    """A full accept queue would look exactly like a dead holder.
+
+    A socket that is bound and listening but whose queue is full refuses
+    new connections on macOS, like the leftover file of a holder that
+    died -- and a contender reading that refusal takes the name from a
+    live holder. So the holder drains its queue and every probe is
+    answered.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_base", lambda: Path("evtest"))
+
+    real_bind = socket.socket.bind
+
+    def refuse_abstract(sock, address):
+        if isinstance(address, bytes) and address.startswith(b"\0"):
+            raise OSError(errno.EAFNOSUPPORT, "no abstract namespace")
+        return real_bind(sock, address)
+
+    monkeypatch.setattr(socket.socket, "bind", refuse_abstract)
+
+    folder = _proposal_dir(tmp_path)
+    lock = proposals._ProposalLock(folder)
+    path = proposals._socket_path(lock._name)
+    holder = lock._acquire_posix()
+    try:
+        for _ in range(200):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(5.0)
+            try:
+                probe.connect(str(path))
+            finally:
+                probe.close()
     finally:
         holder.close()
 
