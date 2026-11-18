@@ -566,6 +566,26 @@ def _word_value(arg: str, token: dict[str, object] | None) -> str:
     return str(token["value"]) if token is not None else arg
 
 
+def _decoded_words(text: str) -> str:
+    """*text* with each shell word replaced by its decoded value: what the
+    shell reads after quotes and escapes are removed. Used for here-document
+    code that ``xargs`` splits into words before handing to a shell."""
+    tokens = parse(text).tokens
+    pieces: list[str] = []
+    position = 0
+    for token in tokens:
+        start, end = int(token["start"]), int(token["end"])
+        pieces.append(text[position:start])
+        if token["type"] == "word":
+            pieces.append(_word_value(str(token["raw"]), token))
+        else:
+            # Operators have no ``raw`` key; their value is the literal text.
+            pieces.append(str(token["value"]))
+        position = end
+    pieces.append(text[position:])
+    return "".join(pieces)
+
+
 def _command_end(command: str, words: ShellWords, index: int, in_backtick: bool) -> int:
     """Where the command whose name is token *index* ends, its redirections
     included (the words :func:`_command_arguments` reads)."""
@@ -753,11 +773,19 @@ def _unwrap(
     return found
 
 
-def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
-    """The argument index of the script a shell runs from ``-c``, and whether
-    it runs code from stdin (no ``-c`` and no script file, or ``-s``). Only
-    the options before the first operand count; with ``-n`` the shell checks
-    the syntax and runs neither."""
+# A short ``-o name`` / ``-O name`` may be clustered with other shell options
+# (``-euo pipefail``), in which case the next word is still its value.
+_SHELL_OPTION_VALUE_RE = re.compile(r"[-+][A-Za-z]*[oO][A-Za-z]*")
+
+
+def _shell_options(
+    shell: SimpleCommand,
+) -> tuple[str, int | None]:
+    """Short option letters before the first operand of *shell*, and that
+    operand's position (``None`` when there is none). Words are decoded as the
+    shell reads them, so quoted, escaped and clustered options count. A
+    ``-o``/``-O`` whose value is the next word skips it, including when it ends
+    a cluster such as ``-euo``; ``+o``/``+O`` take a value too."""
     letters = ""
     skip = False
     first: int | None = None
@@ -765,25 +793,149 @@ def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
         value = _word_value(arg, token)
         if skip:
             skip = False
-        elif value in _SHELL_OPTIONS_WITH_VALUE:
-            skip = True
         elif value in ("-", "--"):
             first = position + 1 if position + 1 < len(shell.args) else None
             break
         elif value.startswith("--"):
+            skip = value in _SHELL_OPTIONS_WITH_VALUE
             continue
         elif value.startswith("+") and len(value) > 1:
+            skip = bool(_SHELL_OPTION_VALUE_RE.fullmatch(value))
             letters = "".join(c for c in letters if c not in value[1:])  # +n undoes -n
         elif value.startswith("-") and len(value) > 1:
+            skip = bool(_SHELL_OPTION_VALUE_RE.fullmatch(value))
             letters += value[1:]
         else:
             first = position
             break
+    return letters, first
+
+
+def _piped_heredocs(command: str, words: ShellWords, name_index: int) -> list[int]:
+    """Here-document bodies whose command feeds the command starting at token
+    *name_index* through a ``|`` immediately before it. A braced group or a
+    parenthesized subshell counts as one feeder, so ``{ cat <<EOF; } | bash``
+    and ``( cat <<EOF ) | bash`` are both covered."""
+    tokens = words.tokens
+
+    def newline_before(position: int, groups: bool = False) -> bool:
+        if position + 1 >= len(tokens):
+            return False
+        return (
+            command_newline(
+                command,
+                int(tokens[position]["end"]),
+                int(tokens[position + 1]["start"]),
+            )
+            is not None
+            and not groups  # newlines inside a group do not end the pipeline
+        )
+
+    # Walk back over the downstream command's own words (name, wrappers and
+    # options) to its leading `|`, without crossing another command boundary.
+    position = name_index - 1
+    while position >= 0:
+        token = tokens[position]
+        value = str(token["value"])
+        if token["type"] == "op":
+            if value == "|":
+                break
+            if value in COMMAND_START_OPS:
+                return []
+            if "<" in value or ">" in value:  # a redirection target
+                position -= 1
+                continue
+            return []
+        if newline_before(position):
+            return []
+        position -= 1
+    if position < 0 or str(tokens[position]["value"]) != "|":
+        return []
+    # Walk back over the feeder command to its own boundary. A `}`/`)` closing
+    # a group is skipped (and separators inside the group too), so the group's
+    # here-documents are included. The matching `{`/`(` ends the group.
+    found: list[int] = []
+    position -= 1
+    braces = parens = 0
+    while position >= 0:
+        token = tokens[position]
+        value = str(token["value"])
+        if token["type"] == "word" and value == "}":
+            braces += 1
+            position -= 1
+            continue
+        if token["type"] == "word" and value == "{":
+            if braces == 0:
+                break
+            braces -= 1
+            position -= 1
+            continue
+        if token["type"] == "op" and value == ")":
+            parens += 1
+            position -= 1
+            continue
+        if token["type"] == "op" and value == "(":
+            if parens == 0:
+                break
+            parens -= 1
+            position -= 1
+            continue
+        groups = braces > 0 or parens > 0
+        if token["type"] == "op":
+            if groups and value in COMMAND_START_OPS:
+                position -= 1
+                continue
+            if value in COMMAND_START_OPS:
+                break
+            if "<" in value or ">" in value:
+                position -= 1
+                continue
+            position -= 1
+            continue
+        for body, delimiter in enumerate(words.body_delimiters):
+            if delimiter == int(token["start"]):
+                found.append(body)
+        if newline_before(position, groups):
+            break
+        position -= 1
+    return found
+
+
+def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
+    """The argument index of the script a shell runs from ``-c``, and whether
+    it runs code from stdin (no ``-c`` and no script file, or ``-s``). Only
+    the options before the first operand count; with ``-n`` the shell checks
+    the syntax and runs neither."""
+    letters, first = _shell_options(shell)
     if "n" in letters:
         return None, False
     if "c" in letters:
         return first, False
     return None, first is None or "s" in letters
+
+
+def _shell_reads_heredoc_as_code(
+    shell: SimpleCommand, script: int | None, reads_stdin: bool
+) -> bool:
+    """Whether *shell* reads a here-document body as code rather than data.
+
+    True when the shell reads code from stdin, or when a wrapper (``xargs``)
+    supplies a missing ``-c`` script from stdin. The latter is ``xargs bash -c
+    <<EOF``: xargs turns the body into arguments, so the first becomes the
+    script the shell runs. With a script word already written, the body only
+    supplies positional arguments, which are data.
+    """
+    if reads_stdin:
+        return True
+    if script is not None or "xargs" not in shell.via:
+        return False
+    # `xargs bash -c` with no script word written: -c is still collected in
+    # shell.args, but _shell_code reports no script and no stdin because it
+    # cannot see that xargs supplies the operand from the here-document.
+    # Decode the words the way _shell_code does, so `'-c'`, `"-c"`, `\-c` and
+    # clustered `-ec` all contribute their option letters.
+    letters, _first = _shell_options(shell)
+    return "c" in letters and "n" not in letters
 
 
 def simple_commands(command: str) -> list[SimpleCommand]:
@@ -911,13 +1063,24 @@ def _simple_commands(
                 # outer shell expands in it first (`bash -c "cd x; $(...)"`).
                 if each.tokens[script] is not None and not starting_folder:
                     script_tokens.add(id(each.tokens[script]))
-            if reads_stdin:
+            reads_code = _shell_reads_heredoc_as_code(each, script, reads_stdin)
+            piped = (
+                _piped_heredocs(command, words, index)
+                if reads_code and script is None
+                else []
+            )
+            if reads_code or piped:
                 if not starting_folder:  # likewise an unquoted here-document
                     code_bodies.update(heredocs)
-                for body in heredocs:
+                    code_bodies.update(piped)
+                for body in [*heredocs, *piped]:
                     start, end, _expands = words.bodies[body]
                     text = command[start:end].rstrip("\n")
-                    # Without the end line.
+                    # Without the end line. When xargs supplies the ``-c``
+                    # script it splits the body into words first, stripping
+                    # quotes, so read those words as the shell does.
+                    if script is None and "xargs" in each.via and not reads_stdin:
+                        text = _decoded_words(text)
                     nested.append((text[: text.rfind("\n") + 1], each.via))
 
     def collect(body: str) -> tuple[str, bool]:
@@ -944,6 +1107,78 @@ def _simple_commands(
             for inner in _simple_commands(text, seen, chain, assigned, starting_folder)
         )
     return found
+
+
+def shell_code_bodies(command: str) -> list[str]:
+    """Here-document bodies that shells in *command* read as code.
+
+    A here-document on a shell command is a script, not data. Scripts nested
+    in a shell's ``-c`` argument or in a here-document it reads are included
+    too; a here-document on another command, such as ``cat``, is data and is
+    left out.
+    """
+    found: list[str] = []
+    _collect_shell_code_bodies(command, set(), (), found)
+    return found
+
+
+def _collect_shell_code_bodies(
+    command: str,
+    seen: set[tuple[str, tuple[str, ...]]],
+    outer: tuple[str, ...],
+    found: list[str],
+) -> None:
+    """Read the stdin scripts of *command* and the code nested inside them."""
+    words = parse(command)
+    tokens = words.tokens
+    nested: list[tuple[str, tuple[str, ...]]] = []
+    in_backtick = False
+    for index, (token, is_name) in enumerate(
+        zip(tokens, words.name_flags, strict=True)
+    ):
+        value = str(token["value"])
+        if token["type"] == "op" and value == "`":
+            in_backtick = not in_backtick
+        if not is_name or value in COMMAND_PREFIX_WORDS:
+            continue
+        if ASSIGNMENT_RE.match(str(token["raw"])) is not None:
+            continue
+        name = re.split(r"[\\/]", value)[-1]
+        args, heredocs = _command_arguments(command, words, index, in_backtick)
+        # Unwrap wrappers such as `env`/`timeout` before checking for a shell:
+        # `env bash <<EOF` reads its here-document as code too. Mirrors
+        # _simple_commands, which also unwraps every command name first.
+        for each in _unwrap(name, args, (), nested, False):
+            if each.name not in SHELL_NAMES:
+                continue
+            script, reads_stdin = _shell_code(each)
+            if script is not None:
+                token_for_script = each.tokens[script]
+                if token_for_script is not None:
+                    nested.append(
+                        (_word_value(each.args[script], token_for_script), each.via)
+                    )
+            reads_code = _shell_reads_heredoc_as_code(each, script, reads_stdin)
+            piped = (
+                _piped_heredocs(command, words, index)
+                if reads_code and script is None
+                else []
+            )
+            if reads_code or piped:
+                for body in [*heredocs, *piped]:
+                    start, end, _expands = words.bodies[body]
+                    text = command[start:end].rstrip("\n")
+                    code = text[: text.rfind("\n") + 1]
+                    if script is None and "xargs" in each.via and not reads_stdin:
+                        code = _decoded_words(code)
+                    nested.append((code, each.via))
+                    found.append(code)
+    for text, via in nested:
+        chain = (*outer, *via)
+        if (text, chain) in seen:
+            continue
+        seen.add((text, chain))
+        _collect_shell_code_bodies(text, seen, chain, found)
 
 
 def command_names(command: str) -> list[str]:

@@ -1040,6 +1040,13 @@ def _has_traversal_component(command: str) -> bool:
         if token["type"] == "word" and int(token["start"]) in scripts:
             if _has_traversal_component(str(token["value"])):
                 return True
+    # A shell also reads code from stdin: a here-document body on a shell
+    # command runs, while the same body on `cat` is data. Read the nested
+    # code the way simple_commands does, so quoted and escaped spellings and
+    # assignment prefixes are checked as commands rather than as raw text.
+    for command_text in shell_syntax.shell_code_bodies(command):
+        if _has_traversal_component(command_text):
+            return True
     return False
 
 
