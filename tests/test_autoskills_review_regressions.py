@@ -24,6 +24,18 @@ from EvoScientist.memory.autoskills.proposals import (
 )
 
 
+def record_reviewed_proposal_for(memory_dir, proposal_id):
+    """Stand in for the display a person's decision requires.
+
+    The production surfaces record a draft when they show it. A test that
+    decides directly has shown the draft it is about to decide, so it records
+    that current content. A body edited after this line is still refused.
+    """
+    from EvoScientist.memory.autoskills.proposals import record_reviewed_proposal_by_id
+
+    record_reviewed_proposal_by_id(memory_dir, proposal_id)
+
+
 def _write_skill_folder(
     memory_dir: Path,
     skill_name: str,
@@ -58,6 +70,7 @@ def _submit(memory_dir: Path, skills_dir: Path, body: str = "Draft body.") -> No
 
 
 def _approve(memory_dir: Path, skills_dir: Path) -> Path:
+    record_reviewed_proposal_for(memory_dir, "focused-validation")
     result = approve_skill_proposal(
         memory_dir,
         "focused-validation",
@@ -93,6 +106,7 @@ def test_a_draft_file_swapped_for_a_fifo_never_blocks_the_digest(tmp_path):
 
     def run() -> None:
         try:
+            record_reviewed_proposal_for(memory_dir, "focused-validation")
             outcome["result"] = approve_skill_proposal(
                 memory_dir,
                 "focused-validation",
@@ -189,6 +203,7 @@ def test_a_fifo_in_the_draft_is_skipped_and_never_blocks(tmp_path):
 
     def run() -> None:
         try:
+            record_reviewed_proposal_for(memory_dir, "focused-validation")
             outcome["result"] = approve_skill_proposal(
                 memory_dir,
                 "focused-validation",

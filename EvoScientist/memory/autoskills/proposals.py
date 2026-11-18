@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -30,10 +31,19 @@ from ... import paths
 
 AUTOSKILL_PROPOSALS_DIR = "autoskills/proposals"
 AUTOSKILL_PROCESSED_DIR = "autoskills/processed"
-# A digest the agent cannot reach. The proposals directory is the agent's
-# write path, so a record stored inside a draft (including ``manifest.json``)
-# is not a record the approval can trust.
+# A race record, not a trust boundary. The agent's shell is a real process
+# running as this user, so it can compute the parent of the proposals root
+# and rewrite any file stored there, including this one. An approval made by
+# a person compares the draft with what that person's process displayed; the
+# seal only covers the agent's own approval under auto mode, where nobody
+# reviewed the draft, and detects a body that changed between submit and that
+# automatic approval.
 AUTOSKILL_SEALS_DIR = "autoskills/seals"
+# The per-draft lock lives here, beside the drafts but outside the proposals
+# directory the agent's tools are rooted at. Unlinking a lock file inside
+# that directory used to drop the directory entry while the first process
+# still held the old inode, and a second FileLock could then lock a new one.
+AUTOSKILL_LOCKS_DIR = "autoskills/locks"
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _CLUSTER_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -72,6 +82,9 @@ class SkillProposal:
     approved_by: str | None = None
     approved_at: str | None = None
     rejected_at: str | None = None
+    # The manifest this proposal was built from. A listing that shows the
+    # draft records this object, so it does not read the file a second time.
+    manifest: dict[str, Any] | None = None
 
     @property
     def effective_scope(self) -> str:
@@ -87,6 +100,29 @@ _PROPOSAL_OPERATIONS = frozenset({"create", "update"})
 _SCOPE_WORKSPACE = "workspace"
 _SCOPE_GLOBAL = "global"
 _SKILL_SCOPES = frozenset({_SCOPE_WORKSPACE, _SCOPE_GLOBAL})
+
+
+# What this process computed when it displayed a draft. Keyed by the draft
+# folder's real path and its ``updated_at``, so a resubmit is a different
+# record and a second listing replaces the record of the content it showed.
+# This is the only record a person's approval trusts: it lives in the memory
+# of the process that showed the draft, which the agent's shell cannot write.
+# A file cannot take its place. There is no path on this machine the agent,
+# running as this user, cannot reach. It is process-global rather than a
+# context variable because the server and the CLI display a draft on one
+# thread and decide it on another.
+_reviews: dict[tuple[str, str], str] = {}
+_reviews_guard = threading.Lock()
+# What an approval in this process installed: the per-file digests, the tier
+# and the real path. The manifest copies of these are agent-writable, so a
+# revert does not read them. A process that did not perform the approval has
+# no record and refuses the automatic undo.
+_installations: dict[str, dict[str, Any]] = {}
+_installations_guard = threading.Lock()
+
+
+def _review_key(proposal_dir: Path, updated_at: object) -> tuple[str, str]:
+    return (os.path.realpath(proposal_dir), str(updated_at))
 
 
 def _now() -> str:
@@ -112,23 +148,47 @@ def _processed_root(memory_dir: str | Path) -> Path:
 
 
 def _seal_root(memory_dir: str | Path) -> Path:
-    """Where a submit seals what an approval is allowed to trust.
+    """Where a submit records the body it hashed, beside the proposals root.
 
-    This is a sibling of the proposals directory, never inside it: the
-    ``/autoskill-proposals/`` route and the proposal shell are both rooted at
-    the proposals directory, so a file stored here is outside every path the
-    agent can write.
+    This is a sibling of the proposals directory, never inside it, so a file
+    tool rooted at the proposals directory does not see it. It is not a
+    boundary against the agent's shell: that shell runs as this user and can
+    reach any path. The seal is a race detector and the record an automatic
+    approval checks. A person's approval checks the digest that person's
+    process computed when it displayed the draft, which no file can stand in
+    for.
     """
     return Path(memory_dir).expanduser() / AUTOSKILL_SEALS_DIR
+
+
+def _lock_root(memory_dir: str | Path) -> Path:
+    """Where the per-draft locks live: beside the drafts, not among them.
+
+    The proposals directory is the root of the agent's file tools and of its
+    shell. A lock file stored in there can be unlinked, and on POSIX
+    unlinking a locked pathname removes the directory entry while the holder
+    keeps the old inode, so another ``FileLock`` creates and locks a new one.
+    Keeping the lock here means a write made through those tools, whose paths
+    stay inside the proposals directory, cannot name it.
+
+    What remains: the agent's shell is not confined to that directory. A
+    command that computes this path can still unlink the lock file, and the
+    same POSIX window then exists. There is no file path this user cannot
+    reach, so no lock file is safe from a shell that is allowed to run.
+    """
+    return Path(memory_dir).expanduser() / AUTOSKILL_LOCKS_DIR
 
 
 def _proposal_file_lock(proposal_dir: Path) -> FileLock:
     """The one lock every writer of this draft takes, across processes.
 
-    The lock file sits beside the draft directory, never inside it, so it is
-    not one of the files an approval copies and not part of the content digest.
+    The lock file sits outside the proposals directory, so it is not one of
+    the files an approval copies and not a name the agent's file tools can
+    write. See :func:`_lock_root` for the POSIX unlink that a shell can still
+    open.
     """
-    return FileLock(str(proposal_dir.parent / f"{proposal_dir.name}.lock"))
+    memory_dir = proposal_dir.parent.parent.parent
+    return FileLock(str(_lock_root(memory_dir) / f"{proposal_dir.name}.lock"))
 
 
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
@@ -185,7 +245,7 @@ def _locked_proposal(*, submit: bool = False):
                     action: False,
                     "error": f"No unique proposal matching {values['proposal_id']!r}",
                 }
-            proposal_dir.parent.mkdir(parents=True, exist_ok=True)
+            _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
             with _proposal_file_lock(proposal_dir):
                 if not submit and lookup() != proposal_dir:
                     if function.__name__ == "revert_skill_proposal":
@@ -374,37 +434,6 @@ def _content_changed(proposal_id: object) -> dict[str, Any]:
     }
 
 
-def _legacy_body_is_newer(proposal_dir: Path, manifest: dict[str, Any]) -> bool:
-    """Whether a body file is newer than a manifest that has no sealed digest.
-
-    Weaker than the digest: a copied timestamp or an edit that preserves
-    mtime slips through, and rewriting the manifest refreshes its own mtime,
-    which hides a body edited earlier. It is still better than checking
-    nothing, which is what let a body edited after review be installed. The
-    comparison is the manifest file's mtime, not its ``updated_at`` field:
-    the agent can edit that field, and the body's mtime is what a body write
-    changes. Only a draft with no seal takes this path.
-    """
-    del manifest
-    manifest_path = proposal_dir / "manifest.json"
-    try:
-        written_at = manifest_path.stat().st_mtime
-    except OSError:
-        return True
-    for relative in copied_files(proposal_dir):
-        path = proposal_dir / relative
-        fd = _open_regular(path)
-        try:
-            # Strictly newer than the manifest file. A body written in the
-            # same second as the manifest is the submission; one written
-            # after it is an edit the manifest does not describe.
-            if os.fstat(fd).st_mtime > written_at:
-                return True
-        finally:
-            os.close(fd)
-    return False
-
-
 def _manifest_timestamp(manifest: dict[str, Any], key: str) -> str | None:
     value = manifest.get(key)
     if isinstance(value, str) and value.strip():
@@ -454,7 +483,7 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
         # The same lock an approval holds: rewriting the manifest without it
         # can put an approval that just committed back to the old workspace.
         proposal_dir = manifest_path.parent
-        proposal_dir.parent.mkdir(parents=True, exist_ok=True)
+        _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
         with _proposal_file_lock(proposal_dir):
             manifest = _read_manifest(manifest_path)
             stored = manifest.get("workspace_dir") if manifest else None
@@ -516,7 +545,7 @@ def move_proposals(
         # and writing the stale manifest would drop ``approved_skill_path``
         # and put the draft back to pending, which loses Undo.
         proposal_dir = manifest_path.parent
-        proposal_dir.parent.mkdir(parents=True, exist_ok=True)
+        _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
         with _proposal_file_lock(proposal_dir):
             current = _read_manifest(manifest_path)
             if current is None or current.get("workspace_dir") == new_key:
@@ -542,6 +571,23 @@ def move_proposals(
                 if moved_path is not None:
                     current[key] = moved_path
             _write_manifest(manifest_path, current)
+            # The undo reads the path this process recorded, not the
+            # manifest. A project move rewrites the manifest's copy, so the
+            # record has to follow or the undo would delete the old place
+            # and leave the moved skill.
+            with _installations_guard:
+                installation = _installations.get(os.path.realpath(proposal_dir))
+                if (
+                    isinstance(installation, dict)
+                    and installation.get("approved_at") == current.get("approved_at")
+                    and isinstance(installation.get("path"), Path)
+                ):
+                    moved_install = _moved_path(
+                        str(installation["path"]), old_key, new_key
+                    )
+                    if moved_install is not None:
+                        installation["path"] = Path(moved_install)
+                        installation["workspace_dir"] = new_key
             moved += 1
     return moved
 
@@ -623,6 +669,7 @@ def _proposal_from_manifest(
             ),
             approved_at=_manifest_timestamp(manifest, "approved_at"),
             rejected_at=_manifest_timestamp(manifest, "rejected_at"),
+            manifest=manifest,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -633,8 +680,16 @@ def list_skill_proposals(
     *,
     status: str | None = None,
     workspace_dir: str | Path | None = None,
+    record_review: bool = False,
 ) -> list[SkillProposal]:
-    """List autoskill proposals recorded in memory."""
+    """List autoskill proposals recorded in memory.
+
+    ``record_review`` is set by a surface that shows the drafts to a person.
+    It records the digest of each pending draft's current body and decision
+    fields, which is what a later approval in this process compares against.
+    A listing that only counts or filters does not record one: recording is
+    the act of showing.
+    """
     proposals: list[SkillProposal] = []
     normalized_workspace = _normalize_workspace_dir(workspace_dir)
     root = _proposal_root(memory_dir)
@@ -654,6 +709,13 @@ def list_skill_proposals(
             continue
         if status is not None and proposal.status != status:
             continue
+        if record_review and proposal.status == "pending" and manifest is not None:
+            try:
+                record_reviewed_proposal(manifest_path.parent, manifest)
+            except (OSError, ValueError):
+                # An unreadable body is not a review. Leave it unrecorded so
+                # a decision of it is refused instead of approved unseen.
+                pass
         proposals.append(proposal)
     return proposals
 
@@ -664,6 +726,26 @@ def find_skill_proposal(
     """The draft whose id is exactly ``proposal_id``, in any project."""
     found = _find_with_manifest(memory_dir, proposal_id)
     return found[0] if found else None
+
+
+def review_skill_proposal(
+    memory_dir: str | Path, proposal_id: str
+) -> SkillProposal | None:
+    """Find one draft and record the body and decision fields just read.
+
+    This is what a surface calls when it shows one draft. The digest is of
+    the manifest this call read, so a decision later in this process compares
+    against the content that was shown. A draft whose body cannot be hashed
+    is returned unrecorded, and a decision of it is refused.
+    """
+    found = _find_with_manifest(memory_dir, proposal_id)
+    if found is None:
+        return None
+    proposal, manifest = found
+    if proposal.status == "pending":
+        with contextlib.suppress(OSError, ValueError):
+            record_reviewed_proposal(proposal.path, manifest)
+    return proposal
 
 
 def _find_with_manifest(
@@ -1217,6 +1299,118 @@ def _draft_digest(proposal_dir: Path) -> str:
         digest.update(size.to_bytes(8, "big"))
         digest.update(file_digest.digest())
     return digest.hexdigest()
+
+
+def _decision_digest(proposal_dir: Path, manifest: dict[str, Any]) -> str:
+    """Digest the body and the decision fields a review has to pin down.
+
+    The body is what an approval copies. The decision fields decide which
+    tier is written and which cluster is marked processed. Both are hashed,
+    because the agent can change either after the draft was shown.
+    """
+    digest = hashlib.sha256()
+    for key in _SEALED_FIELDS:
+        encoded = json.dumps(manifest.get(key), ensure_ascii=False).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    body = _draft_digest(proposal_dir).encode("ascii")
+    digest.update(len(body).to_bytes(8, "big"))
+    digest.update(body)
+    return digest.hexdigest()
+
+
+def record_reviewed_proposal(proposal_dir: Path, manifest: dict[str, Any]) -> str:
+    """Remember the draft this process just displayed, and return its digest.
+
+    A later approval or rejection in this same process compares the draft
+    with this digest. Recording happens when the draft is shown, so the
+    record is of the content the person saw; showing it again records the
+    content shown then. A process that never showed the draft has no record,
+    and its decision is refused.
+    """
+    digest = _decision_digest(proposal_dir, manifest)
+    with _reviews_guard:
+        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = digest
+    return digest
+
+
+def reviewed_decision_digest(proposal_dir: Path, updated_at: object) -> str | None:
+    """The digest this process recorded for this version, or None."""
+    with _reviews_guard:
+        return _reviews.get(_review_key(proposal_dir, updated_at))
+
+
+def record_reviewed_proposal_by_id(
+    memory_dir: str | Path, proposal_id: str
+) -> SkillProposal | None:
+    """Record one draft by its exact id, without listing the others.
+
+    A prefix, or an id that is not a single draft, records nothing: the
+    surface resolves the id the way a decision does and then calls this with
+    the exact folder name. Looking every draft up would read drafts the
+    caller did not ask about.
+    """
+    if not isinstance(proposal_id, str) or not _SKILL_NAME_RE.fullmatch(proposal_id):
+        return None
+    found = find_skill_proposal(memory_dir, proposal_id)
+    if found is None:
+        return None
+    if found.status == "pending":
+        manifest = _read_manifest(found.path / "manifest.json")
+        if manifest is not None:
+            with contextlib.suppress(OSError, ValueError):
+                record_reviewed_proposal(found.path, manifest)
+    return found
+
+
+def _not_reviewed(action: str, proposal_id: object) -> dict[str, Any]:
+    """A decision in a process that never displayed this version of the draft."""
+    verb = "approved" if action == "approve" else "rejected"
+    return {
+        verb: False,
+        "proposal_id": proposal_id,
+        "error": (
+            "Proposal was not reviewed in this process; list it again before deciding"
+        ),
+    }
+
+
+def _reviewed_changed(action: str, proposal_id: object) -> dict[str, Any]:
+    """The draft no longer matches what this process displayed."""
+    verb = "approved" if action == "approve" else "rejected"
+    return {
+        verb: False,
+        "proposal_id": proposal_id,
+        "error": (
+            "Proposal content changed since it was shown; list it again before deciding"
+        ),
+    }
+
+
+def _check_human_review(
+    action: str,
+    proposal_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    approved_by: str,
+) -> dict[str, Any] | None:
+    """Refuse a person's decision that this process did not display.
+
+    Auto mode is the agent's own approval: nobody displayed the draft, so
+    the caller checks the seal instead. A person's decision has to name a
+    digest this process computed while showing the draft. A missing record
+    is a refusal, not a fallback: a fresh process, and a server that listed
+    nothing, have nothing honest to compare against. A forged file cannot
+    supply the record, because the record is not a file.
+    """
+    if approved_by == "auto":
+        return None
+    recorded = reviewed_decision_digest(proposal_dir, manifest.get("updated_at"))
+    if recorded is None:
+        return _not_reviewed(action, manifest.get("proposal_id"))
+    if recorded != _decision_digest(proposal_dir, manifest):
+        return _reviewed_changed(action, manifest.get("proposal_id"))
+    return None
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
@@ -1917,10 +2111,10 @@ def _record_approval(
     manifest["approved_by"] = approved_by
     manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
-    # What the approval actually installed, per file. A revert compares the
-    # installed skill against this, not against the live draft: the draft can
-    # change after the approval, and an edit that happens to match the
-    # changed draft must not be deleted as if the approval had never run.
+    # A copy of what was installed, for the listing. Revert does not read it:
+    # the manifest is in the draft the agent can write, so a forged digest
+    # map or path here must not choose a deletion. The copy the revert reads
+    # is kept in this process, below.
     if approved_digests is not None:
         manifest["approved_content_digests"] = approved_digests
     else:
@@ -1994,23 +2188,30 @@ def approve_skill_proposal(
         }
     if failure is not None:
         return failure
-    seal: dict[str, Any] | None = None
+    expected_body: str | None = None
     try:
-        # The seal, not the manifest, is what submit recorded. The manifest
-        # lives in the draft the agent can write, so deleting or editing its
-        # ``content_digest`` must not change what the approval compares.
-        seal = _read_seal(memory_dir, proposal_dir.name)
-        if seal is not None:
-            if not _seal_matches(manifest, seal) or seal.get(
-                "content_digest"
-            ) != _draft_digest(proposal_dir):
+        # A person approves only what this process displayed. The record is
+        # the digest computed at that display, kept in this process; a draft
+        # submitted before that display has no record here and is refused.
+        # Auto mode has no display. It checks the seal, which only detects a
+        # change between submit and this approval: the agent's shell can
+        # rewrite the seal, so it is not a review.
+        if approved_by == "auto":
+            seal = _read_seal(memory_dir, proposal_dir.name)
+            if seal is None or not _seal_matches(manifest, seal):
                 return _content_changed(manifest.get("proposal_id"))
-        elif _legacy_body_is_newer(proposal_dir, manifest):
-            # No seal at all means a draft from before seals existed: there is
-            # no trustworthy digest, and the mtime check is the only
-            # comparison available. A body newer than the manifest was written
-            # after the submission.
-            return _content_changed(manifest.get("proposal_id"))
+            expected_body = seal.get("content_digest")
+            if not isinstance(expected_body, str) or expected_body != _draft_digest(
+                proposal_dir
+            ):
+                return _content_changed(manifest.get("proposal_id"))
+        else:
+            refused = _check_human_review(
+                "approve", proposal_dir, manifest, approved_by=approved_by
+            )
+            if refused is not None:
+                return refused
+            expected_body = _draft_digest(proposal_dir)
     except (OSError, ValueError) as exc:
         return {
             "approved": False,
@@ -2068,8 +2269,9 @@ def approve_skill_proposal(
                 # Copy through the descriptor opened for this check. A second
                 # open of the live path is the window a swapped-in FIFO blocks.
                 _copy_regular_file(proposal_dir / relative, target_file)
-            sealed_digest = seal.get("content_digest") if seal is not None else None
-            if sealed_digest is not None and _draft_digest(snapshot) != sealed_digest:
+            # Re-hash the snapshot, not the live draft: a write that lands
+            # after the check above must not be what gets installed.
+            if expected_body is None or _draft_digest(snapshot) != expected_body:
                 raise ValueError(
                     "Proposal content changed since submission; resubmit it for review"
                 )
@@ -2097,6 +2299,20 @@ def approve_skill_proposal(
             try:
                 # The manifest is the commit point, so it is written last.
                 _write_manifest(manifest_path, manifest)
+                # Only after that write succeeded does this process remember
+                # where it installed. The manifest's copy of the path and the
+                # digests is agent-writable and is not what a revert deletes
+                # from. The folder path is the one this approval resolved,
+                # not the string the manifest happens to hold.
+                with _installations_guard:
+                    _installations[os.path.realpath(proposal_dir)] = {
+                        "approved_at": manifest["approved_at"],
+                        "path": destination,
+                        "scope": target_scope,
+                        "digests": approved_digests,
+                        "workspace_dir": manifest.get("workspace_dir"),
+                        "skill_name": skill_name,
+                    }
             except (OSError, ValueError):
                 if not had_mark:
                     try:
@@ -2270,9 +2486,12 @@ def _remove_unchanged_copy(
 
 
 def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
-    """Whether ``installed`` is the ``<tier>/<skill>`` folder the manifest names."""
-    # An approval made before scopes existed installed into the workspace tier.
-    scope = manifest.get("scope") or _SCOPE_WORKSPACE
+    """Whether ``installed`` is the ``<tier>/<skill>`` folder the approval named.
+
+    ``scope`` and ``workspace_dir`` come from the record this process kept at
+    approval, not from the manifest: the agent can edit both of those fields.
+    """
+    scope = manifest.get("scope")
     if scope == _SCOPE_GLOBAL:
         root = Path(paths.GLOBAL_SKILLS_DIR)
     elif scope == _SCOPE_WORKSPACE and manifest.get("workspace_dir"):
@@ -2287,6 +2506,12 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
         and installed.name == manifest.get("skill_name")
         and installed.parent.resolve() == root.resolve()
     )
+
+
+_REVERT_UNAVAILABLE = (
+    "This approval was not made in this process, so the installed path and "
+    "its digests are not known here and it cannot be reverted automatically."
+)
 
 
 @_locked_proposal()
@@ -2328,33 +2553,41 @@ def revert_skill_proposal(
         return refused("not_decided")
     if status == "approved" and proposal.operation != "create":
         return refused("revert_unavailable")
-    installed = manifest.get("approved_skill_path") if status == "approved" else None
-    if installed is not None and not isinstance(installed, str):
-        return refused("skill_changed")
+    # The deletion target is this process's record of its own approval. The
+    # manifest's approved_skill_path, scope and digest map are in the draft
+    # the agent writes, so a revert that read them would delete whatever the
+    # agent named. A process that did not make the approval has no record and
+    # refuses, rather than guessing from the live draft. The record is read
+    # before any deletion and is only dropped once the manifest write, the
+    # commit point, has succeeded: a retry of a failed undo still knows what
+    # it installed.
+    installation = None
+    if status == "approved":
+        with _installations_guard:
+            installation = _installations.get(os.path.realpath(proposal.path))
+        if not isinstance(installation, dict) or installation.get(
+            "approved_at"
+        ) != manifest.get("approved_at"):
+            return {
+                **refused("revert_unavailable"),
+                "detail": _REVERT_UNAVAILABLE,
+            }
     # Submit never overwrites a rejected draft, so a resubmit cannot bring it back.
     rejects = status == "approved" and manifest.get("approved_by") == "auto"
     try:
-        if installed:
-            if not _installed_in_its_tier(manifest, Path(installed)):
+        if installation is not None:
+            installed = installation.get("path")
+            if not isinstance(installed, Path) or not _installed_in_its_tier(
+                installation, installed
+            ):
                 return refused("skill_changed")
-            approved_digests = manifest.get("approved_content_digests")
+            approved_digests = installation.get("digests")
             if not isinstance(approved_digests, dict):
-                # An approval made before per-file digests were recorded does
-                # not say what it installed. Comparing the installed files
-                # with the live draft deletes a user's edit that happens to
-                # match a draft changed since, so such an approval cannot be
-                # undone automatically.
                 return {
                     **refused("revert_unavailable"),
-                    "detail": (
-                        "This approval recorded no digest of the installed "
-                        "files, so it cannot be reverted without risking a "
-                        "later edit."
-                    ),
+                    "detail": _REVERT_UNAVAILABLE,
                 }
-            if not _remove_unchanged_copy(
-                Path(installed), approved_digests=approved_digests
-            ):
+            if not _remove_unchanged_copy(installed, approved_digests=approved_digests):
                 return refused("skill_changed")
         if status == "approved":
             _notify_approved_skill()
@@ -2387,6 +2620,8 @@ def revert_skill_proposal(
         if not rejects:
             _discard_seal(memory_dir, proposal.proposal_id)
         _write_manifest(manifest_path, manifest)
+        with _installations_guard:
+            _installations.pop(os.path.realpath(proposal.path), None)
     except OSError as exc:
         return {**refused("revert_failed"), "detail": str(exc)}
     return {
@@ -2440,22 +2675,16 @@ def reject_skill_proposal(
             "updated_at": manifest.get("updated_at"),
             "error": "Proposal changed since it was read",
         }
-    # A sealed draft is rejected only while it is still the submission. The
-    # seal is what the agent cannot change, so a body or a decision field
-    # edited since submit fails here the same way an approval fails.
+    # A rejection is a person's decision, so it requires the same display
+    # record an approval does. The seal is not consulted: the agent's shell
+    # can rewrite it, and a rejection of a body the person did not see is
+    # the same mistake as installing that body.
     try:
-        seal = _read_seal(memory_dir, proposal_dir.name)
-        if seal is not None and (
-            not _seal_matches(manifest, seal)
-            or seal.get("content_digest") != _draft_digest(proposal_dir)
-        ):
-            return {
-                "rejected": False,
-                "proposal_id": manifest.get("proposal_id"),
-                "error": (
-                    "Proposal content changed since submission; resubmit it for review"
-                ),
-            }
+        refused = _check_human_review(
+            "reject", proposal_dir, manifest, approved_by="user"
+        )
+        if refused is not None:
+            return refused
     except (OSError, ValueError) as exc:
         return {
             "rejected": False,

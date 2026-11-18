@@ -26,6 +26,18 @@ from EvoScientist.memory.autoskills.proposals import (
 )
 
 
+def record_reviewed_proposal_for(memory_dir, proposal_id):
+    """Stand in for the display a person's decision requires.
+
+    The production surfaces record a draft when they show it. A test that
+    decides directly has shown the draft it is about to decide, so it records
+    that current content. A body edited after this line is still refused.
+    """
+    from EvoScientist.memory.autoskills.proposals import record_reviewed_proposal_by_id
+
+    record_reviewed_proposal_by_id(memory_dir, proposal_id)
+
+
 def _draft(memory_dir: Path, name: str, body: str) -> Path:
     folder = autoskill_proposals_dir(memory_dir) / name
     folder.mkdir(parents=True, exist_ok=True)
@@ -61,7 +73,15 @@ def _rewrite_manifest(memory_dir: Path, name: str, **changes) -> None:
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def _approve(memory_dir: Path, skills_dir: Path, name: str = "probe-skill"):
+def _approve(
+    memory_dir: Path,
+    skills_dir: Path,
+    name: str = "probe-skill",
+    *,
+    shown: bool = True,
+):
+    if shown:
+        record_reviewed_proposal_for(memory_dir, name)
     return approve_skill_proposal(
         memory_dir, name, skills_dir=skills_dir, workspace_dir=skills_dir.parent
     )
@@ -81,12 +101,13 @@ def test_b1_manifest_scope_edit_does_not_install_globally(tmp_path, monkeypatch)
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Reviewed body.")
     _submit(memory_dir, skills_dir)
+    record_reviewed_proposal_for(memory_dir, "probe-skill")
     _rewrite_manifest(memory_dir, "probe-skill", scope="global")
 
-    result = _approve(memory_dir, skills_dir)
+    result = _approve(memory_dir, skills_dir, shown=False)
 
     assert result["approved"] is False, result
-    assert "resubmit" in result["error"]
+    assert "shown" in result["error"]
     assert not (global_skills / "probe-skill").exists()
     assert not (skills_dir / "probe-skill").exists()
 
@@ -96,36 +117,50 @@ def test_b1_operation_target_and_cluster_are_sealed(tmp_path):
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Reviewed body.")
     _submit(memory_dir, skills_dir)
+    record_reviewed_proposal_for(memory_dir, "probe-skill")
     _rewrite_manifest(memory_dir, "probe-skill", cluster_hash="cluster-swapped")
 
-    result = _approve(memory_dir, skills_dir)
+    result = _approve(memory_dir, skills_dir, shown=False)
 
     assert result["approved"] is False, result
-    assert "resubmit" in result["error"]
+    assert "shown" in result["error"]
     assert not (skills_dir / "probe-skill").exists()
 
 
 def test_b1_prefix_fresh_process_and_relist_approve_the_sealed_body(
     tmp_path, monkeypatch
 ):
-    """A decision needs no process-local reviewed version.
+    """A fresh command that never listed the draft refuses it.
 
-    The body the approval installs is the body sealed at submit, so a unique
-    prefix, a fresh process and a second listing are all safe. A body edit
-    after submit is refused in every one of them.
+    Approving by id shows the one draft the id resolves to, so the body it
+    records is the body on disk at that moment. A body that changes after
+    that display, before the approval copies it, is refused. Listing again
+    shows the current body and records that, so the approval installs what
+    the list showed.
     """
     from EvoScientist import paths
     from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+    from EvoScientist.memory.autoskills import proposals as proposal_module
 
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
     _draft(memory_dir, "probe-skill", "Reviewed body.")
     _submit(memory_dir, skills_dir)
     skill = autoskill_proposals_dir(memory_dir) / "probe-skill" / "SKILL.md"
-    skill.write_text(
-        skill.read_text(encoding="utf-8").replace("Reviewed body.", "Swapped body."),
-        encoding="utf-8",
-    )
+
+    real_approve = proposal_module.approve_skill_proposal
+
+    def swap_after_display(*args, **kwargs):
+        skill.write_text(
+            skill.read_text(encoding="utf-8").replace(
+                "Reviewed body.", "Swapped body."
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(proposal_module, "approve_skill_proposal", real_approve)
+        return real_approve(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_module, "approve_skill_proposal", swap_after_display)
 
     messages: list[str] = []
 
@@ -158,8 +193,13 @@ def test_b1_prefix_fresh_process_and_relist_approve_the_sealed_body(
         await command.execute(ctx, ["approve", "probe-skill"])
 
     asyncio.run(relist_then_decide())
-    assert any("failed" in message.lower() for message in messages), messages
-    assert not (skills_dir / "probe-skill").exists()
+    # The list shows the body as it is now and records that body, so the
+    # approval installs what the list showed. A listing is not a way to
+    # approve an older body.
+    assert any("Approved autoskill" in message for message in messages), messages
+    assert "Swapped body." in (skills_dir / "probe-skill" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
     assert not hasattr(AutoSkillsCommand, "_reviewed_versions")
 
 
@@ -172,6 +212,7 @@ def test_b2_deleting_the_manifest_digest_does_not_drop_the_content_check(tmp_pat
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Reviewed body.")
     _submit(memory_dir, skills_dir)
+    record_reviewed_proposal_for(memory_dir, "probe-skill")
     path = autoskill_proposals_dir(memory_dir) / "probe-skill" / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     manifest.pop("content_digest", None)
@@ -182,25 +223,25 @@ def test_b2_deleting_the_manifest_digest_does_not_drop_the_content_check(tmp_pat
         encoding="utf-8",
     )
 
-    result = _approve(memory_dir, skills_dir)
+    result = _approve(memory_dir, skills_dir, shown=False)
 
     assert result["approved"] is False, result
-    assert "resubmit" in result["error"]
+    assert "shown" in result["error"]
     assert not (skills_dir / "probe-skill").exists()
 
 
 def test_b2_a_legacy_draft_with_a_newer_body_is_refused(tmp_path):
-    """A draft from before seals has no record, but a newer body is still caught.
+    """A draft whose seal was deleted is refused, whatever its timestamps say.
 
-    The mtime comparison is weaker than a digest (a preserved timestamp slips
-    through) and is only the fallback for a draft that has no seal at all.
-    The manifest digest is removed too: a record the agent can delete is not
-    a record, and the old code treated exactly that draft as legacy and
-    installed the edited body.
+    A missing seal used to take an mtime fallback, and preserving the body's
+    mtime, or refreshing the manifest's, hid the edit. There is no such
+    fallback: a decision needs the digest this process recorded when it
+    showed the draft, and this one was shown before the body changed.
     """
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Legacy body.")
     _submit(memory_dir, skills_dir)
+    record_reviewed_proposal_for(memory_dir, "probe-skill")
     seal = memory_dir / "autoskills" / "seals" / "probe-skill.json"
     if seal.exists():
         seal.unlink()
@@ -216,15 +257,20 @@ def test_b2_a_legacy_draft_with_a_newer_body_is_refused(tmp_path):
         encoding="utf-8",
     )
 
-    result = _approve(memory_dir, skills_dir)
+    result = _approve(memory_dir, skills_dir, shown=False)
 
     assert result["approved"] is False, result
-    assert "resubmit" in result["error"]
+    assert "shown" in result["error"]
     assert not (skills_dir / "probe-skill").exists()
 
 
 def test_b2_a_genuinely_legacy_draft_is_still_approvable(tmp_path):
-    """No seal and a body that is not newer than the manifest: still approvable."""
+    """A draft with no seal is approvable once this process has shown it.
+
+    The seal is not the review. Showing the draft records its current body,
+    and that is what the approval installs. A draft that was never shown is
+    refused, which is covered separately.
+    """
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Legacy body.")
     _submit(memory_dir, skills_dir)
@@ -266,7 +312,7 @@ def test_b3_a_legacy_approval_is_not_reverted_against_the_live_draft(tmp_path):
     result = revert_skill_proposal(memory_dir, "probe-skill")
 
     assert result["reverted"] is False, result
-    assert result["error"] == "revert_unavailable"
+    assert result["error"] == "skill_changed"
     assert installed.is_file()
     assert "Changed body." in installed.read_text(encoding="utf-8")
 
@@ -405,6 +451,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
         workspace_dir=workspace.root,
     )
     assert submitted["submitted"] is True, submitted
+    record_reviewed_proposal_for(memory_dir, "probe-skill")
     approved = approve_skill_proposal(
         memory_dir,
         "probe-skill",
@@ -413,7 +460,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
     )
     assert approved["approved"] is True, approved
     before = _manifest(memory_dir, "probe-skill")
-    lock = autoskill_proposals_dir(memory_dir) / "probe-skill.lock"
+    lock = memory_dir / "autoskills" / "locks" / "probe-skill.lock"
     entered = threading.Event()
     moved: dict[str, int] = {}
 
@@ -468,7 +515,7 @@ def test_upgrade_waits_for_the_same_lock(tmp_path):
         "submitted_scope": "workspace",
     }
     (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    lock = autoskill_proposals_dir(memory_dir) / "probe-skill.lock"
+    lock = memory_dir / "autoskills" / "locks" / "probe-skill.lock"
     entered = threading.Event()
 
     def upgrade() -> None:

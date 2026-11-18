@@ -4432,8 +4432,18 @@ def run_textual_interactive(
             self._append_pending_skill_proposals_notice()
 
         def _append_pending_skill_proposals_notice(self) -> None:
+            from .. import paths
+            from ..memory.autoskills.proposals import list_skill_proposals
             from .commands import _pending_skill_proposals_message
 
+            # The notice shows the pending drafts, so this process records
+            # the body it would be approving. The count below is unchanged.
+            list_skill_proposals(
+                paths.MEMORIES_DIR,
+                status="pending",
+                workspace_dir=self._dirs.workspace.root,
+                record_review=True,
+            )
             message = _pending_skill_proposals_message(self._dirs.workspace.root)
             if message:
                 self._append_system(message, style="yellow")

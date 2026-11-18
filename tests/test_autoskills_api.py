@@ -21,6 +21,18 @@ from EvoScientist.memory.autoskills.proposals import (
 from EvoScientist.paths import Workspace
 
 
+def record_reviewed_proposal_for(memory_dir, proposal_id):
+    """Stand in for the display a person's decision requires.
+
+    The production surfaces record a draft when they show it. A test that
+    decides directly has shown the draft it is about to decide, so it records
+    that current content. A body edited after this line is still refused.
+    """
+    from EvoScientist.memory.autoskills.proposals import record_reviewed_proposal_by_id
+
+    record_reviewed_proposal_by_id(memory_dir, proposal_id)
+
+
 @pytest.fixture
 def projects(monkeypatch) -> registry.Registry:
     fresh = registry.Registry()
@@ -83,6 +95,7 @@ def _draft(
 
 
 def _approve(workspace: Workspace, name: str) -> None:
+    record_reviewed_proposal_for(paths.MEMORIES_DIR, name)
     result = approve_skill_proposal(
         paths.MEMORIES_DIR,
         name,
@@ -358,6 +371,7 @@ def test_list_reports_rejections_and_auto_approvals(server, served):
     from EvoScientist.memory.autoskills.proposals import reject_skill_proposal
 
     _draft(served, "rejected-skill")
+    record_reviewed_proposal_for(paths.MEMORIES_DIR, "rejected-skill")
     reject_skill_proposal(paths.MEMORIES_DIR, "rejected-skill")
     _draft(served, "auto-skill")
     _approve(served, "auto-skill")
@@ -1016,9 +1030,14 @@ def quiet_skill_index(monkeypatch):
 
 
 def _decide(server, name: str, action: str, headers=None, **body):
+    if action in {"approve", "reject"}:
+        # The review page lists a draft before it can decide it. The list is
+        # the display this process records.
+        server.get("/api/autoskills/proposals")
+    empty = body.pop("empty", False)
     return server.post(
         f"/api/autoskills/proposals/{name}/{action}",
-        json=body,
+        json=None if empty else body,
         headers=headers or {},
     )
 
@@ -1397,9 +1416,7 @@ def test_decision_routes_refuse_a_body_that_is_not_an_object(
 def test_decision_routes_accept_an_empty_body(server, served, secret):
     _draft(served, "focused-validation")
 
-    response = server.post(
-        "/api/autoskills/proposals/focused-validation/reject", headers=secret
-    )
+    response = _decide(server, "focused-validation", "reject", secret, empty=True)
 
     assert response.status_code == 200
 
@@ -1684,7 +1701,6 @@ def test_a_decision_never_falls_back_to_a_prefix_match(
     monkeypatch.setattr(
         autoskills_api, "find_skill_proposal", find_then_lose_the_folder
     )
-
     response = _decide(server, "paper-review", action, secret)
 
     assert response.status_code == 409
@@ -1728,6 +1744,8 @@ def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_inde
     from EvoScientist.memory.autoskills import proposals
 
     _draft(served, "focused-validation")
+    # The review page listed the draft before the two approvals raced.
+    autoskills_api.list_drafts()
     real_copy = proposals._copy_proposed_skill
     copies = []
 

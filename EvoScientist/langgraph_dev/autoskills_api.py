@@ -36,8 +36,10 @@ from EvoScientist.memory.autoskills.proposals import (
     installed_skills_read_once,
     list_skill_proposals,
     proposal_install_target,
+    record_reviewed_proposal,
     reject_skill_proposal,
     revert_skill_proposal,
+    review_skill_proposal,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,9 +99,19 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
         return None
     if proposal.scope not in _SCOPES:
         return None
-    found = find_skill_proposal(paths.MEMORIES_DIR, proposal.proposal_id)
-    if found is None or found.path != proposal.path:
+    # The proposal came from the listing's own read of its manifest, so the
+    # row is already the draft an approval would use. Confirming it with a
+    # second lookup reads the folder again, and a folder removed between the
+    # two reads fails the page. A single draft is still confirmed by
+    # ``find_skill_proposal`` where one file is served.
+    if proposal.proposal_id != proposal.path.name:
         return None
+    if proposal.status == "pending" and proposal.manifest is not None:
+        # The page shows this draft. The digest is of the manifest the list
+        # already read; a body that cannot be hashed stays unrecorded and a
+        # decision of it is refused.
+        with contextlib.suppress(OSError, ValueError):
+            record_reviewed_proposal(proposal.path, proposal.manifest)
     return key
 
 
@@ -291,7 +303,9 @@ def read_draft_file(
     relative = _relative_path(rel_path)
     if relative is None:
         return 400, {"error": "invalid_path"}
-    proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
+    # Reading a draft file is how the page shows one draft, so it records the
+    # review the same way the list does.
+    proposal = review_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     served = _served_keys(registry.REGISTRY.registered())
     key = _listed(proposal, served) if proposal is not None else None
     if proposal is None or key is None:

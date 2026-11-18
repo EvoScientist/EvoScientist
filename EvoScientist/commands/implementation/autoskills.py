@@ -176,6 +176,7 @@ class AutoSkillsCommand(Command):
             paths.MEMORIES_DIR,
             status=status,
             workspace_dir=workspace_dir,
+            record_review=True,
         )
         if not proposals:
             if status:
@@ -246,6 +247,12 @@ class AutoSkillsCommand(Command):
             )
             return
         workspace_dir = self._workspace_dir(ctx)
+        # Approving is a decision, so this process shows the one draft the
+        # id resolves to and records that body. The review command lists it;
+        # this covers an approval given by id without a separate listing.
+        await asyncio.to_thread(
+            self._show_resolved, paths.MEMORIES_DIR, proposal_id, workspace_dir
+        )
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
@@ -287,6 +294,9 @@ class AutoSkillsCommand(Command):
             )
             return
         workspace_dir = self._workspace_dir(ctx)
+        await asyncio.to_thread(
+            self._show_resolved, paths.MEMORIES_DIR, proposal_id, workspace_dir
+        )
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
@@ -300,6 +310,25 @@ class AutoSkillsCommand(Command):
             )
         else:
             ctx.ui.append_system(f"Reject failed: {result.get('error')}", style="red")
+
+    @staticmethod
+    def _show_resolved(memory_dir, proposal_id: str, workspace_dir) -> None:
+        """Record the one draft an id names, the way listing it would.
+
+        A prefix resolves to that one draft first, and only its exact id is
+        recorded. Recording every draft would read drafts this command did
+        not show.
+        """
+        from ...memory.autoskills.proposals import (
+            _proposal_dir_by_id,
+            record_reviewed_proposal_by_id,
+        )
+
+        found = _proposal_dir_by_id(
+            memory_dir, proposal_id, workspace_dir=workspace_dir
+        )
+        if found is not None:
+            record_reviewed_proposal_by_id(memory_dir, found.name)
 
     async def _run(self, ctx: CommandContext) -> None:
         from ...config import get_effective_config
