@@ -99,14 +99,21 @@ def _lifecycle_started(
     *,
     graph_name: str | None = None,
     subagent: bool = True,
-    trigger_call_id: str | None = None,
 ) -> dict:
+    """A lifecycle start event in the shape the transformer actually pushes.
+
+    The trigger call id is the namespace segment's own id, as the
+    transformer sends it; the cause is present only for a run a tool
+    call started. (The tracker ignores the trigger call id entirely:
+    the terminal payload carries none, so it can never be a guard.)
+    """
     data: dict = {"event": "started"}
     if graph_name is not None:
         data["graph_name"] = graph_name
     if subagent:
         data["cause"] = {"type": "toolCall", "tool_call_id": "call-1"}
-    data["trigger_call_id"] = trigger_call_id or f"trigger-{len(namespace)}"
+    segment = namespace[-1]
+    data["trigger_call_id"] = segment.partition(":")[2] or segment
     return {
         "method": "lifecycle",
         "params": {"namespace": namespace, "data": data},
@@ -699,24 +706,6 @@ def test_same_name_concurrent_launches_keep_their_own_triggers():
     assert _end_instances(ends) == ["async:async-thread-2"], ends
 
 
-def test_the_trigger_guard_refuses_a_mismatched_call_on_an_async_end():
-    """An end naming a different tool call than the launch must not close the child."""
-    tracker, _registry = _tracker()
-
-    _launch(tracker)
-
-    assert (
-        tracker._end_async(("async", "async-thread-1"), trigger_call_id="call-OTHER")
-        == []
-    )
-    assert tracker._end_async(("async", "async-thread-1"), trigger_call_id="call-1")
-    assert not _ends(
-        tracker.process(
-            _record_update("async-thread-1", "code-agent", status="success")
-        )
-    )
-
-
 def test_a_check_command_result_is_not_a_launch():
     """check_async_task returns a Command with async_tasks too: it is not a launch.
 
@@ -737,8 +726,16 @@ def test_a_check_command_result_is_not_a_launch():
     assert not _ends(events), events
 
 
-def test_a_check_of_an_active_child_keeps_its_launch_trigger():
-    """A check result must not overwrite the real launch's trigger."""
+def test_a_check_of_an_active_child_keeps_its_launch_call_id():
+    """A check result must not overwrite the real launch's call id.
+
+    The launch call id is carried on the start event so the CLI places
+    the child under its own task line. It is placement, not a guard:
+    no async completion signal carries a tool call id to compare
+    against, so there is no trigger matching on an async end -- the
+    run-id checks are what keep a stale completion from ending the
+    child (see the stale-completion tests below).
+    """
     tracker, _registry = _tracker()
 
     _launch(tracker)
@@ -753,7 +750,7 @@ def test_a_check_of_an_active_child_keeps_its_launch_trigger():
 
     assert not _starts(events), events
     assert not _ends(events), events
-    assert tracker._active[("async", "async-thread-1")] == ("code-agent", "call-1")
+    assert tracker._active[("async", "async-thread-1")] == "code-agent"
     assert tracker._async_launch_calls["async-thread-1"] == "call-1"
 
 
@@ -1219,10 +1216,7 @@ def test_ending_an_older_run_keeps_a_parallel_updates_pending_run():
     assert _starts(batch) == ["code-agent"], batch
     # The revival leaves the child active on run-10: the end below must
     # close that child, not silently re-arm an ended path.
-    assert tracker._active.get(("async", "async-thread-1")) == (
-        "code-agent",
-        "call-1",
-    )
+    assert tracker._active.get(("async", "async-thread-1")) == "code-agent"
     ends = tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="success", run_id="run-10"
@@ -1359,7 +1353,10 @@ def test_finish_ends_sync_children_but_not_running_async_ones():
     tracker, _registry = _tracker()
 
     tracker.process(_lifecycle_started(["tools:task-1"], graph_name="code-agent"))
-    _launch(tracker)
+    # The async child is named differently from the sync child on
+    # purpose: the assertion must prove WHICH child ended, not just
+    # that one did.
+    _launch(tracker, name="research-agent")
     events = tracker.finish()
 
     assert _ends(events) == ["code-agent"], events

@@ -834,16 +834,23 @@ class _ServerSubagentTracker:
     # A record is state, not a launch event: it announces or re-arms a
     # child only when its run id is one an update (or a launch) actually
     # produced in this turn. Without that, a check of an earlier-turn
-    # task would announce a child that was never launched here, and a
-    # stale record for an old run would revive an ended child.
+    # task would announce a child that was never launched here. The
+    # gate is the only signal available for this, and it is not a
+    # proof: it cannot order two pending runs (both are in the set, so
+    # the later one can arrive first and move the child backwards),
+    # and it cannot tell an external client's genuine new run -- one
+    # no update in this turn produced -- from a stale record.
     _async_pending_runs: dict[tuple[str, ...], set[str]] = field(default_factory=dict)
     # Current run id per async child path. A completion naming an older run
     # than the one the child is on is stale and must not end it.
     _async_run_ids: dict[tuple[str, ...], str | None] = field(default_factory=dict)
     # Tool call id that launched each async task (task_id -> tool_call_id).
-    # The tool-finished Command names the task it launched, so the trigger
-    # is correlated by task id -- never guessed by agent name, which would
-    # swap triggers when two same-name children launch at once.
+    # The tool-finished Command names the task it launched, so the launch
+    # call id is correlated by task id -- never guessed by agent name,
+    # which would swap call ids when two same-name children launch at
+    # once. The id is placement only: it is carried on the start event
+    # so the CLI places the child under its own task line, never a
+    # guard on an end (no completion signal carries one).
     _async_launch_calls: dict[str, str] = field(default_factory=dict)
     # Run id each ended async child was on when it ended (path -> run id).
     # A terminal signal for an older run must not close a newer run, and a
@@ -853,13 +860,18 @@ class _ServerSubagentTracker:
     _ended_async_runs: dict[tuple[str, ...], str | None] = field(default_factory=dict)
     # Run ids ever observed for each async child path. A record naming a
     # run that was already seen while the child is on a different run is
-    # stale: the current run must never move backwards, and a revival
-    # must name a run never seen before. Runs are NOT delivered in
-    # order -- parallel tool calls gather their outputs in call order,
-    # so a record for an old run can arrive after a newer run ended --
-    # which is why the seen set alone cannot tell a stale never-seen
-    # run from a genuine new one; the pending-run gate in
-    # _process_async_task_record is what does that.
+    # stale in the cases the tests cover: the current run should not
+    # move backwards, and a revival should name a run never seen
+    # before. That is the intent, not a guarantee the tracker can
+    # keep: runs are NOT delivered in order -- parallel tool calls
+    # gather their outputs in call order, so a record for an old run
+    # can arrive after a newer run ended -- and when two runs are both
+    # pending, the pending-run gate cannot order them, so the later
+    # one can arrive first and move the child backwards. The seen set
+    # alone cannot tell a stale never-seen run from a genuine new one;
+    # the pending-run gate in _process_async_task_record is the only
+    # signal for that, and it is not sufficient (see the note on
+    # _async_pending_runs).
     _async_seen_runs: dict[tuple[str, ...], set[str]] = field(default_factory=dict)
 
     def process(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1177,7 +1189,11 @@ class _ServerSubagentTracker:
         itself: a failed launch must announce nothing. A launch result is
         a serialized Command whose update holds the task record; the
         record names the task, its agent and its run, and the call id
-        that produced it is the trigger.
+        that produced it is recorded as the launch call id and carried
+        on the start event, so the CLI places the child under its own
+        task line. It is placement, not a guard: no async completion
+        signal carries a tool call id, so there is no trigger matching
+        on an async end.
 
         A record is state, not a launch event, so it never announces a
         child on its own: the launch result is the start signal, and an
