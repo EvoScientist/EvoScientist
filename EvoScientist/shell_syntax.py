@@ -5,6 +5,7 @@ substitutions and command-name positions; not a full shell parser.
 """
 
 import functools
+import itertools
 import re
 from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
@@ -37,7 +38,7 @@ HEREDOC_OP_RE = re.compile(r"\d*<<")
 SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash"})
 # Commands that run the command named by their first operand.
 WRAPPER_NAMES = frozenset(
-    {"env", "nohup", "timeout", "xargs", "exec", "command", "nice", "setsid"}
+    {"env", "nohup", "timeout", "xargs", "exec", "command", "builtin", "nice", "setsid"}
 )
 # Wrapper operands before the command: a duration or niceness (`5`, `1.5m`).
 _WRAPPER_VALUE_RE = re.compile(r"-?\d+(\.\d+)?[smhd]?")
@@ -486,6 +487,12 @@ class SimpleCommand(NamedTuple):
         dict[str, object] | None, ...
     ]  # per arg: its token, or None if several
     via: tuple[str, ...]  # wrappers it runs under, outermost first
+    # The folders `env -C` changes into before it runs, outermost first, as
+    # the shell passes them to env.
+    folders: tuple[str, ...] = ()
+    # Inside a loop (its condition included) or a function body: it may run
+    # again, or before the commands written ahead of it.
+    repeats: bool = False
 
 
 def _command_word_end(
@@ -563,30 +570,6 @@ def _command_arguments(
 def _word_value(arg: str, token: dict[str, object] | None) -> str:
     """A word as the shell reads it: its decoded token, else as written."""
     return str(token["value"]) if token is not None else arg
-
-
-def _command_end(command: str, words: ShellWords, index: int, in_backtick: bool) -> int:
-    """Where the command whose name is token *index* ends, its redirections
-    included (the words :func:`_command_arguments` reads)."""
-    tokens = words.tokens
-    end = int(tokens[index]["end"])
-    index += 1
-    while index < len(tokens):
-        token = tokens[index]
-        value = str(token["value"])
-        if command_newline(command, end, int(token["start"])) is not None or (
-            token["type"] == "op"
-            and (value != "`" or in_backtick)
-            and "<" not in value
-            and ">" not in value
-        ):
-            break
-        if token["type"] == "op" and (value != "`" or in_backtick):
-            index += 1
-        else:  # a word, or a backtick substitution that starts one
-            index = _command_word_end(tokens, index, in_backtick)
-        end = int(tokens[index - 1]["end"])
-    return end
 
 
 # Short options of GNU and BSD env, other than `-S`, whose value is the rest
@@ -703,20 +686,33 @@ def _unwrap(
     name: str,
     args: list[tuple[str, dict[str, object] | None]],
     via: tuple[str, ...],
-    scripts: list[tuple[str, tuple[str, ...]]],
-    starting_folder: bool = False,
+    scripts: list[tuple[str, tuple[str, ...], tuple[str, ...]]],
+    folders: tuple[str, ...] = (),
+    assigned: list[tuple[str, str]] | None = None,
 ) -> list[SimpleCommand]:
     """The command and, through wrappers such as ``env`` or ``xargs``, the
-    commands it runs. Strings that ``env -S`` splits are read in place and
-    also go to *scripts*, with the wrappers they run under, to be read as
-    shell code. With *starting_folder*, an ``env -C`` runs nothing here."""
+    commands it runs, in the ``env -C`` *folders* they run in (the last
+    ``-C`` of each ``env``, as GNU ``env`` changes folder once). Strings that
+    ``env -S`` splits are read in place and also go to *scripts*, with the
+    wrappers and folders they run under, to be read as shell code. The
+    ``NAME=value`` words of ``env`` go to *assigned* (see
+    :func:`assignments`)."""
     found = [
-        SimpleCommand(name, tuple(a for a, _ in args), tuple(t for _, t in args), via)
+        SimpleCommand(
+            name,
+            tuple(a for a, _ in args),
+            tuple(t for _, t in args),
+            via,
+            folders,
+        )
     ]
     if name not in WRAPPER_NAMES:
         return found
     takes_value = _WRAPPER_OPTIONS_WITH_VALUE.get(name, frozenset())
+    outer_folders = folders  # one env changes folder once, to its last -C
     rest = list(args)
+    env_assigned: list[tuple[str, str]] = []
+    scripts_before = len(scripts)
     position = 0
     while position < len(rest):
         value = _word_value(*rest[position])
@@ -724,19 +720,29 @@ def _unwrap(
         split = _env_split_string(value, rest, position) if name == "env" else None
         if split is not None:
             text, position = split
-            scripts.append((_env_shell_text(text), (*via, name)))
+            scripts.append((_env_shell_text(text), (*via, name), folders))
             rest[position:position] = _env_words(text)
             continue
         if name == "env" and value.startswith("-"):
             takes_next, changes_folder = _env_option(value)
-            if changes_folder and starting_folder:
-                return found
+            if changes_folder:
+                option = _braced_word_value(*rest[position - 1])
+                folder = _env_folder(option, rest, position, takes_next)
+                folders = (*outer_folders, folder)
             if takes_next:
                 position += 1
             continue
         if value in takes_value:
             position += 1
             continue
+        if name == "env" and assigned is not None:
+            arg, token = rest[position - 1]
+            declared = _declared_assignment(
+                str(token["raw"]) if token is not None else arg
+            )
+            if declared is not None:
+                env_assigned.append(declared)
+                continue
         if name == "command" and value in ("-v", "-V"):
             return found  # only looks the name up
         if (
@@ -746,10 +752,38 @@ def _unwrap(
         ):
             continue
         inner = re.split(r"[\\/]", value)[-1]
-        return found + _unwrap(
-            inner, rest[position:], (*via, name), scripts, starting_folder
-        )
+        runs = _unwrap(inner, rest[position:], (*via, name), scripts, folders, assigned)
+        if (
+            assigned is not None
+            and env_assigned
+            and _keeps_prefix(runs, len(scripts) > scripts_before, "")
+        ):
+            assigned.extend(env_assigned)  # only the code it runs sees them
+        return found + runs
     return found
+
+
+def _braced_word_value(arg: str, token: dict[str, object] | None) -> str:
+    """:func:`_word_value`, with each ``$NAME`` written ``${NAME}``."""
+    braced = braced_value(str(token["raw"])) if token is not None else None
+    return braced if braced is not None else _word_value(arg, token)
+
+
+def _env_folder(
+    value: str,
+    args: list[tuple[str, dict[str, object] | None]],
+    position: int,
+    takes_next: bool,
+) -> str:
+    """The folder an ``env`` option *value* that changes it names: the next
+    word in *args* (at *position*), or the rest of *value* (``-Cbuild``,
+    ``-iCbuild``, ``--chdir=build``); a ``$NAME`` in it written ``${NAME}``
+    (see :func:`braced_value`)."""
+    if takes_next:
+        return _braced_word_value(*args[position]) if position < len(args) else ""
+    if value.startswith("--"):
+        return value.partition("=")[2]
+    return value[value.index("C") + 1 :]
 
 
 def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
@@ -820,17 +854,9 @@ def simple_commands(command: str) -> list[SimpleCommand]:
 
 
 # Commands that change the folder the commands after them run in; `popd`
-# cannot before a `pushd`, as each command starts with an empty stack.
-_FOLDER_COMMANDS = frozenset({"cd", "pushd"})
-
-
-def starting_folder_commands(command: str) -> list[SimpleCommand]:
-    """The commands of *command* that run in the folder it starts in (see
-    :func:`simple_commands`): each text read ends at its first ``cd`` or
-    ``pushd``, and the command an ``env -C`` runs is left out. A folder change
-    inside a substitution or a subshell also ends its text, which misses a
-    command rather than adding one."""
-    return _simple_commands(command, set(), (), starting_folder=True)
+# only returns to a folder an earlier `pushd` left, as each command starts
+# with an empty stack.
+FOLDER_COMMANDS = frozenset({"cd", "pushd"})
 
 
 # Builtins whose `NAME=value` arguments set variables.
@@ -840,24 +866,223 @@ DECLARATION_NAMES = frozenset({"export", "local", "declare", "typeset", "readonl
 def assignments(command: str) -> list[tuple[str, str]]:
     """``(name, value as written)`` of each variable *command* sets with
     ``NAME=value``: alone, before a command, as an argument of ``export`` /
-    ``local`` / ``declare``, and in the code it runs (see
+    ``local`` / ``declare`` or ``env``, and in the code it runs (see
     :func:`simple_commands`)."""
-    found: list[tuple[str, str]] = []
-    for each in _simple_commands(command, set(), (), found):
-        if each.name in DECLARATION_NAMES:
-            found.extend(
-                declared
-                for declared in map(_declared_assignment, each.args)
-                if declared is not None
+    return [(_assigned_name(head), value) for head, value in _variables(command)[0]]
+
+
+# Declaration options that only export or mark read-only; any other (`-n`,
+# `-a`, `-i`) changes what the value means.
+_PLAIN_DECLARATION_OPTION_RE = re.compile(r"[-+][xrg]+")
+# Builtins that set the variables named in their arguments from what the run
+# reads.
+_READ_SETTER_NAMES = frozenset({"read", "mapfile", "readarray"})
+# Builtins that set them from their arguments in a way the check does not
+# follow.
+_OTHER_SETTER_NAMES = frozenset({"getopts", "let"})
+# Builtins that run a string as code in this shell, where it may set any
+# variable. A file run with `source` / `.` is code the check never sees in
+# any case, so it is not one of them.
+CODE_RUNNER_NAMES = frozenset({"eval"})
+_NAME_RE = re.compile(r"[A-Za-z_]\w*")
+# A printf `%n` conversion, with its flags, width, precision and length.
+_PRINTF_N_RE = re.compile(r"%[-+ #0'*\d.]*(?:hh|h|ll|l|L|q|j|z|t)?n")
+
+
+_SEQUENCE_RE = re.compile(
+    r"(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?|([A-Za-z])\.\.([A-Za-z])"
+)
+
+
+def _brace_words(word: str) -> list[str] | None:
+    """The words a brace expansion in *word*, as written, makes
+    (``seed_{0..2}`` reads ``seed_0 seed_1 seed_2``, ``{a,b}x`` reads
+    ``ax bx``); ``None`` for one it does not read: with quotes, an escape, an
+    expansion or a brace that expands nothing, or with more words than
+    :data:`_VALUES_CAP`."""
+    if re.search(r"[\"'\\$`]", word):
+        return None
+    start = word.find("{")
+    if start == -1:
+        return None if "}" in word else [word]
+    depth = 0
+    commas: list[int] = []
+    for end in range(start, len(word)):
+        if word[end] == "{":
+            depth += 1
+        elif word[end] == "}":
+            depth -= 1
+            if not depth:
+                break
+        elif word[end] == "," and depth == 1:
+            commas.append(end)
+    else:
+        return None
+    body = word[start + 1 : end]
+    if commas:
+        bounds = [start, *commas, end]
+        choices = [word[a + 1 : b] for a, b in itertools.pairwise(bounds)]
+    else:
+        sequence = _SEQUENCE_RE.fullmatch(body)
+        if sequence is None:
+            return None
+        if sequence.group(4):
+            first, last = ord(sequence.group(4)), ord(sequence.group(5))
+            step = 1 if last >= first else -1
+            choices = [chr(c) for c in range(first, last + step, step)]
+        else:
+            first, last = int(sequence.group(1)), int(sequence.group(2))
+            step = abs(int(sequence.group(3) or 1)) or 1
+            step = step if last >= first else -step
+            if abs(last - first) // abs(step) >= _VALUES_CAP:
+                return None
+            width = max(len(sequence.group(1)), len(sequence.group(2)))
+            padded = re.match(r"-?0\d", sequence.group(1)) or re.match(
+                r"-?0\d", sequence.group(2)
             )
+            choices = [
+                str(n).zfill(width) if padded else str(n)
+                for n in range(first, last + step, step)
+            ]
+    found: list[str] = []
+    for choice in choices:
+        expanded = _brace_words(word[:start] + choice + word[end + 1 :])
+        if expanded is None or len(found) + len(expanded) > _VALUES_CAP:
+            return None
+        found.extend(expanded)
     return found
 
 
+class _Variables(NamedTuple):
+    """How *command* sets its variables (see :func:`_variables`)."""
+
+    # Each `NAME=value` (see :func:`assignments`), with what is written
+    # before its `=` (`NAME`, `NAME+` or `NAME[i]`), and each word of a
+    # `for NAME in WORDS` loop whose words are written out.
+    found: list[tuple[str, str]]
+    # Set from what the run reads (`read`, `mapfile`, a loop over the words
+    # of a substitution): values the check cannot know.
+    run_only: set[str]
+    # Set another way the check does not follow (`printf -v`, `declare -a`,
+    # `${NAME:=value}`, `unset`, a loop over a variable's words), from values
+    # it could read.
+    in_part: set[str]
+    # It may set any of them (a nameref, `eval`, a name only the run knows).
+    opaque: bool
+    # It has a nameref, which may also write to a variable it never assigns.
+    nameref: bool = False
+
+
+def _variables(command: str) -> _Variables:
+    """How *command* sets its variables (see :class:`_Variables`). Options
+    and names are read as the shell reads them (``declare "-n"``,
+    ``read "D"``)."""
+    found: list[tuple[str, str]] = []
+    run_only: set[str] = set()
+    in_part: set[str] = set()
+    opaque = False
+    nameref = False
+    for each in _simple_commands(command, set(), (), found):
+        args = each.args
+        words = [
+            _word_value(arg, token)
+            for arg, token in zip(args, each.tokens, strict=True)
+        ]
+        if each.name in CODE_RUNNER_NAMES:
+            opaque = True
+        elif each.name == "for" and args:
+            loop_words = [word for word in args[2:] if word != "do"]
+            if len(words) == 1:
+                # `for NAME` alone: the arguments the shell was given, or a
+                # loop whose `in WORDS` is on the next line.
+                in_part.add(words[0])
+            elif words[1:2] != ["in"]:
+                run_only.add(words[0])  # the arguments the shell was given
+            elif any(variable_references(word) for word in loop_words):
+                in_part.add(words[0])  # a variable's words
+            else:
+                # Each word is a value, as of a `NAME=value`: one a
+                # substitution prints only the run knows.
+                values: list[str] | None = []
+                for word in loop_words:
+                    braced = _brace_words(word) if "{" in word else [word]
+                    if braced is None or values is None:
+                        values = None
+                    else:
+                        values.extend(braced)
+                if values is None or len(values) > _VALUES_CAP:
+                    in_part.add(words[0])  # a brace expansion not followed
+                else:
+                    found.extend((words[0], value) for value in values)
+        elif each.name == "select" and args:
+            # The word picked, or empty on a reply that picks none.
+            in_part.add(words[0])
+            run_only.add("REPLY")
+        elif each.name == "unset":
+            in_part.update(words)
+        elif each.name in DECLARATION_NAMES:
+            declared = [_declared_assignment(arg) for arg in args]
+            plain = all(
+                each_declared is not None
+                or _NAME_RE.fullmatch(word)
+                or _PLAIN_DECLARATION_OPTION_RE.fullmatch(word)
+                for each_declared, word in zip(declared, words, strict=True)
+            )
+            if not plain and any(
+                (word.startswith(("-", "+")) and "n" in word)
+                or "$" in word
+                or "`" in word
+                for word in words
+            ):
+                opaque = nameref = True  # a nameref, or options only the run knows
+            for each_declared, word in zip(declared, words, strict=True):
+                if each_declared is not None:
+                    found.append(each_declared)
+                if not plain:
+                    head = each_declared[0] if each_declared is not None else word
+                    in_part.add(_assigned_name(head))
+        elif each.name in _READ_SETTER_NAMES or each.name in _OTHER_SETTER_NAMES:
+            names = {_assigned_name(word) for word in words}
+            if each.name in _READ_SETTER_NAMES:
+                run_only.update(names)
+                # The variable set when no name is given.
+                run_only.add("REPLY" if each.name == "read" else "MAPFILE")
+            else:
+                in_part.update(names)
+                in_part.add("REPLY")
+            if any("$" in word or "`" in word for word in words):
+                opaque = True  # a name only the run knows
+        elif each.name == "printf":
+            # `%n` writes the count printed so far into a variable named by
+            # an argument; which one is not followed.
+            if any(_PRINTF_N_RE.search(word.replace("%%", "")) for word in words):
+                opaque = True
+            for at, word in enumerate(words):
+                destination = None
+                if word == "-v" and at + 1 < len(words):
+                    destination = words[at + 1]
+                elif word.startswith("-v") and len(word) > 2:
+                    destination = word[2:]
+                if destination is not None:
+                    in_part.add(_assigned_name(destination))  # `D[0]` sets D
+                    if "$" in destination or "`" in destination:
+                        opaque = True  # a name only the run knows
+    in_part.update(re.findall(r"\$\{([A-Za-z_]\w*)(?:\[[^\]]*\])?:?=", command))
+    return _Variables(
+        found,
+        {name for name in run_only if _NAME_RE.fullmatch(name)},
+        {name for name in in_part if _NAME_RE.fullmatch(name)},
+        opaque,
+        nameref,
+    )
+
+
 def _declared_assignment(arg: str) -> tuple[str, str] | None:
-    """``(name, value as written)`` of a ``NAME=value`` argument of a
-    declaration builtin, quoted or not (``"PID=$(lsof -t)"``, ``'PID'=x``).
-    The quotes opened before the ``=`` stay on the value, so a substitution
-    in it still runs exactly when the shell would run it."""
+    """``(what is written before the =, value as written)`` of a
+    ``NAME=value`` argument of a declaration builtin, quoted or not
+    (``"PID=$(lsof -t)"``, ``'PID'=x``). The quotes opened before the ``=``
+    stay on the value, so a substitution in it still runs exactly when the
+    shell would run it."""
     equals = arg.find("=")
     if equals <= 0:
         return None
@@ -865,7 +1090,7 @@ def _declared_assignment(arg: str) -> tuple[str, str] | None:
     name = re.sub(r"[\"'\\]", "", head)
     if ASSIGNMENT_RE.fullmatch(f"{name}=") is None:
         return None
-    return _assigned_name(name), re.sub(r"[^\"']", "", head) + arg[equals + 1 :]
+    return name, re.sub(r"[^\"']", "", head) + arg[equals + 1 :]
 
 
 def _assigned_name(word: str) -> str:
@@ -873,25 +1098,356 @@ def _assigned_name(word: str) -> str:
     return re.split(r"[\[+=]", word, maxsplit=1)[0]
 
 
+_REFERENCE_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+# `${NAME` with an index or an operator: `${D[@]}`, `${D:-x}`, `${#D}`, `${!D}`.
+_OPERATOR_REFERENCE_RE = re.compile(
+    r"\$\{(?:[#!]([A-Za-z_]\w*)|([A-Za-z_]\w*)(?![\w}]))"
+)
+# `${NAME:?message}` / `${NAME?message}`: NAME's value, or an error.
+_CHECKED_REFERENCE_RE = re.compile(r"\$\{([A-Za-z_]\w*):?\?[^${}`]*\}")
+# Most values one word is read with, so a long chain of assignments stays cheap.
+_VALUES_CAP = 16
+
+
+class UnknownValues(ValueError):
+    """A word may read as values the check does not follow: more than
+    :data:`_VALUES_CAP`, or of a variable set in a way it does not follow
+    (see :func:`assigned_values`); *word* is it. *partial* when the check
+    knows some of them but not all (``D=sk; D+=ills``), rather than none, as
+    for a variable only the run sets (``read D``)."""
+
+    def __init__(self, word: str, partial: bool = True) -> None:
+        super().__init__(word)
+        self.word = word
+        self.partial = partial
+
+
+class AssignedValues(dict[str, tuple[str, ...] | None]):
+    """:func:`assigned_values`: each variable's values, ``None`` when they
+    are not followed; *partial* holds those of them the check knows in part
+    (see :class:`UnknownValues`)."""
+
+    partial: frozenset[str] = frozenset()
+    # The command has a nameref, so a variable it never assigns may be set too.
+    writes_through: bool = False
+
+
+def _references(word: str) -> list[tuple[re.Match[str], bool]]:
+    """The ``$NAME`` / ``${NAME}`` of a word as written that the shell
+    expands (outside single quotes and not escaped), each with whether it is
+    inside double quotes. A name inside a ``$(...)`` or backtick
+    substitution is the substitution's, whose output only the run knows, so
+    it is not one of them."""
+    found: list[tuple[re.Match[str], bool]] = []
+    quote: str | None = None
+    index = 0
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            index += 1
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "$" and word.startswith("$(", index):
+            end = matching_paren(word, index + 2)
+            if end is None:
+                break
+            index = end
+        elif char == "`":
+            end = word.find("`", index + 1)
+            while end != -1 and word[end - 1] == "\\":
+                end = word.find("`", end + 1)
+            if end == -1:
+                break
+            index = end
+        elif char == "$":
+            match = _REFERENCE_RE.match(word, index)
+            if match is not None:
+                found.append((match, quote == '"'))
+        index += 1
+    return found
+
+
+def variable_references(word: str) -> set[str]:
+    """The variables a word as written expands with ``$NAME`` or ``${NAME}``:
+    outside single quotes and not escaped."""
+    return {match.group(1) or match.group(2) for match, _ in _references(word)}
+
+
+def braced_value(word: str) -> str | None:
+    """A word as written, as the shell reads it, with each ``$NAME`` it
+    expands written ``${NAME}``, so quote removal keeps where the name ends
+    (``"$D"ills`` reads ``${D}ills``); ``None`` when it is not one word."""
+    parts: list[str] = []
+    last = 0
+    for match, _quoted in _references(word):
+        name = match.group(1) or match.group(2)
+        parts.append(word[last : match.start()] + "${" + name + "}")
+        last = match.end()
+    tokens = tokenize("".join(parts) + word[last:])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return str(tokens[0]["value"])
+
+
+def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
+    """The values *command* sets each variable to with plain assignments
+    (see :func:`assignments`), in any order, as the shell reads them: quotes
+    removed, and a ``$NAME`` of another variable set in *command* replaced by
+    its values. A value with a substitution is only known when the command
+    runs, so it is left out; any other ``$NAME`` (``$HOME``) stays as
+    written. ``None`` for a variable whose values the check does not follow:
+    one set any other way (see :class:`_Variables`), every one when the
+    command may set any variable (a nameref, ``eval``), one set in part
+    (``NAME+=value``, ``NAME[i]=value``) or to an array, one whose value
+    refers back to it (``D=$D/x``) or reads a variable with an operator
+    (``${D%/}``), one with more than :data:`_VALUES_CAP` values, one with
+    values known before the run and values only the run knows
+    (``X=build; X=$(cmd)``), or one whose value names such a variable.
+    Only one the run alone sets (``read D``, see :class:`_Variables`) is
+    not in :attr:`AssignedValues.partial`. With *plain_only*, such a one is
+    read from its plain assignments alone."""
+    found, run_only, in_part, opaque, nameref = _variables(command)
+    # Set in part, or to an array: the `=` values are only some of them.
+    partial = {
+        _assigned_name(head)
+        for head, value in found
+        if head != _assigned_name(head) or value.startswith("(")
+    } | in_part
+    if opaque:  # any of them may be set some other way
+        partial.update(_assigned_name(head) for head, _ in found)
+    # Read alone, the plain `=` values of one the run also sets are checked.
+    other = set(partial) if plain_only else run_only | partial
+    written: dict[str, list[str]] = {}
+    for head, value in found:
+        written.setdefault(_assigned_name(head), []).append(value)
+    resolved: dict[str, tuple[str, ...] | None] = dict.fromkeys(other)
+    pending: set[str] = set()
+
+    def resolve(name: str) -> tuple[str, ...] | None:
+        if name in resolved:
+            return resolved[name]
+        if name in pending:  # it refers back to itself
+            raise UnknownValues(name)
+        pending.add(name)
+        try:
+            values: tuple[str, ...] | None = resolve_values(name)
+        except UnknownValues as exc:
+            values = None
+            if exc.partial:
+                partial.add(name)
+        pending.discard(name)
+        resolved[name] = values
+        return values
+
+    def resolve_values(name: str) -> tuple[str, ...]:
+        found: list[str] = []
+        run_only = False  # a value only the run knows
+        for value in written[name]:
+            value = _CHECKED_REFERENCE_RE.sub(r"${\1}", value)
+            # An operator form (`${X:-build}`) is read as written, as the
+            # word it is in would be.
+            if "$(" in value or "`" in value or _OPERATOR_REFERENCE_RE.search(value):
+                run_only = True
+                continue
+            if not tokenize(value):
+                found.append("")
+                continue
+            read = braced_value(value)
+            if read is None:
+                run_only = True
+                continue
+            names = variable_references(value) & (written.keys() | other)
+            known = {each: resolve(each) for each in names}
+            if any(known[each] is None for each in names):
+                # Only the run knows it; just the run's value when the value
+                # is that variable alone (`D=$R`), else known in part.
+                raise UnknownValues(
+                    name,
+                    re.fullmatch(r"\$\{\w+\}", read) is None
+                    or any(each in partial for each in names if known[each] is None),
+                )
+            expanded = expand_references(read, known)
+            run_only = run_only or not expanded
+            found.extend(expanded)
+        values = tuple(dict.fromkeys(found))
+        # Checking only the known values of a variable that may also take one
+        # only the run knows would miss that one.
+        if len(values) > _VALUES_CAP or (run_only and values):
+            raise UnknownValues(name)
+        return values
+
+    for name in written:
+        resolve(name)
+    result = AssignedValues(resolved)
+    result.partial = frozenset(partial)
+    result.writes_through = nameref
+    return result
+
+
+def expand_references(
+    text: str, values: dict[str, tuple[str, ...] | None]
+) -> list[str]:
+    """*text* with each ``$NAME`` / ``${NAME}`` of a variable in *values*
+    replaced by each of its values; empty when one of them has none.
+    :class:`UnknownValues` past :data:`_VALUES_CAP` combinations, or for a
+    variable whose values are not followed (``None``)."""
+    results = [""]
+    last = 0
+    for match in _REFERENCE_RE.finditer(text):
+        name = match.group(1) or match.group(2)
+        if name not in values:
+            continue
+        literal = text[last : match.start()]
+        options = values[name]
+        if options is None or len(results) * len(options) > _VALUES_CAP:
+            raise UnknownValues(text)
+        results = [result + literal + value for result in results for value in options]
+        last = match.end()
+    return [result + text[last:] for result in results]
+
+
+def word_values(
+    word: str, value: str, assigned: dict[str, tuple[str, ...] | None]
+) -> list[str] | None:
+    """The values a word reads as with the variables *assigned* in its command
+    (see :func:`assigned_values`): *value* is the word as the shell reads it,
+    *word* as written. ``None`` when it names none of them, and empty when
+    one it names has no value known before the command runs; callers then
+    read the word as written. A value of a name outside double quotes is
+    split into the words it makes (``D="x skills"; rm -rf $D``).
+    :class:`UnknownValues` (naming *word*) when it may read as more than
+    :data:`_VALUES_CAP` values, names a variable whose values are not
+    followed, reads one with an index or an operator (``${D[@]}``,
+    ``${D%/}``; ``${D:?}`` reads as ``$D``), or splits one while the
+    command sets ``IFS``."""
+    word = _CHECKED_REFERENCE_RE.sub(r"${\1}", word)
+    value = _CHECKED_REFERENCE_RE.sub(r"${\1}", value)
+    # Known in part unless every unfollowed name it reads is one only the run
+    # sets; a plain dict knows no such names.
+    partial_names = getattr(assigned, "partial", None)
+    if getattr(assigned, "writes_through", False) and re.search(
+        r"\$\{?[#!]?[A-Za-z_]", word
+    ):
+        # Through a nameref, any variable it names may be one it writes.
+        if (
+            variable_references(word)
+            | {
+                match.group(1) or match.group(2)
+                for match in _OPERATOR_REFERENCE_RE.finditer(word)
+            }
+        ) - assigned.keys():
+            raise UnknownValues(word)
+
+    def in_part(names: set[str]) -> bool:
+        return partial_names is None or any(
+            assigned[name] is not None or name in partial_names for name in names
+        )
+
+    operated = {
+        match.group(1) or match.group(2)
+        for match in _OPERATOR_REFERENCE_RE.finditer(word)
+    } & assigned.keys()
+    if operated:
+        raise UnknownValues(word, in_part(operated))
+    names = variable_references(word) & assigned.keys()
+    if not names:
+        return None
+    value = braced_value(word) or value
+    unquoted = any(
+        not quoted
+        for match, quoted in _references(word)
+        if (match.group(1) or match.group(2)) in names
+    )
+    if unquoted and "IFS" in assigned:
+        raise UnknownValues(word)
+    unfollowed = {name for name in names if assigned[name] is None}
+    if unfollowed:
+        raise UnknownValues(word, in_part(unfollowed))
+    try:
+        values = expand_references(value, {name: assigned[name] for name in names})
+    except UnknownValues:
+        raise UnknownValues(word) from None
+    if unquoted:
+        values = [field for each in values for field in each.split() or [each]]
+    return values
+
+
+# Builtins after which a `NAME=value` written before them stays set (POSIX
+# special builtins, and bash's own in POSIX mode).
+SPECIAL_BUILTIN_NAMES = frozenset(
+    {
+        ":", ".", "break", "continue", "eval", "exec", "exit", "export",
+        "readonly", "return", "set", "shift", "source", "times", "trap", "unset",
+    }
+)  # fmt: skip
+
+
+def _keeps_prefix(
+    unwrapped: list[SimpleCommand], adds_scripts: bool, command: str
+) -> bool:
+    """Whether a ``NAME=value`` written before a command, which sets the
+    variable for that command only, still counts as one the shell sets:
+    before a special builtin, a declaration, ``cd`` / ``pushd`` (which read
+    ``HOME`` and ``CDPATH``) or a function, which keep or read it in this
+    shell, or before a command that runs shell code the check reads, where
+    the code sees it (``D=x bash -c 'rm -rf "$D"'``). Before any other
+    command (``IFS= read``, ``OUT=x python``) the shell's own variable is
+    unchanged."""
+    name = unwrapped[0].name
+    return (
+        adds_scripts
+        or name in SPECIAL_BUILTIN_NAMES
+        or name in DECLARATION_NAMES
+        or name in ("cd", "pushd")
+        or re.search(
+            rf"(?:^|[\s;&|(){{}}/]){re.escape(name)}\s*\(\s*\)|\bfunction\s+{re.escape(name)}\b",
+            command,
+        )
+        is not None
+        or any(
+            each.name in SHELL_NAMES or each.name in SPECIAL_BUILTIN_NAMES
+            for each in unwrapped
+        )
+    )
+
+
 def _simple_commands(
     command: str,
-    seen: set[tuple[str, tuple[str, ...]]],
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...], bool]],
     outer: tuple[str, ...],
     assigned: list[tuple[str, str]] | None = None,
-    starting_folder: bool = False,
+    outer_folders: tuple[str, ...] = (),
+    outer_repeats: bool = False,
+    root: str | None = None,
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
-    the wrappers they run under (*outer* for this one). Assignments in
-    command-name position go to *assigned* (see :func:`assignments`). With
-    *starting_folder*, see :func:`starting_folder_commands`."""
+    the wrappers and ``env -C`` folders they run under (*outer* and
+    *outer_folders* for this one) and whether they repeat (*outer_repeats*,
+    see :class:`SimpleCommand`); *root* is the outermost command, where a
+    function a nested text calls may be defined. Assignments in command-name position go to
+    *assigned* (see :func:`assignments`)."""
+    root = command if root is None else root  # the whole command, for definitions
     words = parse(command)
     tokens = words.tokens
     found: list[SimpleCommand] = []
-    nested: list[tuple[str, tuple[str, ...]]] = []  # text, wrappers it runs under
+    # Text, and the wrappers and `env -C` folders it runs under.
+    nested: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
     # Tokens read as scripts, not again as quoted words; by identity, as an
     # `env -S` string's words carry offsets into that string, not *command*.
     script_tokens: set[int] = set()
     code_bodies: set[int] = set()  # read as code, not again for substitutions
+    # Assignments written before a command name, by the index of its token.
+    prefix: dict[int, list[tuple[str, str]]] = {}
+    # The loops, function bodies and `{ }` groups open at the token being
+    # read, and whether the next `{` opens a function body.
+    blocks: list[str] = []
+    function_next = False
+    repeating: set[int] = set()  # indexes in *nested* of texts that repeat
     in_backtick = False
     for index, (token, is_name) in enumerate(
         zip(tokens, words.name_flags, strict=True)
@@ -899,55 +1455,162 @@ def _simple_commands(
         value = str(token["value"])
         if token["type"] == "op" and value == "`":
             in_backtick = not in_backtick
-        if not is_name or value in COMMAND_PREFIX_WORDS:
+        if not is_name:
+            continue
+        # A keyword only as written: `"done"` or `\\done` runs a command.
+        keyword = value if token.get("raw") == value else None
+        after = tokens[index + 1] if index + 1 < len(tokens) else None
+        if (
+            blocks
+            and blocks[-1] == "case"
+            and after is not None
+            and after["type"] == "op"
+            and after["value"] in (")", "|")
+        ):
+            keyword = None  # a `case` pattern
+        if keyword == "case":
+            blocks.append("case")
+        elif keyword == "esac" and "case" in blocks:
+            while blocks and blocks.pop() != "case":
+                pass
+        elif keyword in ("while", "until", "for", "select"):
+            blocks.append("loop")
+        elif keyword == "{":
+            blocks.append("function" if function_next else "group")
+            function_next = False
+        elif keyword in ("done", "}") and blocks:
+            opened = ("loop",) if keyword == "done" else ("function", "group")
+            while blocks and blocks.pop() not in opened:
+                pass
+        repeats = outer_repeats or any(each in ("loop", "function") for each in blocks)
+        if value in COMMAND_PREFIX_WORDS:
+            if index in prefix:  # `D=x time cmd`: before the command after it
+                prefix[index + 1] = prefix.pop(index)
             continue
         assignment = ASSIGNMENT_RE.match(str(token["raw"]))
         if assignment is not None:
             if assigned is not None:
                 end = _command_word_end(tokens, index, in_backtick)
                 text = command[int(token["start"]) : int(tokens[end - 1]["end"])]
-                assigned.append((_assigned_name(text), text[assignment.end() :]))
+                written = text[: assignment.end() - 1]
+                chain = [*prefix.pop(index, []), (written, text[assignment.end() :])]
+                if (
+                    end < len(tokens)
+                    and words.name_flags[end]
+                    and tokens[end]["type"] == "word"
+                    # A newline ends the command, as `;` does.
+                    and command_newline(
+                        command, int(tokens[end - 1]["end"]), int(tokens[end]["start"])
+                    )
+                    is None
+                ):
+                    prefix[end] = chain
+                else:
+                    assigned.extend(chain)  # alone, not before a command
             continue
         name = re.split(r"[\\/]", value)[-1]
-        if starting_folder and name in _FOLDER_COMMANDS:
-            # Its own words expand here first, read as the words of a `:`
-            # (dropped); the commands after it run elsewhere, so read none of
-            # their substitutions either.
-            elsewhere = _command_end(command, words, index, in_backtick)
-            own = ": " + command[int(token["end"]) : elsewhere]
-            found.extend(_simple_commands(own, seen, outer, None, True)[1:])
-            script_tokens.update(id(t) for t in tokens[index:])
-            code_bodies.update(
-                body
-                for body, delimiter in enumerate(words.body_delimiters)
-                if delimiter >= elsewhere
-            )
-            break
         args, heredocs = _command_arguments(command, words, index, in_backtick)
-        for each in _unwrap(name, args, (), nested, starting_folder):
+        before = prefix.pop(index, [])
+        # A function definition, `function NAME` or `NAME ( )`, is reported
+        # as a command named `function`, as its body may run any number of
+        # times, in any order with the commands around it.
+        if name == "function" or [
+            (str(token["type"]), str(token["value"]))
+            for token in tokens[index + 1 : index + 3]
+        ] == [("op", "("), ("op", ")")]:
+            found.append(SimpleCommand("function", (), (), ()))
+        if name != "function" and [
+            (str(each["type"]), str(each["value"]))
+            for each in tokens[index + 1 : index + 3]
+        ] == [("op", "("), ("op", ")")]:
+            following = tokens[index + 3] if index + 3 < len(tokens) else None
+            if following is not None and following.get("raw") == "{":
+                function_next = True  # its `{` is read as a command name next
+            else:
+                # `( BODY )`, `if`, `case`, ...: to the end of the text.
+                blocks.append("function")
+        if name == "function":
+            # `function NAME [()] { BODY`: the body's first command is read
+            # as these words.
+            body = next(
+                (at + 1 for at, (arg, _) in enumerate(args) if arg in ("{", "(")),
+                len(args),
+            )
+            # Each argument is a slice of *command*, in order; a substitution
+            # has no token of its own, so its place is found from its text.
+            position = int(token["end"])
+            body_start = None
+            for at, (arg, _) in enumerate(args):
+                position = command.index(arg, position)
+                if at == body:
+                    body_start = position
+                position += len(arg)
+            if body_start is not None:
+                repeating.add(len(nested))
+                nested.append((command[body_start:position], (), ()))
+            # After `function NAME [( )]`, only a `{` waits for its `}`; any
+            # other body repeats to the end of the text.
+            at = index + 2
+            if [
+                (str(each["type"]), str(each["value"])) for each in tokens[at : at + 2]
+            ] == [("op", "("), ("op", ")")]:
+                at += 2
+            following = tokens[at] if at < len(tokens) else None
+            if (
+                following is not None
+                and following.get("raw") == "{"
+                and words.name_flags[at]
+            ):
+                function_next = True  # the `{` is read as a command name next
+            else:
+                blocks.append("function")  # to its `}`, or to the end of the text
+            continue
+        scripts_before = len(nested)
+        unwrapped = _unwrap(name, args, (), nested, (), assigned)
+        if repeats:
+            unwrapped = [each._replace(repeats=True) for each in unwrapped]
+        if (
+            assigned is not None
+            and before
+            and (
+                _keeps_prefix(unwrapped, len(nested) > scripts_before, command)
+                or _keeps_prefix(unwrapped, len(nested) > scripts_before, root)
+            )
+        ):
+            assigned.extend(before)
+        for each in unwrapped:
             found.append(each)
             if each.name not in SHELL_NAMES:
                 continue
             script, reads_stdin = _shell_code(each)
             if script is not None:
                 nested.append(
-                    (_word_value(each.args[script], each.tokens[script]), each.via)
+                    (
+                        _word_value(each.args[script], each.tokens[script]),
+                        each.via,
+                        each.folders,
+                    )
                 )
-                # Ending the script at its first `cd` must not drop what the
-                # outer shell expands in it first (`bash -c "cd x; $(...)"`).
-                if each.tokens[script] is not None and not starting_folder:
+                if each.tokens[script] is not None:
                     script_tokens.add(id(each.tokens[script]))
             if reads_stdin:
-                if not starting_folder:  # likewise an unquoted here-document
-                    code_bodies.update(heredocs)
+                code_bodies.update(heredocs)
                 for body in heredocs:
                     start, end, _expands = words.bodies[body]
                     text = command[start:end].rstrip("\n")
                     # Without the end line.
-                    nested.append((text[: text.rfind("\n") + 1], each.via))
+                    nested.append(
+                        (text[: text.rfind("\n") + 1], each.via, each.folders)
+                    )
+        if repeats:
+            repeating.update(range(scripts_before, len(nested)))
+
+    if assigned is not None:
+        for chain in prefix.values():  # before no command name the parser marks
+            assigned.extend(chain)
 
     def collect(body: str) -> tuple[str, bool]:
-        nested.append((body, ()))
+        nested.append((body, (), ()))  # runs before the command it is in
         return body, False
 
     for token in tokens:
@@ -960,14 +1623,18 @@ def _simple_commands(
     for body, (start, end, expands) in enumerate(words.bodies):
         if expands and body not in code_bodies:
             rewrite_substitutions(command[start:end], collect, heredoc=True)
-    for text, via in nested:
+    for at, (text, via, folders) in enumerate(nested):
         chain = (*outer, *via)
-        if (text, chain) in seen:
+        folder_chain = (*outer_folders, *folders)
+        repeats = outer_repeats or at in repeating
+        if (text, chain, folder_chain, repeats) in seen:
             continue  # the same code reached through another nesting
-        seen.add((text, chain))
+        seen.add((text, chain, folder_chain, repeats))
         found.extend(
-            inner._replace(via=(*via, *inner.via))
-            for inner in _simple_commands(text, seen, chain, assigned, starting_folder)
+            inner._replace(via=(*via, *inner.via), folders=(*folders, *inner.folders))
+            for inner in _simple_commands(
+                text, seen, chain, assigned, folder_chain, repeats, root
+            )
         )
     return found
 

@@ -1291,11 +1291,47 @@ def _removal_problem(
     return None
 
 
-def _protected_removal_error(target: str) -> str:
-    return (
-        f"Command blocked: '{target}' is or holds a protected folder (skills, "
-        f"memories or media), which shell commands may not remove."
+def _protected_removal_error(target: str, folder: str | None = None) -> str:
+    """The refusal of removing *target*; *folder*: the workspace folder, other
+    than the root, that the command may change into and *target* is read from."""
+    read_from = (
+        f" (read from '{folder}', a folder this command may change into)"
+        if folder
+        else ""
     )
+    return (
+        f"Command blocked: '{target}'{read_from} is or holds a protected folder "
+        f"(skills, memories or media), which shell commands may not remove."
+    )
+
+
+def _outside_removal_error(operand: str) -> str:
+    """The refusal of a recursive rm of *operand*, outside the workspace."""
+    return (
+        f"Command blocked: rm would remove '{operand}', which is "
+        f"outside the workspace or may expand there. Remove a "
+        f"path inside the workspace (e.g., './build')."
+    )
+
+
+def _unknown_values_error(word: str) -> str:
+    """The refusal of a command whose *word* may name paths the check does
+    not follow (see :class:`shell_syntax.UnknownValues`)."""
+    return (
+        f"Command blocked: '{word}' may name paths the check does not follow: "
+        f"it uses a variable this command sets other than with a plain "
+        f"NAME=value (printf -v, unset, a loop over a variable's words, or any "
+        f"variable once the command runs eval), or one with too many values "
+        f"to check. Write the path out instead."
+    )
+
+
+def _workspace_folder(folder: str, root: str) -> str | None:
+    """*folder* relative to the workspace *root*, ``/`` separated; ``None``
+    for the root itself or a folder outside it."""
+    if folder == root or not _under_any(folder, (root,)):
+        return None
+    return folder[len(root.rstrip("/")) + 1 :]
 
 
 def _is_home_word(raw: str) -> bool:
@@ -1314,28 +1350,94 @@ def _bare_cd_goes_home() -> bool:
     return agent_shell.uses_bash()
 
 
+def _folder_target(
+    found: shell_syntax.SimpleCommand,
+    assigned: dict[str, tuple[str, ...] | None] | None = None,
+) -> tuple[str, dict[str, object] | None] | None:
+    """The target of a ``cd`` / ``pushd`` as written, with its token: the
+    first argument that is not an option as the shell reads it (``"-P"`` is
+    one, and so is ``$O`` when every value *assigned* to it is); ``None``
+    when it names none."""
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if value.startswith("-") and value != "-":
+            continue
+        if assigned and "$" in arg:
+            values = shell_syntax.word_values(arg, value, assigned)
+            if values and all(each.startswith("-") and each != "-" for each in values):
+                continue
+        return arg, token
+    return None
+
+
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
     absolute target outside them (a drive path on Windows too), the home
-    folder (``~``, ``$HOME``) or a bare ``cd``."""
+    folder (``~``, ``$HOME``) or a bare ``cd``. A target that names a
+    variable the command sets is also read with each of its values, where a
+    ``..`` component leaves too (``T=..; cd "$T"``); one whose values are not
+    followed is read as written when only the run sets it (``read D``), as
+    a variable the command does not set. :class:`shell_syntax.UnknownValues`
+    when the check knows its values only in part (``T=.; T+=.``)."""
+
+    def absolute_outside(path: str) -> bool:
+        return (
+            path.startswith("/") or (_is_windows() and bool(_DRIVE_PATH_RE.match(path)))
+        ) and not _under_any(path, allow_prefixes)
+
+    assigned = shell_syntax.assigned_values(command) if "$" in command else {}
+    plain: shell_syntax.AssignedValues | None = None
     for found in shell_syntax.simple_commands(command):
-        if found.name not in ("cd", "pushd"):
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        targets = [
-            (arg, token)
-            for arg, token in zip(found.args, found.tokens, strict=True)
-            if not (arg.startswith("-") and arg != "-")
-        ]
-        if not targets:
+        try:
+            target = _folder_target(found, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:
+                raise
+            target = _folder_target(found)  # its options read as written
+        if target is None:
             if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
             continue
-        arg, token = targets[0]
+        arg, token = target
         # As the agent's shell reads it, so a Windows drive path is absolute too.
         path = _removal_target(token) if token is not None else arg
-        if _is_home_word(arg) or (
-            (path.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(path)))
-            and not _under_any(path, allow_prefixes)
+        if _is_home_word(arg) or absolute_outside(path):
+            return f"{found.name} {arg}"
+        if "$" not in arg:
+            continue
+        try:
+            values = shell_syntax.word_values(arg, path, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:  # the values it may have are not all checked
+                raise
+            # The run may also set it (`read D`, `source`): what the run sets
+            # is read as written, as for a variable the command does not set
+            # (the rm check refuses it in front of a recursive rm), and its
+            # plain `=` values are still checked.
+            if plain is None:
+                plain = shell_syntax.assigned_values(command, plain_only=True)
+            try:
+                values = shell_syntax.word_values(arg, path, plain)
+            except shell_syntax.UnknownValues as plain_exc:
+                if plain_exc.partial:
+                    raise
+                continue
+        for value in values or ():
+            if (
+                _is_home_word(value)
+                or absolute_outside(value)
+                or ".." in re.split(r"[\\/]", value)
+            ):
+                return f"{found.name} {arg}"
+        # An empty value outside quotes leaves no argument: a bare cd.
+        if (
+            found.name == "cd"
+            and values
+            and not re.search("[\"']", arg)
+            and any(not value.strip() for value in values)
+            and _bare_cd_goes_home()
         ):
             return f"{found.name} {arg}"
     return None
@@ -1353,6 +1455,163 @@ def _literal_folder(operand: str) -> str | None:
     if len(tokens) != 1 or tokens[0]["type"] != "word":
         return None
     return _removal_target(tokens[0]) or None
+
+
+# Most folders an rm is checked from; each `cd` may double them.
+_FOLDERS_CAP = 64
+
+
+class _TooManyFolders(Exception):
+    """A command may run in more folders than :data:`_FOLDERS_CAP`."""
+
+
+def _word_paths(
+    word: str,
+    token: dict[str, object] | None,
+    assigned: dict[str, tuple[str, ...] | None],
+    plain: dict[str, tuple[str, ...] | None] | None = None,
+) -> list[str]:
+    """The paths a word may name as the agent's shell reads it, with ``/``
+    separators: with each value of the variables its command sets (see
+    :func:`shell_syntax.word_values`), else itself, also when only the run
+    knows a value (``D=$(date +%F); rm -rf memories/$D``). With *plain* (see
+    :func:`shell_syntax.assigned_values`), a variable only the run sets
+    (``read D``) is read as written too, besides its plain `=` values;
+    :class:`shell_syntax.UnknownValues` otherwise."""
+    path = _removal_target(token) if token is not None else word
+    try:
+        values = shell_syntax.word_values(word, path, assigned)
+    except shell_syntax.UnknownValues as exc:
+        if exc.partial or plain is None:
+            raise
+        values = [*(shell_syntax.word_values(word, path, plain) or ()), path]
+    return [value.replace("\\", "/") for value in values] if values else [path]
+
+
+def _normpath(path: str) -> str:
+    """*path* normalised, with one leading ``/`` (``posixpath.normpath`` keeps
+    two, so ``env -C /`` would read ``//W/skills``)."""
+    return re.sub(r"^/+", "/", posixpath.normpath(path))
+
+
+def _folder_from(folder: str, target: str) -> str | None:
+    """The folder a ``cd`` to *target* from *folder* enters (an absolute
+    target as it is); ``None`` when only the run knows it (an expansion, a
+    glob, ``-``)."""
+    if not target or target == "-" or re.search(r"[$`%*?\[]", target):
+        return None
+    if target.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(target)):
+        return _normpath(target)
+    return _normpath(f"{folder}/{target}")
+
+
+def _possible_folders(
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """The folders the commands of one command may run in, read in order,
+    each with the ``env -C`` folders of the command that entered it: the
+    workspace root, and each ``cd`` / ``pushd`` target read from every folder
+    found before it that the ``cd`` may run in (see :func:`_run_folders`),
+    also with the values of the variables the command sets. A target only the
+    run knows adds none, nor do ``cd -`` and ``popd``, which return to one of
+    them. :class:`_TooManyFolders` past :data:`_FOLDERS_CAP` folders."""
+    root = posixpath.normpath(workspace_root.replace("\\", "/"))
+    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
+    for found in commands:
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        target = _folder_target(found, assigned)
+        if target is None:
+            continue
+        for value in _word_paths(*target, assigned):
+            for start in _run_folders(found.folders, list(folders), assigned):
+                entered = _folder_from(start, value)
+                if entered is None or (entered, found.folders) in folders:
+                    continue
+                if len(folders) >= _FOLDERS_CAP:
+                    raise _TooManyFolders
+                folders.append((entered, found.folders))
+    return folders
+
+
+# A function definition in text the parser does not read as code.
+_FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
+
+
+def _runs_out_of_order(
+    command: str, commands: list[shell_syntax.SimpleCommand]
+) -> bool:
+    """Whether *command* (its *commands*) may change folder in a command
+    that may run again or before one written ahead of it: a ``cd`` /
+    ``pushd``, or code run from a string or a file, inside a loop or a
+    function body (see :class:`shell_syntax.SimpleCommand`), so that the
+    folders it may run in are not read in order. A string run as code
+    (``eval``, ``source``) is not parsed, so a function definition in its
+    text counts too."""
+    if any(
+        found.repeats
+        and (
+            found.name in shell_syntax.FOLDER_COMMANDS
+            or found.name in shell_syntax.CODE_RUNNER_NAMES
+            or found.name in ("source", ".")
+        )
+        for found in commands
+    ):
+        return True
+    return any(
+        found.name in shell_syntax.CODE_RUNNER_NAMES or found.name in ("source", ".")
+        for found in commands
+    ) and bool(_FUNCTION_TEXT_RE.search(command))
+
+
+def _run_folders(
+    chain: tuple[str, ...],
+    folders: list[tuple[str, tuple[str, ...]]],
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[str]:
+    """The folders a command under the ``env -C`` folders *chain* may run in:
+    each of *folders* (see :func:`_possible_folders`) entered under the start
+    of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
+    with the rest of *chain* applied. An ``env -C`` folder only the run knows
+    keeps the folder it is read from, as a ``cd`` to it does
+    (``env -C "$(pwd)"``). :class:`_TooManyFolders` when ``env -C`` folders
+    with many values would take them past :data:`_FOLDERS_CAP`."""
+    reached: list[str] = []
+    for folder, entered_under in folders:
+        if chain[: len(entered_under)] != entered_under:
+            continue
+        starts = [folder]
+        for folder_word in chain[len(entered_under) :]:
+            # One argument already: its value is not split again.
+            values = shell_syntax.word_values(f'"{folder_word}"', folder_word, assigned)
+            starts = list(
+                dict.fromkeys(
+                    _folder_from(start, value.replace("\\", "/")) or start
+                    for start in starts
+                    for value in (values or [folder_word])
+                )
+            )
+            if len(starts) > _FOLDERS_CAP:
+                raise _TooManyFolders
+        reached.extend(starts)
+    reached = list(dict.fromkeys(reached))
+    if len(reached) > max(_FOLDERS_CAP, len(folders)):
+        raise _TooManyFolders
+    return reached
+
+
+def _removes_protected(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> bool:
+    """Whether removing *path* (absolute, ``/`` separators) removes a protected
+    folder: inside one anywhere, or holding one in the workspace."""
+    path = posixpath.normpath(path)
+    return (
+        _under_any(path, protected)
+        or _removal_problem(path, workspace_root, protected) == "protected"
+    )
 
 
 def _recursive_rm_operands(
@@ -1528,6 +1787,158 @@ def _kill_by_lookup(
     )
 
 
+def _value_outside(path: str, workspace_root: str, protected: tuple[str, ...]) -> bool:
+    """Whether a value of a variable, read as the path an rm removes, climbs
+    with ``..``, starts at home or lies outside the workspace."""
+    return (
+        _is_home_word(path)
+        or ".." in path.split("/")
+        or (
+            (path.startswith("/") or bool(_DRIVE_PATH_RE.match(path)))
+            and _removal_problem(path, workspace_root, protected) == "outside"
+        )
+    )
+
+
+def _blank_substitutions(word: str) -> str:
+    """*word* with the body of each ``$(...)`` and backtick substitution
+    emptied."""
+    out: list[str] = []
+    index, quote = 0, None
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif char == "\\":
+            out.append(word[index : index + 2])
+            index += 2
+            continue
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif word.startswith("$(", index):
+            close = shell_syntax.matching_paren(word, index + 2)
+            if close is not None:
+                out.append("$()")
+                index = close + 1
+                continue
+        elif char == "`":
+            close = word.find("`", index + 1)
+            if close != -1:
+                out.append("``")
+                index = close + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _folder_removal_error(
+    command: str,
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    protected: tuple[str, ...],
+) -> str | None:
+    """The refusal of a recursive rm in *command* (its *commands*) that
+    removes a protected folder, with every operand read from every folder the
+    rm may run in, and with the values of the variables the command sets:
+    only a protected folder is refused (rm itself refuses `.`). A first
+    segment that expands may be anything, so it is left alone, unless the
+    folder it is read from is itself in a protected folder."""
+    removals = [
+        (found, operand, token)
+        for found in commands
+        for operand, token in _recursive_rm_operands(found)
+    ]
+    if not removals:
+        return None
+    relative = any(
+        not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+        for _found, operand, token in removals
+        for path in [_removal_target(token) if token is not None else operand]
+    )
+    changes_folder = any(
+        found.name in shell_syntax.FOLDER_COMMANDS for found in commands
+    )
+    # `cd NAME` may enter the folder in $NAME.
+    hides_folder_changes = any(
+        found.name == "shopt" and "cdable_vars" in found.args for found in commands
+    )
+    if relative and (
+        hides_folder_changes
+        or (changes_folder and _runs_out_of_order(command, commands))
+    ):
+        return (
+            "Command blocked: the folder each recursive rm runs in is not "
+            "followed, as the command changes folder in a loop or a function "
+            "(or with cdable_vars). Run the rm as a command of its own, or "
+            "name its path from the workspace root."
+        )
+    assigned = shell_syntax.assigned_values(command)
+    # A variable only the run sets (`read D`) is read as written, as one the
+    # command does not set, besides its plain `=` values.
+    plain = shell_syntax.assigned_values(command, plain_only=True)
+    # Built once, and only when a relative path needs it.
+    folders: list[tuple[str, tuple[str, ...]]] | None = None
+    for found, operand, token in removals:
+        if token is not None:
+            operand_paths = _word_paths(operand, token, assigned, plain)
+            # A value of a variable the command sets, checked as a written
+            # path is: it may not climb with `..`, start at home or lie
+            # outside.
+            for path in operand_paths:
+                if path == _removal_target(token):
+                    continue
+                if _value_outside(path, workspace_root, protected):
+                    return _outside_removal_error(operand)
+        else:
+            # Its values too, with each substitution emptied and the quotes
+            # dropped, so the words inside a substitution are not read as
+            # values.
+            blank = _blank_substitutions(operand)
+            for path in _word_paths(blank, None, assigned, plain):
+                if path == blank:
+                    continue
+                if _value_outside(re.sub("[\"']", "", path), workspace_root, protected):
+                    return _outside_removal_error(operand)
+            # Glued to a substitution: whatever it expands to stays under the
+            # literal folder written before it, or under the folder the rm
+            # runs in when none is.
+            try:
+                written_values = shell_syntax.word_values(operand, operand, assigned)
+            except shell_syntax.UnknownValues as exc:
+                if exc.partial:
+                    raise
+                written_values = [
+                    *(shell_syntax.word_values(operand, operand, plain) or ()),
+                    operand,
+                ]
+            operand_paths = [
+                _literal_folder(written) or written
+                for written in written_values or [operand]
+            ]
+        relative_paths = []
+        for path in operand_paths:
+            if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                relative_paths.append(path)
+            elif _removes_protected(path, workspace_root, protected):
+                return _protected_removal_error(operand)
+        if not relative_paths:
+            continue
+        if folders is None:
+            folders = _possible_folders(commands, workspace_root, assigned)
+        for folder in _run_folders(found.folders, folders, assigned):
+            for path in relative_paths:
+                if _removes_protected(
+                    _normpath(f"{folder}/{path}"), workspace_root, protected
+                ):
+                    return _protected_removal_error(
+                        operand, _workspace_folder(folder, folders[0][0])
+                    )
+    return None
+
+
 def validate_command(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
@@ -1549,8 +1960,8 @@ def validate_command(
             enforced.
         workspace_root: The workspace; ``cd`` may enter it, a destructive
             pattern whose target lies strictly inside it is allowed, and the
-            relative operands of a recursive rm that runs before any ``cd``
-            or ``pushd`` are resolved against it.
+            relative operands of a recursive rm are resolved against it and
+            every folder a ``cd`` or ``pushd`` in the command may enter.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1573,9 +1984,12 @@ def validate_command(
                     f"Use relative paths (e.g., './file.py') instead."
                 )
 
-        outside = _cd_target_outside(
-            command, (workspace_root,) if workspace_root else ()
-        )
+        try:
+            outside = _cd_target_outside(
+                command, (workspace_root,) if workspace_root else ()
+            )
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
         if outside is not None:
             return (
                 f"Command blocked: '{outside}' leaves the workspace. "
@@ -1632,37 +2046,21 @@ def validate_command(
                 if problem == "protected":
                     return _protected_removal_error(operand)
                 if problem is not None:
-                    return (
-                        f"Command blocked: rm would remove '{operand}', which is "
-                        f"outside the workspace or may expand there. Remove a "
-                        f"path inside the workspace (e.g., './build')."
-                    )
-        # A relative operand of an rm that runs in the workspace root: only a
-        # protected folder is refused (rm itself refuses `.`), and a first
-        # segment that expands may be anything, so it is left alone.
-        # `commands` holds nested code too, so without an rm there is none.
-        starting = (
-            shell_syntax.starting_folder_commands(command)
-            if any(found.name == "rm" for found in commands)
-            else []
-        )
-        for found in starting:
-            for operand, token in _recursive_rm_operands(found):
-                path = _removal_target(token) if token is not None else operand
-                bare = path.lstrip("'\"")
-                if bare.startswith("/") or _DRIVE_PATH_RE.match(bare):
-                    continue
-                if token is None:
-                    # Glued to a substitution: whatever it expands to stays
-                    # under the literal folder written before it.
-                    path = _literal_folder(operand)
-                    if path is None:
-                        continue
-                problem = _removal_problem(
-                    f"{workspace_root}/{path}", workspace_root, protected
-                )
-                if problem == "protected":
-                    return _protected_removal_error(operand)
+                    return _outside_removal_error(operand)
+        try:
+            refusal = _folder_removal_error(
+                command, commands, workspace_root, protected
+            )
+        except shell_syntax.UnknownValues as exc:
+            refusal = _unknown_values_error(exc.word)
+        except _TooManyFolders:
+            refusal = (
+                f"Command blocked: it may change into more than {_FOLDERS_CAP} "
+                f"folders, more than the check follows. Split it into shorter "
+                f"commands."
+            )
+        if refusal is not None:
+            return refusal
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:
