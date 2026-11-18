@@ -152,9 +152,11 @@ def test_a_dead_holder_leaves_a_socket_the_next_acquirer_clears(tmp_path, monkey
     The file exists only where the platform has no abstract namespace, so the
     abstract bind is refused here and the fallback is what runs.
     """
-    directory = tmp_path / "locks"
-    directory.mkdir()
-    monkeypatch.setattr(proposals, "_lock_directory", lambda: directory)
+    # The directory is relative, so the socket's path stays inside the limit
+    # however long this machine's paths are: the CI runner's temporary
+    # directory is long enough to overflow it.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_base", lambda: Path("evtest"))
 
     real_bind = socket.socket.bind
 
@@ -167,8 +169,8 @@ def test_a_dead_holder_leaves_a_socket_the_next_acquirer_clears(tmp_path, monkey
 
     folder = _proposal_dir(tmp_path)
     lock = proposals._ProposalLock(folder)
+    path = proposals._socket_path(lock._name)
     held = lock._acquire_posix()
-    path = directory / f"evoskill-{lock._name}.sock"
     assert path.exists()
     held.close()
 
@@ -193,6 +195,23 @@ def test_a_long_home_directory_still_yields_a_bindable_path(tmp_path, monkeypatc
     path = proposals._socket_path("0123456789abcdef0123456789abcdef")
 
     assert len(str(path).encode("utf-8")) <= proposals._SUN_PATH_MAX
+
+
+def test_the_fallback_path_fits_a_unix_socket(tmp_path, monkeypatch):
+    """The path the fallback chooses fits a socket, whatever the machine.
+
+    A socket's path has to fit in sun_path: 107 bytes on Linux, 103 on
+    macOS. The CI runner's temporary directory is long enough to overflow
+    it, so the path is checked against the limit and not against the
+    machine it was built on.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_base", lambda: Path("evtest"))
+
+    path = proposals._socket_path("0123456789abcdef0123456789abcdef")
+
+    assert len(str(path).encode("utf-8")) <= proposals._SUN_PATH_MAX
+    assert path.name == "evoskill-0123456789abcdef0123456789abcdef.sock"
 
 
 def test_the_private_directory_is_used_when_the_path_fits(tmp_path, monkeypatch):
