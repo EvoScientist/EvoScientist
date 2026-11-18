@@ -1757,6 +1757,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
+            received_media: list[str] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1798,6 +1799,7 @@ def run_textual_interactive(
                 forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
+                received_media_state,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1865,6 +1867,7 @@ def run_textual_interactive(
                 self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
+            _received_files = received_media_state(received_media)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2120,6 +2123,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                    _todo_sent = False
                 _hitl_round += 1
                 events = None
                 try:
@@ -2207,8 +2211,9 @@ def run_textual_interactive(
                         if (
                             on_todo_cb
                             and not _todo_sent
-                            and event_type == "tool_call"
+                            and event_type == "tool_result"
                             and event.get("name") == "write_todos"
+                            and event.get("success", True)
                             and state.todo_items
                         ):
                             if (
@@ -2232,6 +2237,7 @@ def run_textual_interactive(
                                 media_dir=self._dirs.sandbox_media_dir,
                                 dangerous=_media_dangerous,
                                 routes=_media_routes,
+                                received_files=_received_files,
                             )
 
                         # -- Remove loading spinner on first content event --
@@ -2349,21 +2355,6 @@ def run_textual_interactive(
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
                                     tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -2383,14 +2374,17 @@ def run_textual_interactive(
                             ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
-                            # Update todo from results
-                            if (
-                                result_name in ("write_todos", "read_todos")
-                                and state.todo_items
+                            # Update todo from results; the first Task List
+                            # panel goes above its call.
+                            if result_name in ("write_todos", "read_todos") and (
+                                state.todo_items or todo_w is not None
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tw is not None:
+                                        await container.mount(todo_w, before=tw)
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
                             # Show "Analyzing results..." if all tools done, no text yet
@@ -3468,6 +3462,7 @@ def run_textual_interactive(
                         else None,
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
+                        received_media=msg.media,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,

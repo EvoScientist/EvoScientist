@@ -983,20 +983,63 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
+# ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
+_GLUED_VALUE_PREFIX_RE = re.compile(
+    r"\+{0,2}[\w.-]+(?:\[[^]]*\])?(?::[A-Z]+)?[+:?!]*=|-[A-Za-z]+,?"
+)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    decoded = (
-        str(token["value"])
-        for token in shell_syntax.parse(command).tokens
-        if token["type"] == "word"
-    )
+    parsed = shell_syntax.parse(command)
+    tokens = parsed.tokens
+    decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
+        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
+        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+        value = token
+        for _ in range(4):
+            glued = _GLUED_VALUE_PREFIX_RE.match(value)
+            if glued is None:
+                break
+            value = value[glued.end() :]
+            entries = [value] if glued[0].startswith("-") else value.split(":")
+            if any(".." in PurePosixPath(entry).parts for entry in entries):
+                return True
+
+    # The substitution helper reads shell words, not whole commands: comments
+    # and literal heredoc bodies must not affect its quote tracking.
+    def check_substitution(inner: str) -> tuple[str, bool]:
+        return inner, _has_traversal_component(inner)
+
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                str(token["raw"]), check_substitution
+            )
+            if traversal:
+                return True
+    for start, end, expands in parsed.bodies:
+        if expands:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                command[start:end], check_substitution, heredoc=True
+            )
+            if traversal:
+                return True
+    # A shell's script (bash -c '...') is a command line of its own: check
+    # inside it too, the way _extract_all_paths recurses into script words.
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) in scripts:
+            if _has_traversal_component(str(token["value"])):
+                return True
     return False
 
 

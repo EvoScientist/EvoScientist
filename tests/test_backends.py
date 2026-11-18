@@ -3179,6 +3179,86 @@ class TestTraversalFalsePositiveFix:
         assert result is not None
 
 
+# === '..' traversal through option and assignment spellings (issue #825) ===
+
+
+class TestTraversalOptionSpellings:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=../out.txt",
+            "python s.py -o../out.txt",
+            "OUT=../out.txt python s.py",
+            "python s.py '--output=../out.txt'",
+            "python s.py -o'../out.txt'",
+            "python s.py --output=..",
+            "bash -c 'python s.py --output=../out.txt'",
+            "bash -c 'python s.py -o\"../out.txt\"'",
+            "python s.py -vo../out.txt",
+            "make CFLAGS=-I../include",
+            "CPPFLAGS=-I../include ./configure",
+            "# '\necho \"$(python s.py -o'../out.txt')\"",
+            '# "\necho "`python s.py -o\'../out.txt\'`"',
+            "cat <<EOF\n$(python s.py -o'../out.txt')\nEOF",
+            "cat <<EOF\n'$(python s.py -o'../out.txt')'\nEOF",
+            "echo \"$(python s.py -o'../out.txt')\"",
+            "echo \"`python s.py -o'../out.txt'`\"",
+            'echo "$(echo "$(python s.py -o\'../out.txt\')")"',
+            'export PATH="$PATH:../bin"',
+            "pytest --override-ini=cache_dir=../cache",
+            "PYTHONPATH=$PYTHONPATH:../src python s.py",
+            "python train.py trainer.default_root_dir=../runs",
+            "python train.py +trainer.default_root_dir=../runs",
+            "gcc main.c -Wl,-rpath=../lib -o main",
+            "cmake -DCMAKE_INSTALL_PREFIX:PATH=../install .",
+            "cmake -B build -D CMAKE_INSTALL_PREFIX:PATH=../install",
+            "gcc -Wl,-rpath,../lib main.c",
+            "make PREFIX:=../install",
+            "make PREFIX::=../install",
+            "make PREFIX!=../install",
+            "python train.py ++trainer.default_root_dir=../runs",
+            "bazel build --action_env=PATH=../bin //x",
+            'OUT[0]=../outside; cat "${OUT[0]}"',
+        ],
+    )
+    def test_glued_traversal_spellings_are_blocked(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python s.py --output=out.txt",
+            "python s.py -oout.txt",
+            "OUT=out.txt python s.py",
+            "python s.py --output=foo..bar.txt",
+            "python s.py -ofoo..bar.txt",
+            "echo foo..bar.txt",
+            "bash -c 'python s.py --output=out.txt'",
+            "bash -c 'echo hello'",
+            "bash \"-c\" 'echo hello'",
+            "sed -i 's/a=../b/' f.txt",
+            "sed -i 's,dir=../,dir=./,' cfg.ini",
+            "grep -F '=../' cfg.ini",
+            "sed 's:dir=../:dir=./:' cfg.ini",
+            "git log --format=%h:..:%s",
+            "scp host:../data.csv .",
+            "cat <<'EOF'\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            'cat <<"EOF"\n"`python s.py -o\'../out.txt\'`"\nEOF',
+            "cat <<\\EOF\n\"$(python s.py -o'../out.txt')\"\nEOF",
+            "cat <<EOF\n$(python s.py -o'out.txt')\nEOF",
+            "echo \"$(python s.py -o'out.txt')\"",
+            "echo \"`python s.py -o'out.txt'`\"",
+            "echo '$(python s.py -o\"../out.txt\")' ",
+            "echo \"\\$(python s.py -o'../out.txt')\"",
+            "curl 'https://x.org/a?b=../c'",
+        ],
+    )
+    def test_benign_glued_spellings_still_allowed(self, command):
+        assert validate_command(command) is None
+
+
 # === Pipeline command validation ===
 
 
