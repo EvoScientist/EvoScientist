@@ -46,6 +46,9 @@ class _FakeSocket:
 
     def accept(self):
         self._state["accepts"] += 1
+        failures = self._state.get("accept_fail") or []
+        if failures:
+            raise OSError(failures.pop(0), "the peer went away")
         raise OSError(errno.EAGAIN, "nothing to accept")
 
     def connect(self, address):
@@ -139,6 +142,30 @@ def test_a_replaced_fallback_name_is_refused(fake_sockets, tmp_path, monkeypatch
     # The replaced name was retried a bounded number of times, not forever.
     # Each attempt binds and listens, so the calls come in pairs.
     assert len(fake_sockets["calls"]) <= 14, fake_sockets["calls"]
+
+
+def test_the_drain_survives_a_peer_that_disconnected(fake_sockets, tmp_path):
+    """One aborted peer must not end the drain.
+
+    A peer that disconnects before the accept is reported as ECONNABORTED
+    (or ECONNRESET) -- that peer is gone, not the socket. Ending the drain
+    on such an error would let the accept queue fill again, and a contender
+    reading a full queue as "dead" would take the name from a live holder.
+    """
+    import time
+
+    fake_sockets["fail"] = [errno.EAFNOSUPPORT]
+    fake_sockets["accept_fail"] = [errno.ECONNABORTED]
+    lock = proposals._ProposalLock(_proposal_dir(tmp_path))
+    lock._acquire_posix()
+
+    deadline = time.monotonic() + 5.0
+    while fake_sockets["accepts"] < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert fake_sockets["accepts"] >= 2, (
+        f"the drain ended on the aborted peer: {fake_sockets['accepts']} accept(s)"
+    )
 
 
 def test_the_holder_accepts_on_the_fallback_socket(fake_sockets, tmp_path):

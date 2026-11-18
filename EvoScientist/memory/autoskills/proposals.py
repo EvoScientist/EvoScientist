@@ -356,7 +356,16 @@ def _drain_forever(held: socket.socket) -> None:
         while True:
             try:
                 connection, _ = held.accept()
-            except OSError:
+            except OSError as exc:
+                # A peer that disconnected before we accepted it is reported
+                # as ECONNABORTED (or ECONNRESET): that peer is gone, not
+                # the socket, so the queue is still ours to drain. Ending
+                # the thread on one such error would let the queue fill
+                # again, and a contender reading a full queue as "dead"
+                # would take the name from a live holder.
+                if exc.errno in (errno.ECONNABORTED, errno.ECONNRESET, errno.EINTR):
+                    continue
+                # Anything else means the socket is finished.
                 return
             try:
                 connection.close()
