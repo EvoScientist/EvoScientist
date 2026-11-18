@@ -363,7 +363,7 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_by", "rejected_at", "approved_skill_path",
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
-        "rationale_md", "rationale_md_truncated", "contents", "files",
+        "rationale_md", "rationale_md_truncated", "contents", "review_token", "files",
         "install_target",
         "install_base", "install_error",
     }  # fmt: skip
@@ -1032,11 +1032,15 @@ def quiet_skill_index(monkeypatch):
 
 
 def _decide(server, name: str, action: str, headers=None, **body):
-    if action in {"approve", "reject"}:
-        # The review page lists a draft before it can decide it. The list is
-        # the display this process records.
-        server.get("/api/autoskills/proposals")
     empty = body.pop("empty", False)
+    if action in {"approve", "reject"}:
+        # The review page lists a draft before it can decide it. Return the
+        # token carried by the row whose content this client received.
+        listed = server.get("/api/autoskills/proposals").json()["proposals"]
+        draft = next((draft for draft in listed if draft["proposal_id"] == name), None)
+        token = draft.get("review_token") if draft is not None else None
+        if not empty and token is not None:
+            body.setdefault("review_token", token)
     return server.post(
         f"/api/autoskills/proposals/{name}/{action}",
         json=None if empty else body,
@@ -1076,6 +1080,7 @@ def test_approve_route_installs_into_the_drafts_project(
 
 def test_approve_route_global_scope(server, served, secret, quiet_skill_index):
     _draft(served, "focused-validation")
+    _edit_manifest("focused-validation", scope="global", submitted_scope="global")
 
     response = _decide(server, "focused-validation", "approve", secret, scope="global")
 
@@ -1420,7 +1425,11 @@ def test_decision_routes_accept_an_empty_body(server, served, secret):
 
     response = _decide(server, "focused-validation", "reject", secret, empty=True)
 
-    assert response.status_code == 200
+    # The empty object is valid JSON input; the required credential is what
+    # refuses this WebUI decision, not body parsing.
+    assert response.status_code == 409
+    assert response.json()["error"] == "reject_failed"
+    assert "review token is missing" in response.json()["detail"]
 
 
 def test_approve_route_reports_the_refusal_in_detail(server, served, secret):
@@ -1747,7 +1756,8 @@ def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_inde
 
     _draft(served, "focused-validation")
     # The review page listed the draft before the two approvals raced.
-    autoskills_api.list_drafts()
+    _code, payload = autoskills_api.list_drafts()
+    review_token = payload["proposals"][0]["review_token"]
     real_copy = proposals._copy_proposed_skill
     copies = []
 
@@ -1761,7 +1771,11 @@ def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_inde
     results = []
 
     def approve():
-        results.append(autoskills_api.decide("focused-validation", "approve"))
+        results.append(
+            autoskills_api.decide(
+                "focused-validation", "approve", review_token=review_token
+            )
+        )
 
     threads = [threading.Thread(target=approve) for _ in range(2)]
     for thread in threads:

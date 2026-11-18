@@ -256,7 +256,12 @@ class AutoSkillsCommand(Command):
             # surface. A mount that raised leaves the draft unarmed, so no
             # decision can be taken on a body nobody was shown.
             for proposal, files in shown_drafts:
-                record_rendered_proposal(proposal.path, proposal.manifest, files)
+                record_rendered_proposal(
+                    proposal.path,
+                    proposal.manifest,
+                    files,
+                    scope=proposal.effective_scope,
+                )
         ctx.ui.append_system(
             f"Use {AUTOSKILLS_COMMAND} approve <id> or "
             f"{AUTOSKILLS_COMMAND} reject <id>.",

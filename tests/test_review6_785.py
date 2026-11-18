@@ -473,6 +473,11 @@ def test_relisting_records_the_current_body(tmp_path, monkeypatch):
             "probe-s",
             skills_dir=skills_dir,
             workspace_dir=skills_dir.parent,
+            review_token=next(
+                draft["review_token"]
+                for draft in payload["proposals"]
+                if draft["proposal_id"] == "probe-skill"
+            ),
         )
     assert approved["approved"] is True, approved
     assert "Shown body." in (skills_dir / "probe-skill" / "SKILL.md").read_text(

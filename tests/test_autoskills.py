@@ -54,7 +54,7 @@ from EvoScientist.memory.observations import (
 from EvoScientist.paths import Workspace
 
 
-def record_reviewed_proposal_for(memory_dir, proposal_id):
+def record_reviewed_proposal_for(memory_dir, proposal_id, *, scope=None):
     """Stand in for the display a person's decision requires.
 
     The production surfaces record a draft when they show it. A test that
@@ -62,7 +62,7 @@ def record_reviewed_proposal_for(memory_dir, proposal_id):
     that current content. A body edited after this line is still refused.
     A prefix is resolved first, the way the decision resolves it, so the
     record is of the one draft the prefix names. The record is written by id,
-    not by listing every draft.
+    not by listing every draft. ``scope`` is the tier this stand-in displayed.
     """
     from EvoScientist.memory.autoskills.proposals import (
         _proposal_root,
@@ -73,7 +73,7 @@ def record_reviewed_proposal_for(memory_dir, proposal_id):
     root = _proposal_root(memory_dir)
     exact = root / requested
     if (exact / "manifest.json").is_file():
-        record_reviewed_proposal_by_id(memory_dir, requested)
+        record_reviewed_proposal_by_id(memory_dir, requested, scope=scope)
         return
     matches = (
         [
@@ -85,7 +85,7 @@ def record_reviewed_proposal_for(memory_dir, proposal_id):
         else []
     )
     if len(matches) == 1:
-        record_reviewed_proposal_by_id(memory_dir, matches[0])
+        record_reviewed_proposal_by_id(memory_dir, matches[0], scope=scope)
 
 
 def _record(
@@ -1078,7 +1078,7 @@ def test_install_target_for_unknown_or_decided_draft(tmp_path):
 
 def _approve_quietly(memory_dir, proposal_id, skills_dir, **kwargs):
     with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
-        record_reviewed_proposal_for(memory_dir, proposal_id)
+        record_reviewed_proposal_for(memory_dir, proposal_id, scope=kwargs.get("scope"))
         result = approve_skill_proposal(
             memory_dir, proposal_id, skills_dir=skills_dir, **kwargs
         )
@@ -2577,7 +2577,7 @@ def test_a_failed_fork_leaves_no_partial_fork(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module.shutil, "copytree", partial_copytree)
 
-    record_reviewed_proposal_for(memory_dir, "paper-review")
+    record_reviewed_proposal_for(memory_dir, "paper-review", scope="workspace")
     failed = approve_skill_proposal(
         memory_dir, "paper-review", skills_dir=skills_dir, scope="workspace"
     )
@@ -2822,7 +2822,7 @@ def test_a_fork_into_a_folder_another_writer_created_leaves_it(tmp_path, monkeyp
 
     monkeypatch.setattr(Path, "mkdir", racing_mkdir)
 
-    record_reviewed_proposal_for(memory_dir, "paper-review")
+    record_reviewed_proposal_for(memory_dir, "paper-review", scope="workspace")
     failed = approve_skill_proposal(
         memory_dir, "paper-review", skills_dir=skills_dir, scope="workspace"
     )
@@ -2917,7 +2917,7 @@ def test_a_failed_fork_removes_a_read_only_copy_too(tmp_path, monkeypatch, read_
     )
     assert result["submitted"] is True
     try:
-        record_reviewed_proposal_for(memory_dir, "fork-me")
+        record_reviewed_proposal_for(memory_dir, "fork-me", scope="workspace")
         failed = approve_skill_proposal(
             memory_dir, "fork-me", skills_dir=skills_dir, scope="workspace"
         )
@@ -3934,7 +3934,7 @@ def test_workspace_approval_forks_global_skill(tmp_path, monkeypatch):
         target_skill_name="global-validation",
         skills_dir=workspace_skills,
     )
-    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"])
+    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"], scope="workspace")
     approved = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
@@ -3975,7 +3975,7 @@ def test_create_approval_can_target_global_scope(tmp_path, monkeypatch):
         rationale="This skill belongs in every workspace.",
         skills_dir=workspace_skills,
     )
-    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"])
+    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"], scope="global")
     approved = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
@@ -4402,7 +4402,7 @@ def test_legacy_proposal_needs_explicit_scope_for_global(tmp_path, monkeypatch):
     # sealed record. Deleting scope from a sealed manifest is refused.
     _as_legacy(memory_dir, "global-validation", scope=None)
 
-    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"])
+    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"], scope="global")
     approved = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
@@ -4494,7 +4494,7 @@ def test_approval_records_the_scope_it_installed_into(tmp_path, monkeypatch):
     )
     assert proposal["submitted"] is True
 
-    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"])
+    record_reviewed_proposal_for(memory_dir, proposal["proposal_id"], scope="global")
     result = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
@@ -4513,7 +4513,7 @@ def test_approval_records_the_scope_it_installed_into(tmp_path, monkeypatch):
 
 
 def test_approve_command_accepts_global_scope(tmp_path, monkeypatch):
-    """The slash command forwards a valid global scope override."""
+    """The slash command forwards global scope for a globally reviewed draft."""
     from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
 
     global_skills = tmp_path / "global-skills"
@@ -4536,6 +4536,15 @@ def test_approve_command_accepts_global_scope(tmp_path, monkeypatch):
         skills_dir=skills_dir,
         workspace_dir=tmp_path,
     )
+    # The command may approve globally when global is the tier its review
+    # displayed; a workspace review cannot be overridden at decision time.
+    manifest_path = (
+        autoskill_proposals_dir(memory_dir) / "command-global" / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scope"] = "global"
+    manifest["submitted_scope"] = "global"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     messages: list[str] = []
     rendered: list[object] = []
     ctx = SimpleNamespace(

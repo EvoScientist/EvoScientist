@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import secrets
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -68,6 +69,7 @@ _REVERT_STATUS = {
     "skill_changed": 409,
     "revert_failed": 409,
 }
+_ShownDraftRecord = tuple[Path, dict[str, Any], list[tuple[str, str]], str, str]
 # One decision at a time, so two tabs approving one draft install it once.
 _DECISIONS = threading.Lock()
 
@@ -170,7 +172,7 @@ def _installed(base: Path, relative: Path) -> bool:
 
 def _shown_draft_record(
     proposal: SkillProposal, draft: dict[str, Any]
-) -> tuple[Path, dict[str, Any], list[tuple[str, str]]] | None:
+) -> _ShownDraftRecord | None:
     """The review record of a draft whose content this response returns.
 
     The list inlines ``SKILL.md`` and ``RATIONALE.md``. Every other copied
@@ -211,19 +213,21 @@ def _shown_draft_record(
         for relative, content in rendered
         if relative not in {"SKILL.md", "RATIONALE.md"}
     }
-    return (proposal.path, proposal.manifest, rendered)
+    token = secrets.token_urlsafe(24)
+    draft["review_token"] = token
+    return (proposal.path, proposal.manifest, rendered, proposal.effective_scope, token)
 
 
-def record_shown_drafts(
-    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]],
-) -> None:
+def record_shown_drafts(records: list[_ShownDraftRecord]) -> None:
     """Record the reviews of the drafts whose text a response carried.
 
     Called once the response has been delivered: a request that never
-    delivered the payload leaves its drafts unarmed.
+    delivered the payload leaves its drafts unarmed. The token was generated
+    with the payload, but is not trusted for a decision until this record is
+    written after delivery.
     """
-    for path, manifest, rendered in records:
-        record_rendered_proposal(path, manifest, rendered)
+    for path, manifest, rendered, scope, token in records:
+        record_rendered_proposal(path, manifest, rendered, scope=scope, token=token)
 
 
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
@@ -276,6 +280,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "rationale_md": rationale_md[0],
         "rationale_md_truncated": rationale_md[1],
         "contents": {} if proposal.status == "pending" else None,
+        "review_token": None,
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -285,7 +290,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
 
 def list_drafts(
     status: str | None = None,
-    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]] | None = None,
+    records: list[_ShownDraftRecord] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Every served project's drafts; counts ignore the ``status`` filter."""
     if status is not None and status not in _STATUSES:
@@ -336,13 +341,13 @@ def list_drafts(
 
 def list_drafts_body(
     status: str | None = None,
-) -> tuple[int, bytes, list[tuple[Path, dict[str, Any], list[tuple[str, str]]]]]:
+) -> tuple[int, bytes, list[_ShownDraftRecord]]:
     """:func:`list_drafts` encoded as the response body, off the event loop.
 
     The review records come back with it, unrecorded: the caller writes them
     once the body has been delivered.
     """
-    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]] = []
+    records: list[_ShownDraftRecord] = []
     code, payload = list_drafts(status, records)
     body = json.dumps(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
@@ -376,7 +381,11 @@ def _read_text(path: Path) -> tuple[int, str | dict[str, Any]]:
 
 
 def read_draft_file(
-    proposal_id: str, rel_path: str, *, installed: bool
+    proposal_id: str,
+    rel_path: str,
+    *,
+    installed: bool,
+    records: list[_ShownDraftRecord] | None = None,
 ) -> tuple[int, str | dict[str, Any]]:
     """A file an approval copies (the draft's, or with ``installed`` the installed
     skill's) or the draft's own rationale; a ``str`` body is its text."""
@@ -427,7 +436,27 @@ def read_draft_file(
         except (OSError, ValueError):
             rendered = []
         if rendered == [(relative, body)]:
-            record_rendered_proposal(proposal.path, proposal.manifest, rendered)
+            if records is None:
+                # A direct in-process caller is the same single-client rule
+                # as the CLI. HTTP passes ``records`` and uses a token.
+                record_rendered_proposal(
+                    proposal.path,
+                    proposal.manifest,
+                    rendered,
+                    scope=proposal.effective_scope,
+                )
+            else:
+                # The token goes in the plain-text response's header. As for
+                # the list, the record is written only after delivery.
+                records.append(
+                    (
+                        proposal.path,
+                        proposal.manifest,
+                        rendered,
+                        proposal.effective_scope,
+                        secrets.token_urlsafe(24),
+                    )
+                )
     return status, body
 
 
@@ -447,6 +476,7 @@ def _apply(
     action: str,
     scope: str | None,
     expected_updated_at: str | None,
+    review_token: str | None,
 ) -> tuple[int, dict[str, Any]]:
     if action == "approve":
         result = approve_skill_proposal(
@@ -458,6 +488,7 @@ def _apply(
             approved_by="user",
             exact=True,
             expected_updated_at=expected_updated_at,
+            review_token=review_token,
         )
         if result.get("approved"):
             return 200, {key: result.get(key) for key in _APPROVED_KEYS}
@@ -469,6 +500,7 @@ def _apply(
             workspace_dir=workspace.root,
             exact=True,
             expected_updated_at=expected_updated_at,
+            review_token=review_token,
         )
         if result.get("rejected"):
             return 200, {
@@ -508,7 +540,11 @@ def _served(workspace: paths.Workspace) -> bool:
 
 
 def _decide_locked(
-    proposal_id: str, action: str, scope: str | None, expected_updated_at: str | None
+    proposal_id: str,
+    action: str,
+    scope: str | None,
+    expected_updated_at: str | None,
+    review_token: str | None,
 ) -> tuple[int, dict[str, Any]]:
     proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     if proposal is None:
@@ -519,7 +555,7 @@ def _decide_locked(
     workspace = paths.Workspace(key)
     if not _served(workspace):
         return 409, {"error": "project_not_served"}
-    return _apply(proposal, workspace, action, scope, expected_updated_at)
+    return _apply(proposal, workspace, action, scope, expected_updated_at, review_token)
 
 
 def _sendable(payload: dict[str, Any]) -> dict[str, Any]:
@@ -538,12 +574,16 @@ def decide(
     *,
     scope: object = None,
     expected_updated_at: object = None,
+    review_token: object = None,
 ) -> tuple[int, dict[str, Any]]:
     """Approve, reject or revert one draft of a served project; with
-    ``expected_updated_at``, a draft resubmitted or decided since is refused."""
+    ``expected_updated_at``, a draft resubmitted or decided since is refused.
+    A WebUI approval or rejection presents the token its rendering returned."""
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
-    if not isinstance(expected_updated_at, str | None):
+    if not isinstance(expected_updated_at, str | None) or not isinstance(
+        review_token, str | None
+    ):
         return 400, {"error": "invalid_body"}
     with _DECISIONS:
         try:
@@ -552,6 +592,7 @@ def decide(
                 action,
                 scope if isinstance(scope, str) else None,
                 expected_updated_at,
+                review_token,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.

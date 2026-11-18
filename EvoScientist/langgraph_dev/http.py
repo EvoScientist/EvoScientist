@@ -460,14 +460,22 @@ async def get_autoskill_proposal_file(request: Request) -> Response:
     the approval would start from, for an update's diff."""
     from EvoScientist.langgraph_dev import autoskills_api
 
+    records = []
     status, body = await asyncio.to_thread(
         autoskills_api.read_draft_file,
         request.path_params["proposal_id"],
         request.query_params.get("path", ""),
         installed=request.query_params.get("installed") == "1",
+        records=records,
     )
     if isinstance(body, str):
-        return Response(body, media_type="text/plain; charset=utf-8")
+        response = Response(body, media_type="text/plain; charset=utf-8")
+        if records:
+            response.headers["X-EvoScientist-Review-Token"] = records[0][4]
+            response.background = BackgroundTask(
+                autoskills_api.record_shown_drafts, records
+            )
+        return response
     return JSONResponse(body, status_code=status)
 
 
@@ -499,6 +507,7 @@ async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
         action,
         scope=body.get("scope"),
         expected_updated_at=body.get("expected_updated_at"),
+        review_token=body.get("review_token"),
     )
     return JSONResponse(payload, status_code=status)
 

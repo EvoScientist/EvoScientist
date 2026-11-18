@@ -371,7 +371,11 @@ def test_workspace_swap_after_display_does_not_install_elsewhere(tmp_path, monke
     rewritten["updated_at"] = stamp
     manifest_path.write_text(json.dumps(rewritten), encoding="utf-8")
 
-    status, result = autoskills_api.decide("probe-skill", "approve")
+    status, result = autoskills_api.decide(
+        "probe-skill",
+        "approve",
+        review_token=payload["proposals"][0]["review_token"],
+    )
 
     assert status == 409, result
     assert result["error"] in {"draft_changed", "approve_failed"}

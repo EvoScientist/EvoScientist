@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -24,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import yaml
 
@@ -101,18 +102,27 @@ _SCOPE_GLOBAL = "global"
 _SKILL_SCOPES = frozenset({_SCOPE_WORKSPACE, _SCOPE_GLOBAL})
 
 
+class _ReviewRecord(NamedTuple):
+    digest: str
+    workspace: str | None
+    scope: str
+    token: str | None = None
+
+
 # What this process computed when it rendered a draft's content. Keyed by
 # the draft folder's real path and its ``updated_at``, so a resubmit is a
 # different record and rendering the draft again replaces the record of the
-# content that was shown. The value pins the body, the decision fields and
-# the normalised workspace the content was shown under. This is the only
-# record a person's approval trusts: it lives in the memory of the process
-# that rendered the draft, which the agent's shell cannot write. A file
-# cannot take its place. There is no path on this machine the agent, running
-# as this user, cannot reach. It is process-global rather than a context
-# variable because the server and the CLI render a draft on one thread and
-# decide it on another.
-_reviews: dict[tuple[str, str], tuple[str, str | None]] = {}
+# content that was shown. The value pins the body, the decision fields, the
+# normalised workspace and the install scope the content was shown under. A
+# WebUI record also holds the one-time token returned with that rendering; a
+# decision must present it. CLI/TUI and channel records have no token and keep the
+# process-level rule. This is the only record a person's approval trusts: it
+# lives in the memory of the process that rendered the draft, which the
+# agent's shell cannot write. A file cannot take its place. There is no path
+# on this machine the agent, running as this user, cannot reach. It is
+# process-global rather than a context variable because the server and the
+# CLI render a draft on one thread and decide it on another.
+_reviews: dict[tuple[str, str], _ReviewRecord] = {}
 _reviews_guard = threading.Lock()
 # What an approval in this process installed: the per-file digests, the tier
 # and the real path. The manifest copies of these are agent-writable, so a
@@ -320,9 +330,7 @@ class _ProposalLock:
             held.close()
             replaced += 1
             if replaced > 5:
-                raise OSError(
-                    "Could not take the proposal lock: the name was replaced"
-                )
+                raise OSError("Could not take the proposal lock: the name was replaced")
             with contextlib.suppress(OSError):
                 path.unlink()
 
@@ -1535,9 +1543,14 @@ def _decision_digest(
 
 
 def record_reviewed_proposal(
-    proposal_dir: Path, manifest: dict[str, Any], body_digest: str | None = None
+    proposal_dir: Path,
+    manifest: dict[str, Any],
+    body_digest: str | None = None,
+    *,
+    scope: str | None = None,
+    token: str | bool | None = None,
 ) -> str:
-    """Remember the draft this process just displayed, and return its digest.
+    """Remember the draft this process just displayed.
 
     A later approval or rejection in this same process compares the draft
     with this digest. Recording happens when the draft is shown, so the
@@ -1545,19 +1558,28 @@ def record_reviewed_proposal(
     content shown then. A process that never showed the draft has no record,
     and its decision is refused. The normalised workspace is stored with the
     digest: a decision whose manifest names a different project is refused
-    even when the body is unchanged.
+    even when the body is unchanged. ``scope`` is the install tier the
+    surface displayed; it defaults to the manifest's effective scope, with
+    pre-scope proposals defaulting to the workspace tier.
 
     ``body_digest`` is the digest of the body that was displayed, taken from
-    the same read as the text it was compared with.
+    the same read as the text it was compared with. ``token=True`` issues a
+    fresh WebUI review token and returns it instead of the digest. The HTTP
+    surface may instead supply a token it already put in a response that is
+    still being delivered; recording remains deferred until delivery.
     """
     digest = _decision_digest(proposal_dir, manifest, body_digest)
     workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
+    shown_scope = scope or str(manifest.get("scope") or _SCOPE_WORKSPACE)
+    if token is True:
+        token = secrets.token_urlsafe(24)
+    elif not isinstance(token, str):
+        token = None
     with _reviews_guard:
-        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = (
-            digest,
-            workspace,
+        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = _ReviewRecord(
+            digest, workspace, shown_scope, token
         )
-    return digest
+    return token if token is not None else digest
 
 
 def reviewed_decision_digest(proposal_dir: Path, updated_at: object) -> str | None:
@@ -1566,9 +1588,7 @@ def reviewed_decision_digest(proposal_dir: Path, updated_at: object) -> str | No
     return recorded[0] if recorded is not None else None
 
 
-def _reviewed_record(
-    proposal_dir: Path, updated_at: object
-) -> tuple[str, str | None] | None:
+def _reviewed_record(proposal_dir: Path, updated_at: object) -> _ReviewRecord | None:
     with _reviews_guard:
         return _reviews.get(_review_key(proposal_dir, updated_at))
 
@@ -1585,15 +1605,20 @@ def rendered_files(proposal_dir: Path) -> list[tuple[str, str]]:
 
 
 def record_rendered_proposal(
-    proposal_dir: Path, manifest: dict[str, Any], rendered: list[tuple[str, str]]
+    proposal_dir: Path,
+    manifest: dict[str, Any],
+    rendered: list[tuple[str, str]],
+    *,
+    scope: str | None = None,
+    token: str | bool | None = None,
 ) -> str | None:
     """Record a review only when ``rendered`` is the draft's copied content.
 
     A caller passes the text it put on screen. The record is written only
     when that text is exactly the files an approval would copy, so a count,
     a metadata row or an installed file cannot arm the pending draft by
-    calling this with something else. Returns the digest, or None when the
-    text is not the draft.
+    calling this with something else. Returns the digest, or the review token
+    when one is requested, and None when the text is not the draft.
     """
     try:
         body_digest, current = _draft_body(proposal_dir, collect=True)
@@ -1601,11 +1626,13 @@ def record_rendered_proposal(
         return None
     if list(rendered) != current:
         return None
-    return record_reviewed_proposal(proposal_dir, manifest, body_digest)
+    return record_reviewed_proposal(
+        proposal_dir, manifest, body_digest, scope=scope, token=token
+    )
 
 
 def record_reviewed_proposal_by_id(
-    memory_dir: str | Path, proposal_id: str
+    memory_dir: str | Path, proposal_id: str, *, scope: str | None = None
 ) -> SkillProposal | None:
     """Record one draft by its exact id, without listing the others.
 
@@ -1623,7 +1650,7 @@ def record_reviewed_proposal_by_id(
         manifest = _read_manifest(found.path / "manifest.json")
         if manifest is not None:
             with contextlib.suppress(OSError, ValueError):
-                record_reviewed_proposal(found.path, manifest)
+                record_reviewed_proposal(found.path, manifest, scope=scope)
     return found
 
 
@@ -1651,12 +1678,42 @@ def _reviewed_changed(action: str, proposal_id: object) -> dict[str, Any]:
     }
 
 
+def _review_token_refused(
+    action: str, proposal_id: object, *, missing: bool
+) -> dict[str, Any]:
+    """A WebUI decision did not present the token its rendering was given."""
+    verb = "approved" if action == "approve" else "rejected"
+    detail = "is missing" if missing else "does not match the rendered draft"
+    return {
+        verb: False,
+        "proposal_id": proposal_id,
+        "error": f"Proposal review token {detail}; list it again before deciding",
+    }
+
+
+def _review_scope_refused(
+    action: str, proposal_id: object, shown: str, requested: str
+) -> dict[str, Any]:
+    """A decision tried to move the reviewed content to another install tier."""
+    verb = "approved" if action == "approve" else "rejected"
+    return {
+        verb: False,
+        "proposal_id": proposal_id,
+        "error": (
+            f"Proposal was shown for {shown} scope, not {requested}; "
+            "list it again before deciding"
+        ),
+    }
+
+
 def _check_human_review(
     action: str,
     proposal_dir: Path,
     manifest: dict[str, Any],
     *,
     approved_by: str,
+    scope: str | None = None,
+    review_token: str | None = None,
 ) -> dict[str, Any] | None:
     """Refuse a person's decision that this process did not display.
 
@@ -1665,14 +1722,31 @@ def _check_human_review(
     digest this process computed while showing the draft. A missing record
     is a refusal, not a fallback: a fresh process, and a server that listed
     nothing, have nothing honest to compare against. A forged file cannot
-    supply the record, because the record is not a file.
+    supply the record, because the record is not a file. A tokened record also
+    binds the decision to the client that received that token, and an approval
+    cannot resolve to a different install tier than the one displayed.
     """
     if approved_by == "auto":
         return None
     recorded = _reviewed_record(proposal_dir, manifest.get("updated_at"))
     if recorded is None:
         return _not_reviewed(action, manifest.get("proposal_id"))
-    digest, workspace = recorded
+    digest, workspace, shown_scope, token = recorded
+    if token is not None:
+        if review_token is None:
+            return _review_token_refused(
+                action, manifest.get("proposal_id"), missing=True
+            )
+        if not isinstance(review_token, str) or not secrets.compare_digest(
+            token, review_token
+        ):
+            return _review_token_refused(
+                action, manifest.get("proposal_id"), missing=False
+            )
+    if scope is not None and shown_scope != scope:
+        return _review_scope_refused(
+            action, manifest.get("proposal_id"), shown_scope, scope
+        )
     if digest != _decision_digest(proposal_dir, manifest):
         return _reviewed_changed(action, manifest.get("proposal_id"))
     # The project the content was shown under. A manifest edited to name
@@ -2409,16 +2483,19 @@ def approve_skill_proposal(
     approved_by: Literal["user", "auto"] = "user",
     exact: bool = False,
     expected_updated_at: str | None = None,
+    review_token: str | None = None,
 ) -> dict[str, Any]:
     """Promote one pending proposal into the tier its manifest records.
 
     The tier is resolved once, when the proposal is submitted, and read back
     here; the approval re-checks that the skill is still installed there and
-    never falls back to another tier. ``scope`` overrides the recorded tier
-    explicitly, which is how a proposal written before scopes existed is
-    confirmed to install into the global tier. An approval that fails leaves
-    no folder it created behind, and the manifest is written last. With
-    ``expected_updated_at``, a pending draft resubmitted since is refused.
+    never falls back to another tier. ``scope`` requests an explicit tier, but
+    a person's approval is refused unless it is the tier the review displayed.
+    An approval that fails leaves no folder it created behind, and the
+    manifest is written last. With ``expected_updated_at``, a pending draft
+    resubmitted since is refused. A WebUI record also requires its
+    ``review_token``; tokenless CLI/TUI and channel records keep the
+    process-level rule.
     """
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
@@ -2477,7 +2554,12 @@ def approve_skill_proposal(
                 return _content_changed(manifest.get("proposal_id"))
         else:
             refused = _check_human_review(
-                "approve", proposal_dir, manifest, approved_by=approved_by
+                "approve",
+                proposal_dir,
+                manifest,
+                approved_by=approved_by,
+                scope=target.scope,
+                review_token=review_token,
             )
             if refused is not None:
                 return refused
@@ -2910,9 +2992,12 @@ def reject_skill_proposal(
     workspace_dir: str | Path | None = None,
     exact: bool = False,
     expected_updated_at: str | None = None,
+    review_token: str | None = None,
 ) -> dict[str, Any]:
     """Mark one pending proposal rejected; with ``expected_updated_at``, a
-    draft resubmitted since is refused, as an approval refuses it."""
+    draft resubmitted since is refused, as an approval refuses it. Rejection
+    installs nothing and has no scope override to pin, but a tokened WebUI
+    review still requires its ``review_token``."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -2951,7 +3036,11 @@ def reject_skill_proposal(
     # the same mistake as installing that body.
     try:
         refused = _check_human_review(
-            "reject", proposal_dir, manifest, approved_by="user"
+            "reject",
+            proposal_dir,
+            manifest,
+            approved_by="user",
+            review_token=review_token,
         )
         if refused is not None:
             return refused
