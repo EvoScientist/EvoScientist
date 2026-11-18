@@ -1216,6 +1216,17 @@ class TestWorkspaceRemovalAndComments:
             workspace_root="/W",
         )
         assert "more than 64 folders" in error
+        # An absolute path, written out or from a variable, needs no folder.
+        assert (
+            validate_command(f"{padded}; rm -rf /W/build", workspace_root="/W") is None
+        )
+        assert (
+            validate_command(f'{padded}; D=/W/build; rm -rf "$D"', workspace_root="/W")
+            is None
+        )
+        assert "protected folder" in validate_command(
+            f'{padded}; D=/W/skills; rm -rf "$D"', ("/W/skills",), workspace_root="/W"
+        )
 
     @pytest.mark.parametrize(
         "command",
@@ -1362,12 +1373,27 @@ class TestWorkspaceRemovalAndComments:
             "D=/opt/data; rm -rf $D",
             "D=/W; rm -rf $D",
             "for d in /opt/data; do rm -rf $d; done",
+            'CACHE=$HOME/.cache/x; rm -rf "$CACHE"',
+            "D=~; rm -rf $D",
+            # Glued to a substitution.
+            "D=/opt/data; rm -rf $D/run_$(date +%F)",
+            'D=/opt/data; rm -rf "$D"/run_$(date +%F)',
+            'D=~; rm -rf "$D"/x_$(date +%F)',
+            "D=.; rm -rf $D$D/x_$(date +%F)",
+            "P='..\\o'; rm -rf $P/a_$(date +%F)",
         ],
     )
     def test_a_removal_of_a_variable_value_outside_is_refused(self, command):
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
         assert "outside the workspace" in error
         assert validate_command("D=/W/build; rm -rf $D", workspace_root="/W") is None
+        for glued in (
+            "D=build; rm -rf $D/x_$(date +%F)",
+            "M=a/b; rm -rf outputs/$(echo $M | tr '/' '_')",
+            "C=/data/run1; D=out; rm -rf $D/$(basename $C)",
+            "D=out; rm -rf $D/$(cat $HOME/.last_run)",
+        ):
+            assert validate_command(glued, workspace_root="/W") is None
 
     @pytest.mark.parametrize(
         "command",

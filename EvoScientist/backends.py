@@ -1730,6 +1730,53 @@ def _kill_by_lookup(
     )
 
 
+def _value_outside(path: str, workspace_root: str, protected: tuple[str, ...]) -> bool:
+    """Whether a value of a variable, read as the path an rm removes, climbs
+    with ``..``, starts at home or lies outside the workspace."""
+    return (
+        _is_home_word(path)
+        or ".." in path.split("/")
+        or (
+            (path.startswith("/") or bool(_DRIVE_PATH_RE.match(path)))
+            and _removal_problem(path, workspace_root, protected) == "outside"
+        )
+    )
+
+
+def _blank_substitutions(word: str) -> str:
+    """*word* with the body of each ``$(...)`` and backtick substitution
+    emptied."""
+    out: list[str] = []
+    index, quote = 0, None
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif char == "\\":
+            out.append(word[index : index + 2])
+            index += 2
+            continue
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif word.startswith("$(", index):
+            close = shell_syntax.matching_paren(word, index + 2)
+            if close is not None:
+                out.append("$()")
+                index = close + 1
+                continue
+        elif char == "`":
+            close = word.find("`", index + 1)
+            if close != -1:
+                out.append("``")
+                index = close + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _folder_removal_error(
     command: str,
     commands: list[shell_syntax.SimpleCommand],
@@ -1772,22 +1819,29 @@ def _folder_removal_error(
             "name its path from the workspace root."
         )
     assigned = shell_syntax.assigned_values(command)
-    folders = _possible_folders(commands, workspace_root, assigned)
+    # Built once, and only when a relative path needs it.
+    folders: list[tuple[str, tuple[str, ...]]] | None = None
     for found, operand, token in removals:
         if token is not None:
             operand_paths = _word_paths(operand, token, assigned)
             # A value of a variable the command sets, checked as a written
-            # path is: it may not climb with `..` or lie outside.
+            # path is: it may not climb with `..`, start at home or lie
+            # outside.
             for path in operand_paths:
                 if path == _removal_target(token):
                     continue
-                if ".." in path.split("/"):
-                    return _outside_removal_error(operand)
-                if (
-                    path.startswith("/") or _DRIVE_PATH_RE.match(path)
-                ) and _removal_problem(path, workspace_root, protected) == "outside":
+                if _value_outside(path, workspace_root, protected):
                     return _outside_removal_error(operand)
         else:
+            # Its values too, with each substitution emptied and the quotes
+            # dropped, so the words inside a substitution are not read as
+            # values.
+            blank = _blank_substitutions(operand)
+            for path in _word_paths(blank, None, assigned):
+                if path == blank:
+                    continue
+                if _value_outside(re.sub("[\"']", "", path), workspace_root, protected):
+                    return _outside_removal_error(operand)
             # Glued to a substitution: whatever it expands to stays under the
             # literal folder written before it, or under the folder the rm
             # runs in when none is.
@@ -1796,15 +1850,23 @@ def _folder_removal_error(
                 for written in shell_syntax.word_values(operand, operand, assigned)
                 or [operand]
             ]
+        relative_paths = []
+        for path in operand_paths:
+            if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                relative_paths.append(path)
+            elif _removes_protected(path, workspace_root, protected):
+                return _protected_removal_error(operand)
+        if not relative_paths:
+            continue
+        if folders is None:
+            folders = _possible_folders(commands, workspace_root, assigned)
         for folder in _run_folders(found.folders, folders, assigned):
-            for path in operand_paths:
-                relative = not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
-                if relative:
-                    path = _normpath(f"{folder}/{path}")
-                if _removes_protected(path, workspace_root, protected):
+            for path in relative_paths:
+                if _removes_protected(
+                    _normpath(f"{folder}/{path}"), workspace_root, protected
+                ):
                     return _protected_removal_error(
-                        operand,
-                        _workspace_folder(folder, folders[0][0]) if relative else None,
+                        operand, _workspace_folder(folder, folders[0][0])
                     )
     return None
 
