@@ -356,3 +356,22 @@ def test_the_same_endpoint_written_two_ways_keeps_the_saved_key(monkeypatch):
 
     assert seen["base_url"] == "http://same-endpoint/v1/", seen
     assert seen["api_key"] == "saved-key", seen
+
+
+def test_a_query_whose_value_ends_in_a_slash_is_a_different_endpoint(monkeypatch):
+    """Only the PATH's trailing slash is ignored, not a query's.
+
+    "http://x/v1?tenant=a/" and "http://x/v1?tenant=a" are different
+    queries. Stripping the slash off the whole string would make them
+    compare equal, and the environment key would be sent to the saved
+    URL's endpoint -- which is not the endpoint it was configured for.
+    """
+    seen = _probe_seen(
+        monkeypatch,
+        _config(url="http://x/v1?tenant=a", key=""),
+        env_url="http://x/v1?tenant=a/",
+        env_key="env-key",
+    )
+
+    assert seen["base_url"] == "http://x/v1?tenant=a/", seen
+    assert seen["api_key"] == "env-key", seen

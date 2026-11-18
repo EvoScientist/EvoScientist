@@ -757,6 +757,29 @@ def _step_ollama_base_url(config: EvoScientistConfig) -> tuple[str, list[str]]:
     return url, detected_models
 
 
+def _same_endpoint(first: str, second: str) -> bool:
+    """Whether two base URLs name the same endpoint.
+
+    Only the PATH's trailing slash is ignored: "/v1" and "/v1/" are the same
+    endpoint, but a different query, a different host or a different port
+    is a different endpoint, and a query whose value ends in a slash is
+    still a different query.
+    """
+    from urllib.parse import urlsplit
+
+    if not first or not second:
+        return False
+    left = urlsplit(first)
+    right = urlsplit(second)
+    return (
+        left.scheme == right.scheme
+        and left.netloc == right.netloc
+        and left.path.rstrip("/") == right.path.rstrip("/")
+        and left.query == right.query
+        and left.fragment == right.fragment
+    )
+
+
 def _step_model(
     config: EvoScientistConfig,
     provider: str,
@@ -853,8 +876,12 @@ def _step_model(
         saved_url = config.custom_openai_base_url or ""
         saved_key = getattr(config, "custom_openai_api_key", "") or ""
         # The same endpoint written two ways ("/v1" and "/v1/") is still the
-        # same endpoint, so compare them without the trailing slash.
-        same_endpoint = bool(env_url) and env_url.rstrip("/") == saved_url.rstrip("/")
+        # same endpoint, so compare the URLs by their parts: only the PATH's
+        # trailing slash is dropped. Stripping the slash off the whole string
+        # would also drop one inside a query value, and two different
+        # queries would then compare equal -- which would pair a key with an
+        # endpoint it was not configured for.
+        same_endpoint = bool(env_url) and _same_endpoint(env_url, saved_url)
         if env_url and not same_endpoint:
             base_url, api_key = env_url, env_key
         elif saved_url:
