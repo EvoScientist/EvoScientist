@@ -1444,7 +1444,7 @@ def _simple_commands(
             keyword = None  # a `case` pattern
         if keyword == "case":
             blocks.append("case")
-        elif keyword == "esac":
+        elif keyword == "esac" and "case" in blocks:
             while blocks and blocks.pop() != "case":
                 pass
         elif keyword in ("while", "until", "for", "select"):
@@ -1546,7 +1546,10 @@ def _simple_commands(
         if (
             assigned is not None
             and before
-            and _keeps_prefix(unwrapped, len(nested) > scripts_before, root)
+            and (
+                _keeps_prefix(unwrapped, len(nested) > scripts_before, command)
+                or _keeps_prefix(unwrapped, len(nested) > scripts_before, root)
+            )
         ):
             assigned.extend(before)
         for each in unwrapped:

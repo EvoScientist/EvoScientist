@@ -1256,6 +1256,8 @@ class TestWorkspaceRemovalAndComments:
             "for i in 1 2; do \\done; cd memories; cd .evoscientist; done; rm -rf x",
             "for i in 1 2; do case x in done) :;; esac; cd memories; "
             "cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; do echo $(true) esac; cd memories; cd .evoscientist; "
+            "done; rm -rf x",
         ],
     )
     def test_a_folder_change_the_check_cannot_read_in_order_is_refused(self, command):
@@ -1331,6 +1333,7 @@ class TestWorkspaceRemovalAndComments:
             'D=skills\nrm -rf "$D"',
             'f() { rm -rf "$D"; }; echo "$(D=skills f)"',
             'a/f() { rm -rf "$D"; }; D=skills a/f',
+            "sh -c 'f() { rm -rf \"$D\"; }; D=skills f'",
             'D=skills # note\nrm -rf "$D"',
             'D=skills\nif true; then rm -rf "$D"; fi',
         ],
