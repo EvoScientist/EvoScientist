@@ -338,3 +338,21 @@ def test_the_sync_probe_has_a_total_deadline(monkeypatch):
 
     assert names == []
     assert elapsed < 2.0, elapsed
+
+
+def test_the_same_endpoint_written_two_ways_keeps_the_saved_key(monkeypatch):
+    """A trailing slash does not make the endpoint a different one.
+
+    "http://x/v1" and "http://x/v1/" name the same endpoint, so the saved
+    key belongs to it and is used. Treating them as different would withhold
+    the key and probe keyless.
+    """
+    seen = _probe_seen(
+        monkeypatch,
+        _config(url="http://same-endpoint/v1/", key="saved-key"),
+        env_url="http://same-endpoint/v1",
+        env_key=None,
+    )
+
+    assert seen["base_url"] == "http://same-endpoint/v1/", seen
+    assert seen["api_key"] == "saved-key", seen

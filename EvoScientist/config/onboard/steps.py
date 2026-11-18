@@ -852,7 +852,10 @@ def _step_model(
         env_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or ""
         saved_url = config.custom_openai_base_url or ""
         saved_key = getattr(config, "custom_openai_api_key", "") or ""
-        if env_url and env_url != saved_url:
+        # The same endpoint written two ways ("/v1" and "/v1/") is still the
+        # same endpoint, so compare them without the trailing slash.
+        same_endpoint = bool(env_url) and env_url.rstrip("/") == saved_url.rstrip("/")
+        if env_url and not same_endpoint:
             base_url, api_key = env_url, env_key
         elif saved_url:
             base_url, api_key = saved_url, (saved_key or env_key)
