@@ -963,7 +963,11 @@ def _variables(command: str) -> _Variables:
             opaque = True
         elif each.name == "for" and args:
             loop_words = [word for word in args[2:] if word != "do"]
-            if words[1:2] != ["in"]:
+            if len(words) == 1:
+                # `for NAME` alone: the arguments the shell was given, or a
+                # loop whose `in WORDS` is on the next line.
+                in_part.add(words[0])
+            elif words[1:2] != ["in"]:
                 run_only.add(words[0])  # the arguments the shell was given
             elif any(variable_references(word) for word in loop_words):
                 in_part.add(words[0])  # a variable's words
@@ -1034,7 +1038,7 @@ def _variables(command: str) -> _Variables:
                     in_part.add(_assigned_name(destination))  # `D[0]` sets D
                     if "$" in destination or "`" in destination:
                         opaque = True  # a name only the run knows
-    in_part.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
+    in_part.update(re.findall(r"\$\{([A-Za-z_]\w*)(?:\[[^\]]*\])?:?=", command))
     return _Variables(
         found,
         {name for name in run_only if _NAME_RE.fullmatch(name)},

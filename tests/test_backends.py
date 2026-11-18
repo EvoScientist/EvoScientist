@@ -1471,6 +1471,8 @@ class TestWorkspaceRemovalAndComments:
             "D=x; printf -vD skills; rm -rf $D",
             "D=x; O=-n; declare $O R=D; R=skills; rm -rf $D",
             ": ${D=skills}; rm -rf $D",
+            ': ${D[0]:=skills}; rm -rf "$D"',
+            'for D\nin skills; do :; done; rm -rf "$D"',
             "D=x; x=skills; rm -rf ${!D}",
             'for d in `ls` skills; do rm -rf "$d"; done',
             'D=x; N=D; read "$N"; rm -rf $D',
