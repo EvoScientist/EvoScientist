@@ -1409,16 +1409,32 @@ def _simple_commands(
             in_backtick = not in_backtick
         if not is_name:
             continue
-        if value in ("while", "until", "for", "select"):
+        # A keyword only as written: `"done"` or `\\done` runs a command.
+        keyword = value if token.get("raw") == value else None
+        after = tokens[index + 1] if index + 1 < len(tokens) else None
+        if (
+            blocks
+            and blocks[-1] == "case"
+            and after is not None
+            and after["type"] == "op"
+            and after["value"] in (")", "|")
+        ):
+            keyword = None  # a `case` pattern
+        if keyword == "case":
+            blocks.append("case")
+        elif keyword == "esac":
+            while blocks and blocks.pop() != "case":
+                pass
+        elif keyword in ("while", "until", "for", "select"):
             blocks.append("loop")
-        elif value == "{":
+        elif keyword == "{":
             blocks.append("function" if function_next else "group")
             function_next = False
-        elif value in ("done", "}") and blocks:
-            opened = ("loop",) if value == "done" else ("function", "group")
+        elif keyword in ("done", "}") and blocks:
+            opened = ("loop",) if keyword == "done" else ("function", "group")
             while blocks and blocks.pop() not in opened:
                 pass
-        repeats = outer_repeats or any(each != "group" for each in blocks)
+        repeats = outer_repeats or any(each in ("loop", "function") for each in blocks)
         if value in COMMAND_PREFIX_WORDS:
             if index in prefix:  # `D=x time cmd`: before the command after it
                 prefix[index + 1] = prefix.pop(index)
@@ -1460,10 +1476,11 @@ def _simple_commands(
             for each in tokens[index + 1 : index + 3]
         ] == [("op", "("), ("op", ")")]:
             following = tokens[index + 3] if index + 3 < len(tokens) else None
-            if following is not None and following["type"] == "op":
-                blocks.append("function")  # `NAME ( ) ( BODY )`: to the end
-            else:
+            if following is not None and following.get("raw") == "{":
                 function_next = True  # its `{` is read as a command name next
+            else:
+                # `( BODY )`, `if`, `case`, ...: to the end of the text.
+                blocks.append("function")
         if name == "function":
             # `function NAME [()] { BODY`: the body's first command is read
             # as these words.
@@ -1483,15 +1500,22 @@ def _simple_commands(
             if body_start is not None:
                 repeating.add(len(nested))
                 nested.append((command[body_start:position], (), ()))
-            opener = next((each for arg, each in args if arg in ("{", "(")), None)
-            if opener is not None and not any(
-                each is opener and flag
-                for each, flag in zip(tokens, words.name_flags, strict=True)
+            # After `function NAME [( )]`, only a `{` waits for its `}`; any
+            # other body repeats to the end of the text.
+            at = index + 2
+            if [
+                (str(each["type"]), str(each["value"])) for each in tokens[at : at + 2]
+            ] == [("op", "("), ("op", ")")]:
+                at += 2
+            following = tokens[at] if at < len(tokens) else None
+            if (
+                following is not None
+                and following.get("raw") == "{"
+                and words.name_flags[at]
             ):
-                # The rest of the body, to its `}`; a `( BODY )` to the end.
-                blocks.append("function")
-            else:
                 function_next = True  # the `{` is read as a command name next
+            else:
+                blocks.append("function")  # to its `}`, or to the end of the text
             continue
         scripts_before = len(nested)
         unwrapped = _unwrap(name, args, (), nested, (), assigned)

@@ -1248,6 +1248,14 @@ class TestWorkspaceRemovalAndComments:
             "function f() { :; cd memories; }; cd .evoscientist; f; rm -rf x",
             "cd build; for i in 1; do eval 'cd skills'; done; rm -rf demo",
             "for i in 1; do source x; done; cd b; rm -rf demo",
+            # A body other than `{ }`, and keywords only as written.
+            "f() if :; then cd memories; fi; cd .evoscientist; f; rm -rf x",
+            "f() case 1 in 1) cd memories;; esac; cd .evoscientist; f; rm -rf x",
+            "function f (cd memories; rm -rf x); cd .evoscientist; f",
+            'for i in 1 2; do "done"; cd memories; cd .evoscientist; done; rm -rf x',
+            "for i in 1 2; do \\done; cd memories; cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; do case x in done) :;; esac; cd memories; "
+            "cd .evoscientist; done; rm -rf x",
         ],
     )
     def test_a_folder_change_the_check_cannot_read_in_order_is_refused(self, command):
@@ -1269,6 +1277,7 @@ class TestWorkspaceRemovalAndComments:
             "cd tests && rm -rf .pytest_cache && for f in test_*.py; do python $f; done",
             "cd src && make clean; while true; do sleep 1; break; done; rm -rf build",
             "function f() { :; }; cd x; rm -rf build",
+            "cd x; case $1 in a) echo;; esac; rm -rf build",
             # Common shapes: code run from a file or a string, a call in quotes.
             "source .venv/bin/activate && rm -rf build",
             'eval "$(conda shell.bash hook)"; rm -rf build',
