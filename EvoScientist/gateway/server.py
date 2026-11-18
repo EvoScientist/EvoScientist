@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -33,7 +34,7 @@ from ..stream.events import (
     build_agent_stream_input,
 )
 from ..stream.summarization import _find_summarization_event_payload
-from ..stream.v3_payloads import _as_raw_map, _event_namespace
+from ..stream.v3_payloads import _as_raw_map, _event_namespace, _text_from_content
 from .background_runs import _acancel_thread_runs
 from .types import (
     DEFAULT_GRAPH_ID,
@@ -684,6 +685,82 @@ def _lifecycle_cause_tool_call_id(data: Mapping[str, Any] | None) -> str | None:
     return stripped or None
 
 
+# Async sub-agents run on their own threads, so the server stream never
+# carries their lifecycle events. The tracker names them from what the
+# parent stream does carry -- the launch tool call and the async_tasks
+# state -- under a synthetic path, through the same _ensure_registered /
+# _end rule as the sync children. Only the name source differs: the sync
+# path reads it from the lifecycle event's graph_name, the async path from
+# the start_async_task arguments and the async_tasks record.
+_ASYNC_PATH_PREFIX = ("async",)
+
+# Terminal async-task statuses: the child is done and gets its end event.
+# Mirrors cli.async_notifier.TERMINAL_STATUSES; keep the two in step.
+# "waiting" is deliberately absent: a task waiting for input on its own
+# thread is still alive.
+_ASYNC_TERMINAL_STATUSES = frozenset(
+    {"cancelled", "success", "error", "timeout", "interrupted"}
+)
+
+# The launch line _build_task_envelope writes into the tool result
+# (middleware/expert_async_subagent.py). A tool-finished carrying it is a
+# launch that succeeded; any other output is a failed launch.
+_ASYNC_LAUNCH_PREFIX = "Launched async subagent. task_id: "
+
+# The synthetic user message cli/async_notifier injects for a completion
+# (format_batch_message): one JSON object per finished task.
+_ASYNC_UPDATE_HEADER = "[Async tasks update]"
+
+
+def _tool_input_subagent_type(input_args: object) -> str | None:
+    """The subagent_type a start_async_task call was launched with, if any."""
+    input_map = _as_raw_map(input_args)
+    if input_map is None:
+        return None
+    name = input_map.get("subagent_type")
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
+
+
+def _tool_output_text(output: object) -> str:
+    """The text of a tool result, whatever shape the stream delivered it in."""
+    if isinstance(output, str):
+        return output
+    output_map = _as_raw_map(output)
+    if output_map is None:
+        return ""
+    return _text_from_content(output_map.get("content"))
+
+
+def _launched_task_id(text: str) -> str | None:
+    """The task id a successful launch result names, if it names one."""
+    if not text.startswith(_ASYNC_LAUNCH_PREFIX):
+        return None
+    task_id = text[len(_ASYNC_LAUNCH_PREFIX) :].strip()
+    return task_id or None
+
+
+def _notification_event_from_kwargs(
+    kwargs: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """The task event a notification message carries in its metadata, if any.
+
+    deepagents labels the message twice: langchain's ``lc_source`` /
+    ``lc_data`` (source "async_subagent") and its own
+    ``deepagents_notification`` key. Either one names the finished task.
+    """
+    if kwargs.get("lc_source") == "async_subagent":
+        data = _as_raw_map(kwargs.get("lc_data"))
+        if data is not None:
+            return data
+    event = _as_raw_map(kwargs.get("deepagents_notification"))
+    if event is not None:
+        return event
+    return None
+
+
 @dataclass(slots=True)
 class _ServerSubagentTracker:
     """Infer subagent start/end events from LangGraph server namespaces."""
@@ -694,6 +771,13 @@ class _ServerSubagentTracker:
     # Paths whose child already ended. A late event for one of these must not
     # announce a second start with no matching end.
     _ended: set[tuple[str, ...]] = field(default_factory=set)
+    # start_async_task calls seen but not yet resolved: tool_call_id ->
+    # subagent_type. A launch is only announced once it succeeds, so a
+    # failed launch leaves nothing behind.
+    _pending_async: dict[str, str] = field(default_factory=dict)
+    # Current run id per async child path. A completion naming an older run
+    # than the one the child is on is stale and must not end it.
+    _async_run_ids: dict[tuple[str, ...], str | None] = field(default_factory=dict)
 
     def process(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -720,12 +804,14 @@ class _ServerSubagentTracker:
                 )
             elif phase in ("completed", "failed") and namespace:
                 events.extend(self._end(namespace))
-        elif namespace and self.registry.resolve(namespace[:1]) is None:
-            # A child's input values come before its lifecycle start, and the
-            # server mirrors tool results under ``tools:<call id>``: register
-            # the path for routing only, so only a lifecycle start announces.
-            head = namespace[:1]
-            self.registry.register(head, self._parse_namespace_segment(head[0])[0])
+        elif method == "tools":
+            events.extend(self._process_async_tool_event(data))
+            self._register_head_for_routing(namespace)
+        elif method == "updates":
+            events.extend(self._process_async_update_event(data))
+            self._register_head_for_routing(namespace)
+        elif namespace:
+            self._register_head_for_routing(namespace)
         return events
 
     def finish(self) -> list[dict[str, Any]]:
@@ -733,9 +819,18 @@ class _ServerSubagentTracker:
         for path in sorted(
             self._active.keys(), key=lambda item: len(item), reverse=True
         ):
+            if self._is_async_path(path):
+                # An async child outlives the parent turn: the run that
+                # launched it is over, but the child keeps working on its
+                # own thread. Its end is emitted when its completion
+                # reaches the tracker in a later turn, not here -- ending
+                # it now would report a still-running child as done.
+                continue
             events.extend(self._end(path))
         self._active.clear()
         self._ended.clear()
+        self._pending_async.clear()
+        self._async_run_ids.clear()
         self.registry.close()
         return events
 
@@ -750,6 +845,26 @@ class _ServerSubagentTracker:
         if not _lifecycle_is_subagent(data):
             return None
         return _lifecycle_graph_name(data)
+
+    def _register_head_for_routing(
+        self, namespace: tuple[str, ...]
+    ) -> None:
+        """Register a namespace head for routing only, never announcing.
+
+        Mirrors the merged #852 fallback: a child's input values come
+        before its lifecycle start, and the server mirrors tool results
+        under ``tools:<call id>`` -- registering the head lets the event
+        processor route, while only a lifecycle start announces a child.
+        Announcing here would name a child after the namespace segment
+        (a ``tools`` sub-agent that does not exist). The ``tasks`` branch
+        the old base had is gone with it: the lifecycle transformer
+        suppresses tasks events, so they never reach the server log.
+        """
+        if not namespace:
+            return
+        head = namespace[:1]
+        if self.registry.resolve(head) is None:
+            self.registry.register(head, self._parse_namespace_segment(head[0])[0])
 
     def _ensure_registered(
         self,
@@ -792,6 +907,259 @@ class _ServerSubagentTracker:
         self._ended.add(path)
         end = self.emitter.subagent_end(name, instance_id=":".join(path))
         return [end.data]
+
+    @staticmethod
+    def _async_path(task_id: str) -> tuple[str, str]:
+        """The tracker path for an async child, keyed by its task id."""
+        return (*_ASYNC_PATH_PREFIX, task_id)
+
+    @staticmethod
+    def _is_async_path(path: tuple[str, ...]) -> bool:
+        return path[:1] == _ASYNC_PATH_PREFIX
+
+    def _register_async(
+        self,
+        task_id: str,
+        name: str,
+        trigger_call_id: str | None,
+        *,
+        run_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Announce an async child through the same rule as a sync one.
+
+        The name comes from the launch instead of a lifecycle graph_name,
+        but the registration and the fixed name are the same. The launch
+        call id is carried on the start event as ``tool_call_id`` so the
+        CLI places the child under its own task line, the way the sync
+        path carries the cause's tool call id -- it is placement, not a
+        guard. There is no trigger matching on an async end: no async
+        completion signal carries a tool call id to compare against (a
+        terminal record and a notification carry a task id and a run id
+        only), so a match could never fire in production. The maintainer
+        removed the same matching from the sync path for the same reason
+        (the lifecycle terminal payload carries no trigger call id). The
+        protection for an async completion is the run-id checks, not a
+        trigger comparison.
+
+        A non-terminal record for an ended path is a follow-up run
+        that revived the task, so it re-arms the path first. Unlike a
+        sync namespace, an async task id IS reused across runs of the
+        same task -- update_async_task resumes a finished task onto a
+        new run under the same task id -- so the path must be able to
+        come back for the next run.
+        """
+        path = self._async_path(task_id)
+        if path in self._ended:
+            self._ended.discard(path)
+        if run_id is not None:
+            self._async_run_ids[path] = run_id
+        return self._ensure_registered(
+            path,
+            tool_call_id=trigger_call_id,
+            name=name,
+        )
+
+    def _pending_trigger_for(self, name: str) -> str | None:
+        """The oldest launch still waiting for a task of this name, if any."""
+        for tool_call_id, subagent_type in self._pending_async.items():
+            if subagent_type == name:
+                del self._pending_async[tool_call_id]
+                return tool_call_id
+        return None
+
+    def _end_async(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+        events = self._end(path)
+        if events:
+            self._async_run_ids.pop(path, None)
+        return events
+
+    def _end_async_by_task(
+        self,
+        task_id: str,
+        name: str | None,
+        run_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """End an async child by task id.
+
+        When the launch was in an earlier turn, this turn's tracker never
+        saw it: the start was already announced there, so the child is
+        registered silently and only the end is emitted. When ``run_id``
+        is given, a completion naming an older run than the one the child
+        is on is stale and ends nothing; a ``None`` run id means the
+        signal is the task's own state, which is authoritative.
+        """
+        path = self._async_path(task_id)
+        if path in self._ended:
+            return []
+        if path in self._active:
+            stored = self._async_run_ids.get(path)
+            if run_id is not None and stored is not None and run_id != stored:
+                return []
+            return self._end_async(path)
+        if name is None:
+            return []
+        self._active[path] = name
+        self.registry.register(path, name)
+        if run_id is not None:
+            self._async_run_ids[path] = run_id
+        return self._end_async(path)
+
+    def _process_async_tool_event(
+        self, data: Mapping[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Track start_async_task calls: remember the launch, name it on success.
+
+        The start is announced from the launch result, never from the call
+        itself: a failed launch must announce nothing. The updates event
+        carrying the async_tasks record is the primary start signal; the
+        tool-finished text is the fallback for a launch whose record never
+        streams. Either order announces the child exactly once.
+        """
+        if data is None:
+            return []
+        if data.get("tool_name") != "start_async_task":
+            return []
+        tool_call_id = data.get("tool_call_id")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return []
+        phase = data.get("event")
+        if phase == "tool-started":
+            subagent_type = _tool_input_subagent_type(data.get("input"))
+            if subagent_type is not None:
+                self._pending_async[tool_call_id] = subagent_type
+            return []
+        if phase == "tool-finished":
+            subagent_type = self._pending_async.pop(tool_call_id, None)
+            task_id = _launched_task_id(_tool_output_text(data.get("output")))
+            if subagent_type is None or task_id is None:
+                return []
+            return self._register_async(
+                task_id, subagent_type, tool_call_id, run_id=None
+            )
+        if phase == "tool-error":
+            self._pending_async.pop(tool_call_id, None)
+            return []
+        return []
+
+    def _process_async_update_event(
+        self, data: Mapping[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Name async children from state, end them on their completion."""
+        if data is None:
+            return []
+        events: list[dict[str, Any]] = []
+        tasks = data.get("async_tasks")
+        if isinstance(tasks, Mapping):
+            for task_id, record in tasks.items():
+                events.extend(self._process_async_task_record(task_id, record))
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                events.extend(self._process_async_notification_message(message))
+        return events
+
+    def _process_async_task_record(
+        self, task_id: object, record: object
+    ) -> list[dict[str, Any]]:
+        """One async_tasks record: announce a live task, end a finished one."""
+        if not isinstance(task_id, str) or not task_id:
+            return []
+        record_map = _as_raw_map(record)
+        if record_map is None:
+            return []
+        name = record_map.get("agent_name")
+        if not isinstance(name, str) or not name.strip():
+            return []
+        status = record_map.get("status")
+        run_id = record_map.get("run_id")
+        run_id = run_id if isinstance(run_id, str) and run_id else None
+        path = self._async_path(task_id)
+        if isinstance(status, str) and status in _ASYNC_TERMINAL_STATUSES:
+            # The record is the task's own state: it is authoritative, so
+            # no run-id staleness check applies here.
+            return self._end_async_by_task(task_id, name, None)
+        if path in self._active:
+            # Still running, possibly on a newer run after a follow-up.
+            if run_id is not None:
+                self._async_run_ids[path] = run_id
+            return []
+        trigger = self._pending_trigger_for(name)
+        return self._register_async(task_id, name, trigger, run_id=run_id)
+
+    def _process_async_notification_message(
+        self, message: object
+    ) -> list[dict[str, Any]]:
+        """End async children a completion notification names.
+
+        The notification arrives as a user message on the parent thread:
+        either deepagents' labelled message (metadata names the task) or
+        the CLI's synthetic "[Async tasks update]" message (one JSON object
+        per finished task). Both are read from the full message the updates
+        event carries, never from streamed deltas.
+        """
+        msg = _as_raw_map(message)
+        if msg is None:
+            return []
+        # LangGraph serializes messages as {"type": ..., "data": {...}}.
+        nested = _as_raw_map(msg.get("data"))
+        if nested is not None:
+            msg = nested
+        events: list[dict[str, Any]] = []
+        kwargs = _as_raw_map(msg.get("additional_kwargs"))
+        if kwargs is not None:
+            event = _notification_event_from_kwargs(kwargs)
+            if event is not None:
+                events.extend(self._end_from_notification_event(event))
+        text = _text_from_content(msg.get("content"))
+        if text:
+            events.extend(self._end_from_update_text(text))
+        return events
+
+    def _end_from_notification_event(
+        self, event: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        task_id = event.get("task_id")
+        status = event.get("status")
+        if not isinstance(task_id, str) or not task_id:
+            return []
+        if not isinstance(status, str) or status not in _ASYNC_TERMINAL_STATUSES:
+            return []
+        name = event.get("agent_name")
+        name = name if isinstance(name, str) and name.strip() else None
+        run_id = event.get("run_id")
+        run_id = run_id if isinstance(run_id, str) and run_id else None
+        return self._end_async_by_task(task_id, name, run_id)
+
+    def _end_from_update_text(self, text: str) -> list[dict[str, Any]]:
+        """End the finished tasks a "[Async tasks update]" message lists."""
+        if _ASYNC_UPDATE_HEADER not in text:
+            return []
+        events: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            # Only sub-agent entries: a background process shares the
+            # shape but is not an async child.
+            if entry.get("kind") != "agent":
+                continue
+            task_id = entry.get("task_id")
+            status = entry.get("status")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            if not isinstance(status, str) or status not in _ASYNC_TERMINAL_STATUSES:
+                continue
+            name = entry.get("agent")
+            name = name if isinstance(name, str) and name.strip() else None
+            # The message carries no run id, so the task id alone routes it.
+            events.extend(self._end_async_by_task(task_id, name, None))
+        return events
 
     @staticmethod
     def _parse_namespace_segment(segment: str) -> tuple[str, str | None]:
