@@ -13,7 +13,9 @@ platform has one.
 from __future__ import annotations
 
 import errno
+import os
 import socket
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -178,6 +180,32 @@ def test_a_dead_holder_leaves_a_socket_the_next_acquirer_clears(tmp_path, monkey
         assert isinstance(second, socket.socket)
     finally:
         second.close()
+
+
+def test_a_long_home_directory_still_yields_a_bindable_path(tmp_path, monkeypatch):
+    """A home directory too long for a socket path still gets a lock.
+
+    The socket's path has to fit in sun_path: 107 bytes on Linux, 103 on
+    macOS. A home directory long enough to push it past that made every
+    bind fail with "AF_UNIX path too long" -- on the CI runner, and on
+    every macOS run, because macOS has no abstract namespace at all.
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / ("x" * 200)))
+
+    path = proposals._socket_path("0123456789abcdef0123456789abcdef")
+
+    assert len(str(path).encode("utf-8")) <= proposals._SUN_PATH_MAX
+
+
+def test_the_private_directory_is_used_when_the_path_fits(tmp_path, monkeypatch):
+    """The private directory is preferred over the temporary one."""
+    short = Path(tempfile.gettempdir()) / f"evoskill-test-{os.getpid()}"
+    monkeypatch.setattr(proposals, "_lock_base", lambda: short)
+
+    path = proposals._socket_path("0123456789abcdef0123456789abcdef")
+
+    assert path.parent == short
+    assert path.name == "evoskill-0123456789abcdef0123456789abcdef.sock"
 
 
 def test_the_fallback_directory_is_private(tmp_path, monkeypatch):

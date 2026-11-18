@@ -45,6 +45,11 @@ AUTOSKILL_SEALS_DIR = "autoskills/seals"
 # longer creates one: a file's name is what a shell unlinks.
 AUTOSKILL_LOCKS_DIR = "autoskills/locks"
 
+# A Unix socket's path has to fit in sockaddr_un.sun_path: 107 bytes on
+# Linux, 103 on macOS. The fallback lock's path is built to stay inside the
+# smaller of the two, so a long home directory cannot make it unbindable.
+_SUN_PATH_MAX = 100
+
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _CLUSTER_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SKILL_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\s*\n", re.DOTALL)
@@ -183,10 +188,61 @@ def _lock_root(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / AUTOSKILL_LOCKS_DIR
 
 
+def _lock_base() -> Path:
+    """Where the private lock directory lives, whether or not it exists."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or str(Path.home() / ".cache")
+    return Path(base) / "evoscientist" / "locks"
+
+
 def _lock_directory() -> Path:
     """The private directory the fallback lock lives in."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or str(Path.home() / ".cache")
-    directory = Path(base) / "evoscientist" / "locks"
+    directory = _lock_base()
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
+    return directory
+
+
+def _socket_path(name: str) -> Path:
+    """The pathname of the fallback lock, short enough for a Unix socket.
+
+    A socket's path has to fit in ``sockaddr_un.sun_path``: 107 bytes on
+    Linux and 103 on macOS. A home directory long enough to push the private
+    directory past that makes every bind fail with "AF_UNIX path too long",
+    and the lock is then unusable on that machine -- which is the case on a
+    CI runner, and on every macOS run.
+
+    So the private directory is used when the path fits there, and a
+    per-user directory in the system's temporary directory -- the same
+    private mode -- is used when it does not.
+    """
+    filename = f"evoskill-{name}.sock"
+    # The length is checked before the directory is created: a home
+    # directory long enough to overflow the path limit would fail the
+    # mkdir on some platforms before the fallback could be chosen.
+    private = _lock_base() / filename
+    if len(str(private).encode("utf-8")) <= _SUN_PATH_MAX:
+        return _lock_directory() / filename
+    with contextlib.suppress(OSError):
+        candidate = _temporary_lock_directory() / filename
+        if len(str(candidate).encode("utf-8")) <= _SUN_PATH_MAX:
+            return candidate
+    raise OSError(
+        "Could not build a proposal lock path that fits a Unix socket: "
+        f"{private} is longer than {_SUN_PATH_MAX} bytes"
+    )
+
+
+def _temporary_lock_directory() -> Path:
+    """A per-user directory in the system's temporary directory.
+
+    The system's temporary directory is already per-user on Windows; on
+    POSIX it is shared, so the directory carries the user's id and the
+    private mode.
+    """
+    uid = getattr(os, "getuid", None)
+    label = f"evoskill-{uid()}" if uid is not None else "evoskill-user"
+    directory = Path(tempfile.gettempdir()) / label
     directory.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(directory, 0o700)
@@ -244,9 +300,11 @@ class _ProposalLock:
     """
 
     def __init__(self, proposal_dir: Path) -> None:
+        # 128 bits, in hex: the name goes into a socket path and a mutex
+        # name, and a socket path is short.
         self._name = hashlib.sha256(
             os.path.realpath(proposal_dir).encode("utf-8", "surrogateescape")
-        ).hexdigest()
+        ).hexdigest()[:32]
         self._held: socket.socket | object | None = None
         # No file is created. The attribute names the kernel object so a
         # caller can see which draft this lock is, and so a stale pathname
@@ -304,7 +362,7 @@ class _ProposalLock:
         draft. The holder checks that the path still names the socket it
         holds: a replaced path is a forged lock, not a held one.
         """
-        path = _lock_directory() / f"evoskill-{self._name}.sock"
+        path = _socket_path(self._name)
         replaced = 0
         while True:
             held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
