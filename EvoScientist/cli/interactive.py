@@ -1111,9 +1111,15 @@ def cmd_interactive(
                             human_budget_exhausted=human_budget_exhausted,
                         )
 
+                    from ..stream.display import received_media_state
+
+                    received_files = received_media_state(msg.media)
+
                     def _channel_ask_user(ask_user_data: dict) -> dict:
                         """Send ask_user questions to channel user and wait for reply."""
-                        return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+                        return _ch_mod.channel_ask_user_prompt(
+                            ask_user_data, msg, received_files=received_files
+                        )
 
                     # ---- Slash command dispatch (cmd_manager, not the agent) ----
                     # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
@@ -1216,6 +1222,7 @@ def cmd_interactive(
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
                             received_media=msg.media,
+                            received_files=received_files,
                             work_dir=str(state["dirs"].work_dir),
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),

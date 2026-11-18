@@ -159,7 +159,7 @@ def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | N
 def received_media_state(
     received_media: Iterable[str] | None,
 ) -> dict[tuple[int, int], tuple[int, int]]:
-    """The files that arrived with a message, as they are when its turn starts.
+    """The received files as they are when recorded for the current turn.
 
     Keyed by the file itself, so a read matches however the agent spells it.
     """
@@ -189,7 +189,7 @@ def forward_media_result(
     dangerous mode when *dangerous* is set.
 
     A file in *received_files* (:func:`received_media_state`) came from the
-    user with this turn's message; a read of it is not sent back while it is
+    user during this turn; a read of it is not sent back while it is
     still as it arrived.
     """
     if (
@@ -1879,6 +1879,7 @@ def _run_streaming(
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
     received_media: list[str] | None = None,
+    received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
@@ -1919,6 +1920,8 @@ def _run_streaming(
             path under ``/skills/`` or ``/memories/`` names that tier's file.
         received_media: Files attached to this turn, which are not echoed
             when a read_file result names an unchanged attachment.
+        received_files: Shared file states for a channel turn, extended by
+            attachments received while answering its questions.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1953,6 +1956,7 @@ def _run_streaming(
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
                 received_media=received_media,
+                received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
@@ -1971,7 +1975,8 @@ def _run_streaming(
     state = _state if _state is not None else StreamState()
     if _media_sent is None:
         _media_sent = set()
-    received_files = received_media_state(received_media)
+    if received_files is None:
+        received_files = received_media_state(received_media)
     _MIN_THINKING_LEN = 200
 
     def _stopped_response() -> str:

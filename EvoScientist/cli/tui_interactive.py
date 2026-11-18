@@ -1758,6 +1758,7 @@ def run_textual_interactive(
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
             received_media: list[str] | None = None,
+            received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1867,7 +1868,11 @@ def run_textual_interactive(
                 self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
-            _received_files = received_media_state(received_media)
+            _received_files = (
+                received_files
+                if received_files is not None
+                else received_media_state(received_media)
+            )
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -3411,13 +3416,19 @@ def run_textual_interactive(
                     """
                     return _ch_mod.channel_hitl_prompt(action_requests, msg, **kwargs)
 
+                from ..stream.display import received_media_state
+
+                received_files = received_media_state(msg.media)
+
                 def _channel_ask_user(ask_user_data: dict) -> dict:
                     """Send ask_user questions to channel user and wait for reply.
 
                     This runs in a thread (called via asyncio.to_thread) so it can
                     block without freezing the Textual event loop.
                     """
-                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+                    return _ch_mod.channel_ask_user_prompt(
+                        ask_user_data, msg, received_files=received_files
+                    )
 
                 # Handle slash commands from channel via the shared
                 # dispatcher (same path Rich CLI and headless serve use).
@@ -3463,6 +3474,7 @@ def run_textual_interactive(
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
                         received_media=msg.media,
+                        received_files=received_files,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,

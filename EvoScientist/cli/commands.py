@@ -1973,8 +1973,14 @@ def _serve_process_message(
             action_requests, msg, human_budget_exhausted=human_budget_exhausted
         )
 
+    from ..stream.display import received_media_state
+
+    received_files = received_media_state(msg.media)
+
     def _ask_user_prompt(ask_user_data: dict) -> dict:
-        return channel_ask_user_prompt(ask_user_data, msg)
+        return channel_ask_user_prompt(
+            ask_user_data, msg, received_files=received_files
+        )
 
     # ---- Slash command dispatch (cmd_manager, not the agent) ----
     # Headless equivalent of the Rich CLI / TUI slash branch so channel
@@ -2061,6 +2067,7 @@ def _serve_process_message(
                 on_todo=_send_todo,
                 on_file_write=_send_media,
                 received_media=msg.media,
+                received_files=received_files,
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
                 routes=file_tool_routes(dirs.workspace),
