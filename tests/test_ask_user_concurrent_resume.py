@@ -261,7 +261,11 @@ async def test_the_lock_is_released_when_the_stream_is_closed_early(tmp_path):
     still give the lock back: otherwise every later run of that thread waits
     forever.
     """
-    from EvoScientist.backends import _THREAD_RUN_LOCKS, thread_run_lock
+    from EvoScientist.backends import (
+        _THREAD_RUN_LOCKS,
+        release_thread_run_lock,
+        thread_run_lock,
+    )
 
     agent, _model = _agent(tmp_path, _two_ask_user_replies())
     await _drain(agent, "t", "pick for me")
@@ -275,8 +279,11 @@ async def test_the_lock_is_released_when_the_stream_is_closed_early(tmp_path):
 
     # And the thread can be run again straight away.
     entry = thread_run_lock("t")
-    await entry.wait_and_acquire()
-    entry.release()
+    try:
+        await entry.wait_and_acquire()
+    finally:
+        entry.release()
+        release_thread_run_lock("t", entry)
 
 
 @pytest.mark.asyncio
@@ -334,9 +341,16 @@ async def test_a_waiter_keeps_the_entry_alive():
 
     # A new request for the same thread must land on the SAME lock, not on
     # a second one.
-    assert thread_run_lock("t") is holder
-    assert _THREAD_RUN_LOCKS.get("t") is holder, list(_THREAD_RUN_LOCKS)
+    third = thread_run_lock("t")
+    try:
+        assert third is holder
+        assert _THREAD_RUN_LOCKS.get("t") is holder, list(_THREAD_RUN_LOCKS)
+    finally:
+        release_thread_run_lock("t", third)
 
     await wait_task
     waiter.release()
+    # Every registration is given back: a reference left behind would keep
+    # the entry in the registry and fail another test's assertion.
+    release_thread_run_lock("t", waiter)
     release_thread_run_lock("t", holder)
