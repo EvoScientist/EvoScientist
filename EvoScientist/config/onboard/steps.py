@@ -769,8 +769,14 @@ def _same_endpoint(first: str, second: str) -> bool:
 
     if not first or not second:
         return False
-    left = urlsplit(first)
-    right = urlsplit(second)
+    try:
+        left = urlsplit(first)
+        right = urlsplit(second)
+    except ValueError:
+        # A malformed URL is not an endpoint this probe can compare: an
+        # unmatched bracket raises here. Treat it as a different endpoint
+        # rather than letting the wizard fail.
+        return False
     return (
         left.scheme == right.scheme
         and left.netloc == right.netloc

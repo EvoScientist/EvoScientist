@@ -438,3 +438,20 @@ def test_the_timed_out_request_is_aborted(monkeypatch):
     assert names == []
     assert elapsed < 2.0, elapsed
     assert closed, "the client was not closed, so the request kept running"
+
+
+def test_a_malformed_saved_url_does_not_stop_the_probe(monkeypatch):
+    """A URL that cannot even be parsed is not the endpoint being probed.
+
+    ``urlsplit`` raises on an unmatched bracket, and that must not abort
+    the wizard: the valid environment endpoint still has to be probed.
+    """
+    seen = _probe_seen(
+        monkeypatch,
+        _config(url="http://[broken/v1", key="saved-key"),
+        env_url="http://env-endpoint/v1",
+        env_key="env-key",
+    )
+
+    assert seen["base_url"] == "http://env-endpoint/v1", seen
+    assert seen["api_key"] == "env-key", seen
