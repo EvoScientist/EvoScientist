@@ -371,14 +371,14 @@ def test_f4_a_revert_in_a_process_that_did_not_approve_refuses(tmp_path):
 
 
 def test_f5_the_lock_is_outside_the_proposals_directory(tmp_path):
-    """Finding 5: a lock inside the agent write root can be unlinked.
+    """Finding 5: a lock file the agent shell can unlink does not serialize.
 
     On POSIX, unlinking a locked pathname removes the directory entry while
-    the holder keeps the old inode, and a second FileLock then locks a new
-    one. The lock now lives beside the drafts, outside the proposals
-    directory the agent tools are rooted at, so a write through those tools
-    cannot name it. A shell that computes the path still can, and that
-    remaining exposure is stated on the lock itself.
+    the holder keeps the old inode, and a second lock then locks a new one.
+    Moving the file beside the drafts only stops the file tools. The lock is
+    now a kernel object with no pathname, so holding it creates no file the
+    shell can delete and replace. Guessing the object name can only stall
+    this draft.
     """
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Reviewed body.")
@@ -386,15 +386,19 @@ def test_f5_the_lock_is_outside_the_proposals_directory(tmp_path):
     from EvoScientist.memory.autoskills.proposals import _proposal_file_lock
 
     proposals = autoskill_proposals_dir(memory_dir)
-    # Where the lifecycle itself puts the lock, taken the way submit does.
+    before = {path for path in memory_dir.rglob("*") if path.is_file()}
     with _proposal_file_lock(proposals / "probe-skill"):
         locks = list(memory_dir.rglob("*.lock"))
-    outside = [path for path in locks if not path.is_relative_to(proposals)]
-    assert outside, "the per-draft lock is inside the proposals directory"
-    assert not any(path.parent == proposals for path in locks)
+        created = {
+            path
+            for path in memory_dir.rglob("*")
+            if path.is_file() and path not in before
+        }
+    assert locks == []
+    assert created == set()
 
 
-def test_relisting_records_the_current_body(tmp_path):
+def test_relisting_records_the_current_body(tmp_path, monkeypatch):
     """Showing the draft again records what is on screen now.
 
     A listing is not a bypass: it shows the current content, so the approval
@@ -452,7 +456,13 @@ def test_relisting_records_the_current_body(tmp_path):
     if not approved["approved"]:
         # The first listing did not record the display. Show it the way the
         # review page does and decide again: what was just shown is installed.
-        from EvoScientist.langgraph_dev import autoskills_api
+        from EvoScientist import paths
+        from EvoScientist.langgraph_dev import autoskills_api, registry
+
+        fresh = registry.Registry()
+        fresh._loaded()[paths.Workspace(skills_dir.parent).key] = True
+        monkeypatch.setattr(registry, "REGISTRY", fresh)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
 
         _code, payload = autoskills_api.list_drafts()
         assert any(

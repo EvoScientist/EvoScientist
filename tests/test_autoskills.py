@@ -451,12 +451,11 @@ def test_atomic_temporary_files_are_not_installed(tmp_path, monkeypatch):
 
 
 def test_decision_waits_for_lock_held_by_another_process(tmp_path):
-    from filelock import FileLock
+    from EvoScientist.memory.autoskills.proposals import _proposal_file_lock
 
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
-    lock_path = memory_dir / "autoskills" / "locks" / "focused-validation.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    proposal_dir = autoskill_proposals_dir(memory_dir) / "focused-validation"
     code = (
         "import sys\n"
         "from EvoScientist.memory.autoskills.proposals import (\n"
@@ -467,7 +466,7 @@ def test_decision_waits_for_lock_held_by_another_process(tmp_path):
     )
     process = None
     try:
-        with FileLock(str(lock_path)):
+        with _proposal_file_lock(proposal_dir):
             process = subprocess.Popen(
                 [sys.executable, "-c", code, str(memory_dir)],
                 stdout=subprocess.PIPE,
@@ -4538,14 +4537,22 @@ def test_approve_command_accepts_global_scope(tmp_path, monkeypatch):
         workspace_dir=tmp_path,
     )
     messages: list[str] = []
+    rendered: list[object] = []
     ctx = SimpleNamespace(
         workspace=SimpleNamespace(root=tmp_path, skills_dir=skills_dir),
         ui=SimpleNamespace(
             append_system=lambda *args, **kwargs: messages.append(str(args[0])),
-            mount_renderable=lambda *args, **kwargs: None,
+            mount_renderable=lambda item, **kwargs: rendered.append(item),
         ),
     )
 
+    asyncio.run(
+        AutoSkillsCommand().execute(
+            ctx,
+            ["review"],
+        )
+    )
+    assert rendered, "review did not render the draft"
     asyncio.run(
         AutoSkillsCommand().execute(
             ctx,

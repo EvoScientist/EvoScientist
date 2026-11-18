@@ -11,7 +11,9 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -25,7 +27,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from filelock import FileLock
 
 from ... import paths
 
@@ -39,10 +40,8 @@ AUTOSKILL_PROCESSED_DIR = "autoskills/processed"
 # reviewed the draft, and detects a body that changed between submit and that
 # automatic approval.
 AUTOSKILL_SEALS_DIR = "autoskills/seals"
-# The per-draft lock lives here, beside the drafts but outside the proposals
-# directory the agent's tools are rooted at. Unlinking a lock file inside
-# that directory used to drop the directory entry while the first process
-# still held the old inode, and a second FileLock could then lock a new one.
+# Kept so a reader can find where lock files used to live. The lifecycle no
+# longer creates one: a file's name is what a shell unlinks.
 AUTOSKILL_LOCKS_DIR = "autoskills/locks"
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
@@ -102,16 +101,18 @@ _SCOPE_GLOBAL = "global"
 _SKILL_SCOPES = frozenset({_SCOPE_WORKSPACE, _SCOPE_GLOBAL})
 
 
-# What this process computed when it displayed a draft. Keyed by the draft
-# folder's real path and its ``updated_at``, so a resubmit is a different
-# record and a second listing replaces the record of the content it showed.
-# This is the only record a person's approval trusts: it lives in the memory
-# of the process that showed the draft, which the agent's shell cannot write.
-# A file cannot take its place. There is no path on this machine the agent,
-# running as this user, cannot reach. It is process-global rather than a
-# context variable because the server and the CLI display a draft on one
-# thread and decide it on another.
-_reviews: dict[tuple[str, str], str] = {}
+# What this process computed when it rendered a draft's content. Keyed by
+# the draft folder's real path and its ``updated_at``, so a resubmit is a
+# different record and rendering the draft again replaces the record of the
+# content that was shown. The value pins the body, the decision fields and
+# the normalised workspace the content was shown under. This is the only
+# record a person's approval trusts: it lives in the memory of the process
+# that rendered the draft, which the agent's shell cannot write. A file
+# cannot take its place. There is no path on this machine the agent, running
+# as this user, cannot reach. It is process-global rather than a context
+# variable because the server and the CLI render a draft on one thread and
+# decide it on another.
+_reviews: dict[tuple[str, str], tuple[str, str | None]] = {}
 _reviews_guard = threading.Lock()
 # What an approval in this process installed: the per-file digests, the tier
 # and the real path. The manifest copies of these are agent-writable, so a
@@ -162,33 +163,106 @@ def _seal_root(memory_dir: str | Path) -> Path:
 
 
 def _lock_root(memory_dir: str | Path) -> Path:
-    """Where the per-draft locks live: beside the drafts, not among them.
+    """Where lock files used to live. The lifecycle no longer writes there.
 
-    The proposals directory is the root of the agent's file tools and of its
-    shell. A lock file stored in there can be unlinked, and on POSIX
-    unlinking a locked pathname removes the directory entry while the holder
-    keeps the old inode, so another ``FileLock`` creates and locks a new one.
-    Keeping the lock here means a write made through those tools, whose paths
-    stay inside the proposals directory, cannot name it.
-
-    What remains: the agent's shell is not confined to that directory. A
-    command that computes this path can still unlink the lock file, and the
-    same POSIX window then exists. There is no file path this user cannot
-    reach, so no lock file is safe from a shell that is allowed to run.
+    A lock file's name is the thing being protected, and the agent's shell
+    can unlink that name. On POSIX the holder keeps the old inode while a
+    second lock creates a new one. The lock is now a kernel object with no
+    pathname, so this directory is not created and not required.
     """
     return Path(memory_dir).expanduser() / AUTOSKILL_LOCKS_DIR
 
 
-def _proposal_file_lock(proposal_dir: Path) -> FileLock:
+class _ProposalLock:
+    """One cross-process lock for a draft, with no filesystem pathname.
+
+    POSIX takes an abstract-namespace socket: its name starts with a NUL and
+    is not a directory entry, so unlink cannot drop it while it is held.
+    Windows takes a named mutex, which is a kernel object rather than a file.
+    The worst a shell that guesses the name can do is hold the object, which
+    stalls this one draft. It cannot replace the object with another one the
+    way unlinking a lock file does. The name is derived from the draft
+    folder, so two processes locking the same draft contend and two drafts
+    do not.
+    """
+
+    def __init__(self, proposal_dir: Path) -> None:
+        self._name = hashlib.sha256(
+            os.path.realpath(proposal_dir).encode("utf-8", "surrogateescape")
+        ).hexdigest()
+        self._held: socket.socket | object | None = None
+        # No file is created. The attribute names the kernel object so a
+        # caller can see which draft this lock is, and so a stale pathname
+        # from the old lock file is not what acquisition uses.
+        self.lock_file = f"autoskill-proposal:{self._name}"
+
+    def __enter__(self) -> _ProposalLock:
+        if sys.platform == "win32":
+            self._held = self._acquire_windows()
+        else:
+            self._held = self._acquire_posix()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        held, self._held = self._held, None
+        if held is None:
+            return
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.kernel32.ReleaseMutex(int(held))
+            ctypes.windll.kernel32.CloseHandle(int(held))
+            return
+        cast_socket = held
+        assert isinstance(cast_socket, socket.socket)
+        cast_socket.close()
+
+    def _acquire_posix(self) -> socket.socket:
+        # A leading NUL is the abstract namespace. The socket has no path.
+        address = b"\0evoskill-" + self._name.encode("ascii")
+        while True:
+            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                held.bind(address)
+            except OSError:
+                held.close()
+                time.sleep(0.05)
+                continue
+            return held
+
+    def _acquire_windows(self) -> int:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = (
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        )
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        name = f"Local\\EvoScientist-autoskill-{self._name}"
+        handle = kernel32.CreateMutexW(None, False, name)
+        if not handle:
+            raise OSError("Could not create the proposal mutex")
+        # INFINITE. A lifecycle writer waits; it does not time out and proceed.
+        waited = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+        if waited not in (0, 0x80):
+            kernel32.CloseHandle(handle)
+            raise OSError("Could not acquire the proposal mutex")
+        return int(handle)
+
+
+def _proposal_file_lock(proposal_dir: Path) -> _ProposalLock:
     """The one lock every writer of this draft takes, across processes.
 
-    The lock file sits outside the proposals directory, so it is not one of
-    the files an approval copies and not a name the agent's file tools can
-    write. See :func:`_lock_root` for the POSIX unlink that a shell can still
-    open.
+    The object has no pathname. A shell can guess its name and hold it,
+    which denies service for this draft, but it cannot unlink the name and
+    lock a replacement the way it could a lock file.
     """
-    memory_dir = proposal_dir.parent.parent.parent
-    return FileLock(str(_lock_root(memory_dir) / f"{proposal_dir.name}.lock"))
+    return _ProposalLock(proposal_dir)
 
 
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
@@ -245,7 +319,6 @@ def _locked_proposal(*, submit: bool = False):
                     action: False,
                     "error": f"No unique proposal matching {values['proposal_id']!r}",
                 }
-            _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
             with _proposal_file_lock(proposal_dir):
                 if not submit and lookup() != proposal_dir:
                     if function.__name__ == "revert_skill_proposal":
@@ -371,6 +444,7 @@ _SEALED_FIELDS = (
     "submitted_scope",
     "cluster_hash",
 )
+_REVIEWED_WORKSPACE = "workspace_dir"
 
 
 def _seal_path(memory_dir: str | Path, proposal_id: str) -> Path:
@@ -483,7 +557,6 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
         # The same lock an approval holds: rewriting the manifest without it
         # can put an approval that just committed back to the old workspace.
         proposal_dir = manifest_path.parent
-        _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
         with _proposal_file_lock(proposal_dir):
             manifest = _read_manifest(manifest_path)
             stored = manifest.get("workspace_dir") if manifest else None
@@ -507,6 +580,14 @@ def _proposal_manifests(memory_dir: str | Path, workspace_key: str):
     if not root.exists():
         return
     for manifest_path in sorted(root.glob("*/manifest.json")):
+        resolved_root = root.resolve()
+        if not _resolves_within_root(
+            manifest_path.parent, resolved_root
+        ) or not _resolves_within_root(manifest_path, resolved_root):
+            # A folder or manifest that resolves outside the proposals root
+            # is not a draft this process serves. A symlink is the usual
+            # way that happens; the check is on the resolved path either way.
+            continue
         manifest = _read_manifest(manifest_path)
         stored = manifest.get("workspace_dir") if manifest else None
         if not isinstance(stored, str) or not stored.strip():
@@ -545,7 +626,6 @@ def move_proposals(
         # and writing the stale manifest would drop ``approved_skill_path``
         # and put the draft back to pending, which loses Undo.
         proposal_dir = manifest_path.parent
-        _lock_root(memory_dir).mkdir(parents=True, exist_ok=True)
         with _proposal_file_lock(proposal_dir):
             current = _read_manifest(manifest_path)
             if current is None or current.get("workspace_dir") == new_key:
@@ -684,18 +764,27 @@ def list_skill_proposals(
 ) -> list[SkillProposal]:
     """List autoskill proposals recorded in memory.
 
-    ``record_review`` is set by a surface that shows the drafts to a person.
-    It records the digest of each pending draft's current body and decision
-    fields, which is what a later approval in this process compares against.
-    A listing that only counts or filters does not record one: recording is
-    the act of showing.
+    Listing does not record a review. A review record is created only by
+    :func:`record_rendered_proposal`, which a surface calls with the text it
+    has just rendered. ``record_review`` remains so older callers still
+    import, and it no longer arms a decision: a count, a filter and a
+    metadata table are not a display of the draft.
     """
+    del record_review
     proposals: list[SkillProposal] = []
     normalized_workspace = _normalize_workspace_dir(workspace_dir)
     root = _proposal_root(memory_dir)
     if not root.exists():
         return proposals
     for manifest_path in sorted(root.glob("*/manifest.json")):
+        resolved_root = root.resolve()
+        if not _resolves_within_root(
+            manifest_path.parent, resolved_root
+        ) or not _resolves_within_root(manifest_path, resolved_root):
+            # A folder or a manifest that resolves outside the proposals
+            # root is another project's file reached through a link. It is
+            # not a draft this list serves.
+            continue
         manifest = _read_manifest(manifest_path)
         if manifest is None:
             continue
@@ -709,13 +798,6 @@ def list_skill_proposals(
             continue
         if status is not None and proposal.status != status:
             continue
-        if record_review and proposal.status == "pending" and manifest is not None:
-            try:
-                record_reviewed_proposal(manifest_path.parent, manifest)
-            except (OSError, ValueError):
-                # An unreadable body is not a review. Leave it unrecorded so
-                # a decision of it is refused instead of approved unseen.
-                pass
         proposals.append(proposal)
     return proposals
 
@@ -731,20 +813,24 @@ def find_skill_proposal(
 def review_skill_proposal(
     memory_dir: str | Path, proposal_id: str
 ) -> SkillProposal | None:
-    """Find one draft and record the body and decision fields just read.
+    """Find one draft and record it when its whole content can be read.
 
-    This is what a surface calls when it shows one draft. The digest is of
-    the manifest this call read, so a decision later in this process compares
-    against the content that was shown. A draft whose body cannot be hashed
-    is returned unrecorded, and a decision of it is refused.
+    A caller of this function is treating the returned draft as shown. The
+    record is of the copied files, and a draft whose content cannot be read
+    is returned unrecorded so a decision of it is refused. A surface that
+    renders only a count, a filter or an installed file does not call this.
     """
     found = _find_with_manifest(memory_dir, proposal_id)
     if found is None:
         return None
     proposal, manifest = found
     if proposal.status == "pending":
-        with contextlib.suppress(OSError, ValueError):
-            record_reviewed_proposal(proposal.path, manifest)
+        try:
+            record_rendered_proposal(
+                proposal.path, manifest, rendered_files(proposal.path)
+            )
+        except (OSError, ValueError):
+            pass
     return proposal
 
 
@@ -1306,7 +1392,9 @@ def _decision_digest(proposal_dir: Path, manifest: dict[str, Any]) -> str:
 
     The body is what an approval copies. The decision fields decide which
     tier is written and which cluster is marked processed. Both are hashed,
-    because the agent can change either after the draft was shown.
+    because the agent can change either after the draft was shown. The
+    workspace is pinned beside this digest, not inside it: a changed
+    workspace is a different destination, compared on its own.
     """
     digest = hashlib.sha256()
     for key in _SEALED_FIELDS:
@@ -1326,18 +1414,70 @@ def record_reviewed_proposal(proposal_dir: Path, manifest: dict[str, Any]) -> st
     with this digest. Recording happens when the draft is shown, so the
     record is of the content the person saw; showing it again records the
     content shown then. A process that never showed the draft has no record,
-    and its decision is refused.
+    and its decision is refused. The normalised workspace is stored with the
+    digest: a decision whose manifest names a different project is refused
+    even when the body is unchanged.
     """
     digest = _decision_digest(proposal_dir, manifest)
+    workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
     with _reviews_guard:
-        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = digest
+        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = (
+            digest,
+            workspace,
+        )
     return digest
 
 
 def reviewed_decision_digest(proposal_dir: Path, updated_at: object) -> str | None:
     """The digest this process recorded for this version, or None."""
+    recorded = _reviewed_record(proposal_dir, updated_at)
+    return recorded[0] if recorded is not None else None
+
+
+def _reviewed_record(
+    proposal_dir: Path, updated_at: object
+) -> tuple[str, str | None] | None:
     with _reviews_guard:
         return _reviews.get(_review_key(proposal_dir, updated_at))
+
+
+def rendered_files(proposal_dir: Path) -> list[tuple[str, str]]:
+    """The copied files as ``(relative path, text)``, in the copy order.
+
+    This is the content a surface renders. A file that is not valid text is
+    rendered as a replacement-decoded view of the same bytes the digest
+    hashes, so what is on screen is what a decision will compare. A file
+    that cannot be read raises: rendering nothing must not record a review.
+    """
+    rendered: list[tuple[str, str]] = []
+    for relative in copied_files(proposal_dir):
+        fd = _open_regular(proposal_dir / relative)
+        try:
+            data = b"".join(_read_regular_chunks(fd, proposal_dir / relative))
+        finally:
+            os.close(fd)
+        rendered.append((relative.as_posix(), data.decode("utf-8", "replace")))
+    return rendered
+
+
+def record_rendered_proposal(
+    proposal_dir: Path, manifest: dict[str, Any], rendered: list[tuple[str, str]]
+) -> str | None:
+    """Record a review only when ``rendered`` is the draft's copied content.
+
+    A caller passes the text it put on screen. The record is written only
+    when that text is exactly the files an approval would copy, so a count,
+    a metadata row or an installed file cannot arm the pending draft by
+    calling this with something else. Returns the digest, or None when the
+    text is not the draft.
+    """
+    try:
+        current = rendered_files(proposal_dir)
+    except (OSError, ValueError):
+        return None
+    if list(rendered) != current:
+        return None
+    return record_reviewed_proposal(proposal_dir, manifest)
 
 
 def record_reviewed_proposal_by_id(
@@ -1405,10 +1545,16 @@ def _check_human_review(
     """
     if approved_by == "auto":
         return None
-    recorded = reviewed_decision_digest(proposal_dir, manifest.get("updated_at"))
+    recorded = _reviewed_record(proposal_dir, manifest.get("updated_at"))
     if recorded is None:
         return _not_reviewed(action, manifest.get("proposal_id"))
-    if recorded != _decision_digest(proposal_dir, manifest):
+    digest, workspace = recorded
+    if digest != _decision_digest(proposal_dir, manifest):
+        return _reviewed_changed(action, manifest.get("proposal_id"))
+    # The project the content was shown under. A manifest edited to name
+    # another workspace would otherwise install there: the WebUI reads this
+    # field to choose the destination, and it is not part of the body.
+    if workspace != _normalize_workspace_dir(manifest.get("workspace_dir")):
         return _reviewed_changed(action, manifest.get("proposal_id"))
     return None
 

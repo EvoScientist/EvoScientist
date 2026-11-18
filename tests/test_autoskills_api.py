@@ -243,6 +243,7 @@ def test_list_inlines_no_text_for_a_decided_draft(
         "skill_md_truncated",
         "rationale_md",
         "rationale_md_truncated",
+        "contents",
     ):
         assert draft[field] is None
     assert draft["description"] == "Use when testing focused-validation."
@@ -362,7 +363,8 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_by", "rejected_at", "approved_skill_path",
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
-        "rationale_md", "rationale_md_truncated", "files", "install_target",
+        "rationale_md", "rationale_md_truncated", "contents", "files",
+        "install_target",
         "install_base", "install_error",
     }  # fmt: skip
 

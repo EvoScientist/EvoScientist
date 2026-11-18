@@ -201,7 +201,10 @@ def test_review_leftover_lock_file_does_not_block_a_live_process(tmp_path):
     skills_dir = tmp_path / "skills"
     _write_draft(memory_dir, "focused-validation", "Original body.")
     _submit(memory_dir, skills_dir, "focused-validation")
+    # A lock file left from the old pathname must not be what a decision
+    # waits on: the lock is a kernel object, so a file here is inert.
     lock = memory_dir / "autoskills" / "locks" / "focused-validation.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_bytes(b"left from a dead process")
     record_reviewed_proposal_for(memory_dir, "focused-validation")
     result = reject_skill_proposal(memory_dir, "focused-validation")

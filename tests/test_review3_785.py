@@ -434,7 +434,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
     Both writers take the per-draft lock and the mover re-reads the manifest
     under it, so the approval's record survives.
     """
-    from filelock import FileLock
+    from EvoScientist.memory.autoskills.proposals import _proposal_file_lock
 
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _draft(memory_dir, "probe-skill", "Reviewed body.")
@@ -460,7 +460,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
     )
     assert approved["approved"] is True, approved
     before = _manifest(memory_dir, "probe-skill")
-    lock = memory_dir / "autoskills" / "locks" / "probe-skill.lock"
+    proposal_dir = autoskill_proposals_dir(memory_dir) / "probe-skill"
     entered = threading.Event()
     moved: dict[str, int] = {}
 
@@ -473,7 +473,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
             {},
         )
 
-    with FileLock(str(lock)):
+    with _proposal_file_lock(proposal_dir):
         worker = threading.Thread(target=mover)
         worker.start()
         assert entered.wait(5)
@@ -493,7 +493,7 @@ def test_move_and_upgrade_take_the_proposal_lock(tmp_path):
 
 def test_upgrade_waits_for_the_same_lock(tmp_path):
     """The one-time workspace upgrade takes the per-draft lock too."""
-    from filelock import FileLock
+    from EvoScientist.memory.autoskills.proposals import _proposal_file_lock
 
     memory_dir = tmp_path / "memories"
     run = tmp_path / "project" / "runs" / "20260101_000000"
@@ -515,14 +515,13 @@ def test_upgrade_waits_for_the_same_lock(tmp_path):
         "submitted_scope": "workspace",
     }
     (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    lock = memory_dir / "autoskills" / "locks" / "probe-skill.lock"
     entered = threading.Event()
 
     def upgrade() -> None:
         entered.set()
         upgrade_proposal_workspaces(memory_dir)
 
-    with FileLock(str(lock)):
+    with _proposal_file_lock(folder):
         worker = threading.Thread(target=upgrade)
         worker.start()
         assert entered.wait(5)

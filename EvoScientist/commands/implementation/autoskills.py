@@ -4,7 +4,9 @@ import asyncio
 from enum import Enum
 from typing import ClassVar
 
+from rich.console import Group
 from rich.table import Table
+from rich.text import Text
 
 from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
@@ -176,7 +178,6 @@ class AutoSkillsCommand(Command):
             paths.MEMORIES_DIR,
             status=status,
             workspace_dir=workspace_dir,
-            record_review=True,
         )
         if not proposals:
             if status:
@@ -219,6 +220,37 @@ class AutoSkillsCommand(Command):
                 proposal.description,
             )
         ctx.ui.mount_renderable(table)
+        # The table is metadata. The review record is of the content below:
+        # every file an approval would copy, rendered in full. A file that
+        # cannot be rendered is named and left unrecorded, so its decision
+        # stays refused.
+        from ...memory.autoskills.proposals import (
+            record_rendered_proposal,
+            rendered_files,
+        )
+
+        bodies = []
+        for proposal in proposals:
+            if proposal.status != "pending" or proposal.manifest is None:
+                continue
+            try:
+                files = rendered_files(proposal.path)
+            except (OSError, ValueError) as exc:
+                bodies.append(
+                    Text(
+                        f"{proposal.proposal_id}: draft content could not be shown ({exc})",
+                        style="red",
+                    )
+                )
+                continue
+            record_rendered_proposal(proposal.path, proposal.manifest, files)
+            shown = [Text(f"Draft {proposal.proposal_id}", style="bold")]
+            for relative, content in files:
+                shown.append(Text(f"--- {relative}", style="cyan"))
+                shown.append(Text(content))
+            bodies.append(Group(*shown))
+        if bodies:
+            ctx.ui.mount_renderable(Group(*bodies))
         ctx.ui.append_system(
             f"Use {AUTOSKILLS_COMMAND} approve <id> or "
             f"{AUTOSKILLS_COMMAND} reject <id>.",
@@ -247,12 +279,6 @@ class AutoSkillsCommand(Command):
             )
             return
         workspace_dir = self._workspace_dir(ctx)
-        # Approving is a decision, so this process shows the one draft the
-        # id resolves to and records that body. The review command lists it;
-        # this covers an approval given by id without a separate listing.
-        await asyncio.to_thread(
-            self._show_resolved, paths.MEMORIES_DIR, proposal_id, workspace_dir
-        )
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
@@ -294,9 +320,6 @@ class AutoSkillsCommand(Command):
             )
             return
         workspace_dir = self._workspace_dir(ctx)
-        await asyncio.to_thread(
-            self._show_resolved, paths.MEMORIES_DIR, proposal_id, workspace_dir
-        )
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
@@ -310,25 +333,6 @@ class AutoSkillsCommand(Command):
             )
         else:
             ctx.ui.append_system(f"Reject failed: {result.get('error')}", style="red")
-
-    @staticmethod
-    def _show_resolved(memory_dir, proposal_id: str, workspace_dir) -> None:
-        """Record the one draft an id names, the way listing it would.
-
-        A prefix resolves to that one draft first, and only its exact id is
-        recorded. Recording every draft would read drafts this command did
-        not show.
-        """
-        from ...memory.autoskills.proposals import (
-            _proposal_dir_by_id,
-            record_reviewed_proposal_by_id,
-        )
-
-        found = _proposal_dir_by_id(
-            memory_dir, proposal_id, workspace_dir=workspace_dir
-        )
-        if found is not None:
-            record_reviewed_proposal_by_id(memory_dir, found.name)
 
     async def _run(self, ctx: CommandContext) -> None:
         from ...config import get_effective_config

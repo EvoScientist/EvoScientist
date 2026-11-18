@@ -36,10 +36,10 @@ from EvoScientist.memory.autoskills.proposals import (
     installed_skills_read_once,
     list_skill_proposals,
     proposal_install_target,
-    record_reviewed_proposal,
+    record_rendered_proposal,
     reject_skill_proposal,
+    rendered_files,
     revert_skill_proposal,
-    review_skill_proposal,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,12 +106,6 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
     # ``find_skill_proposal`` where one file is served.
     if proposal.proposal_id != proposal.path.name:
         return None
-    if proposal.status == "pending" and proposal.manifest is not None:
-        # The page shows this draft. The digest is of the manifest the list
-        # already read; a body that cannot be hashed stays unrecorded and a
-        # decision of it is refused.
-        with contextlib.suppress(OSError, ValueError):
-            record_reviewed_proposal(proposal.path, proposal.manifest)
     return key
 
 
@@ -174,6 +168,45 @@ def _installed(base: Path, relative: Path) -> bool:
         return False
 
 
+def _record_shown_draft(proposal: SkillProposal, draft: dict[str, Any]) -> None:
+    """Record the review of a draft whose content this response returns.
+
+    The list inlines ``SKILL.md`` and ``RATIONALE.md``. Every other copied
+    file is appended to ``skill_md``, which is the body the page shows, so
+    the record is of text present in the payload. The file rows stay
+    metadata. A draft that cannot be read in full, or whose text was cut,
+    is left unrecorded.
+    """
+    assert proposal.manifest is not None
+    try:
+        rendered = rendered_files(proposal.path)
+    except (OSError, ValueError):
+        return
+    by_path = dict(rendered)
+    skill = by_path.get("SKILL.md")
+    if skill is None or draft.get("skill_md") != skill[:MAX_INLINE_CHARS]:
+        # The inlined text is not the file an approval would copy.
+        return
+    rationale = by_path.get("RATIONALE.md")
+    if (
+        rationale is not None
+        and draft.get("rationale_md") != rationale[:MAX_INLINE_CHARS]
+    ):
+        return
+    if draft.get("skill_md_truncated") or draft.get("rationale_md_truncated"):
+        # A cut text is not the whole draft, so it is not a review of it.
+        return
+    # The two markdown texts are inlined above. Every other copied file is
+    # returned in ``contents``, path to text, so the payload holds the whole
+    # draft and the review record is of that text. A file row stays metadata.
+    draft["contents"] = {
+        relative: content
+        for relative, content in rendered
+        if relative not in {"SKILL.md", "RATIONALE.md"}
+    }
+    record_rendered_proposal(proposal.path, proposal.manifest, rendered)
+
+
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     folder = proposal.path.resolve()
     # A decided draft's texts are read through the file route: the list is
@@ -223,6 +256,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "skill_md_truncated": skill_md[1],
         "rationale_md": rationale_md[0],
         "rationale_md_truncated": rationale_md[1],
+        "contents": {} if proposal.status == "pending" else None,
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -250,6 +284,12 @@ def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
                 continue
             try:
                 draft = _draft(proposal, key)
+                if proposal.status == "pending" and proposal.manifest is not None:
+                    # The row is in the response, so its inlined texts are
+                    # what the page shows. Record that rendering only. A
+                    # filter that dropped the row never reaches here, and a
+                    # draft that cannot be sent does not either.
+                    _record_shown_draft(proposal, draft)
                 json.dumps(draft, ensure_ascii=False).encode("utf-8")
             except Exception:
                 # One draft that cannot be read or sent must not fail the page.
@@ -303,9 +343,9 @@ def read_draft_file(
     relative = _relative_path(rel_path)
     if relative is None:
         return 400, {"error": "invalid_path"}
-    # Reading a draft file is how the page shows one draft, so it records the
-    # review the same way the list does.
-    proposal = review_skill_proposal(paths.MEMORIES_DIR, proposal_id)
+    # Looking the draft up does not record a review. The installed copy is
+    # not the pending draft, and one file is not the whole draft either.
+    proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     served = _served_keys(registry.REGISTRY.registered())
     key = _listed(proposal, served) if proposal is not None else None
     if proposal is None or key is None:
@@ -330,7 +370,25 @@ def read_draft_file(
         return 404, {"error": "not_found"}
     if not _resolves_within_root(path, folder):
         return 400, {"error": "invalid_path"}
-    return _read_text(path)
+    status, body = _read_text(path)
+    if (
+        status == 200
+        and not installed
+        and isinstance(body, str)
+        and proposal.status == "pending"
+        and proposal.manifest is not None
+    ):
+        # This response returns one file. Record a review only when that
+        # file is the whole draft an approval would copy: a single-file
+        # draft's body is then on screen, and a larger draft stays unrecorded
+        # until the list returns every copied file.
+        try:
+            rendered = rendered_files(proposal.path)
+        except (OSError, ValueError):
+            rendered = []
+        if rendered == [(relative, body)]:
+            record_rendered_proposal(proposal.path, proposal.manifest, rendered)
+    return status, body
 
 
 def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
