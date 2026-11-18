@@ -424,6 +424,11 @@ class TestSimpleCommands:
         assert shell_syntax.assigned_values(
             "D=x; unset D; for B in {a,b}; do :; done; mapfile"
         ) == {"D": None, "B": ("a", "b"), "MAPFILE": None}
+        # The word picked, or empty on a reply that picks none.
+        assert shell_syntax.assigned_values("select S in a b; do :; done") == {
+            "S": None,
+            "REPLY": None,
+        }
         # A brace expansion is read as the words it makes, if it is read.
         assert shell_syntax.assigned_values(
             'for S in s_{0..2} {a,b}x; do :; done; for Q in "{a,b}" {0..99}; do :; done'
