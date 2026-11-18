@@ -13,9 +13,7 @@ platform has one.
 from __future__ import annotations
 
 import errno
-import os
 import socket
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -198,13 +196,17 @@ def test_a_long_home_directory_still_yields_a_bindable_path(tmp_path, monkeypatc
 
 
 def test_the_private_directory_is_used_when_the_path_fits(tmp_path, monkeypatch):
-    """The private directory is preferred over the temporary one."""
-    short = Path(tempfile.gettempdir()) / f"evoskill-test-{os.getpid()}"
-    monkeypatch.setattr(proposals, "_lock_base", lambda: short)
+    """The private directory is preferred over the temporary one.
+
+    The base is a relative path, so the test does not depend on how long
+    this machine's temporary directory happens to be.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_base", lambda: Path("evtest"))
 
     path = proposals._socket_path("0123456789abcdef0123456789abcdef")
 
-    assert path.parent == short
+    assert path.parent == Path("evtest")
     assert path.name == "evoskill-0123456789abcdef0123456789abcdef.sock"
 
 
