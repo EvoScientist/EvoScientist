@@ -531,6 +531,7 @@ def test_backend_outlives_webui(monkeypatch):
     """The backend the WebUI started is shared by every session: closing the
     WebUI stops only its front-end."""
     captured = _run_webui_once(monkeypatch, _make_config())
+    assert any("WebUI server exited." in line for line in captured["printed"])
     assert captured["stop_calls"] == 0
     assert captured["frontend_stops"] == 1
     assert captured["atexit_fns"] == []
@@ -557,6 +558,7 @@ def test_stop_signals_clean_up_webui(monkeypatch, stage, signal_name):
     if signum is None:
         pytest.skip(f"{signal_name} is unavailable on this platform")
     captured = _run_webui_once(monkeypatch, _make_config(), signal_on=(stage, signum))
+    assert not any("WebUI server exited." in line for line in captured["printed"])
     assert captured["frontend_stops"] == 1
     assert captured["stop_calls"] == 0
     assert captured["handlers"] == captured["original_handlers"]
@@ -666,3 +668,46 @@ def test_first_stop_signal_during_error_cleanup(monkeypatch, signal_name, stage)
         pytest.fail("first shutdown signal interrupted error-driven cleanup")
     assert stops == [True]
     assert deliveries == [stage]
+
+
+@pytest.mark.parametrize("failure", [SystemExit, RuntimeError])
+def test_shutdown_output_failure_still_stops_frontend(monkeypatch, failure):
+    import signal
+
+    stopped = []
+    original_print = _RecordingConsole.print
+
+    def broken_shutdown_output(self, *args, **kwargs):
+        if any("Shutting down" in str(arg) for arg in args):
+            raise failure("shutdown output failed")
+        return original_print(self, *args, **kwargs)
+
+    class StopRecorder(webui_mod.WebUILauncher):
+        def stop(self):
+            super().stop()
+            stopped.append(True)
+
+    monkeypatch.setattr(_RecordingConsole, "print", broken_shutdown_output)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", StopRecorder)
+    with pytest.raises(failure, match="shutdown output failed"):
+        _run_webui_once(monkeypatch, _make_config(), signal_on=("wait", signal.SIGINT))
+    assert stopped == [True]
+
+
+def test_signal_during_shutdown_shield_setup_still_stops_frontend(monkeypatch):
+    stopped = []
+
+    def interrupted_shield():
+        raise KeyboardInterrupt("shield setup interrupted")
+
+    class StopRecorder(webui_mod.WebUILauncher):
+        def stop(self):
+            super().stop()
+            stopped.append(True)
+
+    from EvoScientist.deploy import stop_signals
+
+    monkeypatch.setattr(stop_signals, "ignore_further_stop_signals", interrupted_shield)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", StopRecorder)
+    _run_webui_once(monkeypatch, _make_config(), interrupt_on="unused trigger")
+    assert stopped == [True]
