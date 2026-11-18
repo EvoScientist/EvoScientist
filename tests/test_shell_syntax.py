@@ -324,6 +324,20 @@ class TestSimpleCommands:
         names = {each.name for each in shell_syntax.simple_commands(command)}
         assert ("function" in names) is defines
 
+    @pytest.mark.parametrize(
+        ("command", "name", "args"),
+        [
+            ("function w { cd $(mktemp -d) && touch x; }; w", "cd", ("$(mktemp -d)",)),
+            ("function s { kill $(lsof -t -i:8000); }; s", "kill", ("$(lsof -t -i:8000)",)),
+            ("function f { rm -rf x/$(date +%F); }; f", "rm", ("-rf", "x/$(date +%F)")),
+        ],
+    )  # fmt: skip
+    def test_a_function_body_ending_in_a_substitution_is_read_whole(
+        self, command, name, args
+    ):
+        found = shell_syntax.simple_commands(command)
+        assert args in [each.args for each in found if each.name == name]
+
     def test_the_same_script_in_two_env_folders_is_read_in_both(self):
         found = shell_syntax.simple_commands("env -C a sh -c X; env -C b sh -c X")
         assert [each.folders for each in found if each.name == "X"] == [

@@ -1349,11 +1349,17 @@ def _simple_commands(
                 (at + 1 for at, (arg, _) in enumerate(args) if arg in ("{", "(")),
                 len(args),
             )
-            spans = [token for _, token in args[body:] if token is not None]
-            if spans:
-                nested.append(
-                    (command[int(spans[0]["start"]) : int(spans[-1]["end"])], (), ())
-                )
+            # Each argument is a slice of *command*, in order; a substitution
+            # has no token of its own, so its place is found from its text.
+            position = int(token["end"])
+            body_start = None
+            for at, (arg, _) in enumerate(args):
+                position = command.index(arg, position)
+                if at == body:
+                    body_start = position
+                position += len(arg)
+            if body_start is not None:
+                nested.append((command[body_start:position], (), ()))
             continue
         scripts_before = len(nested)
         unwrapped = _unwrap(name, args, (), nested, (), assigned)
