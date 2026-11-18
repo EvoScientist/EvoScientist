@@ -59,14 +59,25 @@ class _Scripted(BaseChatModel):
 
 @dataclass
 class _RecordingGateway:
-    """LocalGraphGateway wrapper that records every RunRequest."""
+    """LocalGraphGateway wrapper that records every RunRequest and the
+    order the ask_user events arrive in."""
 
     inner: LocalGraphGateway = field(default_factory=LocalGraphGateway)
     requests: list[Any] = field(default_factory=list)
+    ask_user_arrivals: list[str] = field(default_factory=list)
 
     def stream_events(self, request):
         self.requests.append(request)
-        return self.inner.stream_events(request)
+        inner = self.inner.stream_events(request)
+
+        async def _recording():
+            async for event in inner:
+                if event.get("type") == "ask_user":
+                    question = event["questions"][0]["question"]
+                    self.ask_user_arrivals.append(question)
+                yield event
+
+        return _recording()
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
@@ -153,10 +164,17 @@ def test_two_ask_user_calls_in_one_message_are_both_answered(tmp_path):
     result, gateway = _run(agent, _prompt)
 
     assert result == "Both answers received."
-    # Both questions were displayed, one per interrupt, in first-emitted order.
+    # Both questions were displayed, one per interrupt, in first-emitted
+    # order. LangGraph emits parallel-tool interrupts in completion order,
+    # which varies run to run; what the CLI's keep-first block guarantees is
+    # that the questions are ASKED in the order the events arrive — the
+    # same order the TUI and the channels consumer ask in. (A still-pending
+    # sibling re-emits on the resume stream, hence the first-arrival dedupe.)
     assert len(asked) == 2
     assert len({interrupt_id for interrupt_id, _ in asked}) == 2
-    assert sorted(question for _, question in asked) == ["Colour?", "Size?"]
+    first_arrivals = list(dict.fromkeys(gateway.ask_user_arrivals))
+    assert [question for _, question in asked] == first_arrivals
+    assert sorted(first_arrivals) == ["Colour?", "Size?"]
     # Every resume is keyed by the interrupt id of the event that was shown.
     resumes = [r.message for r in gateway.requests[1:]]
     assert len(resumes) == 2

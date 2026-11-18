@@ -2008,14 +2008,14 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
-                # Keep the FIRST ask_user of the round pending: with parallel
-                # calls every pending interrupt emits its own event, and the
-                # last one would otherwise overwrite the first (the TUI and
-                # channels consumers stop at their first ask_user event too,
-                # so every client asks in the same order). The skipped
-                # sibling is not lost — it re-emits on the resume stream,
-                # and keyed resumes (build_ask_user_resume) drain the
-                # pendings one at a time.
+                # Order only: with parallel calls every pending interrupt
+                # emits its own ask_user event, and the last one would
+                # otherwise overwrite the first in the prompt slot. Keeping
+                # the FIRST makes the Rich CLI ask in the same order as the
+                # TUI and the channels consumer, which stop at their first
+                # ask_user event. Nothing is lost either way: a skipped
+                # sibling re-emits on the resume stream and keyed resumes
+                # (build_ask_user_resume) drain the pendings one at a time.
                 pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
                 if (
@@ -2308,9 +2308,7 @@ def _run_streaming(
                         return _stopped_response()
                 from ..backends import build_ask_user_resume
 
-                interrupt_id = str(
-                    state.pending_ask_user.get("interrupt_id") or "default"
-                )
+                interrupt_id = state.pending_ask_user.get("interrupt_id")
                 state.pending_ask_user = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):

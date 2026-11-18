@@ -728,8 +728,9 @@ class InboundConsumer:
 
                     from ..backends import build_ask_user_resume
 
-                    _interrupt_id = str(interrupt_data.get("interrupt_id") or "default")
-                    stream_input = build_ask_user_resume(_interrupt_id, result)
+                    stream_input = build_ask_user_resume(
+                        interrupt_data.get("interrupt_id"), result
+                    )
                     approve_all_carry = self._approval_policy.is_session_granted(
                         session_key
                     )

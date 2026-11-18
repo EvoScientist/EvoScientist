@@ -2683,11 +2683,8 @@ def run_textual_interactive(
                                     _prompt.disabled = False
                                 from ..backends import build_ask_user_resume
 
-                                _interrupt_id = str(
-                                    event.get("interrupt_id") or "default"
-                                )
                                 _stream_input = build_ask_user_resume(
-                                    _interrupt_id, result
+                                    event.get("interrupt_id"), result
                                 )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
