@@ -1484,11 +1484,6 @@ def _possible_folders(
     return folders
 
 
-# Commands that run other commands again or out of order: a loop (`done`, or
-# `for` with a `{ }` body) or a function.
-_OUT_OF_ORDER_NAMES = frozenset({"for", "select", "done", "function"})
-
-
 # A function definition in text the parser does not read as code.
 _FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
 
@@ -1496,16 +1491,26 @@ _FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
 def _runs_out_of_order(
     command: str, commands: list[shell_syntax.SimpleCommand]
 ) -> bool:
-    """Whether *command* (its *commands*) may run a command again or before
-    one written ahead of it (a function definition is a command named
-    ``function``, see :func:`shell_syntax.simple_commands`), so that the
+    """Whether *command* (its *commands*) may change folder in a command
+    that may run again or before one written ahead of it: a ``cd`` /
+    ``pushd``, or code run from a string or a file, inside a loop or a
+    function body (see :class:`shell_syntax.SimpleCommand`), so that the
     folders it may run in are not read in order. A string run as code
-    (``eval``, ``source``) is not parsed, so a definition in its text counts
-    too."""
-    if any(found.name in _OUT_OF_ORDER_NAMES for found in commands):
+    (``eval``, ``source``) is not parsed, so a function definition in its
+    text counts too."""
+    if any(
+        found.repeats
+        and (
+            found.name in shell_syntax.FOLDER_COMMANDS
+            or found.name in shell_syntax.CODE_RUNNER_NAMES
+            or found.name in ("source", ".")
+        )
+        for found in commands
+    ):
         return True
     return any(
-        found.name in shell_syntax.CODE_RUNNER_NAMES for found in commands
+        found.name in shell_syntax.CODE_RUNNER_NAMES or found.name in ("source", ".")
+        for found in commands
     ) and bool(_FUNCTION_TEXT_RE.search(command))
 
 

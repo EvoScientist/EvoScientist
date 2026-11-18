@@ -325,6 +325,25 @@ class TestSimpleCommands:
         assert ("function" in names) is defines
 
     @pytest.mark.parametrize(
+        ("command", "repeating"),
+        [
+            ("for d in a; do cd $d; done; cd b", {"cd $d"}),
+            ("while cd a; do :; done; cd b", {"cd a", ":"}),
+            ("f() { cd a; }; { cd b; }", {"cd a"}),
+            ("function f { :; cd a; }; cd b", {":", "cd a"}),
+            ("function f() { cd a; }; cd b", {"cd a"}),
+            ("for i in 1; do bash -c 'cd a'; done; cd b", {"bash -c", "cd a"}),
+        ],
+    )
+    def test_a_command_in_a_loop_or_function_body_repeats(self, command, repeating):
+        found = shell_syntax.simple_commands(command)
+        assert {
+            " ".join([each.name, *each.args[:1]]).strip()
+            for each in found
+            if each.repeats and each.name not in ("for", "}", "done")
+        } == repeating
+
+    @pytest.mark.parametrize(
         ("command", "name", "args"),
         [
             ("function w { cd $(mktemp -d) && touch x; }; w", "cd", ("$(mktemp -d)",)),

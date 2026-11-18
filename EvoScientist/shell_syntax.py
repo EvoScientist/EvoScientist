@@ -490,6 +490,9 @@ class SimpleCommand(NamedTuple):
     # The folders `env -C` changes into before it runs, outermost first, as
     # the shell passes them to env.
     folders: tuple[str, ...] = ()
+    # Inside a loop (its condition included) or a function body: it may run
+    # again, or before the commands written ahead of it.
+    repeats: bool = False
 
 
 def _command_word_end(
@@ -1282,14 +1285,16 @@ def _keeps_prefix(
 
 def _simple_commands(
     command: str,
-    seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]],
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...], bool]],
     outer: tuple[str, ...],
     assigned: list[tuple[str, str]] | None = None,
     outer_folders: tuple[str, ...] = (),
+    outer_repeats: bool = False,
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
     the wrappers and ``env -C`` folders they run under (*outer* and
-    *outer_folders* for this one). Assignments in command-name position go to
+    *outer_folders* for this one) and whether they repeat (*outer_repeats*,
+    see :class:`SimpleCommand`). Assignments in command-name position go to
     *assigned* (see :func:`assignments`)."""
     words = parse(command)
     tokens = words.tokens
@@ -1302,6 +1307,11 @@ def _simple_commands(
     code_bodies: set[int] = set()  # read as code, not again for substitutions
     # Assignments written before a command name, by the index of its token.
     prefix: dict[int, list[tuple[str, str]]] = {}
+    # The loops, function bodies and `{ }` groups open at the token being
+    # read, and whether the next `{` opens a function body.
+    blocks: list[str] = []
+    function_next = False
+    repeating: set[int] = set()  # indexes in *nested* of texts that repeat
     in_backtick = False
     for index, (token, is_name) in enumerate(
         zip(tokens, words.name_flags, strict=True)
@@ -1311,6 +1321,16 @@ def _simple_commands(
             in_backtick = not in_backtick
         if not is_name:
             continue
+        if value in ("while", "until", "for", "select"):
+            blocks.append("loop")
+        elif value == "{":
+            blocks.append("function" if function_next else "group")
+            function_next = False
+        elif value in ("done", "}") and blocks:
+            opened = ("loop",) if value == "done" else ("function", "group")
+            while blocks and blocks.pop() not in opened:
+                pass
+        repeats = outer_repeats or any(each != "group" for each in blocks)
         if value in COMMAND_PREFIX_WORDS:
             if index in prefix:  # `D=x time cmd`: before the command after it
                 prefix[index + 1] = prefix.pop(index)
@@ -1342,6 +1362,15 @@ def _simple_commands(
             for token in tokens[index + 1 : index + 3]
         ] == [("op", "("), ("op", ")")]:
             found.append(SimpleCommand("function", (), (), ()))
+        if name != "function" and [
+            (str(each["type"]), str(each["value"]))
+            for each in tokens[index + 1 : index + 3]
+        ] == [("op", "("), ("op", ")")]:
+            following = tokens[index + 3] if index + 3 < len(tokens) else None
+            if following is not None and following["type"] == "op":
+                blocks.append("function")  # `NAME ( ) ( BODY )`: to the end
+            else:
+                function_next = True  # its `{` is read as a command name next
         if name == "function":
             # `function NAME [()] { BODY`: the body's first command is read
             # as these words.
@@ -1359,10 +1388,22 @@ def _simple_commands(
                     body_start = position
                 position += len(arg)
             if body_start is not None:
+                repeating.add(len(nested))
                 nested.append((command[body_start:position], (), ()))
+            opener = next((each for arg, each in args if arg in ("{", "(")), None)
+            if opener is not None and not any(
+                each is opener and flag
+                for each, flag in zip(tokens, words.name_flags, strict=True)
+            ):
+                # The rest of the body, to its `}`; a `( BODY )` to the end.
+                blocks.append("function")
+            else:
+                function_next = True  # the `{` is read as a command name next
             continue
         scripts_before = len(nested)
         unwrapped = _unwrap(name, args, (), nested, (), assigned)
+        if repeats:
+            unwrapped = [each._replace(repeats=True) for each in unwrapped]
         if (
             assigned is not None
             and before
@@ -1393,6 +1434,8 @@ def _simple_commands(
                     nested.append(
                         (text[: text.rfind("\n") + 1], each.via, each.folders)
                     )
+        if repeats:
+            repeating.update(range(scripts_before, len(nested)))
 
     if assigned is not None:
         for chain in prefix.values():  # before no command name the parser marks
@@ -1412,15 +1455,18 @@ def _simple_commands(
     for body, (start, end, expands) in enumerate(words.bodies):
         if expands and body not in code_bodies:
             rewrite_substitutions(command[start:end], collect, heredoc=True)
-    for text, via, folders in nested:
+    for at, (text, via, folders) in enumerate(nested):
         chain = (*outer, *via)
         folder_chain = (*outer_folders, *folders)
-        if (text, chain, folder_chain) in seen:
+        repeats = outer_repeats or at in repeating
+        if (text, chain, folder_chain, repeats) in seen:
             continue  # the same code reached through another nesting
-        seen.add((text, chain, folder_chain))
+        seen.add((text, chain, folder_chain, repeats))
         found.extend(
             inner._replace(via=(*via, *inner.via), folders=(*folders, *inner.folders))
-            for inner in _simple_commands(text, seen, chain, assigned, folder_chain)
+            for inner in _simple_commands(
+                text, seen, chain, assigned, folder_chain, repeats
+            )
         )
     return found
 

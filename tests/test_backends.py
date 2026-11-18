@@ -1242,6 +1242,10 @@ class TestWorkspaceRemovalAndComments:
             "while true; do cd x; done; rm -rf build",
             "shopt -s cdable_vars; S=.evoscientist/memories; cd S; rm -rf x",
             'for d in */; do (cd "$d" && rm -rf build); done',
+            "until cd memories; do :; done; rm -rf x",
+            "function f() { :; cd memories; }; cd .evoscientist; f; rm -rf x",
+            "cd build; for i in 1; do eval 'cd skills'; done; rm -rf demo",
+            "for i in 1; do source x; done; cd b; rm -rf demo",
         ],
     )
     def test_a_folder_change_the_check_cannot_read_in_order_is_refused(self, command):
@@ -1257,6 +1261,12 @@ class TestWorkspaceRemovalAndComments:
             "for d in build dist; do rm -rf $d; done",
             "f(){ make; }; f; rm -rf build",
             "for i in 1 2; do cd x; done; rm -rf /W/build",
+            # A loop or function with no cd, eval, source or `.` in it.
+            'cd experiments && for d in run_*; do rm -rf "$d/checkpoints"; done',
+            "cd results && rm -rf old && for s in 0 1 2; do mkdir -p seed_$s; done",
+            "cd tests && rm -rf .pytest_cache && for f in test_*.py; do python $f; done",
+            "cd src && make clean; while true; do sleep 1; break; done; rm -rf build",
+            "function f() { :; }; cd x; rm -rf build",
             # Common shapes: code run from a file or a string, a call in quotes.
             "source .venv/bin/activate && rm -rf build",
             'eval "$(conda shell.bash hook)"; rm -rf build',
