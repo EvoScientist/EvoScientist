@@ -168,34 +168,41 @@ def _installed(base: Path, relative: Path) -> bool:
         return False
 
 
-def _record_shown_draft(proposal: SkillProposal, draft: dict[str, Any]) -> None:
-    """Record the review of a draft whose content this response returns.
+def _shown_draft_record(
+    proposal: SkillProposal, draft: dict[str, Any]
+) -> tuple[Path, dict[str, Any], list[tuple[str, str]]] | None:
+    """The review record of a draft whose content this response returns.
 
     The list inlines ``SKILL.md`` and ``RATIONALE.md``. Every other copied
     file is appended to ``skill_md``, which is the body the page shows, so
     the record is of text present in the payload. The file rows stay
     metadata. A draft that cannot be read in full, or whose text was cut,
     is left unrecorded.
+
+    Nothing is recorded here. The record is built from the text the
+    response carries and written by the caller once that response has been
+    delivered, so a request that never delivers the payload leaves the
+    draft unarmed.
     """
     assert proposal.manifest is not None
     try:
         rendered = rendered_files(proposal.path)
     except (OSError, ValueError):
-        return
+        return None
     by_path = dict(rendered)
     skill = by_path.get("SKILL.md")
     if skill is None or draft.get("skill_md") != skill[:MAX_INLINE_CHARS]:
         # The inlined text is not the file an approval would copy.
-        return
+        return None
     rationale = by_path.get("RATIONALE.md")
     if (
         rationale is not None
         and draft.get("rationale_md") != rationale[:MAX_INLINE_CHARS]
     ):
-        return
+        return None
     if draft.get("skill_md_truncated") or draft.get("rationale_md_truncated"):
         # A cut text is not the whole draft, so it is not a review of it.
-        return
+        return None
     # The two markdown texts are inlined above. Every other copied file is
     # returned in ``contents``, path to text, so the payload holds the whole
     # draft and the review record is of that text. A file row stays metadata.
@@ -204,7 +211,19 @@ def _record_shown_draft(proposal: SkillProposal, draft: dict[str, Any]) -> None:
         for relative, content in rendered
         if relative not in {"SKILL.md", "RATIONALE.md"}
     }
-    record_rendered_proposal(proposal.path, proposal.manifest, rendered)
+    return (proposal.path, proposal.manifest, rendered)
+
+
+def record_shown_drafts(
+    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]],
+) -> None:
+    """Record the reviews of the drafts whose text a response carried.
+
+    Called once the response has been delivered: a request that never
+    delivered the payload leaves its drafts unarmed.
+    """
+    for path, manifest, rendered in records:
+        record_rendered_proposal(path, manifest, rendered)
 
 
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
@@ -264,7 +283,10 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     }
 
 
-def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
+def list_drafts(
+    status: str | None = None,
+    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]] | None = None,
+) -> tuple[int, dict[str, Any]]:
     """Every served project's drafts; counts ignore the ``status`` filter."""
     if status is not None and status not in _STATUSES:
         return 400, {"error": "invalid_status"}
@@ -282,14 +304,16 @@ def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
             by_project[key][proposal.status] += 1
             if status is not None and proposal.status != status:
                 continue
+            record = None
             try:
                 draft = _draft(proposal, key)
                 if proposal.status == "pending" and proposal.manifest is not None:
                     # The row is in the response, so its inlined texts are
-                    # what the page shows. Record that rendering only. A
+                    # what the page shows. Build that review record only. A
                     # filter that dropped the row never reaches here, and a
-                    # draft that cannot be sent does not either.
-                    _record_shown_draft(proposal, draft)
+                    # draft that cannot be sent does not either: the payload
+                    # is encoded below, before anything is recorded.
+                    record = _shown_draft_record(proposal, draft)
                 json.dumps(draft, ensure_ascii=False).encode("utf-8")
             except Exception:
                 # One draft that cannot be read or sent must not fail the page.
@@ -297,17 +321,33 @@ def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
                     "Could not list draft %s.", proposal.proposal_id, exc_info=True
                 )
                 continue
+            if record is not None:
+                if records is None:
+                    # An in-process caller receives the payload as the return
+                    # value, so the text is delivered with it.
+                    record_shown_drafts([record])
+                else:
+                    # A response on its way out: the caller records once it
+                    # has been delivered.
+                    records.append(record)
             drafts.append(draft)
     return 200, {"proposals": drafts, "counts": counts, "by_project": by_project}
 
 
-def list_drafts_body(status: str | None = None) -> tuple[int, bytes]:
-    """:func:`list_drafts` encoded as the response body, off the event loop."""
-    code, payload = list_drafts(status)
+def list_drafts_body(
+    status: str | None = None,
+) -> tuple[int, bytes, list[tuple[Path, dict[str, Any], list[tuple[str, str]]]]]:
+    """:func:`list_drafts` encoded as the response body, off the event loop.
+
+    The review records come back with it, unrecorded: the caller writes them
+    once the body has been delivered.
+    """
+    records: list[tuple[Path, dict[str, Any], list[tuple[str, str]]]] = []
+    code, payload = list_drafts(status, records)
     body = json.dumps(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     )
-    return code, body.encode("utf-8")
+    return code, body.encode("utf-8"), records
 
 
 def _relative_path(value: str) -> str | None:

@@ -36,6 +36,7 @@ import os
 from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -441,10 +442,17 @@ async def list_autoskill_proposals(request: Request) -> Response:
     draft's texts (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
     from EvoScientist.langgraph_dev import autoskills_api
 
-    status, body = await asyncio.to_thread(
+    status, body, records = await asyncio.to_thread(
         autoskills_api.list_drafts_body, request.query_params.get("status") or None
     )
-    return Response(body, status_code=status, media_type="application/json")
+    response = Response(body, status_code=status, media_type="application/json")
+    if records:
+        # The review records are written once the body has been sent: a
+        # request that never delivers the payload leaves its drafts unarmed.
+        response.background = BackgroundTask(
+            autoskills_api.record_shown_drafts, records
+        )
+    return response
 
 
 async def get_autoskill_proposal_file(request: Request) -> Response:

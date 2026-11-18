@@ -1354,15 +1354,25 @@ def _copy_regular_file(source: Path, target: Path) -> None:
         os.close(fd)
 
 
-def _draft_digest(proposal_dir: Path) -> str:
+def _draft_body(
+    proposal_dir: Path, collect: bool = False
+) -> tuple[str, list[tuple[str, str]]]:
     """Digest the files an approval would copy, hashing each as it is read.
 
     Each file contributes ``len(name) || name || len(bytes) || sha256(bytes)``.
     The file hash stands in for the bytes so the length can lead, which a
     content digest needs, while the file itself is hashed a chunk at a time
     and never held in memory.
+
+    With ``collect`` the same pass also returns the text a surface renders,
+    decoded the way :func:`rendered_files` decodes it. A caller that displays
+    the text and a caller that records a digest therefore read the bytes once
+    and cannot disagree about what was read: the recorded digest always
+    describes the text that was displayed, never a later version of the same
+    file.
     """
     digest = hashlib.sha256()
+    rendered: list[tuple[str, str]] = []
     for relative in copied_files(proposal_dir):
         name = relative.as_posix().encode("utf-8")
         digest.update(len(name).to_bytes(8, "big"))
@@ -1370,12 +1380,15 @@ def _draft_digest(proposal_dir: Path) -> str:
         path = proposal_dir / relative
         file_digest = hashlib.sha256()
         size = 0
+        chunks: list[bytes] = []
         fd = _open_regular(path)
         try:
             info = os.fstat(fd)
             for chunk in _read_regular_chunks(fd, path):
                 file_digest.update(chunk)
                 size += len(chunk)
+                if collect:
+                    chunks.append(chunk)
             if size != info.st_size:
                 # The file shrank or grew while it was hashed, so the length
                 # already mixed in no longer describes these bytes.
@@ -1384,10 +1397,21 @@ def _draft_digest(proposal_dir: Path) -> str:
             os.close(fd)
         digest.update(size.to_bytes(8, "big"))
         digest.update(file_digest.digest())
-    return digest.hexdigest()
+        if collect:
+            rendered.append(
+                (relative.as_posix(), b"".join(chunks).decode("utf-8", "replace"))
+            )
+    return digest.hexdigest(), rendered
 
 
-def _decision_digest(proposal_dir: Path, manifest: dict[str, Any]) -> str:
+def _draft_digest(proposal_dir: Path) -> str:
+    """The digest of the files an approval would copy, from one read."""
+    return _draft_body(proposal_dir)[0]
+
+
+def _decision_digest(
+    proposal_dir: Path, manifest: dict[str, Any], body_digest: str | None = None
+) -> str:
     """Digest the body and the decision fields a review has to pin down.
 
     The body is what an approval copies. The decision fields decide which
@@ -1395,19 +1419,28 @@ def _decision_digest(proposal_dir: Path, manifest: dict[str, Any]) -> str:
     because the agent can change either after the draft was shown. The
     workspace is pinned beside this digest, not inside it: a changed
     workspace is a different destination, compared on its own.
+
+    ``body_digest`` is the digest of the body the caller displayed, taken
+    from the same read as the text it compares. Without it the body is read
+    again here, and a body that changed between the two reads would be
+    digested in one version and displayed in another.
     """
     digest = hashlib.sha256()
     for key in _SEALED_FIELDS:
         encoded = json.dumps(manifest.get(key), ensure_ascii=False).encode("utf-8")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
-    body = _draft_digest(proposal_dir).encode("ascii")
+    body = (
+        body_digest if body_digest is not None else _draft_digest(proposal_dir)
+    ).encode("ascii")
     digest.update(len(body).to_bytes(8, "big"))
     digest.update(body)
     return digest.hexdigest()
 
 
-def record_reviewed_proposal(proposal_dir: Path, manifest: dict[str, Any]) -> str:
+def record_reviewed_proposal(
+    proposal_dir: Path, manifest: dict[str, Any], body_digest: str | None = None
+) -> str:
     """Remember the draft this process just displayed, and return its digest.
 
     A later approval or rejection in this same process compares the draft
@@ -1417,8 +1450,11 @@ def record_reviewed_proposal(proposal_dir: Path, manifest: dict[str, Any]) -> st
     and its decision is refused. The normalised workspace is stored with the
     digest: a decision whose manifest names a different project is refused
     even when the body is unchanged.
+
+    ``body_digest`` is the digest of the body that was displayed, taken from
+    the same read as the text it was compared with.
     """
-    digest = _decision_digest(proposal_dir, manifest)
+    digest = _decision_digest(proposal_dir, manifest, body_digest)
     workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
     with _reviews_guard:
         _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = (
@@ -1449,15 +1485,7 @@ def rendered_files(proposal_dir: Path) -> list[tuple[str, str]]:
     hashes, so what is on screen is what a decision will compare. A file
     that cannot be read raises: rendering nothing must not record a review.
     """
-    rendered: list[tuple[str, str]] = []
-    for relative in copied_files(proposal_dir):
-        fd = _open_regular(proposal_dir / relative)
-        try:
-            data = b"".join(_read_regular_chunks(fd, proposal_dir / relative))
-        finally:
-            os.close(fd)
-        rendered.append((relative.as_posix(), data.decode("utf-8", "replace")))
-    return rendered
+    return _draft_body(proposal_dir, collect=True)[1]
 
 
 def record_rendered_proposal(
@@ -1472,12 +1500,12 @@ def record_rendered_proposal(
     text is not the draft.
     """
     try:
-        current = rendered_files(proposal_dir)
+        body_digest, current = _draft_body(proposal_dir, collect=True)
     except (OSError, ValueError):
         return None
     if list(rendered) != current:
         return None
-    return record_reviewed_proposal(proposal_dir, manifest)
+    return record_reviewed_proposal(proposal_dir, manifest, body_digest)
 
 
 def record_reviewed_proposal_by_id(

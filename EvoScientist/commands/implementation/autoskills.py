@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.console import Group
 from rich.table import Table
@@ -230,6 +230,7 @@ class AutoSkillsCommand(Command):
         )
 
         bodies = []
+        shown_drafts: list[tuple[Any, list[tuple[str, str]]]] = []
         for proposal in proposals:
             if proposal.status != "pending" or proposal.manifest is None:
                 continue
@@ -243,14 +244,19 @@ class AutoSkillsCommand(Command):
                     )
                 )
                 continue
-            record_rendered_proposal(proposal.path, proposal.manifest, files)
             shown = [Text(f"Draft {proposal.proposal_id}", style="bold")]
             for relative, content in files:
                 shown.append(Text(f"--- {relative}", style="cyan"))
                 shown.append(Text(content))
             bodies.append(Group(*shown))
+            shown_drafts.append((proposal, files))
         if bodies:
             ctx.ui.mount_renderable(Group(*bodies))
+            # The record is written only after the text reached the deciding
+            # surface. A mount that raised leaves the draft unarmed, so no
+            # decision can be taken on a body nobody was shown.
+            for proposal, files in shown_drafts:
+                record_rendered_proposal(proposal.path, proposal.manifest, files)
         ctx.ui.append_system(
             f"Use {AUTOSKILLS_COMMAND} approve <id> or "
             f"{AUTOSKILLS_COMMAND} reject <id>.",
