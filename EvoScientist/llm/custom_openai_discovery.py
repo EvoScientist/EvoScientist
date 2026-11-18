@@ -13,6 +13,7 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 # A picker mounts one row per model, so a huge listing would make it
 # unusable. The cap keeps the list usable and the response bounded.
@@ -86,18 +87,23 @@ def list_custom_openai_models(
 
     names: list[str] = []
     failed: list[BaseException] = []
+    client_holder: dict[str, Any] = {}
 
     def fetch() -> None:
         try:
             import httpx
 
-            resp = httpx.get(
-                _models_url(base_url),
-                headers=_auth_headers(api_key),
-                timeout=timeout,
-            )
-            if resp.status_code == 200:
-                names.extend(_names_from_body(resp.json()))
+            client = httpx.Client(timeout=timeout)
+            client_holder["client"] = client
+            try:
+                resp = client.get(
+                    _models_url(base_url),
+                    headers=_auth_headers(api_key),
+                )
+                if resp.status_code == 200:
+                    names.extend(_names_from_body(resp.json()))
+            finally:
+                client.close()
         except BaseException as exc:
             failed.append(exc)
 
@@ -105,7 +111,16 @@ def list_custom_openai_models(
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        # The endpoint is trickling the response: give up on it.
+        # The endpoint is trickling the response: give up on it, and close
+        # the client so the request is aborted rather than left running and
+        # buffering into a connection nobody reads.
+        client = client_holder.get("client")
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        worker.join(0.5)
         return []
     if failed:
         return []

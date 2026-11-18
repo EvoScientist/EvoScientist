@@ -22,6 +22,31 @@ from EvoScientist.llm.custom_openai_discovery import (
 _LISTING = {"data": [{"id": "fake-agent"}, {"id": "other-model"}]}
 
 
+class _ClientThroughGet:
+    """Stands in for ``httpx.Client`` and performs the request with ``httpx.get``.
+
+    The probe uses a client so it can close it and abort a request that
+    outlives the deadline. The tests below patch ``httpx.get``, so the fake
+    client defers to it and their assertions keep their meaning.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+
+    def get(self, url: str, **kwargs: object):
+        return httpx.get(url, **kwargs)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _probe_uses_a_client():
+    """The sync probe builds a client; the tests patch the request itself."""
+    with patch("httpx.Client", _ClientThroughGet):
+        yield
+
+
 def _response(status_code: int = 200, body: object = None, *, json_error: bool = False):
     resp = MagicMock()
     resp.status_code = status_code

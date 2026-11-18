@@ -883,9 +883,15 @@ def _step_model(
         # endpoint it was not configured for.
         same_endpoint = bool(env_url) and _same_endpoint(env_url, saved_url)
         if env_url and not same_endpoint:
+            # The environment names a different endpoint: its key is the one
+            # for it, and the saved key belongs to the saved URL.
             base_url, api_key = env_url, env_key
         elif saved_url:
-            base_url, api_key = saved_url, (saved_key or env_key)
+            # The saved config names the endpoint (and the environment may
+            # name the same one). The environment's key comes first, the
+            # same precedence the runtime gives it -- a saved key that has
+            # expired must not shadow a live one.
+            base_url, api_key = saved_url, (env_key or saved_key)
         else:
             base_url, api_key = env_url, env_key
         discovered = list_custom_openai_models(base_url, api_key)

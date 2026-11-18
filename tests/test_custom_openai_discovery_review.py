@@ -330,7 +330,17 @@ def test_the_sync_probe_has_a_total_deadline(monkeypatch):
         time.sleep(5)
         raise AssertionError("the deadline did not fire")
 
-    monkeypatch.setattr(httpx, "get", slow_get)
+    class _SlowClient:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def get(self, *args, **kwargs):
+            return slow_get(*args, **kwargs)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(httpx, "Client", _SlowClient)
 
     started = time.monotonic()
     names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
@@ -375,3 +385,56 @@ def test_a_query_whose_value_ends_in_a_slash_is_a_different_endpoint(monkeypatch
 
     assert seen["base_url"] == "http://x/v1?tenant=a/", seen
     assert seen["api_key"] == "env-key", seen
+
+
+def test_the_environment_key_wins_over_an_expired_saved_key(monkeypatch):
+    """The runtime gives the environment key precedence, and so does the probe.
+
+    The saved key can have expired while the environment key is live. The
+    probe must use the same effective credentials the runtime will use, or
+    discovery fails against an endpoint that would have answered.
+    """
+    seen = _probe_seen(
+        monkeypatch,
+        _config(url="http://same-endpoint/v1", key="expired-key"),
+        env_url="http://same-endpoint/v1",
+        env_key="live-key",
+    )
+
+    assert seen["base_url"] == "http://same-endpoint/v1", seen
+    assert seen["api_key"] == "live-key", seen
+
+
+def test_the_timed_out_request_is_aborted(monkeypatch):
+    """A timed-out probe must not leave the request running.
+
+    The worker thread is still waiting when the deadline passes; it keeps
+    its connection and buffers into it. Closing the client aborts the
+    request.
+    """
+    import time
+
+    import httpx
+
+    from EvoScientist.llm import custom_openai_discovery as discovery
+
+    closed: list[bool] = []
+
+    class _SlowClient(httpx.Client):
+        def get(self, *args, **kwargs):
+            time.sleep(5)
+            raise AssertionError("the deadline did not fire")
+
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(httpx, "Client", _SlowClient)
+
+    started = time.monotonic()
+    names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
+    elapsed = time.monotonic() - started
+
+    assert names == []
+    assert elapsed < 2.0, elapsed
+    assert closed, "the client was not closed, so the request kept running"
