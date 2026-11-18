@@ -1554,6 +1554,33 @@ def get_effective_config(
             except (ValueError, TypeError):
                 pass
 
+    # A custom endpoint's key belongs to its URL. The environment and the
+    # saved config are resolved independently, so the merge above can hold
+    # the environment's URL with the SAVED key -- and a probe would send
+    # that key to an endpoint it does not belong to. Pair them here, while
+    # both sources are still known.
+    #
+    # The runtime reads a custom endpoint's URL and key from the environment
+    # directly, so it never mixes them; only the merged configuration does.
+    from .custom_endpoints import (
+        CUSTOM_ENDPOINT_FIELDS,
+        pair_custom_endpoint_credentials,
+    )
+
+    for url_field, key_field, url_env, key_env in CUSTOM_ENDPOINT_FIELDS:
+        env_url = os.environ.get(url_env, "")
+        env_key = os.environ.get(key_env, "")
+        saved_url = str(getattr(config, url_field, "") or "")
+        saved_key = str(getattr(config, key_field, "") or "")
+        base_url, api_key = pair_custom_endpoint_credentials(
+            env_base_url=env_url,
+            env_api_key=env_key,
+            saved_base_url=saved_url,
+            saved_api_key=saved_key,
+        )
+        data[url_field] = base_url
+        data[key_field] = api_key
+
     # Apply CLI overrides (highest priority)
     if cli_overrides:
         for key, value in cli_overrides.items():

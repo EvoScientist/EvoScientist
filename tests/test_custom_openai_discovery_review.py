@@ -470,3 +470,79 @@ def test_the_models_url_extends_the_path_and_keeps_the_query():
     assert _models_url("http://x/v1/") == "http://x/v1/models"
     assert _models_url("http://x/v1?tenant=a") == "http://x/v1/models?tenant=a"
     assert _models_url("http://x/v1?tenant=a/") == "http://x/v1/models?tenant=a/"
+
+
+def test_the_effective_config_never_pairs_the_saved_key_with_the_env_url(
+    monkeypatch,
+):
+    """The merged configuration must not mix the two sources.
+
+    The environment and the saved config are resolved independently, so the
+    merge can hold the environment's URL with the SAVED key. The pickers
+    probe with the merged pair, so that key would reach an endpoint it does
+    not belong to.
+    """
+    from EvoScientist.config.settings import get_effective_config
+
+    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://env-endpoint/v1")
+    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.load_config",
+        lambda *args, **kwargs: _saved_config(
+            custom_openai_base_url="http://saved-endpoint/v1",
+            custom_openai_api_key="saved-key",
+        ),
+    )
+
+    config = get_effective_config()
+
+    assert config.custom_openai_base_url == "http://env-endpoint/v1"
+    assert config.custom_openai_api_key == "", config.custom_openai_api_key
+
+
+def test_the_effective_config_keeps_the_saved_key_for_the_same_endpoint(
+    monkeypatch,
+):
+    """The same endpoint named twice keeps the key that belongs to it."""
+    from EvoScientist.config.settings import get_effective_config
+
+    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://same-endpoint/v1")
+    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.load_config",
+        lambda *args, **kwargs: _saved_config(
+            custom_openai_base_url="http://same-endpoint/v1",
+            custom_openai_api_key="saved-key",
+        ),
+    )
+
+    config = get_effective_config()
+
+    assert config.custom_openai_base_url == "http://same-endpoint/v1"
+    assert config.custom_openai_api_key == "saved-key"
+
+
+def test_the_effective_config_prefers_the_environment_key(monkeypatch):
+    """The runtime gives the environment's key precedence, and so does this."""
+    from EvoScientist.config.settings import get_effective_config
+
+    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://same-endpoint/v1")
+    monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "live-key")
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.load_config",
+        lambda *args, **kwargs: _saved_config(
+            custom_openai_base_url="http://same-endpoint/v1",
+            custom_openai_api_key="expired-key",
+        ),
+    )
+
+    config = get_effective_config()
+
+    assert config.custom_openai_api_key == "live-key"
+
+
+def _saved_config(**fields: str):
+    """A config object carrying only the fields a test sets."""
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    return EvoScientistConfig(**fields)
