@@ -173,6 +173,46 @@ def _lock_root(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / AUTOSKILL_LOCKS_DIR
 
 
+def _lock_directory() -> Path:
+    """The private directory the fallback lock lives in."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or str(Path.home() / ".cache")
+    directory = Path(base) / "evoscientist" / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
+    return directory
+
+
+def _socket_is_live(path: Path) -> bool:
+    """Whether a socket file still has a holder behind it.
+
+    A holder that died leaves the file behind, and the next bind would find
+    the name taken forever. A refused connection means nothing is listening.
+    """
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1.0)
+    try:
+        probe.connect(str(path))
+    except OSError as exc:
+        return exc.errno not in (errno.ECONNREFUSED, errno.ENOENT)
+    finally:
+        probe.close()
+    return True
+
+
+def _socket_is_ours(path: Path, held: socket.socket) -> bool:
+    """Whether the path still names the socket this process holds.
+
+    The name is a path on the platforms without an abstract namespace, so a
+    shell can unlink it and bind a socket of its own there. The inode of the
+    path and the inode of the descriptor have to be the same one.
+    """
+    try:
+        return os.stat(path).st_ino == os.fstat(held.fileno()).st_ino
+    except OSError:
+        return False
+
+
 class _ProposalLock:
     """One cross-process lock for a draft, with no filesystem pathname.
 
@@ -184,6 +224,13 @@ class _ProposalLock:
     way unlinking a lock file does. The name is derived from the draft
     folder, so two processes locking the same draft contend and two drafts
     do not.
+
+    The abstract namespace is a Linux facility. Where it does not exist the
+    lock falls back to a socket in a private directory, and there the name
+    is a path: a shell that guesses it can stall this draft, and the holder
+    checks that the path still names the socket it holds, so a replaced path
+    is refused rather than trusted. The decision itself trusts the review
+    record in process memory, not this lock.
     """
 
     def __init__(self, proposal_dir: Path) -> None:
@@ -218,17 +265,66 @@ class _ProposalLock:
         cast_socket.close()
 
     def _acquire_posix(self) -> socket.socket:
+        """Take the lock on POSIX, wherever the platform's sockets can bind.
+
+        Only contention is retried. A setup failure is permanent, and
+        retrying it forever hung every lifecycle call on a platform whose
+        abstract namespace does not exist.
+        """
         # A leading NUL is the abstract namespace. The socket has no path.
         address = b"\0evoskill-" + self._name.encode("ascii")
         while True:
             held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 held.bind(address)
-            except OSError:
+            except OSError as exc:
                 held.close()
-                time.sleep(0.05)
-                continue
+                if exc.errno == errno.EADDRINUSE:
+                    time.sleep(0.05)
+                    continue
+                # The abstract namespace is a Linux facility. Where it does
+                # not exist the lock falls back to a socket with a path.
+                return self._acquire_posix_path()
             return held
+
+    def _acquire_posix_path(self) -> socket.socket:
+        """Take the lock where the abstract namespace does not exist.
+
+        The name is a path here, so a shell that guesses it can stall this
+        draft. The holder checks that the path still names the socket it
+        holds: a replaced path is a forged lock, not a held one.
+        """
+        path = _lock_directory() / f"evoskill-{self._name}.sock"
+        replaced = 0
+        while True:
+            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                held.bind(str(path))
+            except OSError as exc:
+                held.close()
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                if _socket_is_live(path):
+                    time.sleep(0.05)
+                    continue
+                # A holder that died leaves its socket behind. The path is
+                # removed and the bind is tried again.
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                continue
+            if _socket_is_ours(path, held):
+                return held
+            # The name was taken over between the bind and this check. The
+            # lock is not trusted, and the takeover is bounded: a name that
+            # keeps changing is not a lock this process can hold.
+            held.close()
+            replaced += 1
+            if replaced > 5:
+                raise OSError(
+                    "Could not take the proposal lock: the name was replaced"
+                )
+            with contextlib.suppress(OSError):
+                path.unlink()
 
     def _acquire_windows(self) -> int:
         import ctypes
