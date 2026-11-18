@@ -1474,6 +1474,9 @@ class TestWorkspaceRemovalAndComments:
             'T=.; D=$T$T; declare -n N; N=D; pushd "$N"',
             'T=.; D=$T$T; N=D; declare -n N; E=$N; cd "$E"',
             'T=.; D=$T$T; X=N; N=D; declare -n "$X"; cd "$N"',
+            # A nameref may write to a variable the command never assigns.
+            'declare -n N=D; N=skills; rm -rf "$D"',
+            'declare -n N=D; N=/; cd "$D"',
             'D=x; printf "-v" D skills; rm -rf $D',
             'D=x; read "D"; cd "$D"; rm -rf demo',
             'D=x; readarray D; cd "$D"; rm -rf demo',

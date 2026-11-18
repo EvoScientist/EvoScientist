@@ -943,6 +943,8 @@ class _Variables(NamedTuple):
     in_part: set[str]
     # It may set any of them (a nameref, `eval`, a name only the run knows).
     opaque: bool
+    # It has a nameref, which may also write to a variable it never assigns.
+    nameref: bool = False
 
 
 def _variables(command: str) -> _Variables:
@@ -953,6 +955,7 @@ def _variables(command: str) -> _Variables:
     run_only: set[str] = set()
     in_part: set[str] = set()
     opaque = False
+    nameref = False
     for each in _simple_commands(command, set(), (), found):
         args = each.args
         words = [
@@ -1005,7 +1008,7 @@ def _variables(command: str) -> _Variables:
                 or "`" in word
                 for word in words
             ):
-                opaque = True  # a nameref, or options only the run knows
+                opaque = nameref = True  # a nameref, or options only the run knows
             for each_declared, word in zip(declared, words, strict=True):
                 if each_declared is not None:
                     found.append(each_declared)
@@ -1044,6 +1047,7 @@ def _variables(command: str) -> _Variables:
         {name for name in run_only if _NAME_RE.fullmatch(name)},
         {name for name in in_part if _NAME_RE.fullmatch(name)},
         opaque,
+        nameref,
     )
 
 
@@ -1098,6 +1102,8 @@ class AssignedValues(dict[str, tuple[str, ...] | None]):
     (see :class:`UnknownValues`)."""
 
     partial: frozenset[str] = frozenset()
+    # The command has a nameref, so a variable it never assigns may be set too.
+    writes_through: bool = False
 
 
 def _references(word: str) -> list[tuple[re.Match[str], bool]]:
@@ -1179,7 +1185,7 @@ def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
     Only one the run alone sets (``read D``, see :class:`_Variables`) is
     not in :attr:`AssignedValues.partial`. With *plain_only*, such a one is
     read from its plain assignments alone."""
-    found, run_only, in_part, opaque = _variables(command)
+    found, run_only, in_part, opaque, nameref = _variables(command)
     # Set in part, or to an array: the `=` values are only some of them.
     partial = {
         _assigned_name(head)
@@ -1253,6 +1259,7 @@ def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
         resolve(name)
     result = AssignedValues(resolved)
     result.partial = frozenset(partial)
+    result.writes_through = nameref
     return result
 
 
@@ -1297,6 +1304,18 @@ def word_values(
     # Known in part unless every unfollowed name it reads is one only the run
     # sets; a plain dict knows no such names.
     partial_names = getattr(assigned, "partial", None)
+    if getattr(assigned, "writes_through", False) and re.search(
+        r"\$\{?[#!]?[A-Za-z_]", word
+    ):
+        # Through a nameref, any variable it names may be one it writes.
+        if (
+            variable_references(word)
+            | {
+                match.group(1) or match.group(2)
+                for match in _OPERATOR_REFERENCE_RE.finditer(word)
+            }
+        ) - assigned.keys():
+            raise UnknownValues(word)
 
     def in_part(names: set[str]) -> bool:
         return partial_names is None or any(
