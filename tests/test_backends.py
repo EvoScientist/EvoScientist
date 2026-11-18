@@ -1297,6 +1297,11 @@ class TestWorkspaceRemovalAndComments:
             "cd $OUT && ls",
             'OUT=build; while IFS= read -r l; do echo "$l"; done < f.txt; rm -rf $OUT',
             'OUT=build; env OUT=$(mktemp -d) python x.py; rm -rf "$OUT"',
+            # A variable only the run sets, read as written as for xargs.
+            'while read d; do rm -rf "$d"; done < list.txt',
+            "read D; rm -rf $D",
+            'read R; D=$R; rm -rf "$D"',
+            'D=build; read D; rm -rf "$D"',
         ],
     )
     def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
@@ -1335,22 +1340,22 @@ class TestWorkspaceRemovalAndComments:
         error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
         assert "'cd $D' leaves the workspace" in error
 
-    def test_a_variable_set_before_source_is_refused_naming_source(self):
+    def test_a_variable_set_before_eval_is_refused_naming_eval(self):
         error = validate_command(
-            'D=build; source .venv/bin/activate; rm -rf "$D"',
+            "D=build; eval 'D=skills'; rm -rf \"$D\"",
             ("/W/skills",),
             workspace_root="/W",
         )
-        assert "runs source, . or eval" in error
-        # With no variable, the same source passes.
-        assert (
-            validate_command(
-                "source .venv/bin/activate && rm -rf build",
-                ("/W/skills",),
-                workspace_root="/W",
+        assert "runs eval" in error
+        # A file run with source is code the check never sees in any case.
+        for command in (
+            'D=build; source .venv/bin/activate; rm -rf "$D"',
+            "source .venv/bin/activate && rm -rf build",
+            'D=pkg; . .venv/bin/activate; cd "$D" && rm -rf build',
+        ):
+            assert (
+                validate_command(command, ("/W/skills",), workspace_root="/W") is None
             )
-            is None
-        )
 
     def test_a_function_body_is_read(self):
         error = validate_command(
@@ -1430,17 +1435,20 @@ class TestWorkspaceRemovalAndComments:
             "D=x; printf -v D skills; rm -rf $D",
             "declare -n D=E; E=skills; rm -rf $D",
             ": ${D:=skills}; rm -rf $D",
-            "read D; rm -rf $D",
             # A cd to such a variable in front of a recursive rm.
             'read d; cd "$d"; rm -rf skills',
             # A value made from a variable only the run sets.
             'read R; D=skills$R; rm -rf "$D"',
-            'read R; D=$R; rm -rf "$D"',
             'read R; D=$HOME$R; cd "$D"',
             'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
+            'for d in $(ls) skills; do rm -rf "$d"; done',
             # Read as the shell reads the words, and through a nameref.
             'D=x; declare -n R=D; R=skills; rm -rf "$D"',
             'declare "-n" D=P; P=skills; rm -rf $D',
+            # Set with a value the check does not follow, or after eval.
+            'printf -v D /; cd "$D"',
+            ': ${D:=/opt}; cd "$D"',
+            'D=/; eval :; cd "$D"',
             # A cd to a nameref goes to the value of the variable it names.
             'T=.; D=$T$T; declare -n N=D; cd "$N"',
             "D=/; local -n N=D; cd $N",
@@ -1448,15 +1456,15 @@ class TestWorkspaceRemovalAndComments:
             'T=.; D=$T$T; N=D; declare -n N; E=$N; cd "$E"',
             'T=.; D=$T$T; X=N; N=D; declare -n "$X"; cd "$N"',
             'D=x; printf "-v" D skills; rm -rf $D',
-            'D=x; read "D"; rm -rf $D',
-            'D=x; mapfile -t "D"; rm -rf $D',
+            'D=x; read "D"; cd "$D"; rm -rf demo',
+            'D=x; mapfile -t "D"; cd "$D"; rm -rf demo',
             'D=build; N=D; printf -v "$N" skills; rm -rf "$D"',
             "D=build; printf -v 'D[0]' skills; rm -rf \"$D\"",
             "D=a0skills; printf '%n' IFS; rm -rf $D",
             'D=skills; rm -rf "${D:?${M}}"',
             'D=build; unset D; rm -rf "${D}skills"',
             'for d in {skills,build}; do rm -rf "$d"; done',
-            "REPLY=build; read <<'EOF'\nskills\nEOF\nrm -rf \"$REPLY\"",
+            "REPLY=x; read <<'EOF'\nskills\nEOF\ncd \"$REPLY\"; rm -rf demo",
             'printf -v "IFS" X; D="a skills"; rm -rf $D',
         ],
     )
@@ -1851,7 +1859,6 @@ class TestSandboxCommandChecks:
             ('T=".. "; cd $T', "'cd $T'"),
             ("bash -c 'T=.; cd \"$T$T\"'", "'cd \"$T$T\"'"),
             # Also set another way: its plain values are still checked.
-            ('D=/; eval :; cd "$D"', "'cd \"$D\"'"),
             ('D=.; false && read D; cd "$D$D"', "'cd \"$D$D\"'"),
         ],
     )

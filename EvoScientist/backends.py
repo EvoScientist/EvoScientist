@@ -1277,9 +1277,9 @@ def _unknown_values_error(word: str) -> str:
     return (
         f"Command blocked: '{word}' may name paths the check does not follow: "
         f"it uses a variable this command sets other than with a plain "
-        f"NAME=value (read, printf -v, a loop over words the run makes, or any "
-        f"variable once the command runs source, . or eval), or one with too "
-        f"many values to check. Write the path out instead."
+        f"NAME=value (printf -v, unset, a loop over a variable's words, or any "
+        f"variable once the command runs eval), or one with too many values "
+        f"to check. Write the path out instead."
     )
 
 
@@ -1426,13 +1426,22 @@ def _word_paths(
     word: str,
     token: dict[str, object] | None,
     assigned: dict[str, tuple[str, ...] | None],
+    plain: dict[str, tuple[str, ...] | None] | None = None,
 ) -> list[str]:
     """The paths a word may name as the agent's shell reads it, with ``/``
     separators: with each value of the variables its command sets (see
     :func:`shell_syntax.word_values`), else itself, also when only the run
-    knows a value (``D=$(date +%F); rm -rf memories/$D``)."""
+    knows a value (``D=$(date +%F); rm -rf memories/$D``). With *plain* (see
+    :func:`shell_syntax.assigned_values`), a variable only the run sets
+    (``read D``) is read as written too, besides its plain `=` values;
+    :class:`shell_syntax.UnknownValues` otherwise."""
     path = _removal_target(token) if token is not None else word
-    values = shell_syntax.word_values(word, path, assigned)
+    try:
+        values = shell_syntax.word_values(word, path, assigned)
+    except shell_syntax.UnknownValues as exc:
+        if exc.partial or plain is None:
+            raise
+        values = [*(shell_syntax.word_values(word, path, plain) or ()), path]
     return [value.replace("\\", "/") for value in values] if values else [path]
 
 
@@ -1824,11 +1833,14 @@ def _folder_removal_error(
             "name its path from the workspace root."
         )
     assigned = shell_syntax.assigned_values(command)
+    # A variable only the run sets (`read D`) is read as written, as one the
+    # command does not set, besides its plain `=` values.
+    plain = shell_syntax.assigned_values(command, plain_only=True)
     # Built once, and only when a relative path needs it.
     folders: list[tuple[str, tuple[str, ...]]] | None = None
     for found, operand, token in removals:
         if token is not None:
-            operand_paths = _word_paths(operand, token, assigned)
+            operand_paths = _word_paths(operand, token, assigned, plain)
             # A value of a variable the command sets, checked as a written
             # path is: it may not climb with `..`, start at home or lie
             # outside.
@@ -1842,7 +1854,7 @@ def _folder_removal_error(
             # dropped, so the words inside a substitution are not read as
             # values.
             blank = _blank_substitutions(operand)
-            for path in _word_paths(blank, None, assigned):
+            for path in _word_paths(blank, None, assigned, plain):
                 if path == blank:
                     continue
                 if _value_outside(re.sub("[\"']", "", path), workspace_root, protected):
@@ -1850,10 +1862,18 @@ def _folder_removal_error(
             # Glued to a substitution: whatever it expands to stays under the
             # literal folder written before it, or under the folder the rm
             # runs in when none is.
+            try:
+                written_values = shell_syntax.word_values(operand, operand, assigned)
+            except shell_syntax.UnknownValues as exc:
+                if exc.partial:
+                    raise
+                written_values = [
+                    *(shell_syntax.word_values(operand, operand, plain) or ()),
+                    operand,
+                ]
             operand_paths = [
                 _literal_folder(written) or written
-                for written in shell_syntax.word_values(operand, operand, assigned)
-                or [operand]
+                for written in written_values or [operand]
             ]
         relative_paths = []
         for path in operand_paths:
