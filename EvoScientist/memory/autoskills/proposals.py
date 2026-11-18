@@ -1714,6 +1714,7 @@ def _check_human_review(
     approved_by: str,
     scope: str | None = None,
     review_token: str | None = None,
+    body_digest: str | None = None,
 ) -> dict[str, Any] | None:
     """Refuse a person's decision that this process did not display.
 
@@ -1747,7 +1748,7 @@ def _check_human_review(
         return _review_scope_refused(
             action, manifest.get("proposal_id"), shown_scope, scope
         )
-    if digest != _decision_digest(proposal_dir, manifest):
+    if digest != _decision_digest(proposal_dir, manifest, body_digest):
         return _reviewed_changed(action, manifest.get("proposal_id"))
     # The project the content was shown under. A manifest edited to name
     # another workspace would otherwise install there: the WebUI reads this
@@ -2553,6 +2554,10 @@ def approve_skill_proposal(
             ):
                 return _content_changed(manifest.get("proposal_id"))
         else:
+            # The body is read ONCE. The digest the review compares is the
+            # digest the install is verified against, so a writer that lands
+            # between the two cannot have its body installed.
+            body_digest = _draft_digest(proposal_dir)
             refused = _check_human_review(
                 "approve",
                 proposal_dir,
@@ -2560,10 +2565,11 @@ def approve_skill_proposal(
                 approved_by=approved_by,
                 scope=target.scope,
                 review_token=review_token,
+                body_digest=body_digest,
             )
             if refused is not None:
                 return refused
-            expected_body = _draft_digest(proposal_dir)
+            expected_body = body_digest
     except (OSError, ValueError) as exc:
         return {
             "approved": False,

@@ -146,12 +146,26 @@ def test_the_real_socket_is_taken_and_released(tmp_path):
 @pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"), reason="this platform has no POSIX socket"
 )
-def test_a_dead_holder_leaves_a_socket_the_next_acquirer_clears(tmp_path):
-    """A holder that died leaves a file; the next acquirer clears it."""
+def test_a_dead_holder_leaves_a_socket_the_next_acquirer_clears(tmp_path, monkeypatch):
+    """A holder that died leaves a file; the next acquirer clears it.
+
+    The file exists only where the platform has no abstract namespace, so the
+    abstract bind is refused here and the fallback is what runs.
+    """
     directory = tmp_path / "locks"
     directory.mkdir()
-    folder = _proposal_dir(tmp_path)
+    monkeypatch.setattr(proposals, "_lock_directory", lambda: directory)
 
+    real_bind = socket.socket.bind
+
+    def refuse_abstract(sock, address):
+        if isinstance(address, bytes) and address.startswith(b"\0"):
+            raise OSError(errno.EAFNOSUPPORT, "no abstract namespace")
+        return real_bind(sock, address)
+
+    monkeypatch.setattr(socket.socket, "bind", refuse_abstract)
+
+    folder = _proposal_dir(tmp_path)
     lock = proposals._ProposalLock(folder)
     held = lock._acquire_posix()
     path = directory / f"evoskill-{lock._name}.sock"
