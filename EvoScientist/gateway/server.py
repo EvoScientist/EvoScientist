@@ -1078,12 +1078,23 @@ class _ServerSubagentTracker:
         if events:
             # Remember the run the child ended on: a late signal for that
             # run must not re-announce it, and a terminal signal for it
-            # must not close a child revived onto a newer run. A pending
-            # resume run dies with the child: a record for it after the
-            # end is stale, not a revival.
-            self._ended_async_runs[path] = self._async_run_ids.get(path)
+            # must not close a child revived onto a newer run. Only the
+            # pending run for the run that just ended dies with the
+            # child: each run is produced by exactly one tool call, so
+            # the run that ended is the only pending run the ending
+            # signal can be about. A pending run for a different run
+            # was recorded by a different, parallel call -- an update
+            # that resumed the task -- and it survives: its record may
+            # still arrive and legitimately revive the child.
+            ended_run = self._async_run_ids.get(path)
+            self._ended_async_runs[path] = ended_run
             self._async_run_ids.pop(path, None)
-            self._async_pending_runs.pop(path, None)
+            pending = self._async_pending_runs.get(path)
+            if pending is not None:
+                if ended_run is not None:
+                    pending.discard(ended_run)
+                if not pending:
+                    self._async_pending_runs.pop(path, None)
         return events
 
     def _end_async_by_task(
@@ -1117,10 +1128,21 @@ class _ServerSubagentTracker:
                 # must not re-arm it only to end it a second time and
                 # rewrite the tombstone to the old run.
                 return []
-            # A terminal signal for a different run than the one this path
-            # ended on: a follow-up run finished without its start
-            # streaming. Re-arm, then end it below. The tombstone is kept:
-            # the end below overwrites it with the run it ends on.
+            pending = self._async_pending_runs.get(path)
+            if not pending or run_id not in pending:
+                # A terminal record for a run no tool call in this turn
+                # produced is a stale cached record, not a follow-up run
+                # that finished without its start streaming: a follow-up
+                # run is produced by an update, and the update records
+                # its run as pending. Without that, a cached list entry
+                # for an old run would re-arm the child only to end it
+                # a second time and rewrite the tombstone to the old run.
+                return []
+            # A terminal signal for a follow-up run an update produced
+            # in this turn, which finished without its start streaming.
+            # Re-arm, then end it below. The tombstone is kept: the end
+            # below overwrites it with the run it ends on.
+            pending.discard(run_id)
             self._ended.discard(path)
         if path in self._active:
             stored = self._async_run_ids.get(path)
@@ -1295,15 +1317,28 @@ class _ServerSubagentTracker:
             return self._end_async_by_task(task_id, name, run_id)
         if path in self._active:
             # Still running. The current run never moves backwards: a
-            # record naming a run already seen while the child is on a
-            # different run is stale and changes nothing.
+            # record may move it only to a run a tool call in this turn
+            # actually produced -- the run it is already on, a run an
+            # update recorded as pending, or (when the launch never told
+            # us its run) the first run we learn. Any other run is a
+            # stale record from an earlier turn or a cached list, and it
+            # changes nothing. Run ids carry no ordering, so a
+            # never-seen old run looks exactly like a genuine new one;
+            # only the pending-run gate tells them apart.
             if run_id is not None:
                 seen = self._async_seen_runs.setdefault(path, set())
                 stored = self._async_run_ids.get(path)
-                if run_id != stored and run_id in seen:
+                pending = self._async_pending_runs.get(path)
+                if (
+                    stored is not None
+                    and run_id != stored
+                    and not (pending and run_id in pending)
+                ):
                     return []
                 self._async_run_ids[path] = run_id
                 seen.add(run_id)
+                if pending is not None:
+                    pending.discard(run_id)
             return []
         # A record is state, not a launch event. It announces a child
         # only when a run-causing tool call actually produced that run

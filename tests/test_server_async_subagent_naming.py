@@ -395,6 +395,32 @@ def _update_finished(
     return events
 
 
+def _list_command_wire(
+    task_id: str, agent_name: str, status: str, run_id: str, tool_call_id: str
+) -> dict:
+    """A list_async_tasks result, built with the real command builder.
+
+    The list returns the live status it fetched for the task; a cached
+    list can return an old run's status.
+    """
+    from deepagents.middleware.async_subagents import _build_list_command
+
+    task = _task_record(task_id, agent_name, status="success", run_id="run-8")
+    return json_loads(
+        json_dumpb(_build_list_command([task], [(status, run_id)], tool_call_id))
+    )
+
+
+def _command_update(command: dict) -> dict:
+    """One call's Command update, as the server streams it in a batch item."""
+    return command["update"]
+
+
+def _batch(items: list[dict]) -> dict:
+    """One updates event carrying several calls' Command updates, in call order."""
+    return _updates({"tools": items})
+
+
 def _cli_update_message(
     task_id: str, agent_name: str, status: str, kind: str = "agent"
 ) -> dict:
@@ -787,6 +813,8 @@ def test_a_stale_running_record_does_not_move_the_current_run_backwards():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -821,6 +849,8 @@ def test_a_late_record_for_a_seen_run_does_not_revive_an_ended_child():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -850,6 +880,8 @@ def test_a_seen_old_terminal_record_after_a_newer_run_ends_nothing():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -878,6 +910,8 @@ def test_a_seen_run_does_not_revive_even_with_an_update_pending_run():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -1061,11 +1095,149 @@ def test_batched_updates_name_both_parallel_launches():
     assert not _ends(batch), batch
 
 
+def test_a_never_seen_stale_run_in_a_batch_does_not_move_the_child_backwards():
+    """B2: an update's run-10 record followed by a stale check's never-seen
+    run-9 record in one parallel batch must leave the child on run-10.
+
+    Run ids carry no ordering, so the never-seen run-9 looks exactly like
+    a genuine new run; only the pending-run gate tells them apart.
+    """
+    tracker, _registry = _tracker()
+
+    # Launch on run-8.
+    events: list[dict] = []
+    events += tracker.process(
+        _tool_started("call-1", {"description": "x", "subagent_type": "code-agent"})
+    )
+    events += tracker.process(
+        _tool_finished("call-1", "async-thread-1", "code-agent", run_id="run-8")
+    )
+    assert _starts(events) == ["code-agent"], events
+    # An update resumes the task onto run-10.
+    _update_finished(tracker, run_id="run-10")
+    update_cmd = _update_command_wire(
+        "async-thread-1", "code-agent", "run-10", "update-1"
+    )
+    check_cmd = _check_command_wire(
+        "async-thread-1", "code-agent", "running", "run-9", "check-1"
+    )
+    tracker.process(_tool_finished_raw("check-1", check_cmd))
+    # One parallel batch, in call order: the update's record, then the
+    # stale check's record for a run this turn never saw.
+    batch = tracker.process(
+        _batch([_command_update(update_cmd), _command_update(check_cmd)])
+    )
+    assert not _starts(batch), batch
+    assert not _ends(batch), batch
+    assert tracker._async_run_ids[("async", "async-thread-1")] == "run-10"
+    ends = tracker.process(
+        _record_update(
+            "async-thread-1", "code-agent", status="success", run_id="run-10"
+        )
+    )
+    assert _ends(ends) == ["code-agent"], ends
+
+
+def test_a_stale_terminal_record_in_a_batch_does_not_end_the_child_twice():
+    """B3b: update run-10/running, check run-10/error, cached list
+    run-9/success in one parallel batch: one start, one end, and the
+    tombstone stays on run-10.
+
+    The list's terminal record names a run no tool call in this turn
+    produced, so it must not re-arm the ended child only to end it a
+    second time.
+    """
+    tracker, _registry = _tracker()
+
+    # Launch on run-8, end it on run-8.
+    events: list[dict] = []
+    events += tracker.process(
+        _tool_started("call-1", {"description": "x", "subagent_type": "code-agent"})
+    )
+    events += tracker.process(
+        _tool_finished("call-1", "async-thread-1", "code-agent", run_id="run-8")
+    )
+    events += tracker.process(
+        _record_update("async-thread-1", "code-agent", status="success", run_id="run-8")
+    )
+    assert _ends(events) == ["code-agent"], events
+    assert tracker._ended_async_runs[("async", "async-thread-1")] == "run-8"
+    # An update resumes the task onto run-10.
+    _update_finished(tracker, call_id="update-1", run_id="run-10")
+    update_cmd = _update_command_wire(
+        "async-thread-1", "code-agent", "run-10", "update-1"
+    )
+    check_cmd = _check_command_wire(
+        "async-thread-1", "code-agent", "error", "run-10", "check-1"
+    )
+    # The list read the state before the update landed, so it returns
+    # the cached run-9/success.
+    list_cmd = _list_command_wire(
+        "async-thread-1", "code-agent", "success", "run-9", "list-1"
+    )
+    # The tool results stream first; the check and list results are
+    # no-ops for the tracker.
+    tracker.process(_tool_finished_raw("check-1", check_cmd))
+    tracker.process(_tool_finished_raw("list-1", list_cmd))
+    # One parallel batch, in call order.
+    batch = tracker.process(
+        _batch(
+            [
+                _command_update(update_cmd),
+                _command_update(check_cmd),
+                _command_update(list_cmd),
+            ]
+        )
+    )
+    assert _starts(batch) == ["code-agent"], batch
+    assert _ends(batch) == ["code-agent"], batch
+    assert tracker._ended_async_runs[("async", "async-thread-1")] == "run-10"
+
+
+def test_ending_an_older_run_keeps_a_parallel_updates_pending_run():
+    """Update-resume: check run-9/success then update run-10/running in one
+    parallel batch. Ending run-9 must not clear the pending run-10 the
+    parallel update recorded, so the update's record revives the child."""
+    tracker, _registry = _tracker()
+
+    _launch(tracker)  # run-9
+    # An update resumes the task onto run-10.
+    _update_finished(tracker, call_id="update-1", run_id="run-10")
+    update_cmd = _update_command_wire(
+        "async-thread-1", "code-agent", "run-10", "update-1"
+    )
+    check_cmd = _check_command_wire(
+        "async-thread-1", "code-agent", "success", "run-9", "check-1"
+    )
+    tracker.process(_tool_finished_raw("check-1", check_cmd))
+    # One parallel batch, in call order: the check's record first, then
+    # the update's.
+    batch = tracker.process(
+        _batch([_command_update(check_cmd), _command_update(update_cmd)])
+    )
+    assert _ends(batch) == ["code-agent"], batch
+    assert _starts(batch) == ["code-agent"], batch
+    # The revival leaves the child active on run-10: the end below must
+    # close that child, not silently re-arm an ended path.
+    assert tracker._active.get(("async", "async-thread-1")) == (
+        "code-agent",
+        "call-1",
+    )
+    ends = tracker.process(
+        _record_update(
+            "async-thread-1", "code-agent", status="success", run_id="run-10"
+        )
+    )
+    assert _ends(ends) == ["code-agent"], ends
+
+
 def test_a_stale_completion_for_an_older_run_does_not_end_the_child():
     """A completion naming the run the child has moved on from is stale."""
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -1086,6 +1258,8 @@ def test_a_stale_terminal_record_does_not_end_a_newer_run():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
@@ -1162,6 +1336,8 @@ def test_a_run_rotation_keeps_the_child_until_its_own_completion():
     tracker, _registry = _tracker()
 
     _launch(tracker)
+    # The rotation onto run-10 is produced by an update in this turn.
+    _update_finished(tracker, run_id="run-10")
     rotated = tracker.process(
         _record_update(
             "async-thread-1", "code-agent", status="running", run_id="run-10"
