@@ -255,10 +255,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         finally:
             # Shield error-driven cleanup too; the outer context restores the
             # handlers only after launcher.stop() has finished.
-            ignore_further_stop_signals()
-            if started:
-                say(
-                    "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]",
-                    to=console,
-                )
-            launcher.stop()
+            try:
+                ignore_further_stop_signals()
+                if started:
+                    say(
+                        "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]",
+                        to=console,
+                    )
+            finally:
+                launcher.stop()
