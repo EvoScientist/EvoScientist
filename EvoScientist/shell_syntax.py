@@ -848,7 +848,9 @@ _NAME_RE = re.compile(r"[A-Za-z_]\w*")
 _PRINTF_N_RE = re.compile(r"%[-+ #0'*\d.]*(?:hh|h|ll|l|L|q|j|z|t)?n")
 
 
-def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
+def _variables(
+    command: str,
+) -> tuple[list[tuple[str, str]], set[str], bool, set[str]]:
     """The ``NAME=value`` assignments of *command* (see :func:`assignments`),
     each with what is written before its ``=`` (``NAME``, ``NAME+`` or
     ``NAME[i]``), with each word of a ``for NAME in WORDS`` loop whose words
@@ -856,11 +858,15 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
     ``printf -v``, ``declare -a``, ``${NAME:=value}``, a loop over words the
     run makes); and whether it may set any variable at all: with a nameref
     (``declare -n``), which writes through to another, or a builtin that runs
-    code in this shell (see :data:`CODE_RUNNER_NAMES`). Options and names are
-    read as the shell reads them (``declare "-n"``, ``read "D"``)."""
+    code in this shell (see :data:`CODE_RUNNER_NAMES`); and the names such a
+    declaration may make namerefs, whose plain value is the name of another
+    variable rather than a path. Options and names are read as the shell
+    reads them (``declare "-n"``, ``read "D"``)."""
     found: list[tuple[str, str]] = []
     other: set[str] = set()
     opaque = False
+    namerefs: set[str] = set()
+    any_nameref = False
     for each in _simple_commands(command, set(), (), found):
         args = each.args
         words = [
@@ -890,12 +896,13 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
                 or _PLAIN_DECLARATION_OPTION_RE.fullmatch(word)
                 for each_declared, word in zip(declared, words, strict=True)
             )
-            if not plain and any(
+            nameref = not plain and any(
                 (word.startswith(("-", "+")) and "n" in word)
                 or "$" in word
                 or "`" in word
                 for word in words
-            ):
+            )
+            if nameref:
                 opaque = True  # a nameref, or options only the run knows
             for each_declared, word in zip(declared, words, strict=True):
                 if each_declared is not None:
@@ -903,6 +910,10 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
                 if not plain:
                     head = each_declared[0] if each_declared is not None else word
                     other.add(_assigned_name(head))
+                    if nameref:
+                        namerefs.add(_assigned_name(head))
+                        if "$" in head or "`" in head:
+                            any_nameref = True  # a name only the run knows
         elif each.name in _RUN_SETTER_NAMES:
             other.update(_assigned_name(word) for word in words)
             # The variable set when no name is given.
@@ -925,7 +936,14 @@ def _variables(command: str) -> tuple[list[tuple[str, str]], set[str], bool]:
                     if "$" in destination or "`" in destination:
                         opaque = True  # a name only the run knows
     other.update(re.findall(r"\$\{([A-Za-z_]\w*):?=", command))
-    return found, {name for name in other if _NAME_RE.fullmatch(name)}, opaque
+    if any_nameref:
+        namerefs.update(_assigned_name(head) for head, _ in found)
+    return (
+        found,
+        {name for name in other if _NAME_RE.fullmatch(name)},
+        opaque,
+        {name for name in namerefs if _NAME_RE.fullmatch(name)},
+    )
 
 
 def _declared_assignment(arg: str) -> tuple[str, str] | None:
@@ -1059,9 +1077,10 @@ def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
     (``X=build; X=$(cmd)``), or one whose value names such a variable.
     With *plain_only*, each variable is read from its plain assignments
     alone, however else the command sets it."""
-    found, other, opaque = _variables(command)
-    if plain_only:  # the plain `=` values alone, however else it is set
-        other, opaque = set(), False
+    found, other, opaque, namerefs = _variables(command)
+    if plain_only:  # the plain `=` values alone, however else it is set,
+        # except for a nameref, whose plain value is another variable's name
+        other, opaque = set(namerefs), False
     written: dict[str, list[str]] = {}
     for head, value in found:
         name = _assigned_name(head)
@@ -1073,7 +1092,7 @@ def assigned_values(command: str, plain_only: bool = False) -> AssignedValues:
         _assigned_name(head)
         for head, value in found
         if head != _assigned_name(head) or value.startswith("(")
-    }
+    } | namerefs
     if opaque:  # any of them may be set some other way
         other.update(written)
     resolved: dict[str, tuple[str, ...] | None] = dict.fromkeys(other)

@@ -1387,6 +1387,12 @@ class TestWorkspaceRemovalAndComments:
             # Read as the shell reads the words, and through a nameref.
             'D=x; declare -n R=D; R=skills; rm -rf "$D"',
             'declare "-n" D=P; P=skills; rm -rf $D',
+            # A cd to a nameref goes to the value of the variable it names.
+            'T=.; D=$T$T; declare -n N=D; cd "$N"',
+            "D=/; local -n N=D; cd $N",
+            'T=.; D=$T$T; declare -n N; N=D; pushd "$N"',
+            'T=.; D=$T$T; N=D; declare -n N; E=$N; cd "$E"',
+            'T=.; D=$T$T; X=N; N=D; declare -n "$X"; cd "$N"',
             'D=x; printf "-v" D skills; rm -rf $D',
             'D=x; read "D"; rm -rf $D',
             'D=x; mapfile -t "D"; rm -rf $D',
