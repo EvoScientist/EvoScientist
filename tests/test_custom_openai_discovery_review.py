@@ -290,3 +290,51 @@ async def test_the_probe_has_a_total_deadline():
 
     assert names == []
     assert elapsed < 2.0, elapsed
+
+
+def test_the_saved_key_is_used_when_the_environment_names_the_same_endpoint(
+    monkeypatch,
+):
+    """The same endpoint named twice keeps the key that belongs to it.
+
+    The user sets ``CUSTOM_OPENAI_BASE_URL``, keeps that URL in onboarding
+    and enters its key: the wizard stores the key in the config without
+    exporting it. The saved key then belongs to the environment's URL, so it
+    must be used.
+    """
+    seen = _probe_seen(
+        monkeypatch,
+        _config(url="http://same-endpoint/v1", key="saved-key"),
+        env_url="http://same-endpoint/v1",
+        env_key=None,
+    )
+
+    assert seen["base_url"] == "http://same-endpoint/v1", seen
+    assert seen["api_key"] == "saved-key", seen
+
+
+def test_the_sync_probe_has_a_total_deadline(monkeypatch):
+    """A trickling endpoint cannot keep the wizard waiting.
+
+    HTTPX's timeout is an inactivity timeout, so an endpoint that sends a
+    chunk every few seconds without finishing would never let the call
+    return. The probe needs a total deadline as well.
+    """
+    import time
+
+    import httpx
+
+    from EvoScientist.llm import custom_openai_discovery as discovery
+
+    def slow_get(*args, **kwargs):
+        time.sleep(5)
+        raise AssertionError("the deadline did not fire")
+
+    monkeypatch.setattr(httpx, "get", slow_get)
+
+    started = time.monotonic()
+    names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
+    elapsed = time.monotonic() - started
+
+    assert names == []
+    assert elapsed < 2.0, elapsed

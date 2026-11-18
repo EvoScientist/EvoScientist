@@ -839,20 +839,25 @@ def _step_model(
         # belong to.
         #
         # So the probe pairs them by WHO names the endpoint:
-        #   - the environment names it: the environment's key is the one for
-        #     it, and the saved key is never sent there;
-        #   - the saved config names it: the saved key is the one for it, and
-        #     the environment key is the fallback for a wizard that has the
-        #     URL but has not written the key back yet.
+        #   - the environment names it, and it is a DIFFERENT endpoint from
+        #     the saved one: the environment's key is the one for it, and
+        #     the saved key is never sent there;
+        #   - the environment names the SAME endpoint the saved config
+        #     names: the saved key belongs to it too, so it is used;
+        #   - the saved config names it: the saved key is the one for it,
+        #     and the environment key is the fallback for a wizard that has
+        #     the URL but has not written the key back yet.
         # A key is never sent to an endpoint it was not configured for.
         env_url = os.environ.get("CUSTOM_OPENAI_BASE_URL") or ""
         env_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or ""
         saved_url = config.custom_openai_base_url or ""
         saved_key = getattr(config, "custom_openai_api_key", "") or ""
-        if env_url:
+        if env_url and env_url != saved_url:
             base_url, api_key = env_url, env_key
-        else:
+        elif saved_url:
             base_url, api_key = saved_url, (saved_key or env_key)
+        else:
+            base_url, api_key = env_url, env_key
         discovered = list_custom_openai_models(base_url, api_key)
         entries = [(name, name) for name in discovered]
         if not entries:

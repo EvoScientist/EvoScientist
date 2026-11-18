@@ -12,6 +12,8 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 
 from __future__ import annotations
 
+import threading
+
 # A picker mounts one row per model, so a huge listing would make it
 # unusable. The cap keeps the list usable and the response bounded.
 _MAX_MODELS = 500
@@ -70,25 +72,44 @@ def list_custom_openai_models(
     non-200, timeout, connect error, non-JSON, or a body that is not a model
     list). Never raises — the wizard must still open when the endpoint is down.
 
+    The call has a TOTAL deadline, not just HTTPX's inactivity timeout.
+    HTTPX's timeout limits the wait for each chunk, so an endpoint that
+    sends a chunk every few seconds without ever finishing would keep the
+    wizard waiting indefinitely. The request runs in a daemon thread and the
+    caller stops waiting once the deadline passes.
+
     The listing is bounded: an endpoint that serves tens of thousands of ids
     would otherwise fill the picker with one row each and make it unusable.
     """
     if not base_url:
         return []
 
-    try:
-        import httpx
+    names: list[str] = []
+    failed: list[BaseException] = []
 
-        resp = httpx.get(
-            _models_url(base_url),
-            headers=_auth_headers(api_key),
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            return []
-        return _names_from_body(resp.json())
-    except Exception:
+    def fetch() -> None:
+        try:
+            import httpx
+
+            resp = httpx.get(
+                _models_url(base_url),
+                headers=_auth_headers(api_key),
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                names.extend(_names_from_body(resp.json()))
+        except BaseException as exc:
+            failed.append(exc)
+
+    worker = threading.Thread(target=fetch, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        # The endpoint is trickling the response: give up on it.
         return []
+    if failed:
+        return []
+    return names
 
 
 async def discover_custom_openai_models(
