@@ -808,6 +808,12 @@ class _ServerSubagentTracker:
     ) -> list[dict[str, Any]]:
         if not path:
             return []
+        if path in self._ended:
+            # The child already ended. A late event for it -- a ``messages``
+            # event that arrives after the end -- must not announce a second
+            # start, and must not overwrite the registry's name. A fresh
+            # lifecycle start re-arms the path before it gets here.
+            return []
         active = self._active.get(path)
         if active is not None:
             # Already announced: the start is not repeated and the name is not

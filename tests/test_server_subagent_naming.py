@@ -310,3 +310,43 @@ def test_nested_depth_three_announces_each_level_once():
     ]
 
     assert _starts(events) == names, events
+
+
+def _late_output_event(namespace: list[str]) -> dict:
+    """An output event that arrives after the child already ended."""
+    return {
+        "method": "messages",
+        "params": {"namespace": namespace, "data": {"event": "messages"}},
+    }
+
+
+def test_a_late_output_event_does_not_restart_an_ended_child():
+    """A late event for an ended child must not announce a second start.
+
+    The child already ended, so a late output event must not announce it
+    again -- and must not overwrite the registry's name either, or the
+    child the user saw would be replaced by a nameless one.
+    """
+    tracker, registry = _tracker()
+
+    tracker.process(_lifecycle_started(["tools:task-1"], graph_name="code-agent"))
+    tracker.process(_lifecycle_ended(["tools:task-1"]))
+
+    late = tracker.process(_late_output_event(["tools:task-1"]))
+
+    assert not _starts(late), late
+    assert registry.resolve(("tools:task-1",)).name == "code-agent"
+
+
+def test_a_fresh_lifecycle_start_still_re_arms_an_ended_path():
+    """A new child on the same path is announced again."""
+    tracker, _registry = _tracker()
+
+    tracker.process(_lifecycle_started(["tools:task-1"], graph_name="first"))
+    tracker.process(_lifecycle_ended(["tools:task-1"]))
+
+    replacement = tracker.process(
+        _lifecycle_started(["tools:task-1"], graph_name="second")
+    )
+
+    assert _starts(replacement) == ["second"], replacement
