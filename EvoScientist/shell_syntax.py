@@ -1360,7 +1360,7 @@ def _keeps_prefix(
         or name in DECLARATION_NAMES
         or name in ("cd", "pushd")
         or re.search(
-            rf"(?:^|[\s;&|(){{}}]){re.escape(name)}\s*\(\s*\)|\bfunction\s+{re.escape(name)}\b",
+            rf"(?:^|[\s;&|(){{}}/]){re.escape(name)}\s*\(\s*\)|\bfunction\s+{re.escape(name)}\b",
             command,
         )
         is not None
@@ -1378,12 +1378,15 @@ def _simple_commands(
     assigned: list[tuple[str, str]] | None = None,
     outer_folders: tuple[str, ...] = (),
     outer_repeats: bool = False,
+    root: str | None = None,
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
     the wrappers and ``env -C`` folders they run under (*outer* and
     *outer_folders* for this one) and whether they repeat (*outer_repeats*,
-    see :class:`SimpleCommand`). Assignments in command-name position go to
+    see :class:`SimpleCommand`); *root* is the outermost command, where a
+    function a nested text calls may be defined. Assignments in command-name position go to
     *assigned* (see :func:`assignments`)."""
+    root = command if root is None else root  # the whole command, for definitions
     words = parse(command)
     tokens = words.tokens
     found: list[SimpleCommand] = []
@@ -1524,7 +1527,7 @@ def _simple_commands(
         if (
             assigned is not None
             and before
-            and _keeps_prefix(unwrapped, len(nested) > scripts_before, command)
+            and _keeps_prefix(unwrapped, len(nested) > scripts_before, root)
         ):
             assigned.extend(before)
         for each in unwrapped:
@@ -1582,7 +1585,7 @@ def _simple_commands(
         found.extend(
             inner._replace(via=(*via, *inner.via), folders=(*folders, *inner.folders))
             for inner in _simple_commands(
-                text, seen, chain, assigned, folder_chain, repeats
+                text, seen, chain, assigned, folder_chain, repeats, root
             )
         )
     return found
