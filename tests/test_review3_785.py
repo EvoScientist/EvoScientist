@@ -304,9 +304,12 @@ def test_b4_installed_digest_does_not_reopen_after_the_check(tmp_path, monkeypat
     opens: list[str] = []
     real_open = os.open
 
-    def counting(path, flags, *args):
+    def counting(path, flags, *args, **kwargs):
+        # The stub replaces the whole ``os.open``, so it has to accept every
+        # call convention the standard library uses -- ``dir_fd`` among them,
+        # which POSIX callers pass and Windows does not.
         opens.append(os.fsdecode(path))
-        return real_open(path, flags, *args)
+        return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(proposals.os, "open", counting)
     assert proposals._file_digest(target)
@@ -361,11 +364,14 @@ def test_b4_approval_copies_through_the_checked_descriptor(tmp_path, monkeypatch
     opens: list[str] = []
     real_open = os.open
 
-    def counting(path, flags, *args):
+    def counting(path, flags, *args, **kwargs):
+        # The stub replaces the whole ``os.open``, so it has to accept every
+        # call convention the standard library uses -- ``dir_fd`` among them,
+        # which POSIX callers pass and Windows does not.
         text = os.fsdecode(path)
         if text == live:
             opens.append(text)
-        return real_open(path, flags, *args)
+        return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(proposals.os, "open", counting)
     monkeypatch.setattr(proposals, "_notify_approved_skill", lambda: None)
