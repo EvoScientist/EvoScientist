@@ -423,7 +423,11 @@ class TestSimpleCommands:
         assert shell_syntax.assigned_values("env 'Q=a b' sh -c :") == {"Q": ("a b",)}
         assert shell_syntax.assigned_values(
             "D=x; unset D; for B in {a,b}; do :; done; mapfile"
-        ) == {"D": None, "B": None, "MAPFILE": None}
+        ) == {"D": None, "B": ("a", "b"), "MAPFILE": None}
+        # A brace expansion is read as the words it makes, if it is read.
+        assert shell_syntax.assigned_values(
+            'for S in s_{0..2} {a,b}x; do :; done; for Q in "{a,b}" {0..99}; do :; done'
+        ) == {"S": ("s_0", "s_1", "s_2", "ax", "bx"), "Q": None}
         # A nameref or eval may set any of them.
         assert shell_syntax.assigned_values("D=x; declare -n R=D") == {
             "D": None,

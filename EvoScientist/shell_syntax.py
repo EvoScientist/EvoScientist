@@ -5,6 +5,7 @@ substitutions and command-name positions; not a full shell parser.
 """
 
 import functools
+import itertools
 import re
 from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
@@ -862,6 +863,70 @@ _NAME_RE = re.compile(r"[A-Za-z_]\w*")
 _PRINTF_N_RE = re.compile(r"%[-+ #0'*\d.]*(?:hh|h|ll|l|L|q|j|z|t)?n")
 
 
+_SEQUENCE_RE = re.compile(
+    r"(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?|([A-Za-z])\.\.([A-Za-z])"
+)
+
+
+def _brace_words(word: str) -> list[str] | None:
+    """The words a brace expansion in *word*, as written, makes
+    (``seed_{0..2}`` reads ``seed_0 seed_1 seed_2``, ``{a,b}x`` reads
+    ``ax bx``); ``None`` for one it does not read: with quotes, an escape, an
+    expansion or a brace that expands nothing, or with more words than
+    :data:`_VALUES_CAP`."""
+    if re.search(r"[\"'\\$`]", word):
+        return None
+    start = word.find("{")
+    if start == -1:
+        return None if "}" in word else [word]
+    depth = 0
+    commas: list[int] = []
+    for end in range(start, len(word)):
+        if word[end] == "{":
+            depth += 1
+        elif word[end] == "}":
+            depth -= 1
+            if not depth:
+                break
+        elif word[end] == "," and depth == 1:
+            commas.append(end)
+    else:
+        return None
+    body = word[start + 1 : end]
+    if commas:
+        bounds = [start, *commas, end]
+        choices = [word[a + 1 : b] for a, b in itertools.pairwise(bounds)]
+    else:
+        sequence = _SEQUENCE_RE.fullmatch(body)
+        if sequence is None:
+            return None
+        if sequence.group(4):
+            first, last = ord(sequence.group(4)), ord(sequence.group(5))
+            step = 1 if last >= first else -1
+            choices = [chr(c) for c in range(first, last + step, step)]
+        else:
+            first, last = int(sequence.group(1)), int(sequence.group(2))
+            step = abs(int(sequence.group(3) or 1)) or 1
+            step = step if last >= first else -step
+            if abs(last - first) // abs(step) >= _VALUES_CAP:
+                return None
+            width = max(len(sequence.group(1)), len(sequence.group(2)))
+            padded = re.match(r"-?0\d", sequence.group(1)) or re.match(
+                r"-?0\d", sequence.group(2)
+            )
+            choices = [
+                str(n).zfill(width) if padded else str(n)
+                for n in range(first, last + step, step)
+            ]
+    found: list[str] = []
+    for choice in choices:
+        expanded = _brace_words(word[:start] + choice + word[end + 1 :])
+        if expanded is None or len(found) + len(expanded) > _VALUES_CAP:
+            return None
+        found.extend(expanded)
+    return found
+
+
 class _Variables(NamedTuple):
     """How *command* sets its variables (see :func:`_variables`)."""
 
@@ -900,12 +965,22 @@ def _variables(command: str) -> _Variables:
             loop_words = [word for word in args[2:] if word != "do"]
             if words[1:2] != ["in"]:
                 run_only.add(words[0])  # the arguments the shell was given
-            elif any("{" in word or variable_references(word) for word in loop_words):
-                in_part.add(words[0])  # a brace expansion or a variable's words
+            elif any(variable_references(word) for word in loop_words):
+                in_part.add(words[0])  # a variable's words
             else:
                 # Each word is a value, as of a `NAME=value`: one a
                 # substitution prints only the run knows.
-                found.extend((words[0], word) for word in loop_words)
+                values: list[str] | None = []
+                for word in loop_words:
+                    braced = _brace_words(word) if "{" in word else [word]
+                    if braced is None or values is None:
+                        values = None
+                    else:
+                        values.extend(braced)
+                if values is None or len(values) > _VALUES_CAP:
+                    in_part.add(words[0])  # a brace expansion not followed
+                else:
+                    found.extend((words[0], value) for value in values)
         elif each.name == "select" and args:
             # The word picked, or empty on a reply that picks none.
             in_part.add(words[0])

@@ -1044,6 +1044,8 @@ class TestWorkspaceRemovalAndComments:
             'D=sk; env -C "$D"ills rm -rf x',
             'D="x skills"; rm -rf $D',
             'for d in skills x; do rm -rf "$d"; done',
+            'for d in {skills,build}; do rm -rf "$d"; done',
+            'for d in sk{ills,x}; do rm -rf "$d"; done',
             "env D=skills sh -c 'rm -rf \"$D\"'",
             "env 'D=skills' sh -c 'rm -rf \"$D\"'",
             "builtin export D=skills; rm -rf $D",
@@ -1299,6 +1301,8 @@ class TestWorkspaceRemovalAndComments:
             'OUT=build; env OUT=$(mktemp -d) python x.py; rm -rf "$OUT"',
             # A variable only the run sets, read as written as for xargs.
             'while read d; do rm -rf "$d"; done < list.txt',
+            # A brace expansion, read as the words it makes.
+            'for seed in {0..4}; do rm -rf "outputs/seed_$seed"; done',
             "read D; rm -rf $D",
             'read R; D=$R; rm -rf "$D"',
             'D=build; read D; rm -rf "$D"',
@@ -1463,7 +1467,7 @@ class TestWorkspaceRemovalAndComments:
             "D=a0skills; printf '%n' IFS; rm -rf $D",
             'D=skills; rm -rf "${D:?${M}}"',
             'D=build; unset D; rm -rf "${D}skills"',
-            'for d in {skills,build}; do rm -rf "$d"; done',
+            'for d in "{skills,b}"; do rm -rf "$d"; done',
             "REPLY=x; read <<'EOF'\nskills\nEOF\ncd \"$REPLY\"; rm -rf demo",
             'printf -v "IFS" X; D="a skills"; rm -rf $D',
         ],
