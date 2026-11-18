@@ -455,3 +455,18 @@ def test_a_malformed_saved_url_does_not_stop_the_probe(monkeypatch):
 
     assert seen["base_url"] == "http://env-endpoint/v1", seen
     assert seen["api_key"] == "env-key", seen
+
+
+def test_the_models_url_extends_the_path_and_keeps_the_query():
+    """/models belongs on the path, not inside the query.
+
+    "http://x/v1?tenant=a" must not become "http://x/v1?tenant=a/models",
+    whose query is "tenant=a/models" -- a different endpoint, and one the
+    key would be sent to.
+    """
+    from EvoScientist.llm.custom_openai_discovery import _models_url
+
+    assert _models_url("http://x/v1") == "http://x/v1/models"
+    assert _models_url("http://x/v1/") == "http://x/v1/models"
+    assert _models_url("http://x/v1?tenant=a") == "http://x/v1/models?tenant=a"
+    assert _models_url("http://x/v1?tenant=a/") == "http://x/v1/models?tenant=a/"

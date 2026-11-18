@@ -21,7 +21,23 @@ _MAX_MODELS = 500
 
 
 def _models_url(base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/models"
+    """The endpoint's ``/models`` URL, built from the URL's parts.
+
+    Appending ``"/models"`` to the string would put it inside a query when
+    the base URL carries one: ``http://x/v1?tenant=a`` would become
+    ``http://x/v1?tenant=a/models``, whose query is ``tenant=a/models`` --
+    a different endpoint, and one the key would be sent to. The path is
+    extended instead, and the query and the fragment are kept as they are.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(base_url)
+    except ValueError:
+        # A URL that cannot even be parsed cannot be extended either.
+        return f"{base_url.rstrip('/')}/models"
+    path = f"{parts.path.rstrip('/')}/models"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
