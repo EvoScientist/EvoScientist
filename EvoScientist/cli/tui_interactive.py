@@ -2123,6 +2123,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                    _todo_sent = False
                 _hitl_round += 1
                 events = None
                 try:
@@ -2210,8 +2211,9 @@ def run_textual_interactive(
                         if (
                             on_todo_cb
                             and not _todo_sent
-                            and event_type == "tool_call"
+                            and event_type == "tool_result"
                             and event.get("name") == "write_todos"
+                            and event.get("success", True)
                             and state.todo_items
                         ):
                             if (
@@ -2353,21 +2355,6 @@ def run_textual_interactive(
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
                                     tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -2387,14 +2374,17 @@ def run_textual_interactive(
                             ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
-                            # Update todo from results
-                            if (
-                                result_name in ("write_todos", "read_todos")
-                                and state.todo_items
+                            # Update todo from results; the first Task List
+                            # panel goes above its call.
+                            if result_name in ("write_todos", "read_todos") and (
+                                state.todo_items or todo_w is not None
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tw is not None:
+                                        await container.mount(todo_w, before=tw)
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
                             # Show "Analyzing results..." if all tools done, no text yet
@@ -2681,11 +2671,11 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_ask_user_resume
 
-                                _stream_input = Command(resume=result)
+                                _stream_input = build_ask_user_resume(
+                                    event.get("interrupt_id"), result
+                                )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
                                 )
