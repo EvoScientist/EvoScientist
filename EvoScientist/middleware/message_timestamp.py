@@ -32,7 +32,12 @@ from langchain.agents.middleware.types import (
     ExtendedModelResponse,
     ModelResponse,
 )
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    ToolMessage,
+    convert_to_messages,
+)
 from langgraph.types import Command
 
 if TYPE_CHECKING:
@@ -67,11 +72,19 @@ def _stamped_command(command: Command, now: str) -> Command:
     update = command.update
     if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
         return command
-    messages = [with_created_at(message, now) for message in update["messages"]]
+    # A tool may write message dicts; ToolNode checks them but passes them on
+    # as dicts, so convert them first or they would carry no stamp.
+    messages = [
+        with_created_at(message, now)
+        for message in convert_to_messages(update["messages"])
+    ]
     return replace(command, update={**update, "messages": messages})
 
 
 def _stamped_tool_result(result: Any, now: str) -> Any:
+    # ToolNode also accepts a list of ``ToolMessage`` / ``Command`` from a tool.
+    if isinstance(result, list):
+        return [_stamped_tool_result(item, now) for item in result]
     if isinstance(result, Command):
         return _stamped_command(result, now)
     return with_created_at(result, now)

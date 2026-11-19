@@ -31,7 +31,7 @@ def _key(message):
     return message.response_metadata.get(CREATED_AT_KEY)
 
 
-# --- before_agent / before_model scan ----------------------------------------
+# --- before_agent scan -------------------------------------------------------
 
 
 def test_new_human_message_is_stamped_in_place_by_id():
@@ -194,6 +194,32 @@ def test_tool_command_without_a_message_list_is_returned_as_is():
     out = MessageTimestampMiddleware().wrap_tool_call(None, lambda _: command)
 
     assert out is command
+
+
+def test_tool_command_message_dicts_are_stamped():
+    command = Command(
+        update={"messages": [{"role": "tool", "content": "r", "tool_call_id": "c"}]}
+    )
+
+    out = MessageTimestampMiddleware().wrap_tool_call(None, lambda _: command)
+
+    [message] = out.update["messages"]
+    assert isinstance(message, ToolMessage)
+    assert _ISO_UTC_MS.match(_key(message))
+
+
+def test_list_tool_result_is_stamped_item_by_item():
+    result = [
+        ToolMessage("r", tool_call_id="c1"),
+        Command(update={"messages": [ToolMessage("s", tool_call_id="c2")]}),
+    ]
+
+    message, command = MessageTimestampMiddleware().wrap_tool_call(
+        None, lambda _: result
+    )
+
+    assert _ISO_UTC_MS.match(_key(message))
+    assert _key(command.update["messages"][0]) == _key(message)
 
 
 def test_tool_command_messages_share_one_time():
