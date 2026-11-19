@@ -1177,7 +1177,8 @@ class TestStepModel:
     def test_custom_openai_offers_discovered_names(self, monkeypatch):
         """A live endpoint's ids are the choices, ahead of the free-text entry.
 
-        The key falls back to ``CUSTOM_OPENAI_API_KEY`` because onboarding
+        The environment key is the one the probe uses: the environment
+        names the endpoint the model calls will reach, and onboarding
         loads the file only and may not have written a kept key back.
         """
         from EvoScientist.config.onboard.steps import _step_model

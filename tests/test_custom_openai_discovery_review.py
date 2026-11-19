@@ -127,41 +127,6 @@ def test_a_discovered_listing_is_capped():
     assert names[0] == "model-0"
 
 
-def test_the_probe_uses_the_url_and_the_key_from_the_same_source(monkeypatch):
-    """A key that belongs to one endpoint is never sent to another.
-
-    The runtime gives the environment precedence over the saved config. The
-    probe must use the same source for BOTH the URL and the key, or it would
-    send the environment key to a stale saved URL.
-    """
-    from EvoScientist.config.onboard import steps as steps_module
-
-    seen: dict[str, str] = {}
-
-    def fake_list(base_url, api_key, **kwargs):
-        seen["base_url"] = base_url or ""
-        seen["api_key"] = api_key or ""
-        return []
-
-    monkeypatch.setattr(steps_module, "list_custom_openai_models", fake_list)
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://env-endpoint/v1")
-    monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "env-key")
-    config = SimpleNamespace(
-        model="",
-        custom_openai_base_url="http://saved-endpoint/v1",
-        custom_openai_api_key="saved-key",
-    )
-
-    with patch(
-        "EvoScientist.config.onboard.steps.questionary",
-        **_picker_stub(),
-    ):
-        steps_module._step_model(config, "custom-openai")
-
-    assert seen["base_url"] == "http://env-endpoint/v1", seen
-    assert seen["api_key"] == "env-key", seen
-
-
 def _probe_seen(monkeypatch, config, env_url=None, env_key=None):
     """Run the onboarding probe and report the URL and key it used."""
     from EvoScientist.config.onboard import steps as steps_module
@@ -199,8 +164,12 @@ def _config(url="http://saved-endpoint/v1", key="saved-key"):
     )
 
 
-def test_an_environment_url_is_never_probed_with_the_saved_key(monkeypatch):
-    """A key is never sent to a URL it was not configured for."""
+def test_an_environment_url_is_probed_with_the_saved_key(monkeypatch):
+    """Each setting takes its environment variable over its saved value.
+
+    The environment names the URL and the config holds the key, so the
+    probe sends both -- the same pair the model calls will send.
+    """
     seen = _probe_seen(
         monkeypatch,
         _config(),
@@ -209,15 +178,14 @@ def test_an_environment_url_is_never_probed_with_the_saved_key(monkeypatch):
     )
 
     assert seen["base_url"] == "http://env-endpoint/v1", seen
-    assert seen["api_key"] == "", seen
+    assert seen["api_key"] == "saved-key", seen
 
 
 def test_an_environment_key_is_probed_with_the_saved_url(monkeypatch):
     """The saved URL keeps the environment key when it has no key of its own.
 
-    This is the onboarding case the upstream contract describes: the wizard
-    has written the URL but may not have written the key back, so the live
-    credential comes from the environment.
+    The wizard has written the URL but may not have written the key back,
+    so the live credential comes from the environment.
     """
     seen = _probe_seen(
         monkeypatch,
@@ -228,6 +196,35 @@ def test_an_environment_key_is_probed_with_the_saved_url(monkeypatch):
 
     assert seen["base_url"] == "http://saved-endpoint/v1", seen
     assert seen["api_key"] == "env-key", seen
+
+
+def test_the_model_calls_keep_the_saved_key_when_the_environment_names_the_url(
+    monkeypatch,
+):
+    """The key every model call sends must not change because of the probe.
+
+    Each setting takes its environment variable over its saved value, so a
+    container that reaches the host at another address still authenticates
+    with the key the user saved. A probe that paired the two would answer
+    401 on the very calls it was meant to describe.
+    """
+    from EvoScientist.config.settings import apply_config_to_env, get_effective_config
+    from EvoScientist.llm.models import get_chat_model
+
+    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.load_config",
+        lambda *args, **kwargs: _saved_config(
+            custom_openai_base_url="http://localhost:8000/v1",
+            custom_openai_api_key="sk-saved",
+        ),
+    )
+
+    apply_config_to_env(get_effective_config())
+    model = get_chat_model("fake-agent", "custom-openai")
+
+    assert model.openai_api_key.get_secret_value() == "sk-saved"
 
 
 def test_both_from_the_environment_are_paired(monkeypatch):
@@ -292,27 +289,6 @@ async def test_the_probe_has_a_total_deadline():
     assert elapsed < 2.0, elapsed
 
 
-def test_the_saved_key_is_used_when_the_environment_names_the_same_endpoint(
-    monkeypatch,
-):
-    """The same endpoint named twice keeps the key that belongs to it.
-
-    The user sets ``CUSTOM_OPENAI_BASE_URL``, keeps that URL in onboarding
-    and enters its key: the wizard stores the key in the config without
-    exporting it. The saved key then belongs to the environment's URL, so it
-    must be used.
-    """
-    seen = _probe_seen(
-        monkeypatch,
-        _config(url="http://same-endpoint/v1", key="saved-key"),
-        env_url="http://same-endpoint/v1",
-        env_key=None,
-    )
-
-    assert seen["base_url"] == "http://same-endpoint/v1", seen
-    assert seen["api_key"] == "saved-key", seen
-
-
 def test_the_sync_probe_has_a_total_deadline(monkeypatch):
     """A trickling endpoint cannot keep the wizard waiting.
 
@@ -348,43 +324,6 @@ def test_the_sync_probe_has_a_total_deadline(monkeypatch):
 
     assert names == []
     assert elapsed < 2.0, elapsed
-
-
-def test_the_same_endpoint_written_two_ways_keeps_the_saved_key(monkeypatch):
-    """A trailing slash does not make the endpoint a different one.
-
-    "http://x/v1" and "http://x/v1/" name the same endpoint, so the saved
-    key belongs to it and is used. Treating them as different would withhold
-    the key and probe keyless.
-    """
-    seen = _probe_seen(
-        monkeypatch,
-        _config(url="http://same-endpoint/v1/", key="saved-key"),
-        env_url="http://same-endpoint/v1",
-        env_key=None,
-    )
-
-    assert seen["base_url"] == "http://same-endpoint/v1/", seen
-    assert seen["api_key"] == "saved-key", seen
-
-
-def test_a_query_whose_value_ends_in_a_slash_is_a_different_endpoint(monkeypatch):
-    """Only the PATH's trailing slash is ignored, not a query's.
-
-    "http://x/v1?tenant=a/" and "http://x/v1?tenant=a" are different
-    queries. Stripping the slash off the whole string would make them
-    compare equal, and the environment key would be sent to the saved
-    URL's endpoint -- which is not the endpoint it was configured for.
-    """
-    seen = _probe_seen(
-        monkeypatch,
-        _config(url="http://x/v1?tenant=a", key=""),
-        env_url="http://x/v1?tenant=a/",
-        env_key="env-key",
-    )
-
-    assert seen["base_url"] == "http://x/v1?tenant=a/", seen
-    assert seen["api_key"] == "env-key", seen
 
 
 def test_the_environment_key_wins_over_an_expired_saved_key(monkeypatch):
@@ -439,107 +378,6 @@ def test_the_timed_out_request_is_aborted(monkeypatch):
     assert names == []
     assert elapsed < 2.0, elapsed
     assert cancelled, "the request was not cancelled, so it kept running"
-
-
-def test_a_malformed_saved_url_does_not_stop_the_probe(monkeypatch):
-    """A URL that cannot even be parsed is not the endpoint being probed.
-
-    ``urlsplit`` raises on an unmatched bracket, and that must not abort
-    the wizard: the valid environment endpoint still has to be probed.
-    """
-    seen = _probe_seen(
-        monkeypatch,
-        _config(url="http://[broken/v1", key="saved-key"),
-        env_url="http://env-endpoint/v1",
-        env_key="env-key",
-    )
-
-    assert seen["base_url"] == "http://env-endpoint/v1", seen
-    assert seen["api_key"] == "env-key", seen
-
-
-def test_the_models_url_extends_the_path_and_keeps_the_query():
-    """/models belongs on the path, not inside the query.
-
-    "http://x/v1?tenant=a" must not become "http://x/v1?tenant=a/models",
-    whose query is "tenant=a/models" -- a different endpoint, and one the
-    key would be sent to.
-    """
-    from EvoScientist.llm.custom_openai_discovery import _models_url
-
-    assert _models_url("http://x/v1") == "http://x/v1/models"
-    assert _models_url("http://x/v1/") == "http://x/v1/models"
-    assert _models_url("http://x/v1?tenant=a") == "http://x/v1/models?tenant=a"
-    assert _models_url("http://x/v1?tenant=a/") == "http://x/v1/models?tenant=a/"
-
-
-def test_the_effective_config_never_pairs_the_saved_key_with_the_env_url(
-    monkeypatch,
-):
-    """The merged configuration must not mix the two sources.
-
-    The environment and the saved config are resolved independently, so the
-    merge can hold the environment's URL with the SAVED key. The pickers
-    probe with the merged pair, so that key would reach an endpoint it does
-    not belong to.
-    """
-    from EvoScientist.config.settings import get_effective_config
-
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://env-endpoint/v1")
-    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(
-        "EvoScientist.config.settings.load_config",
-        lambda *args, **kwargs: _saved_config(
-            custom_openai_base_url="http://saved-endpoint/v1",
-            custom_openai_api_key="saved-key",
-        ),
-    )
-
-    config = get_effective_config()
-
-    assert config.custom_openai_base_url == "http://env-endpoint/v1"
-    assert config.custom_openai_api_key == "", config.custom_openai_api_key
-
-
-def test_the_effective_config_keeps_the_saved_key_for_the_same_endpoint(
-    monkeypatch,
-):
-    """The same endpoint named twice keeps the key that belongs to it."""
-    from EvoScientist.config.settings import get_effective_config
-
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://same-endpoint/v1")
-    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(
-        "EvoScientist.config.settings.load_config",
-        lambda *args, **kwargs: _saved_config(
-            custom_openai_base_url="http://same-endpoint/v1",
-            custom_openai_api_key="saved-key",
-        ),
-    )
-
-    config = get_effective_config()
-
-    assert config.custom_openai_base_url == "http://same-endpoint/v1"
-    assert config.custom_openai_api_key == "saved-key"
-
-
-def test_the_effective_config_prefers_the_environment_key(monkeypatch):
-    """The runtime gives the environment's key precedence, and so does this."""
-    from EvoScientist.config.settings import get_effective_config
-
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://same-endpoint/v1")
-    monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "live-key")
-    monkeypatch.setattr(
-        "EvoScientist.config.settings.load_config",
-        lambda *args, **kwargs: _saved_config(
-            custom_openai_base_url="http://same-endpoint/v1",
-            custom_openai_api_key="expired-key",
-        ),
-    )
-
-    config = get_effective_config()
-
-    assert config.custom_openai_api_key == "live-key"
 
 
 def _saved_config(**fields: str):

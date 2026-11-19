@@ -847,20 +847,13 @@ def _step_model(
         #   - the saved config names it: the saved key is the one for it,
         #     and the environment key is the fallback for a wizard that has
         #     the URL but has not written the key back yet.
-        # A key is never sent to an endpoint it was not configured for.
-        env_url = os.environ.get("CUSTOM_OPENAI_BASE_URL") or ""
-        env_key = os.environ.get("CUSTOM_OPENAI_API_KEY") or ""
-        saved_url = config.custom_openai_base_url or ""
-        saved_key = getattr(config, "custom_openai_api_key", "") or ""
-        from ..custom_endpoints import pair_custom_endpoint_credentials
-
-        base_url, api_key = pair_custom_endpoint_credentials(
-            env_base_url=env_url,
-            env_api_key=env_key,
-            saved_base_url=saved_url,
-            saved_api_key=saved_key,
+        # The probe sends the URL and the key the model calls will use:
+        # the environment first, then the wizard's value.
+        discovered = list_custom_openai_models(
+            os.environ.get("CUSTOM_OPENAI_BASE_URL") or config.custom_openai_base_url,
+            os.environ.get("CUSTOM_OPENAI_API_KEY")
+            or getattr(config, "custom_openai_api_key", ""),
         )
-        discovered = list_custom_openai_models(base_url, api_key)
         entries = [(name, name) for name in discovered]
         if not entries:
             entries = get_models_for_provider(provider)

@@ -62,10 +62,8 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
-# Providers that serve the user's OWN endpoint: the ids they accept are the
-# ones they were asked for, so a name given with one must be sent as written.
-# The global registry would rewrite it into another provider's id, which such
-# an endpoint does not serve.
+# The user's own endpoints serve the ids they are asked for, so a name given
+# with one is sent as written, never rewritten into another provider's id.
 _CUSTOM_ENDPOINT_PROVIDERS = frozenset({"custom-openai", "custom-anthropic"})
 
 # Anthropic-routed providers that support extended thinking.

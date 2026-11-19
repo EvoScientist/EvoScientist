@@ -499,15 +499,9 @@ def get_chat_model(
     # older or different model there.
     #
     # A CUSTOM endpoint serves the ids it was asked for, so a name given
-    # with one must be sent as written: the global registry fallback would
-    # rewrite it into another provider's id (``qwen3.5-27b`` ->
-    # ``qwen/qwen3.5-27b`` at atlascloud), which the endpoint does not
-    # serve -- an endpoint that listed ``qwen3.5-27b`` rejects the
-    # rewritten id (issue #713).
-    #
-    # The other providers keep the fallback: their short names are their
-    # own registry entries, so rewriting one into another provider's id
-    # is what their configuration already relies on.
+    # with one is sent as written: the global registry fallback would
+    # rewrite it into another provider's id, which such an endpoint does
+    # not serve.
     if (
         model_id is None
         and model in MODELS

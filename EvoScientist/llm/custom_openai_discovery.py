@@ -14,16 +14,8 @@ from __future__ import annotations
 
 import threading
 
-# A picker mounts one row per model, so a huge listing would make it
-# unusable. The cap keeps the list usable and the response bounded.
+# A picker mounts one row per model, so a huge listing would make it unusable.
 _MAX_MODELS = 500
-
-
-def _models_url(base_url: str) -> str:
-    """The endpoint's ``/models`` URL, built from the URL's parts."""
-    from ..config.custom_endpoints import models_url
-
-    return models_url(base_url)
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
@@ -34,17 +26,7 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
 
 
 def _names_from_body(body: object) -> list[str]:
-    """Model ids from an OpenAI ``/models`` body, or ``[]`` if it isn't one.
-
-    ``_listed_models`` lives next to the key checker. Importing it here (not
-    from ``llm.registry``) keeps the registry free of the config package.
-
-    The ids are stripped and de-duplicated in the order the endpoint listed
-    them: a blank id is not a model, and the same model twice would show up
-    twice in a picker. The list is capped at ``_MAX_MODELS``: a picker mounts
-    one row per model, so an endpoint that serves tens of thousands of ids
-    would leave the user with an unusable list.
-    """
+    """Model ids from an OpenAI ``/models`` body: stripped, unique, capped."""
     from ..config.provider_keys import _listed_models
 
     listed = _listed_models(body)
@@ -69,26 +51,15 @@ def list_custom_openai_models(
     *,
     timeout: float = 5.0,
 ) -> list[str]:
-    """Sync probe for the onboarding wizard.
+    """The endpoint's model ids, or ``[]`` on any failure.
 
-    Returns the endpoint's model ids, or ``[]`` on any failure (no base URL,
-    non-200, timeout, connect error, non-JSON, or a body that is not a model
-    list). Never raises — the wizard must still open when the endpoint is down.
-
-    The call has a TOTAL deadline, not just HTTPX's inactivity timeout.
-    HTTPX's timeout limits the wait for each chunk, so an endpoint that
-    sends a chunk every few seconds without ever finishing would keep the
-    wizard waiting indefinitely.
+    Never raises: the wizard must still open when the endpoint is down. The
+    call has a TOTAL deadline, not just HTTPX's inactivity timeout, because
+    HTTPX's timeout only limits the wait between chunks.
 
     The probe runs in a daemon thread, because the wizard is blocking and
     the request must not. That thread runs the async probe, whose deadline
-    CANCELS the request: when the deadline passes the request is aborted
-    and the thread ends with it. A probe that only stopped waiting would
-    leave the thread and its connection behind, and every further probe
-    would leave another one.
-
-    The listing is bounded: an endpoint that serves tens of thousands of ids
-    would otherwise fill the picker with one row each and make it unusable.
+    CANCELS the request, so the thread ends with the request.
     """
     if not base_url:
         return []
@@ -111,9 +82,9 @@ def list_custom_openai_models(
     worker.join(timeout)
     if worker.is_alive():
         # The probe's own deadline cancels the request, so the thread ends
-        # when the cancellation lands. This is the grace for that.
+        # when the cancellation lands. This is the grace for that -- and a
+        # listing that arrives inside it is the answer.
         worker.join(0.5)
-        return []
     return names
 
 
@@ -123,16 +94,12 @@ async def discover_custom_openai_models(
     *,
     timeout: float = 1.5,
 ) -> list[str]:
-    """Async probe for the model pickers.
+    """The endpoint's model ids, or ``[]`` on any failure.
 
-    Same contract as :func:`list_custom_openai_models`: a list of model ids,
-    or ``[]`` on any failure. Never raises — the picker must always open,
-    even when the endpoint is down. An empty ``base_url`` returns ``[]``
-    without an HTTP call.
-
-    The timeout is a TOTAL deadline, not just an inactivity timeout: an
-    endpoint that trickles a byte at a time would otherwise keep the
-    connection alive indefinitely and the picker would never open.
+    Never raises: the picker must always open, even when the endpoint is
+    down. An empty ``base_url`` returns ``[]`` without an HTTP call. The
+    timeout is a TOTAL deadline, so a trickling endpoint cannot keep the
+    picker waiting.
     """
     if not base_url:
         return []
@@ -145,7 +112,7 @@ async def discover_custom_openai_models(
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await asyncio.wait_for(
                 client.get(
-                    _models_url(base_url),
+                    base_url.rstrip("/") + "/models",
                     headers=_auth_headers(api_key),
                 ),
                 timeout=timeout,
