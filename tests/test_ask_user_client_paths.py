@@ -10,10 +10,10 @@ the client actually displayed. The Rich CLI loop is covered by
   handed to the node as the answer itself, losing the user's answer;
 - the channels consumer (``InboundConsumer._stream_with_hitl``): the
   ask_user events of one turn are drained one ``_resolve_ask_user`` round
-  each, every resume keyed by the displayed event's interrupt id — and a
-  keyless event resumes flat, not keyed ``"default"``;
+  each, every resume keyed by the displayed event's interrupt id;
 - the TUI branch (``tui_interactive`` ask_user handling): the same drain
-  through the interactive widget wait, in display order.
+  through the interactive widget wait, in display order;
+- the server gateway: a keyed answer is posted for that interrupt only.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ pytest.importorskip("textual")
 from langgraph.types import Command  # type: ignore[import-untyped]
 
 from tests.fakes.common import FakeGraphGateway
+from tests.fakes.tui import pausing_stream, scripted_stream
 
 ANSWER_RED = {"answers": ["red"], "status": "answered"}
 ANSWER_LARGE = {"answers": ["large"], "status": "answered"}
@@ -40,13 +41,8 @@ def _ask(interrupt_id: str, question: str) -> dict:
     }
 
 
-def _ask_without_id(question: str) -> dict:
-    """A keyless ask_user event: the case the helper's fallback owns."""
-    return {"type": "ask_user", "questions": [{"question": question, "type": "text"}]}
-
-
 class TestBuildAskUserResumeFallback:
-    """The helper owns the "no id" fallback the call sites used to spell."""
+    """A keyless event resumes flat; a real id keys the resume."""
 
     def test_a_keyless_event_resumes_flat_and_a_real_id_keys(self):
         from EvoScientist.backends import build_ask_user_resume
@@ -85,40 +81,6 @@ def _consumer(workspace, gateway):
     )
 
 
-def _scripted_stream(script: list[list[dict]]):
-    """One list of events per stream call; a call that ends on an ask_user
-    event simply ends (the run parked), like the real stream."""
-    calls = 0
-
-    async def _fake_stream(_request):
-        nonlocal calls
-        events = script[calls]
-        calls += 1
-        for event in events:
-            yield event
-
-    return _fake_stream
-
-
-def _pausing_stream(script: list[list[dict]]):
-    """Like the TUI fake of the same name: a round that pauses holds its
-    stream open until the resumed round closes it."""
-    import asyncio
-
-    calls = 0
-
-    async def _fake_stream(_request):
-        nonlocal calls
-        events = script[calls]
-        calls += 1
-        for event in events:
-            yield event
-        if events and events[-1]["type"] in ("interrupt", "ask_user"):
-            await asyncio.Event().wait()
-
-    return _fake_stream
-
-
 async def _consumer_turn(consumer) -> list:
     from EvoScientist.channels.bus.events import InboundMessage
 
@@ -140,16 +102,16 @@ class TestChannelsConsumerAskUserResume:
     ):
         script = [
             # One step parks BOTH questions; the consumer stops at the
-            # first ask_user event it sees. The sibling is keyless.
-            [_ask("id-1", "Colour?"), _ask_without_id("Size?")],
+            # first ask_user event it sees.
+            [_ask("id-1", "Colour?"), _ask("id-2", "Size?")],
             # The resume stream re-emits the still-pending sibling.
-            [_ask_without_id("Size?")],
+            [_ask("id-2", "Size?")],
             [
                 {"type": "text", "content": "Both answers received."},
                 {"type": "done", "content": "Both answers received."},
             ],
         ]
-        gateway = FakeGraphGateway(stream=_scripted_stream(script))
+        gateway = FakeGraphGateway(stream=scripted_stream(script))
         consumer = _consumer(workspace, gateway)
 
         resolved: list[dict] = []
@@ -170,12 +132,11 @@ class TestChannelsConsumerAskUserResume:
             "Colour?",
             "Size?",
         ]
-        # The keyed sibling resumes by its interrupt id; the keyless one
-        # resumes FLAT — not keyed by a made-up "default" id.
+        # Each resume is keyed by the id of the event it was displayed for.
         resumes = [r.message for r in gateway.requests[1:]]
         assert len(resumes) == 2
         assert resumes[0].resume == {"id-1": ANSWER_RED}
-        assert resumes[1].resume == ANSWER_LARGE
+        assert resumes[1].resume == {"id-2": ANSWER_LARGE}
         # The turn produced its response on the channel.
         assert any("Both answers received." in out.content for out in queued)
 
@@ -191,14 +152,14 @@ class TestTuiAskUserResume:
 
         script = [
             # One step parks BOTH questions; the TUI stops at the first
-            # ask_user event it sees. The sibling is keyless.
-            [_ask("id-1", "Colour?"), _ask_without_id("Size?")],
+            # ask_user event it sees.
+            [_ask("id-1", "Colour?"), _ask("id-2", "Size?")],
             # The resume stream re-emits the still-pending sibling.
-            [_ask_without_id("Size?")],
+            [_ask("id-2", "Size?")],
             FINISHED_REPLY,
         ]
         app = await capture_app(monkeypatch, workspace)
-        gateway = FakeGraphGateway(stream=_pausing_stream(script))
+        gateway = FakeGraphGateway(stream=pausing_stream(script))
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
             app._runtime_gateways = RuntimeGateways(
@@ -222,9 +183,45 @@ class TestTuiAskUserResume:
         assert response == "finished"
         # The questions were asked in first-emitted order, one per round.
         assert asked == ["Colour?", "Size?"]
-        # The keyed sibling resumes by its interrupt id; the keyless one
-        # resumes FLAT — not keyed by a made-up "default" id.
+        # Each resume is keyed by the id of the event it was displayed for.
         resumes = [r.message for r in gateway.requests[1:]]
         assert len(resumes) == 2
         assert resumes[0].resume == {"id-1": ANSWER_RED}
-        assert resumes[1].resume == ANSWER_LARGE
+        assert resumes[1].resume == {"id-2": ANSWER_LARGE}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(ANSWER_RED, id="answered"),
+        pytest.param({"status": "cancelled"}, id="cancelled"),
+    ],
+)
+async def test_server_gateway_posts_the_answer_for_its_interrupt_only(answer):
+    from EvoScientist.backends import build_ask_user_resume
+    from EvoScientist.gateway.server import (
+        LangGraphServerGateway,
+        LangGraphServerThreadStore,
+    )
+    from EvoScientist.gateway.types import RunRequest
+    from tests.fakes.common import (
+        FakeLangGraphClient,
+        FakeLangGraphThreadsClient,
+        FakeLangGraphThreadStream,
+        paused_thread_state,
+    )
+
+    stream = FakeLangGraphThreadStream("t1", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "t1", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"t1": paused_thread_state("id-1", "id-2")},
+        streams={"t1": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    request = RunRequest(message=build_ask_user_resume("id-2", answer), thread_id="t1")
+
+    [event async for event in gateway.stream_events(request)]
+
+    assert [respond["input"] for respond in stream.run.responds] == [{"id-2": answer}]

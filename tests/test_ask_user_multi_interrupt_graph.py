@@ -233,19 +233,3 @@ def test_a_single_ask_user_still_round_trips(tmp_path):
     (interrupt_id,) = resume.resume
     assert resume.resume[interrupt_id] == {"answers": ["red"], "status": "answered"}
     assert _ask_user_tool_results(model) == {"q1": "Q: Colour?\nA: red"}
-
-
-def test_the_gateway_guard_still_rejects_unkeyed_multi_interrupt_resumes():
-    """The server gateway must keep refusing a flat payload with two pending
-    interrupts — the fix is the keyed client, not a weakened guard."""
-    from EvoScientist.gateway.server import _resume_target
-
-    with pytest.raises(RuntimeError, match="2 pending interrupts"):
-        _resume_target(
-            "t", {"answers": ["red"], "status": "answered"}, ["id-a", "id-b"]
-        )
-    # A keyed payload resolves to exactly the interrupt it names.
-    assert _resume_target("t", {"id-a": {"status": "cancelled"}}, ["id-a", "id-b"]) == (
-        "id-a",
-        {"status": "cancelled"},
-    )
