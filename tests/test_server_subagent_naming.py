@@ -122,13 +122,9 @@ def test_the_tool_call_id_is_the_llm_tool_call_that_started_the_child():
     assert _tool_call_ids(events) == ["call_LLM_1"], events
 
 
-def test_a_paused_subagent_ends_as_paused_not_finished():
-    """A child that pauses only stops: the TUI marks the widget paused.
-
-    The lifecycle transformer's terminal payload for a pause is an
-    ``interrupted`` event, not a ``completed`` one. Ending it as finished
-    would finalize the widget as a done sub-agent.
-    """
+@pytest.mark.parametrize("phase", ["interrupted", "drained"])
+def test_a_paused_subagent_ends_as_paused_not_finished(phase):
+    """Both interruption and cooperative shutdown leave the run resumable."""
     tracker, _registry = _tracker()
 
     tracker.process(
@@ -136,11 +132,12 @@ def test_a_paused_subagent_ends_as_paused_not_finished():
             ["tools:task-1"], graph_name="code-agent", cause=_subagent_cause()
         )
     )
-    events = tracker.process(_lifecycle_ended(["tools:task-1"], phase="interrupted"))
+    events = tracker.process(_lifecycle_ended(["tools:task-1"], phase=phase))
 
     ends = [e for e in events if e.get("type") == "subagent_end"]
     assert len(ends) == 1, events
     assert ends[0].get("paused") is True, ends
+    assert not tracker.finish()
 
 
 def test_a_subagent_without_a_graph_name_falls_back_to_the_namespace_segment():
@@ -433,8 +430,8 @@ def test_an_unnamed_agent_in_a_hook_is_not_announced_under_its_parents_name():
 
     The goal drafter is such a run: it announces itself as ``EvoScientist``,
     the parent's name, which the main stream shows as ``Drafter.before_agent``.
-    It is not a sub-agent -- no tool call started it -- so the tracker must
-    not announce it under the inherited name.
+    No tool call started it, so the tracker should announce it under the
+    hook's namespace segment.
     """
     from itertools import cycle
 
@@ -458,11 +455,11 @@ def test_an_unnamed_agent_in_a_hook_is_not_announced_under_its_parents_name():
     )
 
     payloads = _real_lifecycle_payloads(outer)
+    starts = [payload for payload in payloads if payload["event"] == "started"]
+    assert len(starts) == 1, payloads
+    assert starts[0]["graph_name"] == "EvoScientist"
+    assert "cause" not in starts[0]
+
     events, _registry = _track(payloads)
 
-    assert payloads, "the hook's agent run produced no lifecycle payload"
-    assert "EvoScientist" not in _starts(events), events
-    # The name it keeps is the namespace segment -- what the main stream shows.
-    for payload in payloads:
-        segment = payload["namespace"][-1].partition(":")[0]
-        assert segment not in ("", "tools")
+    assert _starts(events) == ["Drafter.before_agent"], events
