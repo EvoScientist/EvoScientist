@@ -16,10 +16,10 @@ The shapes here are the ones the real transformer pushes, read off
   no trigger call id, no cause.
 
 Two tests at the bottom run the REAL transformer over a REAL agent run, so
-the shape above cannot drift from what the server actually delivers: a
-sub-agent started by a ``task`` tool call, and an unnamed agent run inside a
-middleware hook (the goal drafter), which inherits its parent's name and must
-not be announced as a sub-agent under that name.
+the payload shapes above come from the transformer itself: a sub-agent
+started by a ``task`` tool call, and an unnamed agent run inside a middleware
+hook (the goal drafter), which inherits its parent's name and must not be
+announced as a sub-agent under that name.
 """
 
 from __future__ import annotations
@@ -120,24 +120,6 @@ def test_the_tool_call_id_is_the_llm_tool_call_that_started_the_child():
     )
 
     assert _tool_call_ids(events) == ["call_LLM_1"], events
-
-
-@pytest.mark.parametrize("phase", ["interrupted", "drained"])
-def test_a_paused_subagent_ends_as_paused_not_finished(phase):
-    """Both interruption and cooperative shutdown leave the run resumable."""
-    tracker, _registry = _tracker()
-
-    tracker.process(
-        _lifecycle_started(
-            ["tools:task-1"], graph_name="code-agent", cause=_subagent_cause()
-        )
-    )
-    events = tracker.process(_lifecycle_ended(["tools:task-1"], phase=phase))
-
-    ends = [e for e in events if e.get("type") == "subagent_end"]
-    assert len(ends) == 1, events
-    assert ends[0].get("paused") is True, ends
-    assert not tracker.finish()
 
 
 def test_a_subagent_without_a_graph_name_falls_back_to_the_namespace_segment():

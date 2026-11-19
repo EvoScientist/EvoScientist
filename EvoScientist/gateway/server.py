@@ -665,20 +665,6 @@ def _lifecycle_is_subagent(data: Mapping[str, Any] | None) -> bool:
     return cause.get("type") == "toolCall"
 
 
-def _task_agent_name(data: Mapping[str, Any] | None) -> str | None:
-    """The sub-agent name a task event carries in its metadata, if any."""
-    if data is None:
-        return None
-    metadata = _as_raw_map(data.get("metadata"))
-    if metadata is None:
-        return None
-    name = metadata.get("lc_agent_name")
-    if not isinstance(name, str):
-        return None
-    stripped = name.strip()
-    return stripped or None
-
-
 def _lifecycle_cause_tool_call_id(data: Mapping[str, Any] | None) -> str | None:
     """The LLM tool call that started a nested run, if the event names it.
 
@@ -732,34 +718,14 @@ class _ServerSubagentTracker:
                         name=self._lifecycle_name(data),
                     )
                 )
-            elif phase in ("interrupted", "drained") and namespace:
-                # Both leave the child resumable, so the TUI must keep the
-                # widget in its paused state.
-                events.extend(self._end(namespace, paused=True))
             elif phase in ("completed", "failed") and namespace:
                 events.extend(self._end(namespace))
-        elif method == "tasks":
-            if data is not None and "result" in data:
-                # A result that carries interrupts is a child that only paused.
-                events.extend(
-                    self._end_triggered_child(
-                        namespace,
-                        data.get("id"),
-                        paused=bool(data.get("interrupts")),
-                    )
-                )
-            elif namespace:
-                # A task event names the child too, but the server's stream
-                # suppresses those events, so this is only a fallback.
-                events.extend(
-                    self._ensure_registered(
-                        namespace,
-                        tool_call_id=None,
-                        name=_task_agent_name(data) if data is not None else None,
-                    )
-                )
-        elif namespace:
-            events.extend(self._ensure_registered(namespace[:1], tool_call_id=None))
+        elif namespace and self.registry.resolve(namespace[:1]) is None:
+            # A child's input values come before its lifecycle start, and the
+            # server mirrors tool results under ``tools:<call id>``: register
+            # the path for routing only, so only a lifecycle start announces.
+            head = namespace[:1]
+            self.registry.register(head, self._parse_namespace_segment(head[0])[0])
         return events
 
     def finish(self) -> list[dict[str, Any]]:
@@ -795,9 +761,8 @@ class _ServerSubagentTracker:
         if not path:
             return []
         if path in self._ended:
-            # The child already ended. A late event for it -- a ``messages``
-            # event that arrives after the end -- must not announce a second
-            # start, and must not overwrite the registry's name.
+            # The child already ended. A late start for it must not announce
+            # a second start, and must not overwrite the registry's name.
             return []
         active = self._active.get(path)
         if active is not None:
@@ -819,40 +784,13 @@ class _ServerSubagentTracker:
             ).data
         ]
 
-    def _end_triggered_child(
-        self,
-        namespace: tuple[str, ...],
-        result_id: object,
-        *,
-        paused: bool = False,
-    ) -> list[dict[str, Any]]:
-        """End the child a task result belongs to, when it only paused.
-
-        The task result carries the id of the run it belongs to, which is the
-        namespace segment's own id -- not the tool call the model made, which
-        is what the start event now announces.
-        """
-        if not result_id:
-            return []
-        events: list[dict[str, Any]] = []
-        for path in list(self._active):
-            segment = path[-1].partition(":")[2]
-            if path[:-1] == namespace and segment == result_id:
-                events.extend(self._end(path, paused=paused))
-        return events
-
-    def _end(
-        self,
-        path: tuple[str, ...],
-        *,
-        paused: bool = False,
-    ) -> list[dict[str, Any]]:
+    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
         name = self._active.get(path)
         if name is None:
             return []
         self._active.pop(path, None)
         self._ended.add(path)
-        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        end = self.emitter.subagent_end(name, instance_id=":".join(path))
         return [end.data]
 
     @staticmethod
