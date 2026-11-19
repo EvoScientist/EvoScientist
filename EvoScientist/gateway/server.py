@@ -629,11 +629,12 @@ class LangGraphServerThreadStore(ThreadStore):
 def _lifecycle_graph_name(data: Mapping[str, Any] | None) -> str | None:
     """The sub-agent name a lifecycle start event carries, if any.
 
-    LangGraph's lifecycle transformer sets ``graph_name`` on a nested run's
-    start event to the run's own ``lc_agent_name`` when that run is a
-    sub-agent, and to the namespace segment otherwise. The server's stream
-    suppresses the raw ``tasks`` events that carry the same name in their
-    metadata, so this is where the name actually arrives.
+    LangGraph's lifecycle transformer copies the nested run's
+    ``lc_agent_name`` (its own or one inherited from the parent) into
+    ``graph_name`` on its start event, and the namespace segment when there
+    is none. The server's stream suppresses the raw ``tasks`` events that
+    carry the same name in their metadata, so this is where the name
+    actually arrives.
     """
     if data is None:
         return None
@@ -653,8 +654,8 @@ def _lifecycle_is_subagent(data: Mapping[str, Any] | None) -> bool:
     no cause at all. The cause is therefore what tells the two apart, and it
     decides on its own.
 
-    The absence of a cause is not a gap in the evidence: the transformer
-    only omits it for a run no tool call started.
+    The absence of a cause means no tool call started a named run; a
+    tool-started run without a name keeps its namespace segment either way.
     """
     if data is None:
         return False
