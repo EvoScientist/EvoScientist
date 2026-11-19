@@ -334,6 +334,48 @@ class TestBigAndLateAnswers:
         assert names == [], names
         assert elapsed < 1.0, elapsed
 
+    def test_walking_the_names_that_does_not_fit_the_deadline_is_dropped(
+        self, monkeypatch
+    ):
+        """Taking the names out of the body is inside the deadline too.
+
+        Walking a near-cap body costs as much as parsing it, so the walk is
+        part of the work the deadline bounds.
+        """
+        import time
+
+        from EvoScientist.llm import custom_openai_discovery as discovery
+
+        real_names = discovery._names_from_body
+
+        def slow_names(body):
+            time.sleep(0.6)
+            return real_names(body)
+
+        monkeypatch.setattr(discovery, "_names_from_body", slow_names)
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+        started = time.monotonic()
+        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
+        elapsed = time.monotonic() - started
+
+        assert names == [], names
+        assert elapsed < 1.0, elapsed
+
     def test_the_result_is_not_the_workers_own_buffer(self, monkeypatch):
         """A list that fills itself in after the return is not a result."""
         import time

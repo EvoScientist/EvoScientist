@@ -18,10 +18,11 @@ import threading
 # A picker mounts one row per model, so a huge listing would make it unusable.
 _MAX_MODELS = 500
 
-# The body is parsed before the names are counted, and a body of a million
-# ids is 20 MB, so parsing it would cost more than the deadline allows. A
-# body past this is not a picker.
-_MAX_BODY_BYTES = 8 * 1024 * 1024
+# The body is parsed and walked before the names are counted, and that work
+# has to fit the deadline. A picker shows at most _MAX_MODELS rows, so a
+# body past this carries ids no picker would show: it is dropped rather
+# than parsed.
+_MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
@@ -66,6 +67,12 @@ def list_custom_openai_models(
     The probe runs in a daemon thread, because the wizard is blocking and
     the request must not. That thread runs the async probe, whose deadline
     CANCELS the request, so the thread ends with the request.
+
+    The work after the response -- parsing the body and taking the names
+    out of it -- runs in a thread of its own, and the wait for it is what
+    the rest of the deadline bounds. That thread may outlive the call when
+    the body is too big to parse in time; it finishes on its own and its
+    result is dropped.
     """
     if not base_url:
         return []
@@ -138,18 +145,23 @@ async def discover_custom_openai_models(
         if len(resp.content) > _MAX_BODY_BYTES:
             return []
 
-        # The parse is the other half of the deadline. A thread cannot be
-        # interrupted, so the wait for it is what gets the timeout -- the
-        # parse goes on in the background and its result is dropped if it
-        # did not fit. Waiting for a cancelled thread instead would let the
-        # parse decide how long the picker stays open.
+        # The parse and the names out of it are the other half of the
+        # deadline: walking a near-cap body costs as much as parsing it. A
+        # thread cannot be interrupted, so what the timeout bounds is the
+        # WAIT for the work -- it goes on in the background and its result
+        # is dropped if it did not fit. Waiting for a cancelled thread
+        # instead would let the body decide how long the picker stays open.
         remaining = deadline - loop.time()
         if remaining <= 0:
             return []
-        parse = asyncio.ensure_future(asyncio.to_thread(json.loads, resp.content))
-        done, _pending = await asyncio.wait({parse}, timeout=remaining)
+
+        def extract(content: bytes) -> list[str]:
+            return _names_from_body(json.loads(content))
+
+        work = asyncio.ensure_future(asyncio.to_thread(extract, resp.content))
+        done, _pending = await asyncio.wait({work}, timeout=remaining)
         if not done:
             return []
-        return _names_from_body(parse.result())
+        return work.result()
     except Exception:
         return []
