@@ -94,9 +94,6 @@ async def test_child_run_on_a_provider_less_model_sends_no_provider(
             await result
     finally:
         patches._caller_configurable.reset(token)
-    # The provider is present-and-None, not absent: LangGraph merges the
-    # child assistant's SAVED config into the run, and a missing key lets that
-    # saved provider back in -- rebuilding the pair the fix removes.
     assert create.call_args.kwargs["config"]["configurable"] == {
         "model": "gpt-6.1-sol",
         "model_provider": None,
@@ -181,3 +178,35 @@ def test_a_child_run_created_from_a_granted_call_has_no_approval_key(monkeypatch
     assert create.call_args.kwargs["config"] == {
         "configurable": {"model": "m", "model_provider": None}
     }
+
+
+def test_a_provider_in_the_request_itself_does_not_pair_with_a_provider_less_model(
+    monkeypatch,
+):
+    """A provider the caller of runs.create put in its own config is dropped.
+
+    The caller picked a model without a provider, so no provider may ride
+    along -- not the server's, and not one the request already carried.
+    """
+    monkeypatch.setattr(
+        patches,
+        "_read_cfg_configurable",
+        lambda: {"model": "server-model", "model_provider": "server-provider"},
+    )
+    original = {
+        "config": {
+            "configurable": {"model": "gpt-6.1-sol", "model_provider": "req-provider"}
+        }
+    }
+    token = patches._caller_configurable.set({"model": "gpt-6.1-sol"})
+    try:
+        merged = patches._merge_runs_config_kwargs(original)
+    finally:
+        patches._caller_configurable.reset(token)
+
+    assert merged["config"]["configurable"] == {
+        "model": "gpt-6.1-sol",
+        "model_provider": None,
+    }
+    # The caller's own dict is not mutated.
+    assert original["config"]["configurable"]["model_provider"] == "req-provider"
