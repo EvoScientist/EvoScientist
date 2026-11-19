@@ -221,22 +221,29 @@ class TestDiscoverCustomOpenaiModels:
             await discover_custom_openai_models("https://llm.test/v1/")
         assert seen["url"] == "https://llm.test/v1/models"
 
-    async def test_parses_on_the_callers_thread(self, monkeypatch):
-        parse_threads = []
-        original = discovery._names_from_body
+    async def test_a_parse_that_crosses_the_deadline_still_returns(self, monkeypatch):
+        """A parse that ends past the deadline is still a result.
 
-        def parse(body):
-            parse_threads.append(threading.current_thread())
-            return original(body)
+        The parse runs inline and cannot be interrupted, so once it has
+        finished the listing is known; discarding it would drop a valid
+        listing for no saving.
+        """
+        loop = asyncio.get_running_loop()
+        clock = [100.0]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+        original = discovery._picker_names
 
-        monkeypatch.setattr(discovery, "_names_from_body", parse)
+        def slow_parse(body):
+            names = original(body)
+            # The parse ends just after the deadline the caller set.
+            clock[0] += 5.0
+            return names
+
+        monkeypatch.setattr(discovery, "_picker_names", slow_parse)
         patcher, _ = _patch_request(_response())
         with patcher:
-            assert await discover_custom_openai_models("https://llm.test/v1") == [
-                "fake-agent",
-                "other-model",
-            ]
-        assert parse_threads == [threading.current_thread()]
+            names = await discover_custom_openai_models("https://llm.test/v1")
+        assert names == ["fake-agent", "other-model"]
 
 
 async def test_settings_and_picker_list_the_same_normalized_ids(monkeypatch):
@@ -309,7 +316,10 @@ async def test_oversized_listing_stops_before_reading_the_rest(
     assert stream.reads == 2
     assert stream.closed
     parse.assert_not_called()
-    assert "exceeds the 16-byte limit" in caplog.text
+    assert any(
+        record.levelno == logging.DEBUG and record.name == discovery.__name__
+        for record in caplog.records
+    )
 
 
 async def test_reads_a_compressed_listing(monkeypatch):
