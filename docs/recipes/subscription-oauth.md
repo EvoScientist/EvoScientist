@@ -106,6 +106,8 @@ EvoSci
 
 Your browser opens OpenAI's sign-in page and returns to a local callback on `localhost:1455`. You stay signed in afterwards: the token refreshes itself before a request needs it.
 
+To sign in or out on its own, outside the wizard: `EvoSci login chatgpt` signs in, and `EvoSci logout chatgpt` removes the stored sign-in from this machine (it is not revoked at OpenAI). For programs such as the desktop app, `EvoSci login chatgpt --json` prints one JSON object per line instead (a `url` to open, then `signed_in` or an `error`) and never opens a browser itself; the event list is in the docstring of `EvoScientist/cli/login_cmd.py`.
+
 ### 2. Configure EvoScientist
 
 ```bash

@@ -567,3 +567,56 @@ def test_heartbeat_tick_waits_for_the_interval():
     now["t"] = HEARTBEAT_INTERVAL
     report.tick()
     assert lines == ["Unpacking", "Unpacking"]
+
+
+# --- stdin watcher (shared by deploy --json and login --json) -----------------
+
+
+def _watch(read_fd):
+    import threading
+
+    from EvoScientist.setup import protocol
+
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=protocol.watch_stdin, args=(read_fd, stop), daemon=True
+    )
+    thread.start()
+    return stop, thread
+
+
+def test_watch_stdin_stops_on_a_stop_line():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.write(write, b'{"command": "stop"}\n')
+    try:
+        assert stop.wait(5)
+    finally:
+        os.close(write)
+    thread.join(5)
+
+
+def test_watch_stdin_stops_at_end_of_input():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.close(write)
+    assert stop.wait(5)
+    thread.join(5)
+
+
+def test_watch_stdin_ignores_other_lines():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.write(write, b'{"command": "status"}\nhello\n')
+    try:
+        assert not stop.wait(0.3)
+    finally:
+        os.close(write)
+    assert stop.wait(5)
+    thread.join(5)

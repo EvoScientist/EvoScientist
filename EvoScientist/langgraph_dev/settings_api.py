@@ -354,7 +354,16 @@ def read_settings() -> dict[str, Any]:
         "revision": store.revision_of(raw),
         "config_error": config_error,
         "instance": local_secret.instance_id(),
+        "chatgpt": _chatgpt_view(),
     }
+
+
+def _chatgpt_view() -> dict[str, Any]:
+    """Whether a ChatGPT plan is signed in on this machine; never the token."""
+    from ..llm import chatgpt_oauth
+
+    state = chatgpt_oauth.status()
+    return {"signed_in": state.signed_in, "plan": state.plan, "problem": state.problem}
 
 
 # =============================================================================
