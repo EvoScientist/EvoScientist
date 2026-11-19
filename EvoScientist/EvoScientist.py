@@ -396,8 +396,9 @@ def _inject_subagent_middleware(
             # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
-            # Inside the retry layer: a failed attempt raises before the
-            # reply is stamped, so each persisted message is stamped once.
+            # Stamps the reply of the attempt that succeeded: a failed one
+            # raises before the stamp. Kept outside the fallback chain so a
+            # fallback model's reply is stamped too.
             MessageTimestampMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
@@ -1091,8 +1092,9 @@ def _get_default_middleware(
         # middlewares) and normalizes them into a non-dataclass envelope
         # wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
-        # Inside the retry layer: a failed attempt raises before the reply
-        # is stamped, so each persisted message is stamped once.
+        # Stamps the reply of the attempt that succeeded: a failed one
+        # raises before the stamp. Kept outside the fallback chain so a
+        # fallback model's reply is stamped too.
         MessageTimestampMiddleware(),
         ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
