@@ -389,26 +389,37 @@ def exposure_messages(exposure: ServerExposure | None) -> list[str]:
 
 
 def apply_autoskills_settings(config: object) -> str | None:
-    """Ask the server *config* names, when it runs, to reconcile every
-    project's AutoSkills cron with the settings just saved; a note when it
-    could not. Without a running server each project follows at its next
+    """Ask the running server (the one its record names, else the one
+    *config* names) to reconcile every project's AutoSkills cron with the
+    settings just saved; a note when it could not, also when a recorded
+    server does not answer. Without a running server, or with one still
+    starting that does not answer yet, each project follows at its next
     setup."""
-    from .manager import is_langgraph_dev_running
+    from . import server_record
+    from .manager import is_langgraph_dev_running, read_record
     from .sdk import configured_langgraph_dev_url
 
-    url = configured_langgraph_dev_url(config)
+    record = read_record()
+    url = record.url if record is not None else configured_langgraph_dev_url(config)
     if not is_langgraph_dev_running(base_url=url):
-        return None
+        if record is None or record.phase == server_record.STARTING:
+            return None
+        return _not_applied(f"the EvoScientist server at {url} did not answer")
     try:
         failed = reconcile_autoskills(url=url)
     except (RegistrationError, ServerUnusableError) as exc:
-        return (
-            "Could not ask the background agent server to apply it; each "
-            f"project follows when the server next sets it up: {exc}"
-        )
+        return _not_applied(exc)
     if failed:
         return "AutoSkills was not rescheduled for: " + "; ".join(failed)
     return None
+
+
+def _not_applied(reason: object) -> str:
+    """The note when the server could not be asked to apply the settings."""
+    return (
+        "Could not ask the background agent server to apply it; each "
+        f"project follows when the server next sets it up: {reason}"
+    )
 
 
 def move_folder(old: Workspace, new: Workspace, *, url: str) -> dict[str, Any]:
