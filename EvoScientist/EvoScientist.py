@@ -354,7 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
-        MessageTimestampMiddleware,
+        SubagentMessageTimestampMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         WindowsFilePathMiddleware,
@@ -398,8 +398,9 @@ def _inject_subagent_middleware(
             ErrorNormalizationMiddleware(),
             # Stamps the reply of the attempt that succeeded: a failed one
             # raises before the stamp. Kept outside the fallback chain so a
-            # fallback model's reply is stamped too.
-            MessageTimestampMiddleware(),
+            # fallback model's reply is stamped too. No input stamp: that
+            # hook would add a checkpoint to every ``task`` call.
+            SubagentMessageTimestampMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
             # Per-run model channel: mirrors the main agent's stack so a

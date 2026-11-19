@@ -20,6 +20,7 @@ from langgraph.types import Command
 from EvoScientist.middleware.message_timestamp import (
     CREATED_AT_KEY,
     MessageTimestampMiddleware,
+    SubagentMessageTimestampMiddleware,
     stamp_new_messages,
 )
 
@@ -280,11 +281,13 @@ def _tool_turn():
     ]
 
 
-def _agent(replies, checkpointer, *, stamped=True):
+def _agent(replies, checkpointer, *, stamped=True, middleware=None):
+    if middleware is None:
+        middleware = [MessageTimestampMiddleware()] if stamped else []
     return create_agent(
         model=_ScriptedToolModel(replies=replies),
         tools=[lookup],
-        middleware=[MessageTimestampMiddleware()] if stamped else [],
+        middleware=middleware,
         checkpointer=checkpointer,
     )
 
@@ -452,6 +455,26 @@ def test_rejection_beside_an_approved_call_is_stamped():
     assert all(_key(m) for m in result["messages"])
 
 
+def test_subagent_stamps_cost_no_checkpoint():
+    """Sync sub-agents run on the parent's checkpointer once per ``task`` call."""
+
+    def run(middleware):
+        saver = InMemorySaver()
+        config = {"configurable": {"thread_id": "t"}}
+        result = _agent(_tool_turn(), saver, middleware=middleware).invoke(
+            {"messages": [HumanMessage("task description")]}, config
+        )
+        return result["messages"], len(list(saver.list(config)))
+
+    messages, stamped = run([SubagentMessageTimestampMiddleware()])
+    _, unstamped = run([])
+
+    assert stamped == unstamped
+    assert all(_ISO_UTC_MS.match(_key(m)) for m in messages)
+    # The input has no hook of its own: it gets the first reply's time.
+    assert _key(messages[0]) == _key(messages[1])
+
+
 def test_stamping_costs_one_checkpoint_per_run():
     def checkpoints(stamped):
         saver = InMemorySaver()
@@ -583,5 +606,8 @@ def test_subagent_stack_stamps_inside_retry(workspace, no_configured_model):
     subs = [{"name": "research", "middleware": []}]
     _inject_subagent_middleware(subs, workspace=workspace, cfg=EvoScientistConfig())
 
-    names = _names(subs[0]["middleware"])
+    middleware = subs[0]["middleware"]
+    names = _names(middleware)
     assert names.index("model_retry") < names.index("message_timestamp")
+    [stamp] = [m for m in middleware if m.name == "message_timestamp"]
+    assert type(stamp) is SubagentMessageTimestampMiddleware

@@ -5,7 +5,10 @@ one, so clients have nothing to show next to a message. This middleware sets
 ``response_metadata["evo_created_at"]`` (ISO-8601 UTC, milliseconds) once per
 message and never rewrites it:
 
-- the run's input (user turns, async-task notifications) in ``before_agent``;
+- the run's input (user turns, async-task notifications) in ``before_agent``,
+  with the time the run picked it up (a message queued by a client gets the
+  time its run started); sync sub-agents skip this hook, see
+  :class:`SubagentMessageTimestampMiddleware`;
 - AI messages when the model call returns (``wrap_model_call``);
 - tool messages when the tool returns (``wrap_tool_call``);
 - messages other hooks add to state mid-run (todo errors, HITL rejections,
@@ -159,16 +162,15 @@ def _stamped_model_response(
     )
 
 
-class MessageTimestampMiddleware(AgentMiddleware):
-    """Set ``response_metadata["evo_created_at"]`` once per message."""
+class SubagentMessageTimestampMiddleware(AgentMiddleware):
+    """Stamp replies and tool results only, for sync sub-agents.
+
+    No ``before_agent`` hook: it is a graph node, and a sync sub-agent runs on
+    the parent's checkpointer, so it would cost a checkpoint per ``task``
+    call. The sub-agent's input is stamped with its first reply instead.
+    """
 
     name = "message_timestamp"
-
-    def before_agent(self, state, runtime) -> dict[str, Any] | None:
-        return stamp_new_messages(state.get("messages") or [])
-
-    async def abefore_agent(self, state, runtime) -> dict[str, Any] | None:
-        return stamp_new_messages(state.get("messages") or [])
 
     def wrap_model_call(
         self,
@@ -199,3 +201,13 @@ class MessageTimestampMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         return _stamped_tool_result(await handler(request), created_at_now())
+
+
+class MessageTimestampMiddleware(SubagentMessageTimestampMiddleware):
+    """Set ``response_metadata["evo_created_at"]`` once per message."""
+
+    def before_agent(self, state, runtime) -> dict[str, Any] | None:
+        return stamp_new_messages(state.get("messages") or [])
+
+    async def abefore_agent(self, state, runtime) -> dict[str, Any] | None:
+        return stamp_new_messages(state.get("messages") or [])
