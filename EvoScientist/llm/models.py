@@ -498,10 +498,9 @@ def get_chat_model(
     # Routers keep to their own entries: another provider's id may name an
     # older or different model there.
     #
-    # A CUSTOM endpoint serves the ids it was asked for, so a name given
-    # with one is sent as written: the global registry fallback would
-    # rewrite it into another provider's id, which such an endpoint does
-    # not serve.
+    # A custom endpoint serves the ids it is asked for, so a name given with
+    # one is sent as written: the global registry fallback would rewrite it
+    # into another provider's id, which such an endpoint does not serve.
     if (
         model_id is None
         and model in MODELS
