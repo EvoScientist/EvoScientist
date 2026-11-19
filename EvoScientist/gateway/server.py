@@ -731,6 +731,10 @@ class _ServerSubagentTracker:
                         name=self._lifecycle_name(data),
                     )
                 )
+            elif phase == "interrupted" and namespace:
+                # A child that paused only stops: the TUI finalizes the
+                # widget as paused rather than as a finished sub-agent.
+                events.extend(self._end(namespace, paused=True))
             elif phase in ("completed", "failed") and namespace:
                 events.extend(self._end(namespace))
         elif method == "tasks":

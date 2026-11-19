@@ -122,6 +122,27 @@ def test_the_tool_call_id_is_the_llm_tool_call_that_started_the_child():
     assert _tool_call_ids(events) == ["call_LLM_1"], events
 
 
+def test_a_paused_subagent_ends_as_paused_not_finished():
+    """A child that pauses only stops: the TUI marks the widget paused.
+
+    The lifecycle transformer's terminal payload for a pause is an
+    ``interrupted`` event, not a ``completed`` one. Ending it as finished
+    would finalize the widget as a done sub-agent.
+    """
+    tracker, _registry = _tracker()
+
+    tracker.process(
+        _lifecycle_started(
+            ["tools:task-1"], graph_name="code-agent", cause=_subagent_cause()
+        )
+    )
+    events = tracker.process(_lifecycle_ended(["tools:task-1"], phase="interrupted"))
+
+    ends = [e for e in events if e.get("type") == "subagent_end"]
+    assert len(ends) == 1, events
+    assert ends[0].get("paused") is True, ends
+
+
 def test_a_subagent_without_a_graph_name_falls_back_to_the_namespace_segment():
     """No graph_name: the tool name is the best name available."""
     tracker, registry = _tracker()
