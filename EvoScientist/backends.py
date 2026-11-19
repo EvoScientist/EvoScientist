@@ -728,6 +728,27 @@ def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     return Command(resume={interrupt_id: {"decisions": decisions}})
 
 
+def build_ask_user_resume(interrupt_id: str | None, payload: dict) -> "Command":
+    """Key an ask_user answer by the id of the interrupt the client displayed.
+
+    An event without a real id (the stream decoders' ``"default"``) resumes
+    flat: LangGraph reads ``resume`` as an id map only when every key is an
+    xxh3-128 digest, so a keyed ``{"default": payload}`` would be handed to
+    the node as the answer itself.
+
+    Keying matters when the agent calls ``ask_user`` twice in one message:
+    both interrupts are pending at once and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. The
+    keyed resume answers the interrupt the client displayed and re-parks the
+    rest, which re-emit on the next stream and are drained one at a time.
+    """
+    from langgraph.types import Command
+
+    if not interrupt_id or interrupt_id == "default":
+        return Command(resume=payload)  # single unkeyed interrupt
+    return Command(resume={interrupt_id: payload})
+
+
 _SSH_OPTIONS_WITH_VALUE = {
     "-B",
     "-b",
