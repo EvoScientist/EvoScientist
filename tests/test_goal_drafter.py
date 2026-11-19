@@ -394,7 +394,8 @@ def test_the_drafting_agent_mounts_the_tool_error_handler():
         drafter._ensure_agent()
 
     names = [type(m).__name__ for m in create.call_args.kwargs["middleware"]]
-    # The drafter mounts the Windows path middleware too, so assert that the
-    # error handler is mounted rather than pinning the whole order.
-    assert "ToolErrorHandlerMiddleware" in names
-    assert names.index("ToolErrorHandlerMiddleware") < names.index("_GraderCallBudget")
+    # Same order as the main agent: the handler wraps the path rewrite.
+    assert names.index("ToolErrorHandlerMiddleware") + 1 == names.index(
+        "WindowsFilePathMiddleware"
+    )
+    assert names.index("WindowsFilePathMiddleware") < names.index("_GraderCallBudget")

@@ -436,8 +436,8 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     assert [type(m).__name__ for m in grader_mw] == [
         "ModelRetryMiddleware",
         "FilesystemMiddleware",
-        "WindowsFilePathMiddleware",
         "ToolErrorHandlerMiddleware",
+        "WindowsFilePathMiddleware",
         "_GraderCallBudget",
         "UnsupportedContentMiddleware",
         "ModelCallBoundaryMiddleware",

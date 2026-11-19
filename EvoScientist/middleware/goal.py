@@ -407,12 +407,12 @@ class GoalDrafter:
                     tool_token_limit_before_evict=None,
                     human_message_token_limit_before_evict=None,
                 ),
-                # The user's request can name files by their Windows host path.
-                WindowsFilePathMiddleware(),
                 # A file tool that raises costs the draft one tool result, not
                 # the whole draft: the drafter reads the error and drafts from
                 # what it could read, as the main agent and sub-agents do.
                 ToolErrorHandlerMiddleware(),
+                # The user's request can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 _GraderCallBudget(
                     max_calls=GOAL_DRAFTER_MAX_CALLS,
                     who="goal drafter",

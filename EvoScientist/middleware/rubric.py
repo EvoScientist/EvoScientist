@@ -944,12 +944,12 @@ def create_rubric_middleware(
             grader_middleware=[
                 *([model_retry] if model_retry is not None else []),
                 grader_fs,
-                # The transcript can name files by their Windows host path.
-                WindowsFilePathMiddleware(),
                 # A file tool that raises costs the criterion it concerns, not
                 # the whole grading: the grader reads the error and still
                 # decides the rest.
                 ToolErrorHandlerMiddleware(),
+                # The transcript can name files by their Windows host path.
+                WindowsFilePathMiddleware(),
                 _GraderCallBudget(max_calls=GRADER_MAX_CALLS),
                 # create_agent does not add it; after every middleware that
                 # edits the request, so it sees the final one.
