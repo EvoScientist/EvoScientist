@@ -1277,6 +1277,8 @@ class _FakeProcess:
 
         read_end, write_end = os.pipe()
         self.args = cmd
+        # No process: _run_fake stubs out kill_tree, which _run calls on a stall.
+        self.pid = None
         self.stdout = os.fdopen(read_end, "rb", buffering=0)
         self.returncode: int | None = None
 
@@ -1296,7 +1298,39 @@ class _FakeProcess:
 
 def _run_fake(monkeypatch, script, **kw) -> subprocess.CompletedProcess[str]:
     monkeypatch.setattr(re_env.subprocess, "Popen", FakeStep(script))
+    monkeypatch.setattr(re_env, "kill_tree", lambda _pid: None)
     return re_env._run(["pip"], FAST_LIMIT, **kw)
+
+
+def _active_on_every_beat(write):
+    """``(script, beat, beats)`` for a step that prints nothing and is busy
+    for twice the silence limit: ``beat`` calls ``write()`` (the step's sign
+    of work) and ends the step once that time has passed since the first
+    heartbeat, after the silence count has started. A writer thread
+    would leave the check open to a scheduling gap longer than the limit;
+    writing on the heartbeat puts a change before every activity sample."""
+    import threading
+    import time
+
+    done = threading.Event()
+    beats: list[int] = []
+    start: float | None = None
+
+    def beat() -> None:
+        nonlocal start
+        beats.append(1)
+        write()
+        now = time.monotonic()
+        if start is None:
+            start = now
+        elif now - start > 2 * FAST_LIMIT:
+            done.set()
+
+    def script(_out):
+        done.wait(5)
+        return 0
+
+    return script, beat, beats
 
 
 # Steps that stay active for 0.6 s, twice the silence limit.
@@ -1318,19 +1352,14 @@ def test_watched_step_that_only_writes_files_is_not_stopped(
 ):
     """pip prints nothing while it downloads a wheel; the growing folder keeps
     it alive past the silence limit."""
-    import time
+    import itertools
 
-    def script(_out):
-        for _ in range(_STEPS):
-            with (tmp_path / "wheel.part").open("ab") as f:
-                f.write(b"x" * 100)
-            time.sleep(_GAP)
-        return 0
-
-    beats: list[int] = []
-    result = _run_fake(
-        monkeypatch, script, beat=lambda: beats.append(1), watched=(tmp_path,)
+    parts = itertools.count()
+    script, beat, beats = _active_on_every_beat(
+        lambda: (tmp_path / f"wheel{next(parts)}.part").write_bytes(b"x" * 100)
     )
+
+    result = _run_fake(monkeypatch, script, beat=beat, watched=(tmp_path,))
     assert result.returncode == 0
     assert beats
 
@@ -1340,8 +1369,6 @@ def test_watched_step_that_grows_an_open_file_is_not_stopped(
 ):
     """Like pip's download: one file held open while it grows, which a Windows
     listing shows at its size when opened."""
-    import time
-
     listed = re_env.tree_signature
     monkeypatch.setattr(
         re_env,
@@ -1349,18 +1376,14 @@ def test_watched_step_that_grows_an_open_file_is_not_stopped(
         lambda p, exact=False: listed(p, exact=True) if exact else (listed(p)[0], 0),
     )
 
-    def script(_out):
-        with (tmp_path / "wheel.part").open("ab") as f:
-            for _ in range(_STEPS):
-                f.write(b"x" * 100)
-                f.flush()
-                time.sleep(_GAP)
-        return 0
+    with (tmp_path / "wheel.part").open("ab") as part:
 
-    beats: list[int] = []
-    result = _run_fake(
-        monkeypatch, script, beat=lambda: beats.append(1), held_open=(tmp_path,)
-    )
+        def grow() -> None:
+            part.write(b"x" * 100)
+            part.flush()
+
+        script, beat, beats = _active_on_every_beat(grow)
+        result = _run_fake(monkeypatch, script, beat=beat, held_open=(tmp_path,))
     assert result.returncode == 0
     assert beats
 
