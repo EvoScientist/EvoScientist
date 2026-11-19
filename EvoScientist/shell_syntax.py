@@ -1178,10 +1178,89 @@ def variable_references(word: str) -> set[str]:
     return {match.group(1) or match.group(2) for match, _ in _references(word)}
 
 
-def brace_words(word: str) -> list[str] | None:
-    """The words a brace expansion in *word*, as written, makes; *word*
-    itself when it has none (see :func:`_brace_words`)."""
-    return _brace_words(word) if "{" in word or "}" in word else [word]
+def _quote_marked(word: str) -> tuple[str, dict[str, str]] | None:
+    """*word* as written with its quotes removed and each quoted or escaped
+    character replaced by a stand-in that brace expansion leaves alone, with
+    the map back; ``None`` for a word with an expansion (``$``, a backquote)
+    or an unclosed quote."""
+    stand_ins: dict[str, str] = {}
+    out: list[str] = []
+
+    def quoted(char: str) -> None:
+        mark = next((k for k, v in stand_ins.items() if v == char), None)
+        if mark is None:
+            if len(stand_ins) >= 0x1900:  # the Private Use Area
+                raise ValueError(word)
+            mark = chr(0xE000 + len(stand_ins))
+            stand_ins[mark] = char
+        out.append(mark)
+
+    i = 0
+    try:
+        while i < len(word):
+            char = word[i]
+            if char == "'":
+                end = word.find("'", i + 1)
+                if end == -1:
+                    return None
+                for inner in word[i + 1 : end]:
+                    quoted(inner)
+                i = end + 1
+            elif char == '"':
+                i += 1
+                while i < len(word) and word[i] != '"':
+                    if word[i] in "$`":
+                        return None
+                    if word[i] == "\\" and word[i + 1 : i + 2] in ("$", "`", '"', "\\"):
+                        i += 1
+                    quoted(word[i])
+                    i += 1
+                if i >= len(word):
+                    return None
+                i += 1
+            elif char == "\\":
+                if i + 1 == len(word):
+                    return None
+                quoted(word[i + 1])
+                i += 2
+            elif char in "$`":
+                return None
+            else:
+                if 0xE000 <= ord(char) < 0xF900:
+                    return None  # a stand-in written in the word itself
+                out.append(char)
+                i += 1
+    except ValueError:
+        return None
+    return "".join(out), stand_ins
+
+
+def brace_words(word: str, *, as_written: bool = False) -> list[str] | None:
+    """The words a brace expansion in *word*, as written, makes, with quotes
+    removed: braces inside quotes stay as they are (``'{a,b}'`` is one word)
+    and the ones outside expand (``'sk'{ills,x}`` reads ``skills skx``).
+    With *as_written*, each word keeps the quoting of its characters
+    (``'sk'ills``), so a later step reads it as the shell does (an unquoted
+    ``~`` still names the home folder). ``None`` for a word with an
+    expansion or one :func:`_brace_words` declines to read (more words than
+    :data:`_VALUES_CAP`)."""
+    marked = _quote_marked(word)
+    if marked is None:
+        return None
+    plain, stand_ins = marked
+    # With no unquoted `{` nothing expands; a lone `}` is a plain character.
+    words = _brace_words(plain) if "{" in plain else [plain]
+    if words is None:
+        return None
+
+    def written(char: str) -> str:
+        if char not in stand_ins:
+            return char
+        original = stand_ins[char]
+        return "\\'" if original == "'" else f"'{original}'"
+
+    restore = written if as_written else (lambda char: stand_ins.get(char, char))
+    return ["".join(restore(char) for char in each) for each in words]
 
 
 # A brace list or sequence the shell expands (`{a,b}`, `{1..3}`, `{a..c}`).
@@ -1192,9 +1271,10 @@ _EXPANDING_BRACE_RE = re.compile(
 
 def expands_braces(word: str) -> bool:
     """Whether bash expands a brace list or sequence in *word* as written:
-    one outside quotes, in a word with no escape or expansion that
-    :func:`brace_words` declines to read."""
-    return not re.search(r"[\"'\\$`]", word) and bool(_EXPANDING_BRACE_RE.search(word))
+    one outside quotes (``'sk'{ills,x}`` does, ``'{a,b}'`` does not), in a
+    word with no ``$`` or backquote expansion."""
+    marked = _quote_marked(word)
+    return marked is not None and bool(_EXPANDING_BRACE_RE.search(marked[0]))
 
 
 _ANSI_C_ESCAPES = {
@@ -1250,7 +1330,8 @@ def _ansi_c_text(body: str) -> str:
             continue
         out.append(body[i : i + 2])  # an escape bash keeps as written
         i += 2
-    return "".join(out)
+    # Bash ends the text at a NUL: `$'skills\0x'` reads `skills`.
+    return "".join(out).split("\0", 1)[0]
 
 
 def ansi_c_unquoted(word: str) -> str | None:

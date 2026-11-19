@@ -1628,9 +1628,22 @@ def _recursive_rm_operands(
     """
     if found.name != "rm":
         return []
+    # Options are read on the words bash makes too: `rm {-r,-f} x` is
+    # `rm -r -f x`. A brace list too big to read is refused only when the rm
+    # removes folders, or when the list may hold an option.
+    words: list[tuple[str, dict[str, object] | None]] = []
+    too_big: shell_syntax.UnknownValues | None = None
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        try:
+            words.extend(_bash_operand_words(arg, token))
+        except shell_syntax.UnknownValues as exc:
+            if re.search(r"(?:^|[{,])-", arg):
+                raise
+            too_big = too_big or exc
+            words.append((arg, token))
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
-    for arg, token in zip(found.args, found.tokens, strict=True):
+    for arg, token in words:
         value = str(token["value"]) if token is not None else arg
         if not options_done and value == "--":
             options_done = True
@@ -1644,7 +1657,9 @@ def _recursive_rm_operands(
             operands.append((arg, token))
     if not recursive:
         return []
-    return [word for arg, token in operands for word in _bash_operand_words(arg, token)]
+    if too_big is not None:
+        raise too_big
+    return operands
 
 
 def _bash_operand_words(
@@ -1672,17 +1687,19 @@ def _bash_operand_words(
     if unquoted is not None:
         tokens = shell_syntax.tokenize(unquoted)
         if len(tokens) == 1 and tokens[0]["type"] == "word":
-            raw = unquoted
+            # The operand stays a word as written: `$'~'` is a quoted `~`.
+            raw = arg = unquoted
             token = {**token, "raw": raw, "value": tokens[0]["value"]}
-            arg = str(tokens[0]["value"])
-    words = shell_syntax.brace_words(raw)
-    if words is None:
-        if shell_syntax.expands_braces(raw):
-            raise shell_syntax.UnknownValues(arg)
+    if not shell_syntax.expands_braces(raw):
         return [(arg, token)]
-    if words == [raw]:
-        return [(arg, token)]
-    return [(word, {**token, "raw": word, "value": word}) for word in words]
+    written = shell_syntax.brace_words(raw, as_written=True)
+    if written is None:
+        raise shell_syntax.UnknownValues(arg)
+    words = []
+    for each in written:
+        value = str(shell_syntax.tokenize(each)[0]["value"]) if each else ""
+        words.append((each, {**token, "raw": each, "value": value}))
+    return words
 
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:

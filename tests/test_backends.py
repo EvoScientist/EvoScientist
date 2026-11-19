@@ -1032,6 +1032,14 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf $'sk\\151lls'",
             "rm -rf sk$'ill's",
             "cd build && rm -rf {skills,x}",
+            # Options in a brace list, braces after a quoted part, and a NUL
+            # that ends a $'...' word.
+            "rm {-r,-f} skills",
+            "rm {-rf,} skills",
+            "rm -rf 'sk'{ills,x}",
+            'rm -rf "sk"{ills,x}',
+            "rm -rf $'skills\\0unused'",
+            "rm -rf $'skills\\x00z'",
         ],
     )
     def test_removals_read_as_bash_expands_them_are_refused(
@@ -1073,6 +1081,23 @@ class TestWorkspaceRemovalAndComments:
             f"rm -rf {{{names}}}", str(tmp_path)
         )
         assert "too many values" in error
+        # Not a removal of folders: the list is not read, as before.
+        for command in (f"rm {{{names}}}", f"rm -f {{{names}}}"):
+            assert self._prepare_with_workspace_folders(command, str(tmp_path)) is None
+
+    @pytest.mark.parametrize(
+        ("command", "refused"),
+        [("rm -rf {~,x}", True), ("rm -rf '~'{a,b}", False)],
+    )
+    def test_dangerous_mode_reads_a_tilde_in_a_brace_list(
+        self, command, refused, tmp_path, monkeypatch
+    ):
+        # Bash expands the braces first; an unquoted `~` is then the home folder.
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "uses_bash", lambda: True)
+        error = prepare_sandbox_command(command, str(tmp_path), dangerous=True)[1]
+        assert (error is not None) is refused
 
     def test_cmd_exe_operands_are_read_as_written(self, monkeypatch):
         # cmd.exe expands neither braces nor $'...' (#846).

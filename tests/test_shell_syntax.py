@@ -33,6 +33,9 @@ class TestBashReadsOperands:
             ("sk$'ill's", "sk'ill's"),
             ("$'it\\'s'", "'it'\\''s'"),
             ("$'a\\qb'", "'a\\qb'"),  # an unknown escape is kept
+            # Bash ends the $'...' text at a NUL, and keeps what follows it.
+            ("$'skills\\0unused'", "'skills'"),
+            ("$'a\\x00b'c", "'a'c"),
         ],
     )
     def test_ansi_c_words_are_decoded(self, word, expected):
@@ -51,18 +54,34 @@ class TestBashReadsOperands:
             ("sk{i,}lls", ["skills", "sklls"]),
             ("skills", ["skills"]),
             ("x{1..3}", ["x1", "x2", "x3"]),
+            # Quotes keep their braces; the ones outside still expand.
+            ("'sk'{ills,x}", ["skills", "skx"]),
+            ('"sk"{ills,x}', ["skills", "skx"]),
+            ("'{a,b}'", ["{a,b}"]),
+            ("\\{a,b}", ["{a,b}"]),
+            ("$D{a,b}", None),
         ],
     )
     def test_brace_words(self, word, expected):
         assert shell_syntax.brace_words(word) == expected
+
+    def test_brace_words_as_written_keep_the_quoting(self):
+        assert shell_syntax.brace_words("'~'{a,b}", as_written=True) == [
+            "'~'a",
+            "'~'b",
+        ]
+        assert shell_syntax.brace_words("{~,x}", as_written=True) == ["~", "x"]
 
     @pytest.mark.parametrize(
         ("word", "expands"),
         [
             ("{a,b}", True),
             ("x{1..3}", True),
+            ("'sk'{ills,x}", True),
             ("{x}", False),
             ("'{a,b}'", False),
+            ("\\{a,b}", False),
+            ("$D{a,b}", False),
             ("plain", False),
         ],
     )
