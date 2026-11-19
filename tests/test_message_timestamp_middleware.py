@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -91,12 +93,6 @@ def test_model_reply_is_stamped():
     assert CREATED_AT_KEY not in reply.response_metadata
 
 
-def test_plain_ai_message_result_is_stamped():
-    out = MessageTimestampMiddleware().wrap_model_call(None, lambda _: AIMessage("x"))
-
-    assert _ISO_UTC_MS.match(_key(out))
-
-
 def test_existing_stamp_is_never_rewritten():
     reply = AIMessage("done", response_metadata={CREATED_AT_KEY: _EARLIER})
 
@@ -107,18 +103,40 @@ def test_existing_stamp_is_never_rewritten():
     assert _key(out.result[0]) == _EARLIER
 
 
-def test_extended_response_command_messages_are_stamped():
-    extra = ToolMessage("clipped", tool_call_id="c", id="t1")
-    response = ExtendedModelResponse(
-        model_response=ModelResponse(result=[AIMessage("done")]),
-        command=Command(update={"messages": [extra], "other": 1}),
+def test_messages_added_since_the_last_model_call_are_stamped_with_the_reply():
+    history = [
+        HumanMessage("go", id="h1", response_metadata={CREATED_AT_KEY: _EARLIER}),
+        AIMessage("", id="a1", response_metadata={CREATED_AT_KEY: _EARLIER}),
+        ToolMessage("rejected", tool_call_id="c", id="t1"),
+    ]
+    request = SimpleNamespace(state={"messages": history})
+
+    out = MessageTimestampMiddleware().wrap_model_call(
+        request, lambda _: ModelResponse(result=[AIMessage("done")])
     )
 
-    out = MessageTimestampMiddleware().wrap_model_call(None, lambda _: response)
+    [pending] = out.command.update["messages"]
+    assert pending.id == "t1"
+    assert _key(pending) == _key(out.model_response.result[0])
+    assert CREATED_AT_KEY not in history[2].response_metadata
 
-    assert _key(out.model_response.result[0])
-    assert _key(out.command.update["messages"][0])
-    assert out.command.update["other"] == 1
+
+def test_reply_alone_when_nothing_is_pending():
+    request = SimpleNamespace(
+        state={
+            "messages": [
+                HumanMessage(
+                    "go", id="h1", response_metadata={CREATED_AT_KEY: _EARLIER}
+                )
+            ]
+        }
+    )
+
+    out = MessageTimestampMiddleware().wrap_model_call(
+        request, lambda _: ModelResponse(result=[AIMessage("done")])
+    )
+
+    assert isinstance(out, ModelResponse)
 
 
 def test_model_call_error_propagates_unstamped():
@@ -279,6 +297,51 @@ def test_stamping_the_input_does_not_restream_it():
     ]
 
     assert not any(isinstance(m, HumanMessage) for m in streamed)
+
+
+class _RejectToolCalls(AgentMiddleware):
+    """Answers every tool call in ``after_model``, like a HITL rejection."""
+
+    def after_model(self, state, runtime):
+        last = state["messages"][-1]
+        if not getattr(last, "tool_calls", None):
+            return None
+        return {
+            "messages": [
+                ToolMessage("rejected", tool_call_id=c["id"], status="error")
+                for c in last.tool_calls
+            ]
+        }
+
+
+def test_message_added_after_a_model_call_is_stamped_by_the_next_one():
+    agent = create_agent(
+        model=_ScriptedToolModel(replies=_tool_turn()),
+        tools=[lookup],
+        middleware=[MessageTimestampMiddleware(), _RejectToolCalls()],
+        checkpointer=InMemorySaver(),
+    )
+
+    result = agent.invoke(
+        {"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "t"}}
+    )
+
+    *_, rejected, reply = result["messages"]
+    assert rejected.content == "rejected"
+    assert _key(rejected) == _key(reply)
+    assert all(_key(m) for m in result["messages"])
+
+
+def test_stamping_costs_one_checkpoint_per_run():
+    def checkpoints(stamped):
+        saver = InMemorySaver()
+        config = {"configurable": {"thread_id": "t"}}
+        _agent(_tool_turn(), saver, stamped=stamped).invoke(
+            {"messages": [HumanMessage("go")]}, config
+        )
+        return len(list(saver.list(config)))
+
+    assert checkpoints(stamped=True) == checkpoints(stamped=False) + 1
 
 
 # --- wiring -------------------------------------------------------------------

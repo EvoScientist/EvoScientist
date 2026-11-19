@@ -1,15 +1,20 @@
-"""Stamp every message in the thread with the time it was created.
+"""Stamp messages with the time they were created.
 
 Most providers put no time on a reply, and no human or tool message carries
 one, so clients have nothing to show next to a message. This middleware sets
 ``response_metadata["evo_created_at"]`` (ISO-8601 UTC, milliseconds) once per
 message and never rewrites it:
 
+- the run's input (user turns, async-task notifications) in ``before_agent``;
 - AI messages when the model call returns (``wrap_model_call``);
 - tool messages when the tool returns (``wrap_tool_call``);
-- everything else that enters state between model calls (user input,
-  async-task notifications, harness-injected messages) in ``before_agent``
-  and ``before_model``.
+- messages other hooks add to state mid-run (todo errors, HITL rejections,
+  rubric revisions), when the next model call returns: ``wrap_model_call``
+  sends their stamped copies in the same state update as the reply, so no
+  extra checkpoint is written for them.
+
+Code that writes into thread state outside the agent (``update_state``) stamps
+its messages itself with :func:`created_at_now` and :func:`with_created_at`.
 
 ``response_metadata`` is not sent back to providers, so the key can't reach a
 model request.
@@ -66,29 +71,14 @@ def _stamped_command(command: Command, now: str) -> Command:
     return replace(command, update={**update, "messages": messages})
 
 
-def _stamped_model_result(result: Any, now: str) -> Any:
-    if isinstance(result, AIMessage):
-        return with_created_at(result, now)
-    if isinstance(result, ModelResponse):
-        return replace(result, result=[with_created_at(m, now) for m in result.result])
-    if isinstance(result, ExtendedModelResponse):
-        command = result.command
-        return replace(
-            result,
-            model_response=_stamped_model_result(result.model_response, now),
-            command=_stamped_command(command, now) if command is not None else None,
-        )
-    return result
-
-
 def _stamped_tool_result(result: Any, now: str) -> Any:
     if isinstance(result, Command):
         return _stamped_command(result, now)
     return with_created_at(result, now)
 
 
-def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
-    """State update stamping the unstamped messages of the current run, or ``None``.
+def _unstamped_tail(messages: Sequence[Any], now: str) -> list[BaseMessage]:
+    """Stamped copies of the current run's unstamped messages, oldest first.
 
     Walks back from the newest message and stops at the first stamped one, or
     at an unstamped AI message: every reply made since this middleware exists
@@ -96,7 +86,6 @@ def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
     Older history of such a thread stays unstamped instead of getting the time
     it was resumed.
     """
-    now: str | None = None
     stamped: list[BaseMessage] = []
     for message in reversed(messages):
         if not isinstance(message, BaseMessage):
@@ -108,15 +97,35 @@ def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
         # Without an id the reducer would append the copy instead of replacing.
         if message.id is None:
             continue
-        now = now or created_at_now()
         stamped.append(with_created_at(message, now))
-    if not stamped:
-        return None
-    return {"messages": stamped[::-1]}
+    return stamped[::-1]
+
+
+def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
+    """State update stamping the current run's unstamped messages, or ``None``."""
+    stamped = _unstamped_tail(messages, created_at_now())
+    return {"messages": stamped} if stamped else None
+
+
+def _stamped_model_response(
+    request: ModelRequest, response: ModelResponse, now: str
+) -> ModelResponse | ExtendedModelResponse:
+    """Stamp the reply, plus any unstamped message added to state since the
+    last model call; those copies keep their ids, so they replace in place."""
+    response = replace(
+        response, result=[with_created_at(m, now) for m in response.result]
+    )
+    state = getattr(request, "state", None) or {}
+    pending = _unstamped_tail(state.get("messages") or [], now)
+    if not pending:
+        return response
+    return ExtendedModelResponse(
+        model_response=response, command=Command(update={"messages": pending})
+    )
 
 
 class MessageTimestampMiddleware(AgentMiddleware):
-    """Set ``response_metadata["evo_created_at"]`` once on every message."""
+    """Set ``response_metadata["evo_created_at"]`` once per message."""
 
     name = "message_timestamp"
 
@@ -126,25 +135,21 @@ class MessageTimestampMiddleware(AgentMiddleware):
     async def abefore_agent(self, state, runtime) -> dict[str, Any] | None:
         return stamp_new_messages(state.get("messages") or [])
 
-    def before_model(self, state, runtime) -> dict[str, Any] | None:
-        return stamp_new_messages(state.get("messages") or [])
-
-    async def abefore_model(self, state, runtime) -> dict[str, Any] | None:
-        return stamp_new_messages(state.get("messages") or [])
-
     def wrap_model_call(
         self,
         request: ModelRequest,
-        handler: Callable[[ModelRequest], Any],
-    ) -> Any:
-        return _stamped_model_result(handler(request), created_at_now())
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse | ExtendedModelResponse:
+        response = handler(request)
+        return _stamped_model_response(request, response, created_at_now())
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[Any]],
-    ) -> Any:
-        return _stamped_model_result(await handler(request), created_at_now())
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse | ExtendedModelResponse:
+        response = await handler(request)
+        return _stamped_model_response(request, response, created_at_now())
 
     def wrap_tool_call(
         self,
