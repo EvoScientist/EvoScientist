@@ -1,0 +1,325 @@
+"""Tests for MessageTimestampMiddleware (response_metadata["evo_created_at"])."""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+
+import pytest
+from langchain.agents import create_agent
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+from EvoScientist.middleware.message_timestamp import (
+    CREATED_AT_KEY,
+    MessageTimestampMiddleware,
+    stamp_new_messages,
+)
+
+_ISO_UTC_MS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+_EARLIER = "2020-01-01T00:00:00.000Z"
+
+
+def _key(message):
+    return message.response_metadata.get(CREATED_AT_KEY)
+
+
+# --- before_agent / before_model scan ----------------------------------------
+
+
+def test_new_human_message_is_stamped_in_place_by_id():
+    human = HumanMessage("hi", id="h1")
+
+    update = stamp_new_messages([human])
+
+    [stamped] = update["messages"]
+    assert stamped.id == "h1"
+    assert _ISO_UTC_MS.match(_key(stamped))
+    assert stamp_new_messages([stamped]) is None
+
+
+def test_scan_stops_at_the_first_stamped_message():
+    old = HumanMessage("old", id="h0", response_metadata={CREATED_AT_KEY: _EARLIER})
+    tool_result = ToolMessage("r", tool_call_id="c", id="t1")
+    new = HumanMessage("new", id="h1")
+
+    update = stamp_new_messages([HumanMessage("older", id="hx"), old, tool_result, new])
+
+    assert [m.id for m in update["messages"]] == ["t1", "h1"]
+
+
+def test_scan_leaves_history_from_before_the_change_unstamped():
+    history = [
+        HumanMessage("q", id="h0"),
+        AIMessage("", id="a0", tool_calls=[{"name": "t", "args": {}, "id": "c0"}]),
+        ToolMessage("r", tool_call_id="c0", id="t0"),
+        AIMessage("answer", id="a1"),
+    ]
+
+    update = stamp_new_messages([*history, HumanMessage("next", id="h1")])
+
+    assert [m.id for m in update["messages"]] == ["h1"]
+
+
+def test_scan_skips_a_message_without_an_id():
+    assert stamp_new_messages([HumanMessage("no id")]) is None
+
+
+def test_scan_never_mutates_the_state_message():
+    human = HumanMessage("hi", id="h1")
+
+    stamp_new_messages([human])
+
+    assert CREATED_AT_KEY not in human.response_metadata
+
+
+# --- wrap_model_call ----------------------------------------------------------
+
+
+def test_model_reply_is_stamped():
+    reply = AIMessage("done", id="a1")
+    response = ModelResponse(result=[reply])
+
+    out = MessageTimestampMiddleware().wrap_model_call(None, lambda _: response)
+
+    assert _ISO_UTC_MS.match(_key(out.result[0]))
+    assert CREATED_AT_KEY not in reply.response_metadata
+
+
+def test_plain_ai_message_result_is_stamped():
+    out = MessageTimestampMiddleware().wrap_model_call(None, lambda _: AIMessage("x"))
+
+    assert _ISO_UTC_MS.match(_key(out))
+
+
+def test_existing_stamp_is_never_rewritten():
+    reply = AIMessage("done", response_metadata={CREATED_AT_KEY: _EARLIER})
+
+    out = MessageTimestampMiddleware().wrap_model_call(
+        None, lambda _: ModelResponse(result=[reply])
+    )
+
+    assert _key(out.result[0]) == _EARLIER
+
+
+def test_extended_response_command_messages_are_stamped():
+    extra = ToolMessage("clipped", tool_call_id="c", id="t1")
+    response = ExtendedModelResponse(
+        model_response=ModelResponse(result=[AIMessage("done")]),
+        command=Command(update={"messages": [extra], "other": 1}),
+    )
+
+    out = MessageTimestampMiddleware().wrap_model_call(None, lambda _: response)
+
+    assert _key(out.model_response.result[0])
+    assert _key(out.command.update["messages"][0])
+    assert out.command.update["other"] == 1
+
+
+def test_model_call_error_propagates_unstamped():
+    def failing(_):
+        raise RuntimeError("provider down")
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        MessageTimestampMiddleware().wrap_model_call(None, failing)
+
+
+async def test_async_model_reply_is_stamped():
+    async def handler(_):
+        return ModelResponse(result=[AIMessage("done")])
+
+    out = await MessageTimestampMiddleware().awrap_model_call(None, handler)
+
+    assert _key(out.result[0])
+
+
+# --- wrap_tool_call -----------------------------------------------------------
+
+
+def test_tool_message_is_stamped():
+    out = MessageTimestampMiddleware().wrap_tool_call(
+        None, lambda _: ToolMessage("r", tool_call_id="c")
+    )
+
+    assert _ISO_UTC_MS.match(_key(out))
+
+
+def test_tool_command_messages_are_stamped():
+    command = Command(
+        update={"messages": [ToolMessage("r", tool_call_id="c")], "todos": []}
+    )
+
+    out = MessageTimestampMiddleware().wrap_tool_call(None, lambda _: command)
+
+    assert _key(out.update["messages"][0])
+    assert out.update["todos"] == []
+
+
+async def test_async_tool_message_is_stamped():
+    async def handler(_):
+        return ToolMessage("r", tool_call_id="c")
+
+    out = await MessageTimestampMiddleware().awrap_tool_call(None, handler)
+
+    assert _key(out)
+
+
+# --- through a real agent -----------------------------------------------------
+
+
+class _ScriptedToolModel(BaseChatModel):
+    replies: list
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-tools"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self.replies.pop(0))])
+
+
+@tool
+def lookup(query: str) -> str:
+    """Look something up."""
+    return f"found {query}"
+
+
+def _tool_turn():
+    return [
+        AIMessage(
+            "", tool_calls=[{"name": "lookup", "args": {"query": "x"}, "id": "c1"}]
+        ),
+        AIMessage("done"),
+    ]
+
+
+def _agent(replies, checkpointer, *, stamped=True):
+    return create_agent(
+        model=_ScriptedToolModel(replies=replies),
+        tools=[lookup],
+        middleware=[MessageTimestampMiddleware()] if stamped else [],
+        checkpointer=checkpointer,
+    )
+
+
+def test_agent_run_stamps_every_message_in_order():
+    config = {"configurable": {"thread_id": "t"}}
+    before = datetime.now(UTC)
+
+    result = _agent(_tool_turn(), InMemorySaver()).invoke(
+        {"messages": [HumanMessage("go")]}, config
+    )
+
+    stamps = [_key(m) for m in result["messages"]]
+    assert [type(m).__name__ for m in result["messages"]] == [
+        "HumanMessage",
+        "AIMessage",
+        "ToolMessage",
+        "AIMessage",
+    ]
+    assert all(_ISO_UTC_MS.match(s) for s in stamps)
+    assert stamps == sorted(stamps)
+    assert datetime.fromisoformat(stamps[0]) >= before.replace(microsecond=0)
+
+
+def test_second_run_keeps_earlier_stamps():
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "t"}}
+    first = _agent(_tool_turn(), saver).invoke(
+        {"messages": [HumanMessage("a")]}, config
+    )
+    earlier = {m.id: _key(m) for m in first["messages"]}
+
+    second = _agent([AIMessage("again")], saver).invoke(
+        {"messages": [HumanMessage("b")]}, config
+    )
+
+    assert {m.id: _key(m) for m in second["messages"][:4]} == earlier
+    assert all(_key(m) for m in second["messages"][4:])
+
+
+def test_thread_from_before_the_change_keeps_old_messages_unstamped():
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "t"}}
+    _agent(_tool_turn(), saver, stamped=False).invoke(
+        {"messages": [HumanMessage("old")]}, config
+    )
+
+    result = _agent([AIMessage("new reply")], saver).invoke(
+        {"messages": [HumanMessage("new")]}, config
+    )
+
+    assert [_key(m) is not None for m in result["messages"]] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
+
+
+def test_stamping_the_input_does_not_restream_it():
+    agent = _agent([AIMessage("done")], InMemorySaver())
+    config = {"configurable": {"thread_id": "t"}}
+
+    streamed = [
+        chunk
+        for chunk, _meta in agent.stream(
+            {"messages": [HumanMessage("go")]}, config, stream_mode="messages"
+        )
+    ]
+
+    assert not any(isinstance(m, HumanMessage) for m in streamed)
+
+
+# --- wiring -------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_configured_model(monkeypatch):
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_chat_model",
+        lambda: FakeMessagesListChatModel(responses=[]),
+    )
+
+
+def _names(middleware):
+    return [m.name for m in middleware]
+
+
+def test_main_stack_stamps_inside_retry_and_outside_fallback(
+    workspace, no_configured_model
+):
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    names = _names(
+        _get_default_middleware(workspace=workspace, cfg=EvoScientistConfig())
+    )
+
+    assert names.index("model_retry") < names.index("message_timestamp")
+    assert names.index("message_timestamp") < names.index("model_fallback")
+
+
+def test_subagent_stack_stamps_inside_retry(workspace, no_configured_model):
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.EvoScientist import _inject_subagent_middleware
+
+    subs = [{"name": "research", "middleware": []}]
+    _inject_subagent_middleware(subs, workspace=workspace, cfg=EvoScientistConfig())
+
+    names = _names(subs[0]["middleware"])
+    assert names.index("model_retry") < names.index("message_timestamp")

@@ -29,6 +29,7 @@ from .memory_lifecycle import (
     create_memory_lifecycle_middleware,
     default_memory_scheduler,
 )
+from .message_timestamp import MessageTimestampMiddleware
 from .model_fallback import ModelFallbackMiddleware
 from .proactive_mode import ProactiveModeMiddleware, create_proactive_mode_middleware
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
@@ -56,6 +57,7 @@ __all__ = [
     "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
+    "MessageTimestampMiddleware",
     "ModelFallbackMiddleware",
     "ProactiveModeMiddleware",
     "Question",

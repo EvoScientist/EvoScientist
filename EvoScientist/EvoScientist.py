@@ -354,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MessageTimestampMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         WindowsFilePathMiddleware,
@@ -395,6 +396,9 @@ def _inject_subagent_middleware(
             # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
+            # Inside the retry layer: a failed attempt raises before the
+            # reply is stamped, so each persisted message is stamped once.
+            MessageTimestampMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
             # Per-run model channel: mirrors the main agent's stack so a
@@ -987,6 +991,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MessageTimestampMiddleware,
         ModelFallbackMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
@@ -1086,6 +1091,9 @@ def _get_default_middleware(
         # middlewares) and normalizes them into a non-dataclass envelope
         # wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
+        # Inside the retry layer: a failed attempt raises before the reply
+        # is stamped, so each persisted message is stamped once.
+        MessageTimestampMiddleware(),
         ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
