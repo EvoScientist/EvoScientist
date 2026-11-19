@@ -491,6 +491,26 @@ def test_auto_mode_approval_records_auto(tmp_path, monkeypatch):
     assert list_skill_proposals(memory_dir)[0].approved_by == "auto"
 
 
+def test_auto_approval_requires_a_submission_digest(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _edit_manifest(memory_dir, name, content_digest=None)
+    monkeypatch.setattr(proposals, "_notify_approved_skill", lambda: None)
+
+    result = approve_skill_proposal(
+        memory_dir, name, skills_dir=skills_dir, approved_by="auto"
+    )
+
+    assert result["approved"] is False, result
+    assert "submission digest" in result["error"]
+    assert "resubmit" in result["error"].lower()
+    assert _manifest(memory_dir, name)["status"] == "pending"
+    assert not (skills_dir / name).exists()
+
+
 def test_a_resubmit_in_the_same_millisecond_gets_a_new_updated_at(
     tmp_path, monkeypatch
 ):
@@ -1080,9 +1100,6 @@ from pathlib import Path
 from EvoScientist.memory.autoskills import proposals
 
 memory_dir = Path(sys.argv[1])
-print("ready", flush=True)
-if sys.stdin.readline().strip() != "go":
-    raise RuntimeError("the parent did not release the child")
 proposals._notify_approved_skill = lambda: None
 result = proposals.revert_skill_proposal(memory_dir, "focused-validation")
 print(json.dumps(result), flush=True)
@@ -1094,35 +1111,57 @@ print(json.dumps(result), flush=True)
     environment["PYTHONPATH"] = os.pathsep.join(
         [repository, environment.get("PYTHONPATH", "")]
     )
-    process = subprocess.Popen(
+    process = subprocess.run(
         [sys.executable, str(child), str(memory_dir)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=environment,
+        timeout=30,
     )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    assert process.stdin is not None
-    try:
-        ready = process.stdout.readline().strip()
-        assert ready == "ready", process.stderr.read()
-        process.stdin.write("go\n")
-        process.stdin.flush()
-        output, error = process.communicate(timeout=30)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+    assert process.returncode == 0, process.stderr
+    output = process.stdout
 
-    assert process.returncode == 0, error
     result = json.loads(output.strip().splitlines()[-1])
     assert result["reverted"] is True, result
     assert not installed.exists()
     reverted = _manifest(memory_dir, "focused-validation")
     assert reverted["status"] == "pending"
     assert "approved_content_digests" not in reverted
+
+
+def test_fresh_process_undo_bounds_the_wait_for_a_silent_child(tmp_path, monkeypatch):
+    from threading import Timer
+
+    real_popen = subprocess.Popen
+    watchdog = None
+    deadlines = []
+
+    class SilentChild(real_popen):
+        def __init__(self, args, **kwargs):
+            nonlocal watchdog
+            super().__init__(
+                [args[0], "-c", "from threading import Event; Event().wait()"],
+                **kwargs,
+            )
+            # Bound even the broken launcher, whose first read has no deadline.
+            watchdog = Timer(5, self.kill)
+            watchdog.start()
+
+        def communicate(self, input=None, timeout=None):
+            deadlines.append(timeout)
+            return super().communicate(
+                input, timeout=0.2 if timeout is not None else None
+            )
+
+    monkeypatch.setattr(subprocess, "Popen", SilentChild)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            test_undo_uses_manifest_install_facts_in_another_process(tmp_path)
+        assert deadlines[0] == 30
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+            watchdog.join()
 
 
 def test_revert_of_an_auto_approval_rejects_the_draft(tmp_path):
@@ -4332,6 +4371,90 @@ def test_autoskills_review_renders_only_the_named_draft(tmp_path, monkeypatch):
         asyncio.run(command.execute(ctx, ["approve", "chosen-draft"]))
     assert (skills_dir / "chosen-draft" / "SKILL.md").is_file()
     assert not (skills_dir / "other-draft").exists()
+
+
+def test_autoskills_review_prefers_a_decided_exact_id_to_a_pending_prefix(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
+    _submit_create(memory_dir, skills_dir, "paper-review")
+    _approve_quietly(memory_dir, "paper-review", skills_dir)
+    _submit_create(memory_dir, skills_dir, "paper-review-v2")
+    ctx, messages, rendered = _command_context(tmp_path, skills_dir)
+    command = AutoSkillsCommand()
+
+    asyncio.run(command.execute(ctx, ["review", "paper-review"]))
+    asyncio.run(command.execute(ctx, ["approve", "paper-review"]))
+
+    assert not rendered, _command_output(rendered)
+    assert any("Draft paper-review is not pending (approved)" in m for m in messages)
+    assert any("Only pending proposals can be approved" in m for m in messages)
+    assert _manifest(memory_dir, "paper-review-v2")["status"] == "pending"
+
+    asyncio.run(command.execute(ctx, ["review", "paper-review-v"]))
+    assert "Draft paper-review-v2" in _command_output(rendered)
+
+
+def test_autoskills_refuses_a_copied_file_that_resolves_outside_the_draft(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+    from EvoScientist.memory.autoskills import proposals
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
+    monkeypatch.setattr(proposals, "_notify_approved_skill", lambda: None)
+    name = "paper-review"
+    _submit_create(memory_dir, skills_dir, name)
+    draft = autoskill_proposals_dir(memory_dir) / name
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "note.txt"
+    target.write_text("outside-only fixture text", encoding="utf-8")
+
+    is_windows = sys.platform == "win32"
+    link = draft / ("docs" if is_windows else "note.txt")
+    relative = "docs/note.txt" if is_windows else "note.txt"
+
+    def attach():
+        if sys.platform == "win32":
+            import _winapi
+
+            # A junction exercises containment without Windows symlink privileges.
+            _winapi.CreateJunction(str(outside), str(link))
+        else:
+            link.symlink_to(target)
+
+    attach()
+    ctx, messages, rendered = _command_context(tmp_path, skills_dir)
+
+    asyncio.run(AutoSkillsCommand().execute(ctx, ["review", name]))
+    if is_windows:
+        link.rmdir()
+    else:
+        link.unlink()
+
+    # Validation sees a clean draft; the copy must still enforce containment.
+    snapshot = proposals._snapshot_proposal
+
+    def snapshot_with_link(memory_dir, proposal_dir):
+        attach()
+        return snapshot(memory_dir, proposal_dir)
+
+    monkeypatch.setattr(proposals, "_snapshot_proposal", snapshot_with_link)
+    result = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+
+    assert (bool(rendered), result["approved"]) == (False, False), (
+        _command_output(rendered),
+        result,
+    )
+    assert any("Could not read proposal" in m and relative in m for m in messages)
+    assert f"links outside its folder: {relative}" in result["error"]
+    assert not (skills_dir / name).exists()
+    assert _manifest(memory_dir, name)["status"] == "pending"
 
 
 def test_approve_command_rejects_an_unknown_scope(tmp_path, monkeypatch):

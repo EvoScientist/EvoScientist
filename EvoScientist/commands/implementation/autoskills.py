@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group
 from rich.table import Table
@@ -11,6 +11,9 @@ from rich.text import Text
 
 from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
+
+if TYPE_CHECKING:
+    from ...memory.autoskills.proposals import SkillProposal
 
 AUTOSKILLS_COMMAND = "/autoskills"
 _PROPOSAL_STATUSES = {
@@ -189,24 +192,18 @@ class AutoSkillsCommand(Command):
 
     async def _review(self, ctx: CommandContext, proposal_id: str) -> None:
         """Render the copied files of one pending proposal."""
-        from ... import paths
-        from ...memory.autoskills.proposals import (
-            _content_digest,
-            _copied_contents,
-            list_skill_proposals,
-        )
+        from ...memory.autoskills.proposals import _content_digest, _copied_contents
 
-        workspace_dir = self._workspace_dir(ctx)
-        proposals = await asyncio.to_thread(
-            list_skill_proposals,
-            paths.MEMORIES_DIR,
-            status="pending",
-            workspace_dir=workspace_dir,
-        )
-        proposal = self._match_proposal(proposals, proposal_id)
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
         if proposal is None:
             ctx.ui.append_system(
-                f"No unique pending autoskill proposal matching {proposal_id!r}.",
+                f"No unique autoskill proposal matching {proposal_id!r}.",
+                style="yellow",
+            )
+            return
+        if proposal.status != "pending":
+            ctx.ui.append_system(
+                f"Draft {proposal.proposal_id} is not pending ({proposal.status}).",
                 style="yellow",
             )
             return
@@ -316,18 +313,26 @@ class AutoSkillsCommand(Command):
                 style="dim",
             )
             return
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"Approval failed: No unique proposal matching {proposal_id!r}",
+                style="red",
+            )
+            return
         workspace_dir = self._workspace_dir(ctx)
-        snapshot = self._cached_snapshot(ctx, proposal_id)
-        if snapshot is None:
-            snapshot = await asyncio.to_thread(self._read_snapshot, ctx, proposal_id)
+        snapshot = self._snapshots.get((workspace_dir, proposal.proposal_id))
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
-            proposal_id,
+            proposal.proposal_id,
+            exact=True,
             skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
             scope=scope,
-            expected_updated_at=snapshot.updated_at if snapshot else None,
+            expected_updated_at=snapshot.updated_at
+            if snapshot
+            else proposal.updated_at,
             expected_content_digest=snapshot.content_digest if snapshot else None,
         )
         if result.get("approved"):
@@ -362,16 +367,24 @@ class AutoSkillsCommand(Command):
                 style="dim",
             )
             return
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"Reject failed: No unique proposal matching {proposal_id!r}",
+                style="red",
+            )
+            return
         workspace_dir = self._workspace_dir(ctx)
-        snapshot = self._cached_snapshot(ctx, proposal_id)
-        if snapshot is None:
-            snapshot = await asyncio.to_thread(self._read_snapshot, ctx, proposal_id)
+        snapshot = self._snapshots.get((workspace_dir, proposal.proposal_id))
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
-            proposal_id,
+            proposal.proposal_id,
+            exact=True,
             workspace_dir=workspace_dir,
-            expected_updated_at=snapshot.updated_at if snapshot else None,
+            expected_updated_at=snapshot.updated_at
+            if snapshot
+            else proposal.updated_at,
         )
         if result.get("rejected"):
             ctx.ui.append_system(
@@ -545,16 +558,6 @@ class AutoSkillsCommand(Command):
             style="dim",
         )
 
-    @staticmethod
-    def _match_proposal(proposals: list[Any], proposal_id: str) -> Any | None:
-        exact = [item for item in proposals if item.proposal_id == proposal_id]
-        if len(exact) == 1:
-            return exact[0]
-        matches = [
-            item for item in proposals if item.proposal_id.startswith(proposal_id)
-        ]
-        return matches[0] if len(matches) == 1 else None
-
     def _remember(
         self,
         ctx: CommandContext,
@@ -578,35 +581,16 @@ class AutoSkillsCommand(Command):
             content_digest=content_digest,
         )
 
-    def _cached_snapshot(
-        self, ctx: CommandContext, proposal_id: str
-    ) -> _ProposalSnapshot | None:
-        workspace_dir = self._workspace_dir(ctx)
-        exact = self._snapshots.get((workspace_dir, proposal_id))
-        if exact is not None:
-            return exact
-        matches = [
-            snapshot
-            for (workspace, listed_id), snapshot in self._snapshots.items()
-            if workspace == workspace_dir and listed_id.startswith(proposal_id)
-        ]
-        return matches[0] if len(matches) == 1 else None
-
-    def _read_snapshot(
-        self, ctx: CommandContext, proposal_id: str
-    ) -> _ProposalSnapshot | None:
+    def _resolve(self, ctx: CommandContext, proposal_id: str) -> SkillProposal | None:
         from ... import paths
-        from ...memory.autoskills.proposals import list_skill_proposals
+        from ...memory.autoskills.proposals import resolve_skill_proposal
 
-        proposals = list_skill_proposals(
-            paths.MEMORIES_DIR,
-            workspace_dir=self._workspace_dir(ctx),
+        proposal = resolve_skill_proposal(
+            paths.MEMORIES_DIR, proposal_id, workspace_dir=self._workspace_dir(ctx)
         )
-        proposal = self._match_proposal(proposals, proposal_id)
-        if proposal is None:
-            return None
-        self._remember(ctx, proposal)
-        return self._snapshots[(self._workspace_dir(ctx), proposal.proposal_id)]
+        if proposal is not None and proposal.path.name == proposal.proposal_id:
+            return proposal
+        return None
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:

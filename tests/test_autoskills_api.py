@@ -253,29 +253,38 @@ def test_list_truncates_large_skill_md(server, served):
     assert len(draft["skill_md"]) == MAX_INLINE_CHARS
 
 
-def test_list_content_digest_covers_exactly_the_truncated_payload(
-    server, served, monkeypatch
+def test_list_only_issues_a_decision_digest_for_complete_previews(
+    server, served, secret, quiet_skill_index, monkeypatch
 ):
     from EvoScientist.langgraph_dev import autoskills_api
 
-    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 40)
-    _draft(
-        served,
-        "focused-validation",
-        body="x" * 100,
-        files={"scripts/check.py": "print('a much longer script payload')\n"},
+    name = "focused-validation"
+    relative = "scripts/check.py"
+    script = "# " + "x" * 300 + "\n"
+    _draft(served, name, files={relative: script})
+    complete = _only_draft(server)
+    payload = {"SKILL.md": complete["skill_md"].encode("utf-8")}
+    payload.update(
+        {path: text.encode("utf-8") for path, text in complete["contents"].items()}
     )
+    assert complete["content_digest"] == _content_digest(payload)
 
-    draft = _only_draft(server)
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 200)
+    partial = _only_draft(server)
+    assert partial["skill_md_truncated"] is False
+    assert partial["rationale_md_truncated"] is False
+    assert partial["contents"][relative] == script[:200]
+    decision = {"expected_updated_at": partial["updated_at"]}
+    if partial["content_digest"] is not None:
+        decision["expected_content_digest"] = partial["content_digest"]
 
-    assert draft["skill_md_truncated"] is True
-    payload = {
-        "SKILL.md": draft["skill_md"].encode("utf-8"),
-        "scripts/check.py": draft["contents"]["scripts/check.py"].encode("utf-8"),
-    }
-    assert draft["content_digest"] == _content_digest(payload)
-    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
-    assert draft["content_digest"] != _content_digest(folder)
+    response = _decide(server, name, "approve", secret, **decision)
+
+    assert response.status_code == 200, response.json()
+    assert partial["content_digest"] is None
+    assert partial["review_incomplete"] == "truncated"
+    assert complete["review_incomplete"] is None
+    assert (served.skills_dir / name / relative).read_bytes() == script.encode("utf-8")
 
 
 def test_list_reports_install_error_for_collision(server, served):
@@ -383,7 +392,7 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
         "rationale_md", "rationale_md_truncated", "contents", "content_digest",
-        "expected_updated_at", "files", "install_target",
+        "review_incomplete", "expected_updated_at", "files", "install_target",
         "install_base", "install_error",
     }  # fmt: skip
 
@@ -1134,6 +1143,42 @@ def test_approve_route_stale_digest_is_refused_as_draft_changed(
     assert response.status_code == 409
     assert response.json()["error"] == "draft_changed"
     assert not (served.skills_dir / "focused-validation").exists()
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_reports_post_install_staleness_with_cleanup_detail(
+    server, served, secret, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals
+
+    name = "focused-validation"
+    _draft(served, name)
+    shown = _only_draft(server)
+    installed = served.skills_dir / name
+    newer_version = proposals._version_stamp(shown["updated_at"])
+    real_copy = proposals._copy_proposed_skill
+
+    def change_after_install(source, destination):
+        blocked = real_copy(source, destination)
+        if destination == installed:
+            assert (installed / "SKILL.md").is_file()
+            _edit_manifest(name, updated_at=newer_version)
+        return blocked
+
+    monkeypatch.setattr(proposals, "_copy_proposed_skill", change_after_install)
+    # The recovery path matters when a stale install could not be rolled back.
+    monkeypatch.setattr(proposals, "_remove_unchanged_copy", lambda *_: False)
+    response = _decide(
+        server, name, "approve", secret, expected_updated_at=shown["updated_at"]
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "draft_changed", body
+    assert body["updated_at"] == newer_version
+    assert "could not be removed" in body["detail"]
+    assert str(installed) in body["detail"]
+    assert (installed / "SKILL.md").is_file()
     assert _only_draft(server)["status"] == "pending"
 
 

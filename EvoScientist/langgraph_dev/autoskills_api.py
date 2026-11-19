@@ -104,17 +104,21 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
     return key
 
 
-def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes]:
-    """The payload text, whether it was cut, and its bytes for the digest."""
+def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes | None]:
+    """The preview text, truncation flag, and bytes only for a lossless capture."""
     # A character takes at most four bytes, so one byte more shows a longer text.
     limit = MAX_INLINE_CHARS * 4 + 1
     data = _read_regular(path, limit) if _resolves_within_root(path, folder) else None
     if data is None:
-        return "", False, b""
+        return "", False, None
     text = data.decode("utf-8", errors="replace")
     shown = text[:MAX_INLINE_CHARS]
-    # A row can vouch only for its delivered text, including when that text is cut.
-    return shown, len(text) > MAX_INLINE_CHARS, shown.encode("utf-8")
+    truncated = len(text) > MAX_INLINE_CHARS
+    return (
+        shown,
+        truncated,
+        data if not truncated and shown.encode("utf-8") == data else None,
+    )
 
 
 def _inline(path: Path, folder: Path) -> tuple[str, bool]:
@@ -179,6 +183,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     rationale_md = skill_md
     contents: dict[str, str] | None = None
     content_digest = None
+    review_incomplete = None
     target: InstallTarget | None = None
     install_error = None
     if proposal.status == "pending":
@@ -187,7 +192,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         skill_md = (skill[0], skill[1])
         rationale = _read_inline(folder / "RATIONALE.md", folder)
         rationale_md = (rationale[0], rationale[1])
-        digest_files = {"SKILL.md": skill[2]}
+        captures = {"SKILL.md": skill}
         try:
             relatives = copied_files(folder)
         except OSError:
@@ -196,10 +201,24 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
             name = relative.as_posix()
             if name == "SKILL.md":
                 continue
-            text, _truncated, data = _read_inline(folder / relative, folder)
-            contents[name] = text
-            digest_files[name] = data
-        content_digest = _content_digest(digest_files)
+            capture = _read_inline(folder / relative, folder)
+            contents[name] = capture[0]
+            captures[name] = capture
+        previews = (*captures.values(), rationale)
+        if any(truncated for _, truncated, _ in previews):
+            review_incomplete = "truncated"
+        elif Path("SKILL.md") not in relatives or any(
+            data is None for _, _, data in previews
+        ):
+            review_incomplete = "unavailable"
+        else:
+            content_digest = _content_digest(
+                {
+                    name: data
+                    for name, (_, _, data) in captures.items()
+                    if data is not None
+                }
+            )
         computed = _install_target(proposal, key)
         if isinstance(computed, str):
             install_error = computed
@@ -241,6 +260,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "rationale_md_truncated": rationale_md[1],
         "contents": contents,
         "content_digest": content_digest,
+        "review_incomplete": review_incomplete,
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -358,6 +378,12 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         ("Proposal changed since it was read", "Proposal changed since it was shown")
     ):
         return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
+    if error.startswith("Proposal changed while it was being approved"):
+        return 409, {
+            "error": "draft_changed",
+            "updated_at": result.get("updated_at"),
+            "detail": _failure_text(result),
+        }
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
 

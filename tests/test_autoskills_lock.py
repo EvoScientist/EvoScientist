@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
 import threading
 from pathlib import Path
 
 import pytest
+from filelock import Timeout
 
 from EvoScientist.memory.autoskills import proposals as module
 from EvoScientist.memory.autoskills.proposals import (
@@ -291,3 +294,189 @@ def test_decision_manifest_reread_sees_write_before_lock_acquisition(
         "error": "Proposal changed since it was read",
     }
     assert _manifest(memory_dir, name)["status"] == "pending"
+
+
+def test_draft_lock_is_shared_by_aliased_proposals_roots(tmp_path):
+    real_memory, alias_memory = tmp_path / "real", tmp_path / "alias"
+    draft = _write_draft(real_memory, "focused-validation")
+    alias_root = autoskill_proposals_dir(alias_memory)
+    alias_root.parent.mkdir(parents=True)
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(draft.parent), str(alias_root))
+    else:
+        alias_root.symlink_to(draft.parent, target_is_directory=True)
+    alias = alias_root / draft.name
+    assert alias.resolve() == draft.resolve()
+
+    lock, alias_lock = _draft_lock(draft), _draft_lock(alias)
+    assert Path(lock.lock_file) == Path(alias_lock.lock_file)
+    with lock, pytest.raises(Timeout):
+        alias_lock.acquire(timeout=0)
+
+
+def test_approval_refuses_a_workspace_move_between_lookup_and_lock(
+    tmp_path, monkeypatch
+):
+    old, new = tmp_path / "old", tmp_path / "new"
+    new.mkdir()
+    memory_dir, skills_dir = old / "memories", old / "skills"
+    name = "focused-validation"
+    draft = _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    old_key = _manifest(memory_dir, name)["workspace_dir"]
+    new_key = module._normalize_workspace_dir(new)
+    assert new_key is not None
+    real_lock = module._draft_lock
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    moved = False
+
+    def move_then_lock(proposal_dir):
+        nonlocal moved
+        assert proposal_dir == draft
+        if not moved:
+            assert module.move_proposals(memory_dir, old_key, new_key, {}) == 1
+            moved = True
+        return real_lock(proposal_dir)
+
+    monkeypatch.setattr(module, "_draft_lock", move_then_lock)
+    result = approve_skill_proposal(
+        memory_dir, name, workspace_dir=old, skills_dir=skills_dir
+    )
+
+    assert moved
+    assert result["approved"] is False, result
+    assert "moved to a different workspace" in result["error"]
+    manifest = _manifest(memory_dir, name)
+    assert manifest["workspace_dir"] == new_key
+    assert manifest["status"] == "pending"
+    assert not (skills_dir / name).exists()
+
+
+def test_approvals_cannot_interleave_installs_of_two_draft_versions(
+    tmp_path, monkeypatch
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    installed = skills_dir / name
+    installed.mkdir(parents=True)
+    base = f"---\nname: {name}\ndescription: Use when testing updates.\n---\n\nBase.\n"
+    skill_md = installed / "SKILL.md"
+    skill_md.write_text(base, encoding="utf-8")
+
+    def submit(body, cluster):
+        _write_draft(memory_dir, name, body)
+        result = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name=name,
+            cluster_hash=cluster,
+            source_observation_ids=["O-1"],
+            rationale="Refine the installed skill.",
+            skills_dir=skills_dir,
+            workspace_dir=tmp_path,
+            operation="update",
+            target_skill_name=name,
+        )
+        assert result["submitted"] is True, result
+
+    submit("First version.", "cluster-first")
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    monkeypatch.setattr(module, "_DRAFT_LOCK_TIMEOUT", 0)
+    real_copy = module._copy_proposed_skill
+    competing = None
+    interleaved = False
+
+    def approve():
+        return approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+
+    def copy_with_competing_approval(source, destination):
+        nonlocal competing, interleaved
+        if destination == installed and not interleaved:
+            interleaved = True
+            # Force the newer approval into the gap before the old snapshot writes.
+            submit("Second version.", "cluster-second")
+            competing = approve()
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_with_competing_approval)
+    first = approve()
+    assert first["approved"] is False, first
+    assert "changed while it was being approved" in first["error"]
+    assert competing is not None
+
+    # Without serialization, the second approval commits before the first overwrites it.
+    manifest = _manifest(memory_dir, name)
+    if competing["approved"]:
+        assert (
+            manifest["approved_content_digests"]["SKILL.md"]
+            == hashlib.sha256(skill_md.read_bytes()).hexdigest()
+        )
+    assert competing["approved"] is False, competing
+    assert "waiting for another installer" in competing["error"]
+    assert manifest["status"] == "pending"
+
+    retry = approve()
+    assert retry["approved"] is True, retry
+    assert "Second version." in skill_md.read_text(encoding="utf-8")
+    manifest = _manifest(memory_dir, name)
+    assert manifest["status"] == "approved"
+    assert manifest["cluster_hash"] == "cluster-second"
+    assert (
+        manifest["approved_content_digests"]["SKILL.md"]
+        == hashlib.sha256(skill_md.read_bytes()).hexdigest()
+    )
+
+
+def test_approval_rolls_back_a_created_skill_on_commit_lock_timeout(
+    tmp_path, monkeypatch
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    installed = skills_dir / name
+    real_lock = module._draft_lock
+    timed_out = False
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+
+    def lock(proposal_dir):
+        nonlocal timed_out
+        draft_lock = real_lock(proposal_dir)
+        if (installed / "SKILL.md").is_file() and not timed_out:
+            timed_out = True
+            raise Timeout(draft_lock.lock_file)
+        return draft_lock
+
+    monkeypatch.setattr(module, "_draft_lock", lock)
+    result = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+
+    assert timed_out
+    assert result["approved"] is False
+    assert "Could not finish approval: timed out" in result["error"]
+    assert _manifest(memory_dir, name)["status"] == "pending"
+    assert not installed.exists()
+    retry = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+    assert retry["approved"] is True, retry
+
+
+def test_rejection_sticks_to_the_draft_selected_before_locking(tmp_path, monkeypatch):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    prefix, selected = "paper-review", "paper-review-v2"
+    selected_dir = _write_draft(memory_dir, selected)
+    _submit(memory_dir, skills_dir, selected, "cluster-selected")
+    real_lock = module._draft_lock
+
+    def add_exact_then_lock(proposal_dir):
+        if proposal_dir == selected_dir:
+            _write_draft(memory_dir, prefix)
+            _submit(memory_dir, skills_dir, prefix, "cluster-exact")
+        return real_lock(proposal_dir)
+
+    monkeypatch.setattr(module, "_draft_lock", add_exact_then_lock)
+    result = reject_skill_proposal(memory_dir, prefix)
+
+    assert result["rejected"] is True, result
+    assert result["proposal_id"] == selected
+    assert _manifest(memory_dir, selected)["status"] == "rejected"
+    assert _manifest(memory_dir, prefix)["status"] == "pending"
