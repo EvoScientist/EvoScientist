@@ -36,8 +36,12 @@ Routing table (read = local, execute = langgraph server):
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
   go to the server, where runs and background processes live.
-- ``delete_thread`` fans out to both stores; success if either deleted, so a
-  thread that only exists in one store is still removed without error.
+- ``delete_thread`` deletes a UUID on the server first (it asks the thread's
+  runs to stop, then deletes the thread), then removes the local rows. A server
+  error propagates and leaves the local rows for a plain retry; a thread the
+  server does not have is still removed locally. A local failure after a server
+  delete is only logged, since the server's delete already removed the thread's
+  checkpoints from the shared database. Legacy ids are local-only.
 
 **Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
 ids, so a legacy thread can never be registered or executed server-side. Reads
@@ -183,21 +187,21 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        read_ok = await self._read.delete_thread(thread_id, target)
+        # Server first, so a server error leaves the local rows for a retry.
         exec_ok = False
         if _is_uuid(thread_id):
-            try:
-                exec_ok = await self._execute.delete_thread(thread_id, target)
-            except Exception:  # a server error must not override the local result
-                # WARNING: a successful local delete still returns True although
-                # the server may keep the thread.
+            exec_ok = await self._execute.delete_thread(thread_id, target)
+        try:
+            read_ok = await self._read.delete_thread(thread_id, target)
+        except Exception as exc:
+            if exec_ok:
                 logger.warning(
-                    "composite: server-side delete failed for thread %s; "
-                    "local delete %s",
+                    "Server deletion completed for thread %r, but local cleanup failed: %r",
                     thread_id,
-                    "succeeded" if read_ok else "failed",
-                    exc_info=True,
+                    exc,
                 )
+                return True
+            raise
         return read_ok or exec_ok
 
     # --- Execution ------------------------------------------------------------

@@ -81,6 +81,15 @@ class SubAgentState:
             self._result_map.pop(tool_call_id, None)
 
 
+def paragraph_break(before: str, text: str) -> str:
+    """Return the missing padding between non-empty assistant messages."""
+    if not before.strip():
+        return ""
+    trailing = len(before) - len(before.rstrip("\n"))
+    leading = len(text) - len(text.lstrip("\n"))
+    return "\n" * max(0, 2 - trailing - leading)
+
+
 class StreamState:
     """Accumulates stream state for display updates."""
 
@@ -99,6 +108,8 @@ class StreamState:
         self._subagent_map: dict[str, SubAgentState] = {}
         # Todo list tracking
         self.todo_items: list[dict] = []
+        # Pending write_todos args, committed only on a successful result.
+        self._pending_todos: dict[str, list[dict]] = {}
         # Latest text segment (reset on each tool_call)
         self.latest_text = ""
         self.narrated_response_end = 0
@@ -114,6 +125,10 @@ class StreamState:
         self.pending_interrupt: dict | None = None
         # ask_user interrupt tracking
         self.pending_ask_user: dict | None = None
+        # A resumed gateway stream has a fresh processor but shares this state.
+        self._round_boundary_pending = False
+        self._round_boundary_start: int | None = None
+        self._round_boundary_inserted = 0
         # Acceptance grading: a pass in progress and the verdicts so far
         self.rubric_checking = False
         self.rubric_evaluations: list[dict] = []
@@ -180,6 +195,11 @@ class StreamState:
             self.is_responding = True
             self.is_processing = False
             text_content = event.get("content", "")
+            if text_content and self._round_boundary_pending:
+                separator = paragraph_break(self.response_text, text_content)
+                self._round_boundary_inserted = len(separator)
+                text_content = separator + text_content
+                self._round_boundary_pending = False
             self.response_text += text_content
             self.latest_text += text_content
 
@@ -213,11 +233,11 @@ class StreamState:
 
             self.latest_text = ""  # Reset -- next text segment is a new message
 
-            # Capture todo items from write_todos args (most reliable source)
+            # Hold write_todos args until the call succeeds.
             if tool_name == "write_todos":
-                todos = tool_args.get("todos", [])
-                if isinstance(todos, list) and todos:
-                    self.todo_items = todos
+                todos = tool_args.get("todos")
+                if isinstance(todos, list):
+                    self._pending_todos[tool_id] = todos
 
         elif event_type == "tool_result":
             result_name = event.get("name", "unknown")
@@ -231,8 +251,17 @@ class StreamState:
                     "success": event.get("success", True),
                 }
             )
-            # Update todo list from write_todos / read_todos tool results.
-            if result_name in ("write_todos", "read_todos"):
+            # Commit a successful write_todos; a failure keeps the old list.
+            if result_name == "write_todos":
+                pending = self._pending_todos.pop(event["id"], None)
+                if event.get("success", True):
+                    if pending is not None:
+                        self.todo_items = pending
+                    else:
+                        parsed = _parse_todo_items(result_content)
+                        if parsed:
+                            self.todo_items = parsed
+            elif result_name == "read_todos":
                 parsed = _parse_todo_items(result_content)
                 if parsed:
                     self.todo_items = parsed
@@ -277,9 +306,15 @@ class StreamState:
 
         elif event_type == "interrupt":
             self.pending_interrupt = event
+            self._round_boundary_pending = True
+            self._round_boundary_start = len(self.response_text)
+            self._round_boundary_inserted = 0
 
         elif event_type == "ask_user":
             self.pending_ask_user = event
+            self._round_boundary_pending = True
+            self._round_boundary_start = len(self.response_text)
+            self._round_boundary_inserted = 0
 
         elif event_type == "tool_selection":
             self.selected_tools = event.get("tools", [])
@@ -343,16 +378,6 @@ class StreamState:
         elif event_type == "rubric_evaluation":
             self.rubric_checking = False
             self.rubric_evaluations.append(event)
-            if (
-                event.get("result") == "needs_revision"
-                and self.response_text.strip()
-                and not self.response_text.endswith("\n\n")
-            ):
-                # A revision is often a short addendum: keep the draft and
-                # start what follows on its own paragraph.
-                self.response_text += "\n\n"
-                if self.latest_text:
-                    self.latest_text += "\n\n"
 
         return event_type
 
@@ -390,6 +415,21 @@ class StreamState:
             self.latest_text = self.latest_text[
                 : max(0, len(self.latest_text) - text_chars)
             ]
+        if (
+            text_chars
+            and self._round_boundary_start is not None
+            and len(self.response_text)
+            <= self._round_boundary_start + self._round_boundary_inserted
+        ):
+            # The decoder counts its own deltas, not a separator added here.
+            # Remove any local prefix too, and restore the boundary for retry.
+            local_prefix = max(0, len(self.response_text) - self._round_boundary_start)
+            if local_prefix:
+                self.response_text = self.response_text[:-local_prefix]
+                self.latest_text = self.latest_text[:-local_prefix]
+            self._round_boundary_pending = True
+            self._round_boundary_start = len(self.response_text)
+            self._round_boundary_inserted = 0
         if removed:
             self.narrated_response_end = max(
                 0, len(self.response_text) - len(self.latest_text)

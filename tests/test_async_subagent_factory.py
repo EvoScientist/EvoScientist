@@ -244,6 +244,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
     mock_config, mock_chat, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_mode = False
     cfg.auto_approve = False
@@ -304,6 +305,7 @@ def test_async_subagent_mode_filters_ask_user(
     the middleware list builder pulls in transitively.
     """
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = True  # would normally include AskUserMiddleware
     cfg.auto_mode = False
     cfg.auto_approve = False
@@ -346,6 +348,7 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
 ):
     """Async subagents still select tools, but must not drive main-agent UI state."""
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_mode = False
     cfg.auto_approve = False
@@ -386,6 +389,7 @@ def test_main_agent_mounts_the_grader_after_our_other_after_agent_hooks(
     from deepagents.backends import FilesystemBackend
 
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_mode = False
     cfg.auto_approve = False

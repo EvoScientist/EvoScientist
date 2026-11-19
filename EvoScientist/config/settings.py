@@ -303,14 +303,6 @@ class EvoScientistConfig:
     # back to UTC if it can't be determined; set e.g. "Europe/London" to pin one.
     scheduler_default_timezone: str = ""
 
-    # Whether langgraph dev persists its runtime state to .langgraph_api/ in
-    # the server home (~/.evoscientist/server). True (default) keeps
-    # async-task, scheduler, and Store API state across subprocess restarts.
-    # Set False to suppress writes (state is in-memory only and lost when the
-    # server stops). EvoScientist's main thread persistence uses sessions.db
-    # regardless of this setting.
-    langgraph_dev_file_persistence: bool = True
-
     # Concurrency: how many runs each langgraph dev worker processes in parallel.
     # 10 is the langgraph dev recommended default and works well on a typical
     # dev machine. Lower it (e.g., 4) on memory-constrained or low-core
@@ -611,6 +603,15 @@ class EvoScientistConfig:
                 "Invalid sandbox_execute_timeout %r; falling back to 300.", t
             )
             self.sandbox_execute_timeout = 300
+
+        # The interpreter refuses a timeout that is not above 0, which would
+        # stop every agent build.
+        t = self.code_interpreter_timeout
+        if isinstance(t, bool) or not isinstance(t, int | float) or not t > 0:
+            logging.getLogger(__name__).warning(
+                "Invalid code_interpreter_timeout %r; falling back to 60.", t
+            )
+            self.code_interpreter_timeout = 60.0
 
         # A retry budget that is not a whole number of seconds (a hand-edited
         # ``60s``) goes back to its default; ``0`` or less switches the retry off.
@@ -1095,7 +1096,7 @@ def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
         raise ValueError("must be a finite number")
 
     warning = None
-    if key == "sandbox_execute_timeout" and value <= 0:
+    if key in ("sandbox_execute_timeout", "code_interpreter_timeout") and value <= 0:
         raise ValueError("must be greater than 0")
     if key == "memory_skill_synthesis_time":
         value = _normalize_hhmm(value)
@@ -1280,7 +1281,6 @@ _ENV_MAPPINGS = {
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
-    "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
     "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",

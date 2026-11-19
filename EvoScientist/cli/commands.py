@@ -2060,10 +2060,13 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
+                received_media=msg.media,
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
                 routes=file_tool_routes(dirs.workspace),
-                dangerous=sandbox_dangerous_mode(runtime_gateways.graph_gateway),
+                dangerous=sandbox_dangerous_mode(
+                    runtime_gateways.graph_gateway, runtime_state.config
+                ),
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
@@ -2589,8 +2592,9 @@ def config_set(
 
 
 def _apply_autoskills_settings(config: Any = None) -> None:
-    """Have a running server reschedule every project's AutoSkills cron,
-    reached at *config*'s address (by default the current configuration's)."""
+    """Have a running server reschedule every project's AutoSkills cron:
+    the one its record names, else the one at *config*'s address (by
+    default the current configuration's)."""
     from ..config import get_effective_config
     from ..langgraph_dev.registration import apply_autoskills_settings
 

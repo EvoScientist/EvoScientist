@@ -90,24 +90,15 @@ async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(
-    ("hint", "drift", "expected"),
-    [
-        (None, None, []),
-        ("run EvoSci setup", None, ["run EvoSci setup"]),
-        (None, "server python differs", ["server python differs"]),
-        (
-            "run EvoSci setup",
-            "server python differs",
-            ["run EvoSci setup", "server python differs"],
-        ),
-    ],
+    ("drift", "expected"),
+    [(None, []), ("server python differs", ["server python differs"])],
 )
-def test_agent_shell_notices(monkeypatch, hint, drift, expected):
-    """The TUI hides terminal output while it runs, so the hint and the
-    server-python warning become in-app notices."""
+def test_agent_shell_notices(monkeypatch, drift, expected):
+    """The TUI hides terminal output while it runs, so the server-python
+    warning becomes an in-app notice; the logged setup hint is not repeated."""
     from EvoScientist import agent_shell
     from EvoScientist.langgraph_dev import manager
 
-    monkeypatch.setattr(agent_shell, "setup_hint", lambda: hint)
+    monkeypatch.setattr(agent_shell, "setup_hint", lambda: "run EvoSci setup")
     monkeypatch.setattr(manager, "AGENT_SHELL_DRIFT", drift)
     assert tui_mod._agent_shell_notices() == expected

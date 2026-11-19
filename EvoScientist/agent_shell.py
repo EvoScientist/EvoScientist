@@ -106,7 +106,7 @@ def setup_hint() -> str | None:
 
     Names what is missing: a usable ``python`` (any OS), Git Bash (Windows),
     or both, which one ``EvoSci setup`` fixes. For callers that show it
-    themselves (the TUI, ``EvoSci deploy``); not logged here.
+    themselves (``EvoSci deploy``); not logged here.
     """
     from .setup.research_env import agent_python
 
@@ -179,7 +179,7 @@ def shell_drift_message(sidecar: dict) -> str | None:
 @functools.cache
 def log_setup_hint() -> None:
     """Log :func:`setup_hint` once per process where the agent is built, so
-    the Rich CLI, ``-p`` and ``EvoSci serve`` show it."""
+    the Rich CLI, the TUI, ``-p`` and ``EvoSci serve`` show it."""
     hint = setup_hint()
     if hint is not None:
         logger.warning(hint)
