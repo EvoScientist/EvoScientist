@@ -36,12 +36,17 @@ if TYPE_CHECKING:
 CREATED_AT_KEY = "evo_created_at"
 
 
-def _now() -> str:
+def created_at_now() -> str:
+    """The current time in the ``evo_created_at`` format."""
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _stamped(message: Any, now: str) -> Any:
-    """A copy of *message* with the key set; anything else is returned as is."""
+def with_created_at(message: Any, now: str) -> Any:
+    """A copy of *message* with the key set; anything else is returned as is.
+
+    For code that writes messages into thread state without going through the
+    agent's hooks (``update_state`` callers).
+    """
     if (
         not isinstance(message, BaseMessage)
         or CREATED_AT_KEY in message.response_metadata
@@ -57,15 +62,15 @@ def _stamped_command(command: Command, now: str) -> Command:
     update = command.update
     if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
         return command
-    messages = [_stamped(message, now) for message in update["messages"]]
+    messages = [with_created_at(message, now) for message in update["messages"]]
     return replace(command, update={**update, "messages": messages})
 
 
 def _stamped_model_result(result: Any, now: str) -> Any:
     if isinstance(result, AIMessage):
-        return _stamped(result, now)
+        return with_created_at(result, now)
     if isinstance(result, ModelResponse):
-        return replace(result, result=[_stamped(m, now) for m in result.result])
+        return replace(result, result=[with_created_at(m, now) for m in result.result])
     if isinstance(result, ExtendedModelResponse):
         command = result.command
         return replace(
@@ -79,7 +84,7 @@ def _stamped_model_result(result: Any, now: str) -> Any:
 def _stamped_tool_result(result: Any, now: str) -> Any:
     if isinstance(result, Command):
         return _stamped_command(result, now)
-    return _stamped(result, now)
+    return with_created_at(result, now)
 
 
 def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
@@ -103,8 +108,8 @@ def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
         # Without an id the reducer would append the copy instead of replacing.
         if message.id is None:
             continue
-        now = now or _now()
-        stamped.append(_stamped(message, now))
+        now = now or created_at_now()
+        stamped.append(with_created_at(message, now))
     if not stamped:
         return None
     return {"messages": stamped[::-1]}
@@ -132,25 +137,25 @@ class MessageTimestampMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
-        return _stamped_model_result(handler(request), _now())
+        return _stamped_model_result(handler(request), created_at_now())
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[Any]],
     ) -> Any:
-        return _stamped_model_result(await handler(request), _now())
+        return _stamped_model_result(await handler(request), created_at_now())
 
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
-        return _stamped_tool_result(handler(request), _now())
+        return _stamped_tool_result(handler(request), created_at_now())
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        return _stamped_tool_result(await handler(request), _now())
+        return _stamped_tool_result(await handler(request), created_at_now())
