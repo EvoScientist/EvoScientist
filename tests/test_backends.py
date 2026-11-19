@@ -389,10 +389,6 @@ class TestConvertVirtualPaths:
                 "python x.py --dirs=./tmp/a,/home/u/proj/data,/home/u/proj/out",
             ),
             (
-                "python merge.py /tmp/a.csv:/home/u/proj/b.csv",
-                "python merge.py ./tmp/a.csv:/home/u/proj/b.csv",
-            ),
-            (
                 "python merge.py /tmp/a.csv,/home/u/proj",
                 "python merge.py ./tmp/a.csv,/home/u/proj",
             ),
@@ -417,6 +413,17 @@ class TestConvertVirtualPaths:
         )
         assert error is not None
         assert "/home/u/data/a.csv" in error
+
+    @pytest.mark.parametrize("separator", [",", ":"])
+    def test_system_path_list_never_runs_with_a_hidden_host_path(
+        self, tmp_workspace, separator
+    ):
+        """A host path between list entries is refused (comma lists) or
+        dropped with the old rewrite (`:` lists, which validation does not
+        split), never passed to the command."""
+        word = separator.join(["/tmp/a.csv", "/etc/passwd", "/home/u/workspace/b.csv"])
+        command, error = prepare_sandbox_command(f"cat {word}", tmp_workspace)
+        assert error is not None or "/etc/passwd" not in command
 
     def test_convert_virtual_paths_has_no_ssh_remote_path_exemption(self):
         """Masking remote commands is prepare_sandbox_command's job."""
