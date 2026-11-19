@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import threading
 
+import httpx
+
 # A picker mounts one row per model, so a huge listing would make it unusable.
 _MAX_MODELS = 500
 
@@ -122,8 +124,6 @@ async def discover_custom_openai_models(
     try:
         import asyncio
 
-        import httpx
-
         # One deadline for the whole call: the download AND the parse. A
         # listing of a million ids is 20 MB, and parsing that takes longer
         # than the download -- so a deadline that covered only the request
@@ -146,22 +146,48 @@ async def discover_custom_openai_models(
             return []
 
         # The parse and the names out of it are the other half of the
-        # deadline: walking a near-cap body costs as much as parsing it. A
-        # thread cannot be interrupted, so what the timeout bounds is the
-        # WAIT for the work -- it goes on in the background and its result
-        # is dropped if it did not fit. Waiting for a cancelled thread
-        # instead would let the body decide how long the picker stays open.
+        # deadline: walking a near-cap body costs as much as parsing it.
         remaining = deadline - loop.time()
         if remaining <= 0:
             return []
-
-        def extract(content: bytes) -> list[str]:
-            return _names_from_body(json.loads(content))
-
-        work = asyncio.ensure_future(asyncio.to_thread(extract, resp.content))
-        done, _pending = await asyncio.wait({work}, timeout=remaining)
-        if not done:
-            return []
-        return work.result()
+        return await _names_within(resp.content, remaining)
     except Exception:
         return []
+
+
+async def _names_within(content: bytes, timeout: float) -> list[str]:
+    """The names in *content*, parsed off the event loop within *timeout*.
+
+    A parse cannot be interrupted, so what the timeout bounds is the WAIT for
+    it: a parse that does not fit is dropped and its result thrown away.
+    Waiting for a cancelled parse instead would let the body decide how long
+    the picker stays open.
+
+    The parsing thread is a daemon of its own rather than the loop's
+    executor, so a loop that closes while the parse runs does not wait for
+    it -- an executor thread would hold the caller until the parse ended.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    finished = asyncio.Event()
+    parsed: list[list[str]] = []
+
+    def parse() -> None:
+        try:
+            names = _names_from_body(json.loads(content))
+        except Exception:
+            names = []
+        parsed.append(names)
+        try:
+            loop.call_soon_threadsafe(finished.set)
+        except RuntimeError:
+            # The loop is closed; the parse's result goes with it.
+            pass
+
+    threading.Thread(target=parse, daemon=True).start()
+    try:
+        await asyncio.wait_for(finished.wait(), timeout=timeout)
+    except TimeoutError:
+        return []
+    return list(parsed[0]) if parsed else []

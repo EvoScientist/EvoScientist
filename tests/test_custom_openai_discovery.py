@@ -410,3 +410,53 @@ class TestBigAndLateAnswers:
         time.sleep(1.2)
         # The worker's own buffer filled; the list we were handed did not.
         assert names == [], names
+
+    def test_a_timed_out_parse_does_not_hold_the_caller(self, monkeypatch):
+        """The caller returns on the deadline, and the parse thread is left.
+
+        A parse cannot be interrupted, so a parse that does not fit the
+        deadline goes on in a thread of its own and its result is dropped.
+        That thread is a daemon, not the event loop's executor: an executor
+        thread would be joined when the loop closes, and the caller would
+        wait for the parse it had already given up on.
+        """
+        import threading
+        import time
+
+        from EvoScientist.llm import custom_openai_discovery as discovery
+
+        real_loads = json.loads
+
+        def slow_loads(payload, *args, **kwargs):
+            time.sleep(1.0)
+            return real_loads(payload, *args, **kwargs)
+
+        monkeypatch.setattr(discovery.json, "loads", slow_loads)
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+        started = time.monotonic()
+        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
+        elapsed = time.monotonic() - started
+
+        assert names == [], names
+        # The deadline plus the grace the cancellation needs -- not the
+        # deadline plus the whole parse.
+        assert elapsed < 0.6, elapsed
+        # The probe's own worker ends with the call. What may outlive it is
+        # the parse thread, which holds nothing the caller waits on.
+        assert not [t for t in threading.enumerate() if "fetch" in t.name]
+        assert not [t for t in threading.enumerate() if "asyncio" in t.name]
