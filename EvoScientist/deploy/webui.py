@@ -146,8 +146,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         config, cfg, runner, on_lock_wait=lock_wait_status(status_box, starting)
     )
     # Install before startup: a hang-up during readiness or banner rendering
-    # must reach cleanup too. The deploy guard preserves nohup and shields
-    # teardown from repeated stop signals.
+    # must reach cleanup too. The shared stop-signal guard preserves nohup and
+    # shields teardown from repeated stop signals.
     with interrupt_on_stop_signals():
         started = False
         try:
