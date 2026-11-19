@@ -9,6 +9,7 @@ local endpoint is still probed, and ``OPENAI_API_KEY`` is never attached.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -26,9 +27,9 @@ def _response(status_code: int = 200, body: object = None, *, json_error: bool =
     resp = MagicMock()
     resp.status_code = status_code
     if json_error:
-        resp.json = MagicMock(side_effect=ValueError("bad json"))
+        resp.content = b"{not json"
     else:
-        resp.json = MagicMock(return_value=body if body is not None else _LISTING)
+        resp.content = json.dumps(body if body is not None else _LISTING).encode()
     return resp
 
 
@@ -135,14 +136,8 @@ class TestListCustomOpenaiModels:
         async def never_answers(self, url, headers=None, **kwargs):
             await asyncio.sleep(3600)
 
-        def never_answers_sync(self, url, headers=None, **kwargs):
-            time.sleep(3600)
-
         before = threading.active_count()
-        with (
-            patch.object(httpx.AsyncClient, "get", never_answers),
-            patch.object(httpx.Client, "get", never_answers_sync),
-        ):
+        with patch.object(httpx.AsyncClient, "get", never_answers):
             assert (
                 list_custom_openai_models("https://llm.test/v1", "sk", timeout=0.2)
                 == []
@@ -264,3 +259,71 @@ class TestDiscoverCustomOpenaiModels:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestBigAndLateAnswers:
+    """The deadline and the result list have to hold for a hostile endpoint."""
+
+    def test_a_body_past_the_cap_is_not_listed(self, monkeypatch):
+        """A body past the cap is not a picker, and it is not parsed.
+
+        Parsing a huge listing is what ran past the deadline, so a body past
+        the cap is dropped rather than parsed.
+        """
+        import asyncio
+
+        from EvoScientist.llm import custom_openai_discovery as discovery
+
+        monkeypatch.setattr(discovery, "_MAX_BODY_BYTES", 16)
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+        assert asyncio.run(discovery.discover_custom_openai_models("http://x/v1")) == []
+
+    def test_the_result_is_not_the_workers_own_buffer(self, monkeypatch):
+        """A list that fills itself in after the return is not a result."""
+        import time
+
+        from EvoScientist.llm import custom_openai_discovery as discovery
+
+        real_loads = json.loads
+
+        def slow_loads(payload, *args, **kwargs):
+            time.sleep(1.0)
+            return real_loads(payload, *args, **kwargs)
+
+        monkeypatch.setattr(discovery.json, "loads", slow_loads)
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
+        assert names == []
+        time.sleep(1.2)
+        # The worker's own buffer filled; the list we were handed did not.
+        assert names == [], names

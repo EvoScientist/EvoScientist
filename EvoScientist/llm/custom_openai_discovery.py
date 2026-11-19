@@ -12,10 +12,16 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 
 from __future__ import annotations
 
+import json
 import threading
 
 # A picker mounts one row per model, so a huge listing would make it unusable.
 _MAX_MODELS = 500
+
+# The body is parsed before the names are counted, and a body of a million
+# ids is 20 MB, so parsing it would cost more than the deadline allows. A
+# body past this is not a picker.
+_MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
@@ -85,7 +91,9 @@ def list_custom_openai_models(
         # when the cancellation lands. This is the grace for that -- and a
         # listing that arrives inside it is the answer.
         worker.join(0.5)
-    return names
+    # A copy: the worker may still be filling its own buffer, and a caller
+    # that kept the list would see it fill itself in after the return.
+    return list(names)
 
 
 async def discover_custom_openai_models(
@@ -109,16 +117,28 @@ async def discover_custom_openai_models(
 
         import httpx
 
+        # One deadline for the whole call: the download AND the parse. A
+        # listing of a million ids is 20 MB, and parsing that takes longer
+        # than the download -- so a deadline that covered only the request
+        # would let the picker wait on the parse.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await asyncio.wait_for(
                 client.get(
                     base_url.rstrip("/") + "/models",
                     headers=_auth_headers(api_key),
                 ),
-                timeout=timeout,
+                timeout=max(0.0, deadline - loop.time()),
             )
         if resp.status_code != 200:
             return []
-        return _names_from_body(resp.json())
+        # A body past the cap is not a picker. It is not parsed either: the
+        # parse of a huge listing is what ran past the deadline, and the
+        # names are worth less than the picker opening.
+        if len(resp.content) > _MAX_BODY_BYTES:
+            return []
+        return _names_from_body(json.loads(resp.content))
     except Exception:
         return []

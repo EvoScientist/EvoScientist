@@ -1171,6 +1171,41 @@ class TestModelCommandCustomOpenaiPicker:
         )
         assert any(row[2] != "custom-openai" for row in entries[first_custom + 1 :])
 
+    async def test_fallback_picker_shows_discovered_names(self):
+        """``/model-fallback add`` opens a picker with the endpoint's ids.
+
+        It passes the endpoint's settings on, so dropping those two
+        arguments would go unnoticed.
+        """
+        from EvoScientist.commands.implementation.model_fallback import (
+            ModelFallbackCommand,
+        )
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(
+            base_url="https://llm.test/v1", api_key="sk-test"
+        )
+
+        seen: dict[str, object] = {}
+
+        async def fake_discover(base_url, api_key=None, *, timeout):
+            seen["base_url"] = base_url
+            seen["api_key"] = api_key
+            return ["fake-agent"]
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            await ModelFallbackCommand().execute(ctx, ["add"])
+
+        assert seen == {"base_url": "https://llm.test/v1", "api_key": "sk-test"}
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        custom_rows = [row for row in entries if row[2] == "custom-openai"]
+        assert custom_rows == [("fake-agent", "fake-agent", "custom-openai")]
+
     async def test_picker_keeps_static_defaults_when_discovery_empty(self):
         from EvoScientist.commands.implementation.model import ModelCommand
         from EvoScientist.llm.registry import list_models_by_provider

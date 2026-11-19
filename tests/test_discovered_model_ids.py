@@ -1,11 +1,4 @@
-"""Regression tests for the review findings on #713.
-
-The picker offers an id the endpoint listed, but ``get_chat_model`` used to
-rewrite that id into another provider's model id when the names collided, so
-the request carried an id the endpoint does not serve. A discovered id was
-also offered twice when the endpoint listed it twice, and a blank id was
-offered at all.
-"""
+"""Discovered model ids: how they are listed and sent, and the onboarding probe."""
 
 from __future__ import annotations
 
@@ -45,11 +38,13 @@ def test_an_unknown_id_is_sent_verbatim(endpoint):
     assert model.model_name == "totally-unknown-model", model.model_name
 
 
-def test_a_name_without_a_provider_still_resolves_through_the_registry():
+def test_a_name_without_a_provider_still_resolves_through_the_registry(monkeypatch):
     """Without a provider the registry fallback is what names the model."""
-    from EvoScientist.llm.models import MODELS
+    monkeypatch.setenv("ATLASCLOUD_API_KEY", "sk-test")
 
-    assert MODELS["qwen3.5-27b"][0] == "qwen/qwen3.5-27b"
+    model = get_chat_model("qwen3.5-27b")
+
+    assert model.model_name == "qwen/qwen3.5-27b", model.model_name
 
 
 def test_a_discovered_id_is_offered_once_even_when_listed_twice():
@@ -98,23 +93,28 @@ def _picker_stub():
     return {"select": _Choice.select, "text": _Text.text}
 
 
-def test_a_custom_anthropic_id_keeps_the_globals_mapping(endpoint):
-    """The other providers keep the fallback the registry relies on.
+def test_a_custom_anthropic_id_is_sent_as_written(monkeypatch):
+    """A CUSTOM endpoint serves the ids it was asked for.
 
     Only a CUSTOM endpoint serves the ids it was asked for; the other
     providers' short names are their own registry entries, so rewriting one
     into another provider's id is what their configuration relies on.
     """
-    from EvoScientist.llm.models import MODELS
+    monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "sk-test")
 
-    assert MODELS["qwen3.5-27b"][0] == "qwen/qwen3.5-27b"
+    model = get_chat_model("qwen3.5-27b", provider="custom-anthropic")
+
+    assert model.model == "qwen3.5-27b", model.model
 
 
-def test_a_provider_without_a_name_keeps_the_registry_mapping(endpoint):
-    """A provider-less name still resolves through the registry."""
-    from EvoScientist.llm.models import MODELS
+def test_another_provider_keeps_the_registry_mapping(monkeypatch):
+    """The other providers keep the mapping their configuration relies on."""
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-test")
 
-    assert MODELS["qwen3.5-27b"][1] == "atlascloud"
+    model = get_chat_model("qwen3.5-27b", provider="siliconflow")
+
+    assert model.model_name == "qwen/qwen3.5-27b", model.model_name
 
 
 def test_a_discovered_listing_is_capped():
@@ -284,43 +284,6 @@ async def test_the_probe_has_a_total_deadline():
         elapsed = time.monotonic() - started
     finally:
         httpx.AsyncClient = original
-
-    assert names == []
-    assert elapsed < 2.0, elapsed
-
-
-def test_the_sync_probe_has_a_total_deadline(monkeypatch):
-    """A trickling endpoint cannot keep the wizard waiting.
-
-    HTTPX's timeout is an inactivity timeout, so an endpoint that sends a
-    chunk every few seconds without finishing would never let the call
-    return. The probe needs a total deadline as well.
-    """
-    import time
-
-    import httpx
-
-    from EvoScientist.llm import custom_openai_discovery as discovery
-
-    def slow_get(*args, **kwargs):
-        time.sleep(5)
-        raise AssertionError("the deadline did not fire")
-
-    class _SlowClient:
-        def __init__(self, **kwargs: object) -> None:
-            pass
-
-        def get(self, *args, **kwargs):
-            return slow_get(*args, **kwargs)
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(httpx, "Client", _SlowClient)
-
-    started = time.monotonic()
-    names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
-    elapsed = time.monotonic() - started
 
     assert names == []
     assert elapsed < 2.0, elapsed
