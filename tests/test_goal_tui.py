@@ -744,11 +744,10 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_later_turn_alone(
         assert not app.query_one("#prompt").disabled
 
 
-async def test_a_command_cut_by_ctrl_c_leaves_a_channel_turns_input_off(
+async def test_a_command_cut_by_ctrl_c_leaves_the_channel_turn_in_control(
     monkeypatch, workspace, tmp_path
 ):
-    """The same, with a channel turn taking the app: it keeps its input off
-    until it ends, and the old command's end must not switch it on."""
+    """Finishing a superseded command must not release a live channel turn."""
     from unittest.mock import MagicMock
 
     from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
@@ -798,7 +797,8 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_channel_turns_input_off(
             await _until(pilot, lambda: not app._background_tasks)
             await pilot.pause(0.2)
             assert app._busy is True
-            assert app.query_one("#prompt").disabled
+            assert app._run_task is turn
+            assert not app.query_one("#prompt").disabled
         finally:
             ready.set()
             release.set()
@@ -994,53 +994,6 @@ async def test_ctrl_c_before_a_dispatched_command_starts_stops_it(
         assert app._run_task is None
         assert model.calls == {"main": 0, "draft": 0, "grade": 0}
         assert not list(app.query(AskUserWidget))
-        assert not app.query_one("#prompt").disabled
-
-
-async def test_ctrl_c_during_a_channel_turn_keeps_the_input_off(monkeypatch, workspace):
-    """Ctrl+C on a busy app without a foreground turn never switches the
-    input on: whoever switched it off (here a channel turn, started directly)
-    restores it at its own end."""
-    from unittest.mock import MagicMock
-
-    from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
-
-    app = await capture_app(monkeypatch, workspace)
-    msg = ChannelMessage(
-        msg_id="m-1",
-        content="from the channel",
-        sender="u1",
-        channel_type="imessage",
-        metadata={},
-        channel_ref=None,
-        bus_ref=None,
-        chat_id="chat-a",
-        message_id="ts-1",
-    )
-    release = asyncio.Event()
-
-    async def _held_stream(*_args, **_kwargs):
-        await release.wait()
-        return "ok"
-
-    async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._await_agent_ready = AsyncMock(return_value=MagicMock())
-        monkeypatch.setattr(app, "_stream_with_widgets", _held_stream)
-        _register_channel_request(msg)
-        turn = asyncio.ensure_future(app._process_channel_message(msg))
-        try:
-            await _until(pilot, lambda: app._busy)
-            await pilot.pause(0.1)
-            prompt = app.query_one("#prompt")
-            assert prompt.disabled
-            app.action_request_quit()
-            await pilot.pause(0.1)
-            assert prompt.disabled
-        finally:
-            release.set()
-            await asyncio.wait_for(turn, timeout=10)
-        await pilot.pause(0.1)
         assert not app.query_one("#prompt").disabled
 
 

@@ -742,7 +742,8 @@ def run_textual_interactive(
             # its turn began. A held message goes before the queue.
             self._channel_turn_scheduled = False
             self._held_channel_msg: ChannelMessage | None = None
-            self._run_task: Any = None  # asyncio.Task for current _run_turn
+            self._run_task: Any = None  # asyncio.Task for the current turn
+            self._channel_cancel_scope: str | None = None
             self._queued_messages: list[
                 str
             ] = []  # queued messages to send after current turn
@@ -1305,11 +1306,7 @@ def run_textual_interactive(
                     return
                 self._held_channel_msg = None
                 self._channel_turn_scheduled = True
-                self.call_later(
-                    lambda m=msg: asyncio.ensure_future(
-                        self._process_channel_message(m)
-                    )
-                )
+                self.call_later(self._start_channel_turn, msg)
                 return
 
             # Throttled idle state read so a completion surfaces while the user
@@ -1336,6 +1333,12 @@ def run_textual_interactive(
                 self.call_later(
                     lambda: asyncio.ensure_future(self._consume_notifications_tui())
                 )
+
+        def _start_channel_turn(self, msg: ChannelMessage) -> None:
+            # Returning the task would make Textual await it on the message pump.
+            task = asyncio.create_task(self._process_channel_message(msg))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         async def _consume_notifications_tui(self) -> None:
             """Drain the notification queue and inject a synthetic agent turn.
@@ -3328,20 +3331,18 @@ def run_textual_interactive(
                 # message that arrived since.
                 self._held_channel_msg = msg
                 return
-            prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
                 # Taken in the step that checked it: nothing ran in between.
                 self._busy = True
+                self._run_task = asyncio.current_task()
+                self._channel_cancel_scope = _ch_mod._channel_message_cancel_scope(msg)
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
                 await self._refresh_status_snapshot(msg.content)
                 self._render_status()
-
-                prompt_widget = self.query_one("#prompt", ChatTextArea)
-                prompt_widget.disabled = True
 
                 # Mount user message first, then "Received" label
                 container = self.query_one("#chat", VerticalScroll)
@@ -3466,7 +3467,7 @@ def run_textual_interactive(
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
-                        cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                        cancel_scope=self._channel_cancel_scope,
                         approve_all_at_start=_ch_mod.channel_session_granted(msg),
                     )
                 except Exception as exc:
@@ -3479,15 +3480,20 @@ def run_textual_interactive(
                     style="dim",
                 )
 
+            except asyncio.CancelledError:
+                _set_channel_response(msg.msg_id, "Interrupted by user")
+                self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
-                self._busy = False
                 self._status_phase = ResearchPhase.IDLE
-                await self._refresh_status_snapshot(reset_streaming_text=True)
-                self._render_status()
-                if prompt_widget is not None:
-                    prompt_widget.disabled = False
-                    prompt_widget.focus()
-                _ch_mod._complete_channel_request(msg.msg_id)
+                try:
+                    await self._refresh_status_snapshot(reset_streaming_text=True)
+                    self._render_status()
+                finally:
+                    _ch_mod._complete_channel_request(msg.msg_id)
+                    self._channel_cancel_scope = None
+                    self._run_task = None
+                    self._busy = False
+                    self._drain_queue()
 
         # ── Clipboard (copy on mouse select) ─────────────────
 
@@ -4223,7 +4229,7 @@ def run_textual_interactive(
                 if self._run_task is not None and not self._run_task.done():
                     from ..stream.display import request_stream_cancel
 
-                    request_stream_cancel()
+                    request_stream_cancel(self._channel_cancel_scope)
                     approval = self._approval_future
                     if approval is None:
                         self._run_task.cancel()

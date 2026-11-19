@@ -4,8 +4,7 @@ task notifications) take the app only if it is still free when they start.
 The poll runs on its timer and schedules the turn as a callback on the app's
 message pump, so input handled in between can take the app first. These tests
 call the poll themselves, as the timer would, and count the runs that are going
-at once. They wait with ``asyncio.sleep``: a channel turn started that way holds
-the message pump, which ``pilot.pause`` would wait for."""
+at once."""
 
 from __future__ import annotations
 
@@ -418,6 +417,35 @@ async def test_replacing_initial_agent_does_not_wait_for_channel_startup(
         release_load.set()
         release_channels.set()
         await asyncio.gather(*app._background_tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_channel_turn_accepts_terminal_input(monkeypatch, workspace, interrupt):
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            _channel_message("from the channel")
+            app._poll_channel_queue()
+            await _until(lambda: runs.started == ["from the channel"])
+
+            await pilot.press("h", "i", "enter")
+            await _until(lambda: app._queued_messages == ["hi"])
+
+            if interrupt:
+                await pilot.press("ctrl+c")
+                await _until(lambda: _idle(app, runs))
+                assert runs.started == ["from the channel"]
+            else:
+                runs.finish("from the channel")
+                await _until(lambda: runs.started == ["from the channel", "hi"])
+                runs.finish("hi")
+                await _until(lambda: _idle(app, runs))
+            assert runs.peak == 1
+        finally:
+            runs.finish_all()
 
 
 async def test_a_channel_turn_waits_for_input_typed_before_it_starts(
@@ -876,6 +904,18 @@ async def test_random_input_and_queue_arrivals_never_run_two_turns(
     runs = _Runs()
     app = await _app(monkeypatch, workspace)
     sent: list[str] = []
+    claimed: list[str] = []
+    claim = channel_mod._claim_or_complete_channel_request
+
+    def claim_channel_message(msg):
+        accepted = claim(msg)
+        if accepted:
+            claimed.append(msg.content)
+        return accepted
+
+    monkeypatch.setattr(
+        channel_mod, "_claim_or_complete_channel_request", claim_channel_message
+    )
     async with app.run_test(size=(100, 40)) as pilot:
         try:
             await pilot.pause()
@@ -907,11 +947,7 @@ async def test_random_input_and_queue_arrivals_never_run_two_turns(
             await _poll_until(app, lambda: _idle(app, runs), seconds=20)
             assert runs.started
             assert runs.peak == 1
-            # Nothing stops a channel turn, so every message got one, in the
-            # order the messages arrived.
-            channel_turns = [
-                name for name in runs.started if name.startswith("channel-")
-            ]
-            assert channel_turns == sent
+            # Ctrl+C can cancel a claimed turn before it reaches the gateway.
+            assert claimed == sent
         finally:
             runs.finish_all()
