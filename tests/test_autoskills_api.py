@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -13,24 +15,13 @@ from EvoScientist import local_secret, paths
 from EvoScientist.langgraph_dev import registry
 from EvoScientist.langgraph_dev.autoskills_api import MAX_FILE_BYTES, MAX_INLINE_CHARS
 from EvoScientist.memory.autoskills.proposals import (
+    _content_digest,
     approve_skill_proposal,
     autoskill_proposals_dir,
     processed_cluster_hashes,
     submit_autoskill_proposal,
 )
 from EvoScientist.paths import Workspace
-
-
-def record_reviewed_proposal_for(memory_dir, proposal_id):
-    """Stand in for the display a person's decision requires.
-
-    The production surfaces record a draft when they show it. A test that
-    decides directly has shown the draft it is about to decide, so it records
-    that current content. A body edited after this line is still refused.
-    """
-    from EvoScientist.memory.autoskills.proposals import record_reviewed_proposal_by_id
-
-    record_reviewed_proposal_by_id(memory_dir, proposal_id)
 
 
 @pytest.fixture
@@ -95,7 +86,6 @@ def _draft(
 
 
 def _approve(workspace: Workspace, name: str) -> None:
-    record_reviewed_proposal_for(paths.MEMORIES_DIR, name)
     result = approve_skill_proposal(
         paths.MEMORIES_DIR,
         name,
@@ -204,6 +194,9 @@ def test_list_inlines_texts_and_lists_files(server, served):
     assert draft["source_observation_ids"] == ["O-1", "O-2", "O-3"]
     assert draft["approved_by"] is None
     assert draft["approved_skill_present"] is None
+    assert draft["expected_updated_at"] == draft["updated_at"]
+    assert len(draft["content_digest"]) == 64
+    assert "review_token" not in draft
 
 
 def test_list_orders_files_by_path_text(server, served):
@@ -244,6 +237,7 @@ def test_list_inlines_no_text_for_a_decided_draft(
         "rationale_md",
         "rationale_md_truncated",
         "contents",
+        "content_digest",
     ):
         assert draft[field] is None
     assert draft["description"] == "Use when testing focused-validation."
@@ -257,6 +251,31 @@ def test_list_truncates_large_skill_md(server, served):
 
     assert draft["skill_md_truncated"] is True
     assert len(draft["skill_md"]) == MAX_INLINE_CHARS
+
+
+def test_list_content_digest_covers_exactly_the_truncated_payload(
+    server, served, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 40)
+    _draft(
+        served,
+        "focused-validation",
+        body="x" * 100,
+        files={"scripts/check.py": "print('a much longer script payload')\n"},
+    )
+
+    draft = _only_draft(server)
+
+    assert draft["skill_md_truncated"] is True
+    payload = {
+        "SKILL.md": draft["skill_md"].encode("utf-8"),
+        "scripts/check.py": draft["contents"]["scripts/check.py"].encode("utf-8"),
+    }
+    assert draft["content_digest"] == _content_digest(payload)
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    assert draft["content_digest"] != _content_digest(folder)
 
 
 def test_list_reports_install_error_for_collision(server, served):
@@ -363,8 +382,8 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_by", "rejected_at", "approved_skill_path",
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
-        "rationale_md", "rationale_md_truncated", "contents", "review_token", "files",
-        "install_target",
+        "rationale_md", "rationale_md_truncated", "contents", "content_digest",
+        "expected_updated_at", "files", "install_target",
         "install_base", "install_error",
     }  # fmt: skip
 
@@ -373,7 +392,6 @@ def test_list_reports_rejections_and_auto_approvals(server, served):
     from EvoScientist.memory.autoskills.proposals import reject_skill_proposal
 
     _draft(served, "rejected-skill")
-    record_reviewed_proposal_for(paths.MEMORIES_DIR, "rejected-skill")
     reject_skill_proposal(paths.MEMORIES_DIR, "rejected-skill")
     _draft(served, "auto-skill")
     _approve(served, "auto-skill")
@@ -784,8 +802,17 @@ def _file(server, name: str, path: str, **params):
     )
 
 
-def test_file_route_returns_text(server, served):
+def test_file_route_returns_text_digest_without_recording_a_review(
+    server, served, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals
+
     _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    monkeypatch.setattr(
+        proposals,
+        "_write_manifest",
+        lambda *_args, **_kwargs: pytest.fail("the file route wrote review state"),
+    )
 
     response = _file(server, "focused-validation", "scripts/check.py")
 
@@ -793,6 +820,11 @@ def test_file_route_returns_text(server, served):
     assert response.headers["content-type"].startswith("text/plain")
     assert "charset=utf-8" in response.headers["content-type"]
     assert response.text == "print(1)\n"
+    assert (
+        response.headers["X-EvoScientist-Content-Digest"]
+        == hashlib.sha256(response.content).hexdigest()
+    )
+    assert "X-EvoScientist-Review-Token" not in response.headers
 
 
 @pytest.mark.parametrize(
@@ -1032,18 +1064,9 @@ def quiet_skill_index(monkeypatch):
 
 
 def _decide(server, name: str, action: str, headers=None, **body):
-    empty = body.pop("empty", False)
-    if action in {"approve", "reject"}:
-        # The review page lists a draft before it can decide it. Return the
-        # token carried by the row whose content this client received.
-        listed = server.get("/api/autoskills/proposals").json()["proposals"]
-        draft = next((draft for draft in listed if draft["proposal_id"] == name), None)
-        token = draft.get("review_token") if draft is not None else None
-        if not empty and token is not None:
-            body.setdefault("review_token", token)
     return server.post(
         f"/api/autoskills/proposals/{name}/{action}",
-        json=None if empty else body,
+        json=body,
         headers=headers or {},
     )
 
@@ -1058,12 +1081,20 @@ def test_decision_routes_need_the_secret(server, served, action):
     assert _only_draft(server)["status"] == "pending"
 
 
-def test_approve_route_installs_into_the_drafts_project(
+def test_approve_route_matching_digest_installs_into_the_drafts_project(
     server, served, secret, quiet_skill_index
 ):
     _draft(served, "focused-validation")
+    shown = _only_draft(server)
 
-    response = _decide(server, "focused-validation", "approve", secret)
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        expected_updated_at=shown["expected_updated_at"],
+        expected_content_digest=shown["content_digest"],
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1078,9 +1109,63 @@ def test_approve_route_installs_into_the_drafts_project(
     assert body["updated_at"] == draft["updated_at"]
 
 
+def test_approve_route_stale_digest_is_refused_as_draft_changed(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    shown = _only_draft(server)
+    skill = (
+        autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
+    )
+    skill.write_text(
+        skill.read_text(encoding="utf-8").replace("Steps.", "Changed after listing."),
+        encoding="utf-8",
+    )
+
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        expected_updated_at=shown["expected_updated_at"],
+        expected_content_digest=shown["content_digest"],
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "draft_changed"
+    assert not (served.skills_dir / "focused-validation").exists()
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_without_client_digest_installs_the_current_snapshot(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    shown = _only_draft(server)
+    skill = (
+        autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
+    )
+    skill.write_text(
+        skill.read_text(encoding="utf-8").replace("Steps.", "Current WebUI body."),
+        encoding="utf-8",
+    )
+
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        scope="workspace",
+        expected_updated_at=shown["expected_updated_at"],
+    )
+
+    assert response.status_code == 200, response.json()
+    installed = served.skills_dir / "focused-validation" / "SKILL.md"
+    assert "Current WebUI body." in installed.read_text(encoding="utf-8")
+
+
 def test_approve_route_global_scope(server, served, secret, quiet_skill_index):
     _draft(served, "focused-validation")
-    _edit_manifest("focused-validation", scope="global", submitted_scope="global")
 
     response = _decide(server, "focused-validation", "approve", secret, scope="global")
 
@@ -1423,13 +1508,11 @@ def test_decision_routes_refuse_a_body_that_is_not_an_object(
 def test_decision_routes_accept_an_empty_body(server, served, secret):
     _draft(served, "focused-validation")
 
-    response = _decide(server, "focused-validation", "reject", secret, empty=True)
+    response = server.post(
+        "/api/autoskills/proposals/focused-validation/reject", headers=secret
+    )
 
-    # The empty object is valid JSON input; the required credential is what
-    # refuses this WebUI decision, not body parsing.
-    assert response.status_code == 409
-    assert response.json()["error"] == "reject_failed"
-    assert "review token is missing" in response.json()["detail"]
+    assert response.status_code == 200
 
 
 def test_approve_route_reports_the_refusal_in_detail(server, served, secret):
@@ -1712,6 +1795,7 @@ def test_a_decision_never_falls_back_to_a_prefix_match(
     monkeypatch.setattr(
         autoskills_api, "find_skill_proposal", find_then_lose_the_folder
     )
+
     response = _decide(server, "paper-review", action, secret)
 
     assert response.status_code == 409
@@ -1726,14 +1810,16 @@ def test_approve_route_leaves_nothing_after_a_failed_copy(
     from EvoScientist.memory.autoskills import proposals
 
     _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    snapshot_root = paths.MEMORIES_DIR.resolve() / proposals.AUTOSKILL_SNAPSHOTS_DIR
     calls = []
     real_copy = proposals._copy_file_atomic
 
-    def full_disk(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 2:
-            raise OSError(28, "No space left on device")
-        return real_copy(*args, **kwargs)
+    def full_disk(source, target):
+        if Path(source).resolve().is_relative_to(snapshot_root):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+        return real_copy(source, target)
 
     monkeypatch.setattr(proposals, "_copy_file_atomic", full_disk)
 
@@ -1749,33 +1835,25 @@ def test_approve_route_leaves_nothing_after_a_failed_copy(
 
 def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_index):
     import threading
-    import time
 
     from EvoScientist.langgraph_dev import autoskills_api
     from EvoScientist.memory.autoskills import proposals
 
     _draft(served, "focused-validation")
-    # The review page listed the draft before the two approvals raced.
-    _code, payload = autoskills_api.list_drafts()
-    review_token = payload["proposals"][0]["review_token"]
     real_copy = proposals._copy_proposed_skill
-    copies = []
+    snapshot_root = paths.MEMORIES_DIR.resolve() / proposals.AUTOSKILL_SNAPSHOTS_DIR
+    installs = []
 
-    def slow_copy(*args, **kwargs):
-        # Both approvals would pass the pending check before either writes.
-        copies.append(1)
-        time.sleep(0.2)
-        return real_copy(*args, **kwargs)
+    def copy_install(source, destination):
+        if Path(source).resolve().is_relative_to(snapshot_root):
+            installs.append(1)
+        return real_copy(source, destination)
 
-    monkeypatch.setattr(proposals, "_copy_proposed_skill", slow_copy)
+    monkeypatch.setattr(proposals, "_copy_proposed_skill", copy_install)
     results = []
 
     def approve():
-        results.append(
-            autoskills_api.decide(
-                "focused-validation", "approve", review_token=review_token
-            )
-        )
+        results.append(autoskills_api.decide("focused-validation", "approve"))
 
     threads = [threading.Thread(target=approve) for _ in range(2)]
     for thread in threads:
@@ -1786,7 +1864,7 @@ def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_inde
     assert sorted(status for status, _ in results) == [200, 409]
     refused = next(payload for status, payload in results if status == 409)
     assert refused == {"error": "not_pending", "status": "approved"}
-    assert len(copies) == 1
+    assert len(installs) == 1
 
 
 def test_decisions_run_off_the_event_loop(server, served, secret, monkeypatch):

@@ -4424,9 +4424,6 @@ def run_textual_interactive(
         def _append_pending_skill_proposals_notice(self) -> None:
             from .commands import _pending_skill_proposals_message
 
-            # A count is not the draft. Recording here used to arm every
-            # pending proposal before anyone opened one; the review command
-            # is what renders the content and records it.
             message = _pending_skill_proposals_message(self._dirs.workspace.root)
             if message:
                 self._append_system(message, style="yellow")

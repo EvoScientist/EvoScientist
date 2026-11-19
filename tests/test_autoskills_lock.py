@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+
+import pytest
+
+from EvoScientist.memory.autoskills import proposals as module
+from EvoScientist.memory.autoskills.proposals import (
+    _draft_lock,
+    approve_skill_proposal,
+    autoskill_proposals_dir,
+    reject_skill_proposal,
+    revert_skill_proposal,
+    submit_autoskill_proposal,
+)
+
+
+def _write_draft(memory_dir: Path, name: str, body: str = "Original body.") -> Path:
+    folder = autoskill_proposals_dir(memory_dir) / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Exercise the draft lock.\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+    return folder
+
+
+def _submit(
+    memory_dir: Path, skills_dir: Path, name: str, cluster: str, *, must_submit=True
+):
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=name,
+        cluster_hash=cluster,
+        source_observation_ids=["O-1"],
+        rationale="Exercise the per-draft writer lock.",
+        skills_dir=skills_dir,
+        workspace_dir=memory_dir.parent,
+    )
+    assert result["submitted"] is must_submit, result
+    return result
+
+
+def _manifest(memory_dir: Path, name: str) -> dict:
+    path = autoskill_proposals_dir(memory_dir) / name / "manifest.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _call(results: dict, key: str, done: threading.Event, function) -> None:
+    try:
+        results[key] = function()
+    except BaseException as exc:
+        results[key] = exc
+    finally:
+        done.set()
+
+
+@pytest.mark.parametrize("first_action", ["submit", "reject"])
+def test_draft_writers_same_draft_do_not_interleave(
+    tmp_path, monkeypatch, first_action
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    folder = _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    original_version = _manifest(memory_dir, name)["updated_at"]
+    manifest_path = folder / "manifest.json"
+    entered = threading.Event()
+    release = threading.Event()
+    second_attempted = threading.Event()
+    first_done = threading.Event()
+    second_done = threading.Event()
+    real_write = module._write_manifest
+    real_lock = module._draft_lock
+    paused_status = "pending" if first_action == "submit" else "rejected"
+
+    def paused_write(path, payload):
+        if (
+            threading.current_thread().name == "first-writer"
+            and path == manifest_path
+            and payload.get("status") == paused_status
+        ):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("the test did not release the first writer")
+        return real_write(path, payload)
+
+    def observed_lock(proposal_dir):
+        if threading.current_thread().name == "second-writer":
+            second_attempted.set()
+        return real_lock(proposal_dir)
+
+    def first():
+        if first_action == "submit":
+            return _submit(memory_dir, skills_dir, name, "cluster-resubmitted")
+        return reject_skill_proposal(memory_dir, name)
+
+    def second():
+        if first_action == "submit":
+            return reject_skill_proposal(
+                memory_dir, name, expected_updated_at=original_version
+            )
+        return _submit(
+            memory_dir, skills_dir, name, "cluster-resubmitted", must_submit=False
+        )
+
+    monkeypatch.setattr(module, "_write_manifest", paused_write)
+    monkeypatch.setattr(module, "_draft_lock", observed_lock)
+    results = {}
+    first_thread = threading.Thread(
+        target=_call,
+        args=(results, "first", first_done, first),
+        name="first-writer",
+    )
+    second_thread = threading.Thread(
+        target=_call,
+        args=(results, "second", second_done, second),
+        name="second-writer",
+    )
+    first_thread.start()
+    second_started = False
+    try:
+        assert entered.wait(10)
+        second_thread.start()
+        second_started = True
+        assert second_attempted.wait(10)
+        assert not second_done.is_set()
+    finally:
+        release.set()
+        first_thread.join(15)
+        if second_started:
+            second_thread.join(15)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not isinstance(results["first"], BaseException)
+    assert not isinstance(results["second"], BaseException)
+    manifest = _manifest(memory_dir, name)
+    if first_action == "submit":
+        assert results["first"]["submitted"] is True
+        assert results["second"]["rejected"] is False
+        assert results["second"]["error"] == "Proposal changed since it was read"
+        assert manifest["status"] == "pending"
+        assert manifest["cluster_hash"] == "cluster-resubmitted"
+    else:
+        assert results["first"]["rejected"] is True
+        assert results["second"]["submitted"] is False
+        assert results["second"]["status"] == "rejected"
+        assert manifest["status"] == "rejected"
+        assert manifest["cluster_hash"] == "cluster-original"
+
+
+def test_draft_writers_different_drafts_do_not_block_each_other(tmp_path, monkeypatch):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    for name in ("alpha", "beta"):
+        _write_draft(memory_dir, name)
+        _submit(memory_dir, skills_dir, name, f"cluster-{name}")
+    alpha_manifest = autoskill_proposals_dir(memory_dir) / "alpha" / "manifest.json"
+    entered = threading.Event()
+    release = threading.Event()
+    beta_done = threading.Event()
+    alpha_done = threading.Event()
+    real_write = module._write_manifest
+
+    def pause_alpha(path, payload):
+        if (
+            threading.current_thread().name == "alpha-writer"
+            and path == alpha_manifest
+            and payload.get("status") == "rejected"
+        ):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("the test did not release alpha")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", pause_alpha)
+    results = {}
+    alpha = threading.Thread(
+        target=_call,
+        args=(
+            results,
+            "alpha",
+            alpha_done,
+            lambda: reject_skill_proposal(memory_dir, "alpha"),
+        ),
+        name="alpha-writer",
+    )
+    beta = threading.Thread(
+        target=_call,
+        args=(
+            results,
+            "beta",
+            beta_done,
+            lambda: reject_skill_proposal(memory_dir, "beta"),
+        ),
+        name="beta-writer",
+    )
+    alpha.start()
+    try:
+        assert entered.wait(10)
+        beta.start()
+        beta_finished_while_alpha_was_paused = beta_done.wait(10)
+    finally:
+        release.set()
+        alpha.join(15)
+        if beta.ident is not None:
+            beta.join(15)
+
+    assert beta_finished_while_alpha_was_paused
+    assert results["alpha"]["rejected"] is True
+    assert results["beta"]["rejected"] is True
+    assert _manifest(memory_dir, "alpha")["status"] == "rejected"
+    assert _manifest(memory_dir, "beta")["status"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("action", "flag"),
+    [
+        ("submit", "submitted"),
+        ("approve", "approved"),
+        ("reject", "rejected"),
+        ("revert", "reverted"),
+    ],
+)
+def test_draft_lock_timeout_is_a_refusal_for_every_writer(
+    tmp_path, monkeypatch, action, flag
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    folder = _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    monkeypatch.setattr(module, "_DRAFT_LOCK_TIMEOUT", 0.01)
+    calls = {
+        "submit": lambda: _submit(
+            memory_dir, skills_dir, name, "cluster-new", must_submit=False
+        ),
+        "approve": lambda: approve_skill_proposal(
+            memory_dir, name, skills_dir=skills_dir
+        ),
+        "reject": lambda: reject_skill_proposal(memory_dir, name),
+        "revert": lambda: revert_skill_proposal(memory_dir, name),
+    }
+    done = threading.Event()
+    results = {}
+    with _draft_lock(folder):
+        writer = threading.Thread(
+            target=_call,
+            args=(results, action, done, calls[action]),
+            name="contending-writer",
+        )
+        writer.start()
+        finished = done.wait(5)
+    writer.join(5)
+
+    assert finished, "the contending writer hung instead of refusing"
+    assert not writer.is_alive()
+    assert results[action][flag] is False
+    assert "timed out waiting for another writer" in results[action]["error"]
+    assert _manifest(memory_dir, name)["status"] == "pending"
+
+
+def test_decision_manifest_reread_sees_write_before_lock_acquisition(
+    tmp_path, monkeypatch
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    original_version = _manifest(memory_dir, name)["updated_at"]
+    real_lock = module._draft_lock
+
+    def write_between_lookup_and_lock(proposal_dir):
+        manifest_path = proposal_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["updated_at"] = "2026-01-02T03:04:05.006Z"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return real_lock(proposal_dir)
+
+    monkeypatch.setattr(module, "_draft_lock", write_between_lookup_and_lock)
+
+    result = reject_skill_proposal(
+        memory_dir, name, expected_updated_at=original_version
+    )
+
+    assert result == {
+        "rejected": False,
+        "proposal_id": name,
+        "updated_at": "2026-01-02T03:04:05.006Z",
+        "error": "Proposal changed since it was read",
+    }
+    assert _manifest(memory_dir, name)["status"] == "pending"

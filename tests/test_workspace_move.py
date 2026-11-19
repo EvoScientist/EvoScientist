@@ -21,18 +21,6 @@ from EvoScientist.middleware.memory import PROFILE_TEMPLATES
 from EvoScientist.paths import Workspace
 
 
-def record_reviewed_proposal_for(memory_dir, proposal_id):
-    """Stand in for the display a person's decision requires.
-
-    The production surfaces record a draft when they show it. A test that
-    decides directly has shown the draft it is about to decide, so it records
-    that current content. A body edited after this line is still refused.
-    """
-    from EvoScientist.memory.autoskills.proposals import record_reviewed_proposal_by_id
-
-    record_reviewed_proposal_by_id(memory_dir, proposal_id)
-
-
 @pytest.fixture
 def move(tmp_path) -> workspace_move.Move:
     new = tmp_path / "new"
@@ -415,7 +403,6 @@ def test_an_approval_in_a_moved_project_can_still_be_undone(tmp_path, monkeypatc
         workspace_dir=old.root,
     )
     assert submitted["submitted"] is True, submitted
-    record_reviewed_proposal_for(memory, "moved-skill")
     approved = proposals.approve_skill_proposal(
         memory, "moved-skill", skills_dir=old.skills_dir, workspace_dir=old.root
     )

@@ -4,52 +4,35 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import functools
 import hashlib
-import inspect
 import json
 import os
 import re
-import secrets
 import shutil
-import socket
 import stat
-import struct
-import sys
 import tempfile
-import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 
 import yaml
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from ... import paths
 
 AUTOSKILL_PROPOSALS_DIR = "autoskills/proposals"
 AUTOSKILL_PROCESSED_DIR = "autoskills/processed"
-# A race record, not a trust boundary. The agent's shell is a real process
-# running as this user, so it can compute the parent of the proposals root
-# and rewrite any file stored there, including this one. An approval made by
-# a person compares the draft with what that person's process displayed; the
-# seal only covers the agent's own approval under auto mode, where nobody
-# reviewed the draft, and detects a body that changed between submit and that
-# automatic approval.
-AUTOSKILL_SEALS_DIR = "autoskills/seals"
-# Kept so a reader can find where lock files used to live. The lifecycle no
-# longer creates one: a file's name is what a shell unlinks.
 AUTOSKILL_LOCKS_DIR = "autoskills/locks"
-
-# A Unix socket's path has to fit in sockaddr_un.sun_path: 107 bytes on
-# Linux, 103 on macOS. The fallback lock's path is built to stay inside the
-# smaller of the two, so a long home directory cannot make it unbindable.
-_SUN_PATH_MAX = 100
+AUTOSKILL_SNAPSHOTS_DIR = "autoskills/snapshots"
+_DRAFT_LOCK_TIMEOUT = 10.0
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _CLUSTER_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -88,9 +71,6 @@ class SkillProposal:
     approved_by: str | None = None
     approved_at: str | None = None
     rejected_at: str | None = None
-    # The manifest this proposal was built from. A listing that shows the
-    # draft records this object, so it does not read the file a second time.
-    manifest: dict[str, Any] | None = None
 
     @property
     def effective_scope(self) -> str:
@@ -106,40 +86,6 @@ _PROPOSAL_OPERATIONS = frozenset({"create", "update"})
 _SCOPE_WORKSPACE = "workspace"
 _SCOPE_GLOBAL = "global"
 _SKILL_SCOPES = frozenset({_SCOPE_WORKSPACE, _SCOPE_GLOBAL})
-
-
-class _ReviewRecord(NamedTuple):
-    digest: str
-    workspace: str | None
-    scope: str
-    token: str | None = None
-
-
-# What this process computed when it rendered a draft's content. Keyed by
-# the draft folder's real path and its ``updated_at``, so a resubmit is a
-# different record and rendering the draft again replaces the record of the
-# content that was shown. The value pins the body, the decision fields, the
-# normalised workspace and the install scope the content was shown under. A
-# WebUI record also holds the one-time token returned with that rendering; a
-# decision must present it. CLI/TUI and channel records have no token and keep the
-# process-level rule. This is the only record a person's approval trusts: it
-# lives in the memory of the process that rendered the draft, which the
-# agent's shell cannot write. A file cannot take its place. There is no path
-# on this machine the agent, running as this user, cannot reach. It is
-# process-global rather than a context variable because the server and the
-# CLI render a draft on one thread and decide it on another.
-_reviews: dict[tuple[str, str], _ReviewRecord] = {}
-_reviews_guard = threading.Lock()
-# What an approval in this process installed: the per-file digests, the tier
-# and the real path. The manifest copies of these are agent-writable, so a
-# revert does not read them. A process that did not perform the approval has
-# no record and refuses the automatic undo.
-_installations: dict[str, dict[str, Any]] = {}
-_installations_guard = threading.Lock()
-
-
-def _review_key(proposal_dir: Path, updated_at: object) -> tuple[str, str]:
-    return (os.path.realpath(proposal_dir), str(updated_at))
 
 
 def _now() -> str:
@@ -164,463 +110,21 @@ def _processed_root(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / AUTOSKILL_PROCESSED_DIR
 
 
-def _seal_root(memory_dir: str | Path) -> Path:
-    """Where a submit records the body it hashed, beside the proposals root.
-
-    This is a sibling of the proposals directory, never inside it, so a file
-    tool rooted at the proposals directory does not see it. It is not a
-    boundary against the agent's shell: that shell runs as this user and can
-    reach any path. The seal is a race detector and the record an automatic
-    approval checks. A person's approval checks the digest that person's
-    process computed when it displayed the draft, which no file can stand in
-    for.
-    """
-    return Path(memory_dir).expanduser() / AUTOSKILL_SEALS_DIR
-
-
-def _lock_root(memory_dir: str | Path) -> Path:
-    """Where lock files used to live. The lifecycle no longer writes there.
-
-    A lock file's name is the thing being protected, and the agent's shell
-    can unlink that name. On POSIX the holder keeps the old inode while a
-    second lock creates a new one. The lock is now a kernel object with no
-    pathname, so this directory is not created and not required.
-    """
-    return Path(memory_dir).expanduser() / AUTOSKILL_LOCKS_DIR
-
-
-def _lock_base() -> Path:
-    """Where the private lock directory lives, whether or not it exists."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or str(Path.home() / ".cache")
-    return Path(base) / "evoscientist" / "locks"
-
-
-def _lock_directory() -> Path:
-    """The private directory the fallback lock lives in."""
-    directory = _lock_base()
-    directory.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(directory, 0o700)
-    return directory
-
-
-def _socket_path(name: str) -> Path:
-    """The pathname of the fallback lock, short enough for a Unix socket.
-
-    A socket's path has to fit in ``sockaddr_un.sun_path``: 107 bytes on
-    Linux and 103 on macOS. A home directory long enough to push the private
-    directory past that makes every bind fail with "AF_UNIX path too long",
-    and the lock is then unusable on that machine -- which is the case on a
-    CI runner, and on every macOS run.
-
-    So the private directory is used when the path fits there, and a
-    per-user directory in the system's temporary directory -- the same
-    private mode -- is used when it does not.
-    """
-    filename = f"evoskill-{name}.sock"
-    # The length is checked before the directory is created: a home
-    # directory long enough to overflow the path limit would fail the
-    # mkdir on some platforms before the fallback could be chosen.
-    private = _lock_base() / filename
-    if len(str(private).encode("utf-8")) <= _SUN_PATH_MAX:
-        return _lock_directory() / filename
-    with contextlib.suppress(OSError):
-        candidate = _temporary_lock_directory() / filename
-        if len(str(candidate).encode("utf-8")) <= _SUN_PATH_MAX:
-            return candidate
-    raise OSError(
-        "Could not build a proposal lock path that fits a Unix socket: "
-        f"{private} is longer than {_SUN_PATH_MAX} bytes"
-    )
-
-
-def _temporary_lock_directory() -> Path:
-    """A private directory in the system's temporary directory.
-
-    The system's temporary directory is already per-user on Windows and on
-    macOS; on POSIX it can be shared, so the directory carries the user's
-    id and the private mode.
-
-    Two things are checked rather than assumed. A directory that is already
-    there and belongs to somebody else is NOT ours: the lock sockets in it
-    would be theirs to unlink and rebind, and a forged socket that accepts
-    connections would stall every contender. And a mode we could not set is
-    not private. Both fail loudly -- a lock that silently trusts the wrong
-    directory is worse than no lock.
-    """
-    uid = getattr(os, "getuid", None)
-    label = f"evoskill-{uid()}" if uid is not None else "evoskill-user"
-    directory = Path(tempfile.gettempdir()) / label
-    directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(directory, 0o700)
-    if uid is not None:
-        owner = os.stat(directory).st_uid
-        if owner != uid():
-            raise OSError(
-                f"The proposal lock directory {directory} belongs to another "
-                f"user, so the lock cannot be held there"
-            )
-    return directory
-
-
-def _socket_is_live(path: Path) -> bool:
-    """Whether a socket file still has a holder behind it.
-
-    A holder that died leaves the file behind, and the next bind would find
-    the name taken forever. A refused connection means nothing is listening:
-    the holder died, or it was never listening.
-
-    So the holder LISTENS. A socket that is bound but not listening refuses
-    connections exactly like a dead one, and a second acquirer reading that
-    refusal would take the name while the first still holds it -- two
-    holders, one draft.
-    """
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(1.0)
-    try:
-        probe.connect(str(path))
-    except OSError as exc:
-        return exc.errno not in (errno.ECONNREFUSED, errno.ENOENT)
-    finally:
-        probe.close()
-    return True
-
-
-def _peer_is_this_process(probe: socket.socket) -> bool:
-    """Whether the socket on the other end of a connection is our own.
-
-    Linux answers with SO_PEERCRED, which names the peer's pid; the BSDs
-    answer with getpeereid, which names the peer's user.
-    """
-    peer_cred = getattr(socket, "SO_PEERCRED", None)
-    if peer_cred is not None:
-        try:
-            raw = probe.getsockopt(socket.SOL_SOCKET, peer_cred, 12)
-        except OSError:
-            return False
-        return struct.unpack("i", raw[:4])[0] == os.getpid()
-    getpeereid = getattr(socket, "getpeereid", None)
-    if getpeereid is not None:
-        try:
-            euid, egid = getpeereid(probe)
-        except OSError:
-            return False
-        return euid == os.geteuid() and egid == os.getegid()
-    return False
-
-
-def _socket_is_ours(path: Path, held: socket.socket) -> bool:
-    """Whether the path still names the socket this process holds.
-
-    The name is a path on the platforms without an abstract namespace, so a
-    shell can unlink it and bind a socket of its own there. The holder checks
-    that the path still names the socket it holds, so a replaced path is
-    refused rather than trusted.
-
-    There are two ways to ask, because the two platforms answer
-    differently. The inode of the path and the inode of the descriptor are
-    the same one where the socket file *is* the socket (macOS). On Linux
-    they are not, so the peer is asked instead: the holder listens, so
-    connecting to the path reaches this process's own socket, and the
-    credentials name this pid.
-    """
-    try:
-        if os.stat(path).st_ino == os.fstat(held.fileno()).st_ino:
-            return True
-    except OSError:
-        pass
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(1.0)
-    try:
-        probe.connect(str(path))
-    except OSError:
-        return False
-    try:
-        return _peer_is_this_process(probe)
-    finally:
-        probe.close()
-
-
-def _drain_forever(held: socket.socket) -> None:
-    """Accept and close the contenders' probes, so the queue never fills.
-
-    A socket that is bound and listening but whose accept queue is full
-    refuses new connections on macOS -- exactly like the leftover file of a
-    holder that died. A contender reading that refusal would take the name
-    from a live holder, which is the one thing the lock exists to prevent.
-
-    So the holder drains its queue. "Refused" then means "nobody is home".
-    """
-
-    def drain() -> None:
-        while True:
-            try:
-                connection, _ = held.accept()
-            except OSError as exc:
-                # A peer that disconnected before we accepted it is reported
-                # as ECONNABORTED (or ECONNRESET): that peer is gone, not
-                # the socket, so the queue is still ours to drain. Ending
-                # the thread on one such error would let the queue fill
-                # again, and a contender reading a full queue as "dead"
-                # would take the name from a live holder.
-                if exc.errno in (errno.ECONNABORTED, errno.ECONNRESET, errno.EINTR):
-                    continue
-                # Anything else means the socket is finished.
-                return
-            try:
-                connection.close()
-            except OSError:
-                return
-
-    threading.Thread(
-        target=drain, daemon=True, name="evoskill-proposal-lock-drain"
-    ).start()
-
-
-class _ProposalLock:
-    """One cross-process lock for a draft, with no filesystem pathname.
-
-    POSIX takes an abstract-namespace socket: its name starts with a NUL and
-    is not a directory entry, so unlink cannot drop it while it is held.
-    Windows takes a named mutex, which is a kernel object rather than a file.
-    The worst a shell that guesses the name can do is hold the object, which
-    stalls this one draft. It cannot replace the object with another one the
-    way unlinking a lock file does. The name is derived from the draft
-    folder, so two processes locking the same draft contend and two drafts
-    do not.
-
-    The abstract namespace is a Linux facility. Where it does not exist the
-    lock falls back to a socket in a private directory, and there the name
-    is a path: a shell that guesses it can stall this draft, and the holder
-    checks that the path still names the socket it holds, so a replaced path
-    is refused rather than trusted. The decision itself trusts the review
-    record in process memory, not this lock.
-    """
-
-    def __init__(self, proposal_dir: Path) -> None:
-        # 128 bits, in hex: the name goes into a socket path and a mutex
-        # name, and a socket path is short.
-        self._name = hashlib.sha256(
-            os.path.realpath(proposal_dir).encode("utf-8", "surrogateescape")
-        ).hexdigest()[:32]
-        self._held: socket.socket | object | None = None
-        # No file is created. The attribute names the kernel object so a
-        # caller can see which draft this lock is, and so a stale pathname
-        # from the old lock file is not what acquisition uses.
-        self.lock_file = f"autoskill-proposal:{self._name}"
-
-    def __enter__(self) -> _ProposalLock:
-        if sys.platform == "win32":
-            self._held = self._acquire_windows()
-        else:
-            self._held = self._acquire_posix()
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        held, self._held = self._held, None
-        if held is None:
-            return
-        if sys.platform == "win32":
-            import ctypes
-
-            ctypes.windll.kernel32.ReleaseMutex(int(held))
-            ctypes.windll.kernel32.CloseHandle(int(held))
-            return
-        cast_socket = held
-        assert isinstance(cast_socket, socket.socket)
-        cast_socket.close()
-
-    def _acquire_posix(self) -> socket.socket:
-        """Take the lock on POSIX, wherever the platform's sockets can bind.
-
-        Only contention is retried. A setup failure is permanent, and
-        retrying it forever hung every lifecycle call on a platform whose
-        abstract namespace does not exist.
-        """
-        # A leading NUL is the abstract namespace. The socket has no path.
-        address = b"\0evoskill-" + self._name.encode("ascii")
-        while True:
-            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                held.bind(address)
-            except OSError as exc:
-                held.close()
-                if exc.errno == errno.EADDRINUSE:
-                    time.sleep(0.05)
-                    continue
-                # The abstract namespace is a Linux facility. Where it does
-                # not exist the lock falls back to a socket with a path.
-                return self._acquire_posix_path()
-            return held
-
-    def _acquire_posix_path(self) -> socket.socket:
-        """Take the lock where the abstract namespace does not exist.
-
-        The name is a path here, so a shell that guesses it can stall this
-        draft. The holder checks that the path still names the socket it
-        holds: a replaced path is a forged lock, not a held one.
-        """
-        path = _socket_path(self._name)
-        replaced = 0
-        while True:
-            held = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                held.bind(str(path))
-                # The holder listens, so a second acquirer can tell a live
-                # lock from a dead one's leftover file. The backlog is roomy
-                # because a contender's probe queues a connection on it.
-                held.listen(64)
-            except OSError as exc:
-                held.close()
-                if exc.errno != errno.EADDRINUSE:
-                    raise
-                if _socket_is_live(path):
-                    time.sleep(0.05)
-                    continue
-                # A holder that died leaves its socket behind. The path is
-                # removed and the bind is tried again.
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                continue
-            if _socket_is_ours(path, held):
-                _drain_forever(held)
-                return held
-            # The name was taken over between the bind and this check. The
-            # lock is not trusted, and the takeover is bounded: a name that
-            # keeps changing is not a lock this process can hold.
-            held.close()
-            replaced += 1
-            if replaced > 5:
-                raise OSError("Could not take the proposal lock: the name was replaced")
-            with contextlib.suppress(OSError):
-                path.unlink()
-
-    def _acquire_windows(self) -> int:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateMutexW.argtypes = (
-            wintypes.LPVOID,
-            wintypes.BOOL,
-            wintypes.LPCWSTR,
-        )
-        kernel32.CreateMutexW.restype = wintypes.HANDLE
-        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        kernel32.WaitForSingleObject.restype = wintypes.DWORD
-        name = f"Local\\EvoScientist-autoskill-{self._name}"
-        handle = kernel32.CreateMutexW(None, False, name)
-        if not handle:
-            raise OSError("Could not create the proposal mutex")
-        # INFINITE. A lifecycle writer waits; it does not time out and proceed.
-        waited = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
-        if waited not in (0, 0x80):
-            kernel32.CloseHandle(handle)
-            raise OSError("Could not acquire the proposal mutex")
-        return int(handle)
-
-
-def _proposal_file_lock(proposal_dir: Path) -> _ProposalLock:
-    """The one lock every writer of this draft takes, across processes.
-
-    The object has no pathname. A shell can guess its name and hold it,
-    which denies service for this draft, but it cannot unlink the name and
-    lock a replacement the way it could a lock file.
-    """
-    return _ProposalLock(proposal_dir)
+def _draft_lock(proposal_dir: Path) -> FileLock:
+    """The lock every writer of *proposal_dir* takes."""
+    resolved_dir = proposal_dir.resolve()
+    memory_dir = proposal_dir.parents[2].resolve()
+    lock_root = memory_dir / AUTOSKILL_LOCKS_DIR
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Real paths make symlinks share a lock; normcase also folds Windows aliases.
+    key = os.fsencode(os.path.normcase(str(resolved_dir)))
+    lock_path = lock_root / f"{hashlib.sha256(key).hexdigest()}.lock"
+    return FileLock(str(lock_path), timeout=_DRAFT_LOCK_TIMEOUT)
 
 
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
     """Return the real directory exposed as `/autoskill-proposals/` to agents."""
     return _proposal_root(memory_dir)
-
-
-def _locked_proposal(*, submit: bool = False):
-    """Serialize lifecycle changes across processes using a sibling lock file."""
-
-    def decorate(function):
-        signature = inspect.signature(function)
-
-        @functools.wraps(function)
-        def wrapped(*args, **kwargs):
-            arguments = signature.bind(*args, **kwargs)
-            arguments.apply_defaults()
-            values = arguments.arguments
-            memory_dir = values["memory_dir"]
-            if submit:
-                name = values["skill_name"]
-                if sanitize_skill_name(name) != name:
-                    return function(*args, **kwargs)
-                proposal_dir = _proposal_root(memory_dir) / name
-            else:
-
-                def lookup():
-                    if function.__name__ == "revert_skill_proposal":
-                        proposal = find_skill_proposal(
-                            memory_dir, values["proposal_id"]
-                        )
-                        return proposal.path if proposal else None
-                    return _proposal_dir_by_id(
-                        memory_dir,
-                        values["proposal_id"],
-                        workspace_dir=values["workspace_dir"],
-                        exact=values["exact"],
-                    )
-
-                proposal_dir = lookup()
-            if proposal_dir is None:
-                if function.__name__ == "revert_skill_proposal":
-                    return {
-                        "reverted": False,
-                        "proposal_id": values["proposal_id"],
-                        "error": "not_found",
-                    }
-                action = (
-                    "approved"
-                    if function.__name__ == "approve_skill_proposal"
-                    else "rejected"
-                )
-                return {
-                    action: False,
-                    "error": f"No unique proposal matching {values['proposal_id']!r}",
-                }
-            with _proposal_file_lock(proposal_dir):
-                if not submit and lookup() != proposal_dir:
-                    if function.__name__ == "revert_skill_proposal":
-                        return {
-                            "reverted": False,
-                            "proposal_id": values["proposal_id"],
-                            "error": "draft_changed",
-                        }
-                    action = (
-                        "approved"
-                        if function.__name__ == "approve_skill_proposal"
-                        else "rejected"
-                    )
-                    return {
-                        action: False,
-                        "error": "Proposal changed since it was read",
-                    }
-                if not submit:
-                    selected_manifest = _read_manifest(proposal_dir / "manifest.json")
-                    if (
-                        function.__name__ == "approve_skill_proposal"
-                        and selected_manifest is not None
-                        and selected_manifest.get("proposal_id") != proposal_dir.name
-                    ):
-                        return {
-                            "approved": False,
-                            "proposal_id": selected_manifest.get("proposal_id"),
-                            "error": "Proposal folder, id and skill name must match",
-                        }
-                    values["proposal_id"] = proposal_dir.name
-                    if "exact" in values:
-                        values["exact"] = True
-                return function(*arguments.args, **arguments.kwargs)
-
-        return wrapped
-
-    return decorate
 
 
 def sanitize_skill_name(name: str) -> str | None:
@@ -697,82 +201,6 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-# The decision fields an approval trusts. They decide where a skill is
-# installed and which cluster the approval marks processed, so a digest of
-# the body alone does not cover them: the agent can edit the manifest.
-_SEALED_FIELDS = (
-    "proposal_id",
-    "skill_name",
-    "operation",
-    "target_skill_name",
-    "scope",
-    "submitted_scope",
-    "cluster_hash",
-)
-_REVIEWED_WORKSPACE = "workspace_dir"
-
-
-def _seal_path(memory_dir: str | Path, proposal_id: str) -> Path:
-    return _seal_root(memory_dir) / f"{proposal_id}.json"
-
-
-def _sealed_record(manifest: dict[str, Any], content_digest: str) -> dict[str, Any]:
-    """The submit-time facts an approval re-checks, and nothing it may change."""
-    return {
-        "proposal_id": manifest.get("proposal_id"),
-        "skill_name": manifest.get("skill_name"),
-        "operation": manifest.get("operation"),
-        "target_skill_name": manifest.get("target_skill_name"),
-        "scope": manifest.get("scope"),
-        "submitted_scope": manifest.get("submitted_scope"),
-        "cluster_hash": manifest.get("cluster_hash"),
-        "content_digest": content_digest,
-        "updated_at": manifest.get("updated_at"),
-    }
-
-
-def _write_seal(
-    memory_dir: str | Path, proposal_id: str, record: dict[str, Any]
-) -> None:
-    """Replace the seal atomically, outside the directory the agent can write."""
-    root = _seal_root(memory_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    _write_manifest(_seal_path(memory_dir, proposal_id), record)
-
-
-def _read_seal(memory_dir: str | Path, proposal_id: str) -> dict[str, Any] | None:
-    return _read_manifest(_seal_path(memory_dir, proposal_id))
-
-
-def _discard_seal(memory_dir: str | Path, proposal_id: str) -> None:
-    try:
-        _seal_path(memory_dir, proposal_id).unlink()
-    except FileNotFoundError:
-        pass
-
-
-def _seal_matches(manifest: dict[str, Any], seal: dict[str, Any]) -> bool:
-    """Whether the manifest still says what the submit sealed.
-
-    ``updated_at`` is compared exactly. Submit writes the seal and the
-    manifest from one stamp, so they agree; a manifest whose version was
-    edited by hand no longer names that submission. The body digest is
-    compared separately and is not one of these fields: the manifest does
-    not carry it, because the agent can edit the manifest.
-    """
-    if not all(manifest.get(key) == seal.get(key) for key in _SEALED_FIELDS):
-        return False
-    return manifest.get("updated_at") == seal.get("updated_at")
-
-
-def _content_changed(proposal_id: object) -> dict[str, Any]:
-    return {
-        "approved": False,
-        "proposal_id": proposal_id,
-        "error": ("Proposal content changed since submission; resubmit it for review"),
-    }
-
-
 def _manifest_timestamp(manifest: dict[str, Any], key: str) -> str | None:
     value = manifest.get(key)
     if isinstance(value, str) and value.strip():
@@ -819,22 +247,18 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
         return 0
     rewritten = 0
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        # The same lock an approval holds: rewriting the manifest without it
-        # can put an approval that just committed back to the old workspace.
-        proposal_dir = manifest_path.parent
-        with _proposal_file_lock(proposal_dir):
-            manifest = _read_manifest(manifest_path)
-            stored = manifest.get("workspace_dir") if manifest else None
-            if not isinstance(stored, str) or not stored.strip():
-                continue
-            try:
-                dirs = paths.SessionDirs.from_legacy(stored.strip())
-            except (ValueError, OSError, RuntimeError):
-                continue
-            if dirs.run_dir is not None:
-                manifest["workspace_dir"] = dirs.workspace.key
-                _write_manifest(manifest_path, manifest)
-                rewritten += 1
+        manifest = _read_manifest(manifest_path)
+        stored = manifest.get("workspace_dir") if manifest else None
+        if not isinstance(stored, str) or not stored.strip():
+            continue
+        try:
+            dirs = paths.SessionDirs.from_legacy(stored.strip())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if dirs.run_dir is not None:
+            manifest["workspace_dir"] = dirs.workspace.key
+            _write_manifest(manifest_path, manifest)
+            rewritten += 1
     return rewritten
 
 
@@ -845,14 +269,6 @@ def _proposal_manifests(memory_dir: str | Path, workspace_key: str):
     if not root.exists():
         return
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        resolved_root = root.resolve()
-        if not _resolves_within_root(
-            manifest_path.parent, resolved_root
-        ) or not _resolves_within_root(manifest_path, resolved_root):
-            # A folder or manifest that resolves outside the proposals root
-            # is not a draft this process serves. A symlink is the usual
-            # way that happens; the check is on the resolved path either way.
-            continue
         manifest = _read_manifest(manifest_path)
         stored = manifest.get("workspace_dir") if manifest else None
         if not isinstance(stored, str) or not stored.strip():
@@ -885,55 +301,20 @@ def move_proposals(
     its memory project id mapped through *project_ids*. Returns the number
     rewritten; running it again rewrites none."""
     moved = 0
-    for manifest_path, _listed in list(_proposal_manifests(memory_dir, old_key)):
-        # Re-read under the per-draft lock. The listing above is only a
-        # candidate: an approval can commit between that read and this write,
-        # and writing the stale manifest would drop ``approved_skill_path``
-        # and put the draft back to pending, which loses Undo.
-        proposal_dir = manifest_path.parent
-        with _proposal_file_lock(proposal_dir):
-            current = _read_manifest(manifest_path)
-            if current is None or current.get("workspace_dir") == new_key:
-                continue
-            stored = current.get("workspace_dir")
-            try:
-                stored_key = (
-                    paths.Workspace(stored.strip()).key
-                    if isinstance(stored, str) and stored.strip()
-                    else None
-                )
-            except paths.PATH_ERRORS:
-                stored_key = None
-            if stored_key != old_key:
-                continue
-            current["workspace_dir"] = new_key
-            project_id = current.get("project_id")
-            if isinstance(project_id, str) and project_id in project_ids:
-                current["project_id"] = project_ids[project_id]
-            # The list and Undo read where an approval installed, so it moves too.
-            for key in ("approved_skill_path", "workspace_shadow"):
-                moved_path = _moved_path(current.get(key), old_key, new_key)
-                if moved_path is not None:
-                    current[key] = moved_path
-            _write_manifest(manifest_path, current)
-            # The undo reads the path this process recorded, not the
-            # manifest. A project move rewrites the manifest's copy, so the
-            # record has to follow or the undo would delete the old place
-            # and leave the moved skill.
-            with _installations_guard:
-                installation = _installations.get(os.path.realpath(proposal_dir))
-                if (
-                    isinstance(installation, dict)
-                    and installation.get("approved_at") == current.get("approved_at")
-                    and isinstance(installation.get("path"), Path)
-                ):
-                    moved_install = _moved_path(
-                        str(installation["path"]), old_key, new_key
-                    )
-                    if moved_install is not None:
-                        installation["path"] = Path(moved_install)
-                        installation["workspace_dir"] = new_key
-            moved += 1
+    for manifest_path, manifest in list(_proposal_manifests(memory_dir, old_key)):
+        if manifest.get("workspace_dir") == new_key:
+            continue
+        manifest["workspace_dir"] = new_key
+        project_id = manifest.get("project_id")
+        if isinstance(project_id, str) and project_id in project_ids:
+            manifest["project_id"] = project_ids[project_id]
+        # The list and Undo read where an approval installed, so it moves too.
+        for key in ("approved_skill_path", "workspace_shadow"):
+            moved_path = _moved_path(manifest.get(key), old_key, new_key)
+            if moved_path is not None:
+                manifest[key] = moved_path
+        _write_manifest(manifest_path, manifest)
+        moved += 1
     return moved
 
 
@@ -1014,7 +395,6 @@ def _proposal_from_manifest(
             ),
             approved_at=_manifest_timestamp(manifest, "approved_at"),
             rejected_at=_manifest_timestamp(manifest, "rejected_at"),
-            manifest=manifest,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -1025,31 +405,14 @@ def list_skill_proposals(
     *,
     status: str | None = None,
     workspace_dir: str | Path | None = None,
-    record_review: bool = False,
 ) -> list[SkillProposal]:
-    """List autoskill proposals recorded in memory.
-
-    Listing does not record a review. A review record is created only by
-    :func:`record_rendered_proposal`, which a surface calls with the text it
-    has just rendered. ``record_review`` remains so older callers still
-    import, and it no longer arms a decision: a count, a filter and a
-    metadata table are not a display of the draft.
-    """
-    del record_review
+    """List autoskill proposals recorded in memory."""
     proposals: list[SkillProposal] = []
     normalized_workspace = _normalize_workspace_dir(workspace_dir)
     root = _proposal_root(memory_dir)
     if not root.exists():
         return proposals
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        resolved_root = root.resolve()
-        if not _resolves_within_root(
-            manifest_path.parent, resolved_root
-        ) or not _resolves_within_root(manifest_path, resolved_root):
-            # A folder or a manifest that resolves outside the proposals
-            # root is another project's file reached through a link. It is
-            # not a draft this list serves.
-            continue
         manifest = _read_manifest(manifest_path)
         if manifest is None:
             continue
@@ -1073,30 +436,6 @@ def find_skill_proposal(
     """The draft whose id is exactly ``proposal_id``, in any project."""
     found = _find_with_manifest(memory_dir, proposal_id)
     return found[0] if found else None
-
-
-def review_skill_proposal(
-    memory_dir: str | Path, proposal_id: str
-) -> SkillProposal | None:
-    """Find one draft and record it when its whole content can be read.
-
-    A caller of this function is treating the returned draft as shown. The
-    record is of the copied files, and a draft whose content cannot be read
-    is returned unrecorded so a decision of it is refused. A surface that
-    renders only a count, a filter or an installed file does not call this.
-    """
-    found = _find_with_manifest(memory_dir, proposal_id)
-    if found is None:
-        return None
-    proposal, manifest = found
-    if proposal.status == "pending":
-        try:
-            record_rendered_proposal(
-                proposal.path, manifest, rendered_files(proposal.path)
-            )
-        except (OSError, ValueError):
-            pass
-    return proposal
 
 
 def _find_with_manifest(
@@ -1502,11 +841,7 @@ def _is_regular_file(path: Path) -> bool:
 
 def copied_files(proposal_dir: Path) -> list[Path]:
     """The files an approval copies, relative to the draft folder, in POSIX text
-    order; an unreadable folder raises, so no draft is approved short of files.
-
-    An entry that is not a regular file (a symlink, a FIFO, a device) is
-    skipped, not refused: it is not a skill file the approval would install.
-    """
+    order; an unreadable folder raises, so no draft is approved short of files."""
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
         base = Path(dirpath)
@@ -1515,408 +850,34 @@ def copied_files(proposal_dir: Path) -> list[Path]:
             if not _is_regular_file(source_path):
                 continue
             relative = source_path.relative_to(proposal_dir)
-            if relative.as_posix() in {"manifest.json", "RATIONALE.md"} or (
-                name.startswith(".") and name.endswith(".tmp")
-            ):
+            if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
                 continue
             files.append(relative)
     return sorted(files, key=lambda relative: relative.as_posix())
 
 
-_COMPARE_CHUNK = 1 << 20
+def _copied_contents(root: Path) -> dict[str, bytes]:
+    contents: dict[str, bytes] = {}
+    for relative in copied_files(root):
+        data = _read_regular(root / relative)
+        if data is None:
+            raise OSError(f"Cannot read proposal file: {relative.as_posix()}")
+        contents[relative.as_posix()] = data
+    return contents
 
 
-def _open_regular(path: Path) -> int:
-    """Open *path* once and return its descriptor if it is a regular file.
-
-    ``copied_files`` checks each path with ``stat`` and skips anything that is
-    not a regular file, but the file can be replaced between that check and a
-    later read. Opening the path a second time is exactly that window: a FIFO
-    swapped in between would block the caller while it holds the proposal lock.
-
-    ``O_NONBLOCK`` makes the one open of a FIFO fail instead of wait, and the
-    ``fstat`` of *this* descriptor confirms what was actually opened. The
-    caller reads that same descriptor, so nothing is re-opened afterwards.
-    ``O_BINARY`` keeps the read byte-exact: without it Windows opens in text
-    mode and rewrites CRLF, which would change the digest of every file.
-    """
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-    fd = os.open(path, flags)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"Not a regular file: {path}")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
-
-
-def _read_regular_chunks(fd: int, path: Path):
-    """Yield the bytes of an already-opened regular file, one chunk at a time."""
-    while True:
-        try:
-            chunk = os.read(fd, _COMPARE_CHUNK)
-        except OSError as exc:
-            # A non-regular file can still be open here on some platforms:
-            # refuse it rather than treat the failed read as an empty file.
-            if exc.errno == errno.EAGAIN:
-                raise OSError(f"Not a regular file: {path}") from exc
-            raise
-        if not chunk:
-            return
-        yield chunk
-
-
-def _hash_file(path: Path) -> str:
-    """The sha256 of one regular file, hashed from the descriptor that was checked.
-
-    The hash is updated per chunk, so a large skill file is never held whole
-    in memory: both the approval and the revert run in the server.
-    """
+def _content_digest(source: Path | Mapping[str, bytes]) -> str:
+    """Hash a draft folder or already-read payload names and bytes."""
+    contents = _copied_contents(source) if isinstance(source, Path) else source
     digest = hashlib.sha256()
-    fd = _open_regular(path)
-    try:
-        for chunk in _read_regular_chunks(fd, path):
-            digest.update(chunk)
-    finally:
-        os.close(fd)
+    for name in sorted(contents):
+        data = contents[name]
+        encoded_name = name.encode("utf-8")
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
     return digest.hexdigest()
-
-
-def _file_digest(path: Path) -> str:
-    """The sha256 of one file's bytes, read in bounded chunks from one open."""
-    return _hash_file(path)
-
-
-def _copy_regular_file(source: Path, target: Path) -> None:
-    """Copy *source* onto *target* through the descriptor that proved it regular.
-
-    ``shutil.copy2(source, target)`` would open *source* again, and a FIFO
-    swapped in after ``copied_files`` checked it would block the approval
-    while it holds the proposal lock.
-    """
-    fd = _open_regular(source)
-    try:
-        mode = stat.S_IMODE(os.fstat(fd).st_mode)
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            fd_out, temporary_name = tempfile.mkstemp(
-                dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-            )
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(fd_out, "wb") as output:
-                    shutil.copyfileobj(handle, output, length=_COMPARE_CHUNK)
-                    output.flush()
-                    os.fsync(output.fileno())
-                _replace(temporary, target)
-                os.chmod(target, mode)
-            finally:
-                try:
-                    temporary.unlink()
-                except OSError:
-                    pass
-    finally:
-        os.close(fd)
-
-
-def _draft_body(
-    proposal_dir: Path, collect: bool = False
-) -> tuple[str, list[tuple[str, str]]]:
-    """Digest the files an approval would copy, hashing each as it is read.
-
-    Each file contributes ``len(name) || name || len(bytes) || sha256(bytes)``.
-    The file hash stands in for the bytes so the length can lead, which a
-    content digest needs, while the file itself is hashed a chunk at a time
-    and never held in memory.
-
-    With ``collect`` the same pass also returns the text a surface renders,
-    decoded the way :func:`rendered_files` decodes it. A caller that displays
-    the text and a caller that records a digest therefore read the bytes once
-    and cannot disagree about what was read: the recorded digest always
-    describes the text that was displayed, never a later version of the same
-    file.
-    """
-    digest = hashlib.sha256()
-    rendered: list[tuple[str, str]] = []
-    for relative in copied_files(proposal_dir):
-        name = relative.as_posix().encode("utf-8")
-        digest.update(len(name).to_bytes(8, "big"))
-        digest.update(name)
-        path = proposal_dir / relative
-        file_digest = hashlib.sha256()
-        size = 0
-        chunks: list[bytes] = []
-        fd = _open_regular(path)
-        try:
-            info = os.fstat(fd)
-            for chunk in _read_regular_chunks(fd, path):
-                file_digest.update(chunk)
-                size += len(chunk)
-                if collect:
-                    chunks.append(chunk)
-            if size != info.st_size:
-                # The file shrank or grew while it was hashed, so the length
-                # already mixed in no longer describes these bytes.
-                raise OSError(f"Proposal file changed while it was read: {path}")
-        finally:
-            os.close(fd)
-        digest.update(size.to_bytes(8, "big"))
-        digest.update(file_digest.digest())
-        if collect:
-            rendered.append(
-                (relative.as_posix(), b"".join(chunks).decode("utf-8", "replace"))
-            )
-    return digest.hexdigest(), rendered
-
-
-def _draft_digest(proposal_dir: Path) -> str:
-    """The digest of the files an approval would copy, from one read."""
-    return _draft_body(proposal_dir)[0]
-
-
-def _decision_digest(
-    proposal_dir: Path, manifest: dict[str, Any], body_digest: str | None = None
-) -> str:
-    """Digest the body and the decision fields a review has to pin down.
-
-    The body is what an approval copies. The decision fields decide which
-    tier is written and which cluster is marked processed. Both are hashed,
-    because the agent can change either after the draft was shown. The
-    workspace is pinned beside this digest, not inside it: a changed
-    workspace is a different destination, compared on its own.
-
-    ``body_digest`` is the digest of the body the caller displayed, taken
-    from the same read as the text it compares. Without it the body is read
-    again here, and a body that changed between the two reads would be
-    digested in one version and displayed in another.
-    """
-    digest = hashlib.sha256()
-    for key in _SEALED_FIELDS:
-        encoded = json.dumps(manifest.get(key), ensure_ascii=False).encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    body = (
-        body_digest if body_digest is not None else _draft_digest(proposal_dir)
-    ).encode("ascii")
-    digest.update(len(body).to_bytes(8, "big"))
-    digest.update(body)
-    return digest.hexdigest()
-
-
-def record_reviewed_proposal(
-    proposal_dir: Path,
-    manifest: dict[str, Any],
-    body_digest: str | None = None,
-    *,
-    scope: str | None = None,
-    token: str | bool | None = None,
-) -> str:
-    """Remember the draft this process just displayed.
-
-    A later approval or rejection in this same process compares the draft
-    with this digest. Recording happens when the draft is shown, so the
-    record is of the content the person saw; showing it again records the
-    content shown then. A process that never showed the draft has no record,
-    and its decision is refused. The normalised workspace is stored with the
-    digest: a decision whose manifest names a different project is refused
-    even when the body is unchanged. ``scope`` is the install tier the
-    surface displayed; it defaults to the manifest's effective scope, with
-    pre-scope proposals defaulting to the workspace tier.
-
-    ``body_digest`` is the digest of the body that was displayed, taken from
-    the same read as the text it was compared with. ``token=True`` issues a
-    fresh WebUI review token and returns it instead of the digest. The HTTP
-    surface may instead supply a token it already put in a response that is
-    still being delivered; recording remains deferred until delivery.
-    """
-    digest = _decision_digest(proposal_dir, manifest, body_digest)
-    workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
-    shown_scope = scope or str(manifest.get("scope") or _SCOPE_WORKSPACE)
-    if token is True:
-        token = secrets.token_urlsafe(24)
-    elif not isinstance(token, str):
-        token = None
-    with _reviews_guard:
-        _reviews[_review_key(proposal_dir, manifest.get("updated_at"))] = _ReviewRecord(
-            digest, workspace, shown_scope, token
-        )
-    return token if token is not None else digest
-
-
-def reviewed_decision_digest(proposal_dir: Path, updated_at: object) -> str | None:
-    """The digest this process recorded for this version, or None."""
-    recorded = _reviewed_record(proposal_dir, updated_at)
-    return recorded[0] if recorded is not None else None
-
-
-def _reviewed_record(proposal_dir: Path, updated_at: object) -> _ReviewRecord | None:
-    with _reviews_guard:
-        return _reviews.get(_review_key(proposal_dir, updated_at))
-
-
-def rendered_files(proposal_dir: Path) -> list[tuple[str, str]]:
-    """The copied files as ``(relative path, text)``, in the copy order.
-
-    This is the content a surface renders. A file that is not valid text is
-    rendered as a replacement-decoded view of the same bytes the digest
-    hashes, so what is on screen is what a decision will compare. A file
-    that cannot be read raises: rendering nothing must not record a review.
-    """
-    return _draft_body(proposal_dir, collect=True)[1]
-
-
-def record_rendered_proposal(
-    proposal_dir: Path,
-    manifest: dict[str, Any],
-    rendered: list[tuple[str, str]],
-    *,
-    scope: str | None = None,
-    token: str | bool | None = None,
-) -> str | None:
-    """Record a review only when ``rendered`` is the draft's copied content.
-
-    A caller passes the text it put on screen. The record is written only
-    when that text is exactly the files an approval would copy, so a count,
-    a metadata row or an installed file cannot arm the pending draft by
-    calling this with something else. Returns the digest, or the review token
-    when one is requested, and None when the text is not the draft.
-    """
-    try:
-        body_digest, current = _draft_body(proposal_dir, collect=True)
-    except (OSError, ValueError):
-        return None
-    if list(rendered) != current:
-        return None
-    return record_reviewed_proposal(
-        proposal_dir, manifest, body_digest, scope=scope, token=token
-    )
-
-
-def record_reviewed_proposal_by_id(
-    memory_dir: str | Path, proposal_id: str, *, scope: str | None = None
-) -> SkillProposal | None:
-    """Record one draft by its exact id, without listing the others.
-
-    A prefix, or an id that is not a single draft, records nothing: the
-    surface resolves the id the way a decision does and then calls this with
-    the exact folder name. Looking every draft up would read drafts the
-    caller did not ask about.
-    """
-    if not isinstance(proposal_id, str) or not _SKILL_NAME_RE.fullmatch(proposal_id):
-        return None
-    found = find_skill_proposal(memory_dir, proposal_id)
-    if found is None:
-        return None
-    if found.status == "pending":
-        manifest = _read_manifest(found.path / "manifest.json")
-        if manifest is not None:
-            with contextlib.suppress(OSError, ValueError):
-                record_reviewed_proposal(found.path, manifest, scope=scope)
-    return found
-
-
-def _not_reviewed(action: str, proposal_id: object) -> dict[str, Any]:
-    """A decision in a process that never displayed this version of the draft."""
-    verb = "approved" if action == "approve" else "rejected"
-    return {
-        verb: False,
-        "proposal_id": proposal_id,
-        "error": (
-            "Proposal was not reviewed in this process; list it again before deciding"
-        ),
-    }
-
-
-def _reviewed_changed(action: str, proposal_id: object) -> dict[str, Any]:
-    """The draft no longer matches what this process displayed."""
-    verb = "approved" if action == "approve" else "rejected"
-    return {
-        verb: False,
-        "proposal_id": proposal_id,
-        "error": (
-            "Proposal content changed since it was shown; list it again before deciding"
-        ),
-    }
-
-
-def _review_token_refused(
-    action: str, proposal_id: object, *, missing: bool
-) -> dict[str, Any]:
-    """A WebUI decision did not present the token its rendering was given."""
-    verb = "approved" if action == "approve" else "rejected"
-    detail = "is missing" if missing else "does not match the rendered draft"
-    return {
-        verb: False,
-        "proposal_id": proposal_id,
-        "error": f"Proposal review token {detail}; list it again before deciding",
-    }
-
-
-def _review_scope_refused(
-    action: str, proposal_id: object, shown: str, requested: str
-) -> dict[str, Any]:
-    """A decision tried to move the reviewed content to another install tier."""
-    verb = "approved" if action == "approve" else "rejected"
-    return {
-        verb: False,
-        "proposal_id": proposal_id,
-        "error": (
-            f"Proposal was shown for {shown} scope, not {requested}; "
-            "list it again before deciding"
-        ),
-    }
-
-
-def _check_human_review(
-    action: str,
-    proposal_dir: Path,
-    manifest: dict[str, Any],
-    *,
-    approved_by: str,
-    scope: str | None = None,
-    review_token: str | None = None,
-    body_digest: str | None = None,
-) -> dict[str, Any] | None:
-    """Refuse a person's decision that this process did not display.
-
-    Auto mode is the agent's own approval: nobody displayed the draft, so
-    the caller checks the seal instead. A person's decision has to name a
-    digest this process computed while showing the draft. A missing record
-    is a refusal, not a fallback: a fresh process, and a server that listed
-    nothing, have nothing honest to compare against. A forged file cannot
-    supply the record, because the record is not a file. A tokened record also
-    binds the decision to the client that received that token, and an approval
-    cannot resolve to a different install tier than the one displayed.
-    """
-    if approved_by == "auto":
-        return None
-    recorded = _reviewed_record(proposal_dir, manifest.get("updated_at"))
-    if recorded is None:
-        return _not_reviewed(action, manifest.get("proposal_id"))
-    digest, workspace, shown_scope, token = recorded
-    if token is not None:
-        if review_token is None:
-            return _review_token_refused(
-                action, manifest.get("proposal_id"), missing=True
-            )
-        if not isinstance(review_token, str) or not secrets.compare_digest(
-            token, review_token
-        ):
-            return _review_token_refused(
-                action, manifest.get("proposal_id"), missing=False
-            )
-    if scope is not None and shown_scope != scope:
-        return _review_scope_refused(
-            action, manifest.get("proposal_id"), shown_scope, scope
-        )
-    if digest != _decision_digest(proposal_dir, manifest, body_digest):
-        return _reviewed_changed(action, manifest.get("proposal_id"))
-    # The project the content was shown under. A manifest edited to name
-    # another workspace would otherwise install there: the WebUI reads this
-    # field to choose the destination, and it is not part of the body.
-    if workspace != _normalize_workspace_dir(manifest.get("workspace_dir")):
-        return _reviewed_changed(action, manifest.get("proposal_id"))
-    return None
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
@@ -2005,8 +966,56 @@ def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     return None
 
 
-@_locked_proposal(submit=True)
 def submit_autoskill_proposal(
+    *,
+    memory_dir: str | Path,
+    skill_name: str,
+    cluster_hash: str,
+    source_observation_ids: list[str],
+    rationale: str,
+    operation: str = "create",
+    target_skill_name: str | None = None,
+    skills_dir: str | Path,
+    workspace_dir: str | Path | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and register a skill proposal under its per-draft lock."""
+    if sanitize_skill_name(skill_name) != skill_name:
+        return {
+            "submitted": False,
+            "error": "skill_name must be lowercase kebab-case",
+            "skill_name": skill_name,
+        }
+    proposal_dir = _proposal_root(memory_dir) / skill_name
+    try:
+        with _draft_lock(proposal_dir):
+            return _submit_autoskill_proposal_locked(
+                memory_dir=memory_dir,
+                skill_name=skill_name,
+                cluster_hash=cluster_hash,
+                source_observation_ids=source_observation_ids,
+                rationale=rationale,
+                operation=operation,
+                target_skill_name=target_skill_name,
+                skills_dir=skills_dir,
+                workspace_dir=workspace_dir,
+                project_id=project_id,
+            )
+    except FileLockTimeout:
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "error": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "error": f"Could not write the proposal: {exc}",
+        }
+
+
+def _submit_autoskill_proposal_locked(
     *,
     memory_dir: str | Path,
     skill_name: str,
@@ -2164,17 +1173,7 @@ def submit_autoskill_proposal(
 
     created_at = _now() if existing_is_approved else _created_at_for_manifest(existing)
     _write_text_atomic(proposal_dir / "RATIONALE.md", rationale.strip() + "\n")
-    # The previous approval's seal described the installed submission. Drop it
-    # before sealing this one, so a failure while hashing the new body cannot
-    # leave the old seal claiming the new draft.
-    if existing_is_approved:
-        _discard_seal(memory_dir, skill_name)
 
-    # One stamp for the seal and the manifest. Hashing the body sits between
-    # the two writes, and a second call would move the clock, so the manifest
-    # would no longer name the submission the seal records.
-    updated_at = _version_stamp(existing.get("updated_at") if existing else None)
-    content_digest = _draft_digest(proposal_dir)
     manifest = {
         "proposal_id": skill_name,
         "skill_name": skill_name,
@@ -2182,9 +1181,10 @@ def submit_autoskill_proposal(
         "status": "pending",
         "operation": normalized_operation,
         "created_at": created_at,
-        "updated_at": updated_at,
+        "updated_at": _version_stamp(existing.get("updated_at") if existing else None),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
+        "content_digest": _content_digest(proposal_dir),
     }
     if normalized_operation == "update":
         manifest["target_skill_name"] = skill_name
@@ -2200,10 +1200,6 @@ def submit_autoskill_proposal(
         manifest["workspace_dir"] = normalized_workspace
     if project_id:
         manifest["project_id"] = str(project_id)
-    # The seal is written before the manifest. A manifest without its seal is
-    # treated as unsubmitted, so a crash between the two refuses the draft
-    # instead of approving it with nothing to compare against.
-    _write_seal(memory_dir, skill_name, _sealed_record(manifest, content_digest))
     _write_manifest(manifest_path, manifest)
     return {
         "submitted": True,
@@ -2215,6 +1211,7 @@ def submit_autoskill_proposal(
         "target_skill_name": skill_name if normalized_operation == "update" else None,
         "scope": target_scope,
         "submitted_scope": target_scope,
+        "content_digest": manifest["content_digest"],
         "upstream_source": (
             upstream_provenance.get("source") if upstream_provenance else None
         ),
@@ -2593,6 +1590,27 @@ def proposal_install_target(
     return target
 
 
+def _snapshot_proposal(
+    memory_dir: str | Path, proposal_dir: Path
+) -> tuple[Path, str, dict[str, str]]:
+    """Copy a draft and return its snapshot digest and per-file digests."""
+    snapshot_root = Path(memory_dir).expanduser().resolve() / AUTOSKILL_SNAPSHOTS_DIR
+    snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    snapshot = Path(tempfile.mkdtemp(prefix=f"{proposal_dir.name}-", dir=snapshot_root))
+    try:
+        blocked = _copy_proposed_skill(proposal_dir, snapshot)
+        if blocked is not None:
+            raise ValueError(f"Skill snapshot path escapes its destination: {blocked}")
+        contents = _copied_contents(snapshot)
+        approved_digests = {
+            name: hashlib.sha256(data).hexdigest() for name, data in contents.items()
+        }
+        return snapshot, _content_digest(contents), approved_digests
+    except Exception:
+        _remove_created(snapshot)
+        raise
+
+
 def _record_approval(
     manifest: dict[str, Any],
     *,
@@ -2601,7 +1619,7 @@ def _record_approval(
     scope: str,
     workspace_shadow: Path | None,
     provenance: dict[str, str] | None,
-    approved_digests: dict[str, str] | None = None,
+    approved_digests: dict[str, str],
 ) -> None:
     if provenance:
         manifest["upstream_source"] = provenance["source"]
@@ -2617,14 +1635,7 @@ def _record_approval(
     manifest["approved_by"] = approved_by
     manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
-    # A copy of what was installed, for the listing. Revert does not read it:
-    # the manifest is in the draft the agent can write, so a forged digest
-    # map or path here must not choose a deletion. The copy the revert reads
-    # is kept in this process, below.
-    if approved_digests is not None:
-        manifest["approved_content_digests"] = approved_digests
-    else:
-        manifest.pop("approved_content_digests", None)
+    manifest["approved_content_digests"] = approved_digests
     # The tier the skill was actually installed into, which an approval may
     # override.
     manifest["scope"] = scope
@@ -2634,7 +1645,6 @@ def _record_approval(
         manifest.pop("workspace_shadow", None)
 
 
-@_locked_proposal()
 def approve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
@@ -2645,20 +1655,9 @@ def approve_skill_proposal(
     approved_by: Literal["user", "auto"] = "user",
     exact: bool = False,
     expected_updated_at: str | None = None,
-    review_token: str | None = None,
+    expected_content_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Promote one pending proposal into the tier its manifest records.
-
-    The tier is resolved once, when the proposal is submitted, and read back
-    here; the approval re-checks that the skill is still installed there and
-    never falls back to another tier. ``scope`` requests an explicit tier, but
-    a person's approval is refused unless it is the tier the review displayed.
-    An approval that fails leaves no folder it created behind, and the
-    manifest is written last. With ``expected_updated_at``, a pending draft
-    resubmitted since is refused. A WebUI record also requires its
-    ``review_token``; tokenless CLI/TUI and channel records keep the
-    process-level rule.
-    """
+    """Approve a verified snapshot; ``scope`` explicitly overrides its tier."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -2671,206 +1670,228 @@ def approve_skill_proposal(
             "error": f"No unique proposal matching {proposal_id!r}",
         }
     manifest_path = proposal_dir / "manifest.json"
-    manifest = _read_manifest(manifest_path)
-    if manifest is None:
-        return {"approved": False, "error": "Proposal manifest is missing or invalid"}
-    if (
-        expected_updated_at is not None
-        and manifest.get("status") == "pending"
-        and manifest.get("updated_at") != expected_updated_at
-    ):
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "updated_at": manifest.get("updated_at"),
-            "error": "Proposal changed since it was read",
-        }
+    snapshot: Path | None = None
     try:
-        target, failure = _resolve_install(
-            memory_dir, proposal_dir, manifest, skills_dir=skills_dir, scope=scope
-        )
-    except (OSError, ValueError, RecursionError) as exc:
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Could not read the skill folders: {exc}",
-        }
-    if failure is not None:
-        return failure
-    expected_body: str | None = None
-    try:
-        # A person approves only what this process displayed. The record is
-        # the digest computed at that display, kept in this process; a draft
-        # submitted before that display has no record here and is refused.
-        # Auto mode has no display. It checks the seal, which only detects a
-        # change between submit and this approval: the agent's shell can
-        # rewrite the seal, so it is not a review.
-        if approved_by == "auto":
-            seal = _read_seal(memory_dir, proposal_dir.name)
-            if seal is None or not _seal_matches(manifest, seal):
-                return _content_changed(manifest.get("proposal_id"))
-            expected_body = seal.get("content_digest")
-            if not isinstance(expected_body, str) or expected_body != _draft_digest(
-                proposal_dir
-            ):
-                return _content_changed(manifest.get("proposal_id"))
-        else:
-            # The body is read ONCE. The digest the review compares is the
-            # digest the install is verified against, so a writer that lands
-            # between the two cannot have its body installed.
-            body_digest = _draft_digest(proposal_dir)
-            refused = _check_human_review(
-                "approve",
-                proposal_dir,
-                manifest,
-                approved_by=approved_by,
-                scope=target.scope,
-                review_token=review_token,
-                body_digest=body_digest,
-            )
-            if refused is not None:
-                return refused
-            expected_body = body_digest
-    except (OSError, ValueError) as exc:
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Could not read proposal content: {exc}",
-        }
-    assert target.path is not None
-    assert target.scope is not None
-    skill_name = str(manifest["skill_name"]).strip()
-    operation = _normalize_operation(manifest.get("operation")) or "create"
-    destination = target.path
-    target_scope = target.scope
-    workspace_shadow = target.workspace_shadow
-    # A fork copies the global skill first; an in-place update starts from itself.
-    base_skill_dir = target.base_path if target.base_path != destination else None
-
-    def install_failed(
-        error: str, *, changed: bool, leftover: Path | None, mark_left: bool = False
-    ) -> dict[str, Any]:
-        if changed:
-            error += " (the installed skill may already be changed)"
-        if leftover is not None:
-            error += f"; the partly installed folder {leftover} could not be removed"
-        if mark_left:
-            error += "; the processed mark could not be removed"
-        return {
-            "approved": False,
-            "proposal_id": manifest["proposal_id"],
-            "error": error,
-            "scope": target_scope,
-        }
-
-    provenance_path = (
-        destination if operation == "update" and base_skill_dir is None else None
-    )
-    cluster_hash = str(manifest["cluster_hash"])
-    mark_left = False
-    try:
-        upstream_provenance = _installed_provenance(provenance_path)
-        created = _create_destination(
-            destination, must_create=target.base_path != destination
-        )
-    except (OSError, ValueError, RecursionError) as exc:
-        return install_failed(
-            f"Could not install the skill: {exc}", changed=False, leftover=None
-        )
-    try:
-        # Install a verified snapshot: agent file writes do not take our lock.
-        approved_digests: dict[str, str] = {}
-        with tempfile.TemporaryDirectory() as temporary:
-            snapshot = Path(temporary)
-            for relative in copied_files(proposal_dir):
-                target_file = snapshot / relative
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                # Copy through the descriptor opened for this check. A second
-                # open of the live path is the window a swapped-in FIFO blocks.
-                _copy_regular_file(proposal_dir / relative, target_file)
-            # Re-hash the snapshot, not the live draft: a write that lands
-            # after the check above must not be what gets installed.
-            if expected_body is None or _draft_digest(snapshot) != expected_body:
-                raise ValueError(
-                    "Proposal content changed since submission; resubmit it for review"
-                )
-            # The digests of the snapshot that is about to be installed: this
-            # is what a revert must compare the installed skill against.
-            approved_digests = {
-                relative.as_posix(): _file_digest(snapshot / relative)
-                for relative in copied_files(snapshot)
+        try:
+            with _draft_lock(proposal_dir):
+                manifest = _read_manifest(manifest_path)
+                if manifest is None:
+                    return {
+                        "approved": False,
+                        "error": "Proposal manifest is missing or invalid",
+                    }
+                if (
+                    expected_updated_at is not None
+                    and manifest.get("status") == "pending"
+                    and manifest.get("updated_at") != expected_updated_at
+                ):
+                    return {
+                        "approved": False,
+                        "proposal_id": manifest.get("proposal_id"),
+                        "updated_at": manifest.get("updated_at"),
+                        "error": "Proposal changed since it was read",
+                    }
+                try:
+                    target, failure = _resolve_install(
+                        memory_dir,
+                        proposal_dir,
+                        manifest,
+                        skills_dir=skills_dir,
+                        scope=scope,
+                    )
+                except (OSError, ValueError, RecursionError) as exc:
+                    return {
+                        "approved": False,
+                        "proposal_id": manifest.get("proposal_id"),
+                        "error": f"Could not read the skill folders: {exc}",
+                    }
+                if failure is not None:
+                    return failure
+                try:
+                    snapshot, snapshot_digest, approved_digests = _snapshot_proposal(
+                        memory_dir, proposal_dir
+                    )
+                except (OSError, ValueError, RecursionError) as exc:
+                    return {
+                        "approved": False,
+                        "proposal_id": manifest.get("proposal_id"),
+                        "error": f"Could not snapshot the skill: {exc}",
+                    }
+                recorded_digest = manifest.get("content_digest")
+                # AUTO has no displayed digest, so its submission is the
+                # comparison point. A client that sends none has nothing to
+                # compare against, so its decision is not refused for that.
+                expected_digest = expected_content_digest
+                if (
+                    expected_digest is None
+                    and approved_by == "auto"
+                    and isinstance(recorded_digest, str)
+                ):
+                    expected_digest = recorded_digest
+                if expected_digest is not None and snapshot_digest != expected_digest:
+                    return {
+                        "approved": False,
+                        "proposal_id": manifest.get("proposal_id"),
+                        "content_digest": snapshot_digest,
+                        "error": "Proposal changed since it was shown",
+                    }
+                decision_updated_at = manifest["updated_at"]
+        except FileLockTimeout:
+            return {
+                "approved": False,
+                "proposal_id": proposal_id,
+                "error": "Proposal is busy; timed out waiting for another writer",
             }
+        except OSError as exc:
+            return {
+                "approved": False,
+                "proposal_id": proposal_id,
+                "error": f"Could not lock the proposal: {exc}",
+            }
+
+        assert snapshot is not None
+        assert target.path is not None
+        assert target.scope is not None
+        skill_name = str(manifest["skill_name"]).strip()
+        recorded_proposal_id = str(manifest["proposal_id"])
+        operation = _normalize_operation(manifest.get("operation")) or "create"
+        destination = target.path
+        target_scope = target.scope
+        workspace_shadow = target.workspace_shadow
+        # A fork copies the global skill first; an in-place update starts from itself.
+        base_skill_dir = target.base_path if target.base_path != destination else None
+
+        def install_failed(
+            error: str,
+            *,
+            changed: bool,
+            leftover: Path | None,
+            mark_left: bool = False,
+        ) -> dict[str, Any]:
+            if changed:
+                error += " (the installed skill may already be changed)"
+            if leftover is not None:
+                error += (
+                    f"; the partly installed folder {leftover} could not be removed"
+                )
+            if mark_left:
+                error += "; the processed mark could not be removed"
+            return {
+                "approved": False,
+                "proposal_id": recorded_proposal_id,
+                "error": error,
+                "scope": target_scope,
+            }
+
+        provenance_path = (
+            destination if operation == "update" and base_skill_dir is None else None
+        )
+        cluster_hash = str(manifest["cluster_hash"])
+        mark_left = False
+        try:
+            upstream_provenance = _installed_provenance(provenance_path)
+            created = _create_destination(
+                destination, must_create=target.base_path != destination
+            )
+        except (OSError, ValueError, RecursionError) as exc:
+            return install_failed(
+                f"Could not install the skill: {exc}", changed=False, leftover=None
+            )
+        try:
             if created and base_skill_dir is not None:
                 shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
+            # The live draft may change now; only the verified snapshot is installed.
             blocked_path = _copy_proposed_skill(snapshot, destination)
-        if blocked_path is None:
-            _record_approval(
-                manifest,
-                approved_by=approved_by,
-                destination=destination,
-                scope=target_scope,
-                workspace_shadow=workspace_shadow,
-                provenance=upstream_provenance,
-                approved_digests=approved_digests,
-            )
-            had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
-            mark_cluster_processed(memory_dir, cluster_hash)
-            try:
-                # The manifest is the commit point, so it is written last.
-                _write_manifest(manifest_path, manifest)
-                # Only after that write succeeded does this process remember
-                # where it installed. The manifest's copy of the path and the
-                # digests is agent-writable and is not what a revert deletes
-                # from. The folder path is the one this approval resolved,
-                # not the string the manifest happens to hold.
-                with _installations_guard:
-                    _installations[os.path.realpath(proposal_dir)] = {
-                        "approved_at": manifest["approved_at"],
-                        "path": destination,
-                        "scope": target_scope,
-                        "digests": approved_digests,
-                        "workspace_dir": manifest.get("workspace_dir"),
-                        "skill_name": skill_name,
-                    }
-            except (OSError, ValueError):
-                if not had_mark:
+            if blocked_path is None:
+                with _draft_lock(proposal_dir):
+                    latest = _read_manifest(manifest_path)
+                    if latest is None:
+                        raise ValueError("Proposal manifest is missing or invalid")
+                    if (
+                        latest.get("status") != "pending"
+                        or latest.get("updated_at") != decision_updated_at
+                    ):
+                        leftover = (
+                            destination
+                            if created
+                            and not _remove_unchanged_copy(
+                                destination, approved_digests
+                            )
+                            else None
+                        )
+                        return install_failed(
+                            "Proposal changed while it was being approved",
+                            changed=not created,
+                            leftover=leftover,
+                        )
+                    manifest = latest
+                    cluster_hash = str(manifest["cluster_hash"])
+                    _record_approval(
+                        manifest,
+                        approved_by=approved_by,
+                        destination=destination,
+                        scope=target_scope,
+                        workspace_shadow=workspace_shadow,
+                        provenance=upstream_provenance,
+                        approved_digests=approved_digests,
+                    )
+                    had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
+                    mark_cluster_processed(memory_dir, cluster_hash)
                     try:
-                        unmark_cluster_processed(memory_dir, cluster_hash)
-                    except OSError:
-                        mark_left = True
-                raise
-    except (OSError, ValueError) as exc:
-        leftover = destination if created and not _remove_created(destination) else None
-        return install_failed(
-            f"Could not install the skill: {exc}",
-            changed=not created,
-            leftover=leftover,
-            mark_left=mark_left,
-        )
-    if blocked_path is not None:
-        leftover = destination if created and not _remove_created(destination) else None
-        return install_failed(
-            f"Skill install path escapes its destination: {blocked_path}",
-            changed=False,
-            leftover=leftover,
-        )
-    _notify_approved_skill()
-    return {
-        "approved": True,
-        "proposal_id": manifest["proposal_id"],
-        "skill_name": skill_name,
-        "operation": operation,
-        "path": str(destination),
-        "scope": target_scope,
-        "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
-        "upstream_source": (
-            upstream_provenance.get("source") if upstream_provenance else None
-        ),
-        "upstream_commit": (
-            upstream_provenance.get("commit") if upstream_provenance else None
-        ),
-        "updated_at": manifest["updated_at"],
-    }
+                        # The manifest is the commit point, so it is written last.
+                        _write_manifest(manifest_path, manifest)
+                    except (OSError, ValueError):
+                        if not had_mark:
+                            try:
+                                unmark_cluster_processed(memory_dir, cluster_hash)
+                            except OSError:
+                                mark_left = True
+                        raise
+        except FileLockTimeout:
+            return install_failed(
+                "Could not finish approval: timed out waiting for another writer",
+                changed=True,
+                leftover=None,
+            )
+        except (OSError, ValueError) as exc:
+            leftover = (
+                destination if created and not _remove_created(destination) else None
+            )
+            return install_failed(
+                f"Could not install the skill: {exc}",
+                changed=not created,
+                leftover=leftover,
+                mark_left=mark_left,
+            )
+        if blocked_path is not None:
+            leftover = (
+                destination if created and not _remove_created(destination) else None
+            )
+            return install_failed(
+                f"Skill install path escapes its destination: {blocked_path}",
+                changed=False,
+                leftover=leftover,
+            )
+        _notify_approved_skill()
+        return {
+            "approved": True,
+            "proposal_id": manifest["proposal_id"],
+            "skill_name": skill_name,
+            "operation": operation,
+            "path": str(destination),
+            "scope": target_scope,
+            "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
+            "upstream_source": (
+                upstream_provenance.get("source") if upstream_provenance else None
+            ),
+            "upstream_commit": (
+                upstream_provenance.get("commit") if upstream_provenance else None
+            ),
+            "updated_at": manifest["updated_at"],
+        }
+    finally:
+        if snapshot is not None:
+            _remove_created(snapshot)
 
 
 def _raise(error: OSError) -> None:
@@ -2904,22 +1925,6 @@ def _regular_files(root: Path) -> dict[str, Path] | None:
     return files
 
 
-_COMPARE_CHUNK = 1 << 20
-
-
-def _same_bytes(installed: Path, copied: Path) -> bool:
-    if installed.lstat().st_size != copied.stat().st_size:
-        return False
-    # In chunks: a skill may carry a large data file, and revert runs in the server.
-    with installed.open("rb") as left, copied.open("rb") as right:
-        while True:
-            chunk = left.read(_COMPARE_CHUNK)
-            if chunk != right.read(_COMPARE_CHUNK):
-                return False
-            if not chunk:
-                return True
-
-
 # Files a skill gains by being used or browsed (Finder's ``._<name>`` too), which
 # Undo removes with it; compared without case, as Windows and macOS names are.
 _CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
@@ -2945,53 +1950,36 @@ def _unlink_checked(path: Path) -> None:
         path.unlink()
 
 
-def _remove_unchanged_copy(
-    installed: Path,
-    *,
-    approved_digests: dict[str, str] | None = None,
-) -> bool:
-    """Delete a new skill's files if every one is still one the approval copied.
-
-    Files already gone count as removed, so a revert cut short can run again;
-    caches go too, but a file added or edited since keeps the whole folder.
-
-    ``approved_digests`` is the per-file digest of what the approval actually
-    installed. With it the comparison uses that content and never reads the
-    live draft: the draft can change after the approval, and an edit that
-    happens to match the changed draft would otherwise be deleted as if the
-    approval had never run. Without it an approval made before digests were
-    recorded cannot be told apart from the user's own edit, so this refuses
-    and deletes nothing. Comparing with the live draft is exactly the case
-    that deleted a user's edit.
-    """
+def _remove_unchanged_copy(installed: Path, approved_digests: object) -> bool:
+    """Delete a new skill only while it matches its approval digests."""
     try:
         top = installed.lstat()
     except FileNotFoundError:
         return True
     if not _plain(top, directory=True):
         return False
-    if not isinstance(approved_digests, dict):
+    if not isinstance(approved_digests, dict) or not approved_digests:
         return False
-    # The approved content names the files that were installed.
-    copied = dict.fromkeys(approved_digests)
+    if any(
+        not isinstance(name, str)
+        or not isinstance(digest, str)
+        or not _DIGEST_RE.fullmatch(digest)
+        for name, digest in approved_digests.items()
+    ):
+        return False
     present = _regular_files(installed)
     if present is None or not all(
-        name in copied or _is_cache(name) for name in present
+        name in approved_digests or _is_cache(name) for name in present
     ):
         return False
 
     def unchanged(name: str, path: Path) -> bool:
         # A cache may differ from a copied one: Finder rewrites .DS_Store freely.
-        if name not in copied or _is_cache(name):
+        if _is_cache(name):
             return True
-        # Compare with what the approval installed, in bounded chunks.
-        expected = approved_digests.get(name)
-        if expected is None:
-            return False
-        try:
-            return _file_digest(path) == expected
-        except OSError:
-            return False
+        with path.open("rb") as handle:
+            actual = hashlib.file_digest(handle, "sha256").hexdigest()
+        return actual == approved_digests[name]
 
     if not all(unchanged(name, path) for name, path in present.items()):
         return False
@@ -3005,12 +1993,9 @@ def _remove_unchanged_copy(
 
 
 def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
-    """Whether ``installed`` is the ``<tier>/<skill>`` folder the approval named.
-
-    ``scope`` and ``workspace_dir`` come from the record this process kept at
-    approval, not from the manifest: the agent can edit both of those fields.
-    """
-    scope = manifest.get("scope")
+    """Whether ``installed`` is the ``<tier>/<skill>`` folder the manifest names."""
+    # An approval made before scopes existed installed into the workspace tier.
+    scope = manifest.get("scope") or _SCOPE_WORKSPACE
     if scope == _SCOPE_GLOBAL:
         root = Path(paths.GLOBAL_SKILLS_DIR)
     elif scope == _SCOPE_WORKSPACE and manifest.get("workspace_dir"):
@@ -3027,14 +2012,39 @@ def _installed_in_its_tier(manifest: dict[str, Any], installed: Path) -> bool:
     )
 
 
-_REVERT_UNAVAILABLE = (
-    "This approval was not made in this process, so the installed path and "
-    "its digests are not known here and it cannot be reverted automatically."
-)
-
-
-@_locked_proposal()
 def revert_skill_proposal(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
+    """Undo a decision using the install facts stored in its manifest."""
+    proposal = find_skill_proposal(memory_dir, proposal_id)
+    if proposal is None:
+        return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+    try:
+        with _draft_lock(proposal.path):
+            return _revert_skill_proposal_locked(
+                memory_dir,
+                proposal_id,
+                expected_updated_at=expected_updated_at,
+            )
+    except FileLockTimeout:
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "revert_failed",
+            "detail": f"Could not lock the proposal: {exc}",
+        }
+
+
+def _revert_skill_proposal_locked(
     memory_dir: str | Path,
     proposal_id: str,
     *,
@@ -3072,41 +2082,18 @@ def revert_skill_proposal(
         return refused("not_decided")
     if status == "approved" and proposal.operation != "create":
         return refused("revert_unavailable")
-    # The deletion target is this process's record of its own approval. The
-    # manifest's approved_skill_path, scope and digest map are in the draft
-    # the agent writes, so a revert that read them would delete whatever the
-    # agent named. A process that did not make the approval has no record and
-    # refuses, rather than guessing from the live draft. The record is read
-    # before any deletion and is only dropped once the manifest write, the
-    # commit point, has succeeded: a retry of a failed undo still knows what
-    # it installed.
-    installation = None
-    if status == "approved":
-        with _installations_guard:
-            installation = _installations.get(os.path.realpath(proposal.path))
-        if not isinstance(installation, dict) or installation.get(
-            "approved_at"
-        ) != manifest.get("approved_at"):
-            return {
-                **refused("revert_unavailable"),
-                "detail": _REVERT_UNAVAILABLE,
-            }
+    installed = manifest.get("approved_skill_path") if status == "approved" else None
+    if installed is not None and not isinstance(installed, str):
+        return refused("skill_changed")
     # Submit never overwrites a rejected draft, so a resubmit cannot bring it back.
     rejects = status == "approved" and manifest.get("approved_by") == "auto"
     try:
-        if installation is not None:
-            installed = installation.get("path")
-            if not isinstance(installed, Path) or not _installed_in_its_tier(
-                installation, installed
-            ):
+        if installed:
+            if not _installed_in_its_tier(manifest, Path(installed)):
                 return refused("skill_changed")
-            approved_digests = installation.get("digests")
-            if not isinstance(approved_digests, dict):
-                return {
-                    **refused("revert_unavailable"),
-                    "detail": _REVERT_UNAVAILABLE,
-                }
-            if not _remove_unchanged_copy(installed, approved_digests=approved_digests):
+            if not _remove_unchanged_copy(
+                Path(installed), manifest.get("approved_content_digests")
+            ):
                 return refused("skill_changed")
         if status == "approved":
             _notify_approved_skill()
@@ -3120,7 +2107,13 @@ def revert_skill_proposal(
         if _CLUSTER_HASH_RE.fullmatch(cluster_hash) and not shared and not rejects:
             unmark_cluster_processed(memory_dir, cluster_hash)
 
-        for key in ("approved_by", "approved_at", "approved_skill_path", "rejected_at"):
+        for key in (
+            "approved_by",
+            "approved_at",
+            "approved_skill_path",
+            "approved_content_digests",
+            "rejected_at",
+        ):
             manifest.pop(key, None)
         if status == "approved":
             manifest.pop("workspace_shadow", None)
@@ -3132,15 +2125,7 @@ def revert_skill_proposal(
         manifest["updated_at"] = _version_stamp(manifest.get("updated_at"))
         if rejects:
             manifest["rejected_at"] = manifest["updated_at"]
-        manifest.pop("approved_content_digests", None)
-        # Back to pending, the draft is no longer the submission the seal
-        # names. The next submit writes a new seal; until then an approval
-        # has nothing trustworthy to compare, which is the safe side.
-        if not rejects:
-            _discard_seal(memory_dir, proposal.proposal_id)
         _write_manifest(manifest_path, manifest)
-        with _installations_guard:
-            _installations.pop(os.path.realpath(proposal.path), None)
     except OSError as exc:
         return {**refused("revert_failed"), "detail": str(exc)}
     return {
@@ -3151,7 +2136,6 @@ def revert_skill_proposal(
     }
 
 
-@_locked_proposal()
 def reject_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
@@ -3159,12 +2143,52 @@ def reject_skill_proposal(
     workspace_dir: str | Path | None = None,
     exact: bool = False,
     expected_updated_at: str | None = None,
-    review_token: str | None = None,
+) -> dict[str, Any]:
+    """Reject a pending proposal under its per-draft lock."""
+    proposal_dir = _proposal_dir_by_id(
+        memory_dir,
+        proposal_id,
+        workspace_dir=workspace_dir,
+        exact=exact,
+    )
+    if proposal_dir is None:
+        return {
+            "rejected": False,
+            "error": f"No unique proposal matching {proposal_id!r}",
+        }
+    try:
+        with _draft_lock(proposal_dir):
+            return _reject_skill_proposal_locked(
+                memory_dir,
+                proposal_id,
+                workspace_dir=workspace_dir,
+                exact=exact,
+                expected_updated_at=expected_updated_at,
+            )
+    except FileLockTimeout:
+        return {
+            "rejected": False,
+            "proposal_id": proposal_id,
+            "error": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "rejected": False,
+            "proposal_id": proposal_id,
+            "error": f"Could not lock the proposal: {exc}",
+        }
+
+
+def _reject_skill_proposal_locked(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    workspace_dir: str | Path | None = None,
+    exact: bool = False,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     """Mark one pending proposal rejected; with ``expected_updated_at``, a
-    draft resubmitted since is refused, as an approval refuses it. Rejection
-    installs nothing and has no scope override to pin, but a tokened WebUI
-    review still requires its ``review_token``."""
+    draft resubmitted since is refused, as an approval refuses it."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -3196,26 +2220,6 @@ def reject_skill_proposal(
             "proposal_id": manifest.get("proposal_id"),
             "updated_at": manifest.get("updated_at"),
             "error": "Proposal changed since it was read",
-        }
-    # A rejection is a person's decision, so it requires the same display
-    # record an approval does. The seal is not consulted: the agent's shell
-    # can rewrite it, and a rejection of a body the person did not see is
-    # the same mistake as installing that body.
-    try:
-        refused = _check_human_review(
-            "reject",
-            proposal_dir,
-            manifest,
-            approved_by="user",
-            review_token=review_token,
-        )
-        if refused is not None:
-            return refused
-    except (OSError, ValueError) as exc:
-        return {
-            "rejected": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Could not read proposal content: {exc}",
         }
     if not _CLUSTER_HASH_RE.fullmatch(str(manifest.get("cluster_hash", ""))):
         return {

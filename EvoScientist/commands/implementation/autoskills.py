@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar
 
@@ -19,6 +20,12 @@ _PROPOSAL_STATUSES = {
 }
 
 
+@dataclass(frozen=True)
+class _ProposalSnapshot:
+    updated_at: str
+    content_digest: str | None = None
+
+
 class AutoSkillsCommand(Command):
     """Manage EvoMemory AutoSkills proposals."""
 
@@ -29,7 +36,7 @@ class AutoSkillsCommand(Command):
         SubCommand("status", "Show AutoSkills config and proposals for review"),
         SubCommand("help", "Show AutoSkills command examples"),
         SubCommand("list", "List autoskill proposals, optionally filtered by status"),
-        SubCommand("review", "Review autoskill proposals awaiting a decision"),
+        SubCommand("review", "Review one autoskill proposal by id"),
         SubCommand("approve", "Approve an autoskill proposal by id"),
         SubCommand("reject", "Reject an autoskill proposal by id"),
         SubCommand("run", "Run AutoSkills once now"),
@@ -39,6 +46,9 @@ class AutoSkillsCommand(Command):
         SubCommand("cadence", "Set nightly, weekly, or monthly cadence"),
         SubCommand("time", "Set local run time as HH:MM"),
     ]
+
+    def __init__(self) -> None:
+        self._snapshots: dict[tuple[str, str], _ProposalSnapshot] = {}
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Dispatch one ``autoskills`` subcommand."""
@@ -51,7 +61,7 @@ class AutoSkillsCommand(Command):
         elif sub in {"list", "ls", "proposals"}:
             await self._list_command(ctx, rest)
         elif sub == "review":
-            await self._list(ctx, status="pending")
+            await self._review_command(ctx, rest)
         elif sub in {"approve", "accept"}:
             scope, scope_error = self._scope_arg(rest)
             if scope_error is not None:
@@ -126,7 +136,7 @@ class AutoSkillsCommand(Command):
         if pending:
             ctx.ui.append_system(
                 (
-                    f"Next: {AUTOSKILLS_COMMAND} review, then "
+                    f"Next: {AUTOSKILLS_COMMAND} review <id>, then "
                     f"{AUTOSKILLS_COMMAND} approve <id> or "
                     f"{AUTOSKILLS_COMMAND} reject <id>."
                 ),
@@ -167,6 +177,62 @@ class AutoSkillsCommand(Command):
             )
             return
         await self._list(ctx, status=status)
+
+    async def _review_command(self, ctx: CommandContext, args: list[str]) -> None:
+        if len(args) != 1:
+            ctx.ui.append_system(
+                f"Usage: {AUTOSKILLS_COMMAND} review <id>",
+                style="yellow",
+            )
+            return
+        await self._review(ctx, args[0])
+
+    async def _review(self, ctx: CommandContext, proposal_id: str) -> None:
+        """Render the copied files of one pending proposal."""
+        from ... import paths
+        from ...memory.autoskills.proposals import (
+            _content_digest,
+            _copied_contents,
+            list_skill_proposals,
+        )
+
+        workspace_dir = self._workspace_dir(ctx)
+        proposals = await asyncio.to_thread(
+            list_skill_proposals,
+            paths.MEMORIES_DIR,
+            status="pending",
+            workspace_dir=workspace_dir,
+        )
+        proposal = self._match_proposal(proposals, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"No unique pending autoskill proposal matching {proposal_id!r}.",
+                style="yellow",
+            )
+            return
+        try:
+            contents = await asyncio.to_thread(_copied_contents, proposal.path)
+            content_digest = _content_digest(contents)
+        except (OSError, ValueError) as exc:
+            ctx.ui.append_system(
+                f"Could not read proposal {proposal.proposal_id}: {exc}",
+                style="red",
+            )
+            return
+        files = [
+            (name, contents[name].decode("utf-8", errors="replace"))
+            for name in sorted(contents)
+        ]
+
+        shown = [
+            Text(f"Draft {proposal.proposal_id}", style="bold"),
+            Text(f"Scope: {proposal.effective_scope}", style="dim"),
+        ]
+        for relative, content in files:
+            shown.append(Text(f"--- {relative}", style="cyan"))
+            shown.append(Text(content))
+        ctx.ui.mount_renderable(Group(*shown))
+        self._remember(ctx, proposal, content_digest=content_digest)
 
     async def _list(self, ctx: CommandContext, *, status: str | None = None) -> None:
         """Render the proposal table, optionally filtered by status."""
@@ -220,50 +286,11 @@ class AutoSkillsCommand(Command):
                 proposal.description,
             )
         ctx.ui.mount_renderable(table)
-        # The table is metadata. The review record is of the content below:
-        # every file an approval would copy, rendered in full. A file that
-        # cannot be rendered is named and left unrecorded, so its decision
-        # stays refused.
-        from ...memory.autoskills.proposals import (
-            record_rendered_proposal,
-            rendered_files,
-        )
-
-        bodies = []
-        shown_drafts: list[tuple[Any, list[tuple[str, str]]]] = []
         for proposal in proposals:
-            if proposal.status != "pending" or proposal.manifest is None:
-                continue
-            try:
-                files = rendered_files(proposal.path)
-            except (OSError, ValueError) as exc:
-                bodies.append(
-                    Text(
-                        f"{proposal.proposal_id}: draft content could not be shown ({exc})",
-                        style="red",
-                    )
-                )
-                continue
-            shown = [Text(f"Draft {proposal.proposal_id}", style="bold")]
-            for relative, content in files:
-                shown.append(Text(f"--- {relative}", style="cyan"))
-                shown.append(Text(content))
-            bodies.append(Group(*shown))
-            shown_drafts.append((proposal, files))
-        if bodies:
-            ctx.ui.mount_renderable(Group(*bodies))
-            # The record is written only after the text reached the deciding
-            # surface. A mount that raised leaves the draft unarmed, so no
-            # decision can be taken on a body nobody was shown.
-            for proposal, files in shown_drafts:
-                record_rendered_proposal(
-                    proposal.path,
-                    proposal.manifest,
-                    files,
-                    scope=proposal.effective_scope,
-                )
+            self._remember(ctx, proposal)
         ctx.ui.append_system(
-            f"Use {AUTOSKILLS_COMMAND} approve <id> or "
+            f"Use {AUTOSKILLS_COMMAND} review <id> to inspect a draft, then "
+            f"{AUTOSKILLS_COMMAND} approve <id> or "
             f"{AUTOSKILLS_COMMAND} reject <id>.",
             style="dim",
         )
@@ -285,11 +312,14 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             ctx.ui.append_system(
-                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                f"Run {AUTOSKILLS_COMMAND} list to copy a proposal ID.",
                 style="dim",
             )
             return
         workspace_dir = self._workspace_dir(ctx)
+        snapshot = self._cached_snapshot(ctx, proposal_id)
+        if snapshot is None:
+            snapshot = await asyncio.to_thread(self._read_snapshot, ctx, proposal_id)
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
@@ -297,6 +327,8 @@ class AutoSkillsCommand(Command):
             skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
             scope=scope,
+            expected_updated_at=snapshot.updated_at if snapshot else None,
+            expected_content_digest=snapshot.content_digest if snapshot else None,
         )
         if result.get("approved"):
             verb = "Updated" if result.get("operation") == "update" else "Approved"
@@ -326,16 +358,20 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             ctx.ui.append_system(
-                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                f"Run {AUTOSKILLS_COMMAND} list to copy a proposal ID.",
                 style="dim",
             )
             return
         workspace_dir = self._workspace_dir(ctx)
+        snapshot = self._cached_snapshot(ctx, proposal_id)
+        if snapshot is None:
+            snapshot = await asyncio.to_thread(self._read_snapshot, ctx, proposal_id)
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
             proposal_id,
             workspace_dir=workspace_dir,
+            expected_updated_at=snapshot.updated_at if snapshot else None,
         )
         if result.get("rejected"):
             ctx.ui.append_system(
@@ -479,7 +515,10 @@ class AutoSkillsCommand(Command):
         rows = [
             (AUTOSKILLS_COMMAND, "Show this command reference"),
             (f"{AUTOSKILLS_COMMAND} status", "Show config and the next useful action"),
-            (f"{AUTOSKILLS_COMMAND} review", "Review proposals waiting for a decision"),
+            (
+                f"{AUTOSKILLS_COMMAND} review <id>",
+                "Show one proposal's files for review",
+            ),
             (
                 f"{AUTOSKILLS_COMMAND} approve <id> [scope]",
                 "Install a reviewed autoskill; scope is workspace or global",
@@ -507,7 +546,71 @@ class AutoSkillsCommand(Command):
         )
 
     @staticmethod
+    def _match_proposal(proposals: list[Any], proposal_id: str) -> Any | None:
+        exact = [item for item in proposals if item.proposal_id == proposal_id]
+        if len(exact) == 1:
+            return exact[0]
+        matches = [
+            item for item in proposals if item.proposal_id.startswith(proposal_id)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _remember(
+        self,
+        ctx: CommandContext,
+        proposal: Any,
+        *,
+        content_digest: str | None = None,
+    ) -> None:
+        if content_digest is None:
+            content_digest = getattr(proposal, "content_digest", None)
+        if not isinstance(content_digest, str):
+            key = (self._workspace_dir(ctx), proposal.proposal_id)
+            previous = self._snapshots.get(key)
+            content_digest = (
+                previous.content_digest
+                if previous is not None and previous.updated_at == proposal.updated_at
+                else None
+            )
+        key = (self._workspace_dir(ctx), proposal.proposal_id)
+        self._snapshots[key] = _ProposalSnapshot(
+            updated_at=proposal.updated_at,
+            content_digest=content_digest,
+        )
+
+    def _cached_snapshot(
+        self, ctx: CommandContext, proposal_id: str
+    ) -> _ProposalSnapshot | None:
+        workspace_dir = self._workspace_dir(ctx)
+        exact = self._snapshots.get((workspace_dir, proposal_id))
+        if exact is not None:
+            return exact
+        matches = [
+            snapshot
+            for (workspace, listed_id), snapshot in self._snapshots.items()
+            if workspace == workspace_dir and listed_id.startswith(proposal_id)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _read_snapshot(
+        self, ctx: CommandContext, proposal_id: str
+    ) -> _ProposalSnapshot | None:
+        from ... import paths
+        from ...memory.autoskills.proposals import list_skill_proposals
+
+        proposals = list_skill_proposals(
+            paths.MEMORIES_DIR,
+            workspace_dir=self._workspace_dir(ctx),
+        )
+        proposal = self._match_proposal(proposals, proposal_id)
+        if proposal is None:
+            return None
+        self._remember(ctx, proposal)
+        return self._snapshots[(self._workspace_dir(ctx), proposal.proposal_id)]
+
+    @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
+
         return str(ctx.workspace.root)
 
     @staticmethod

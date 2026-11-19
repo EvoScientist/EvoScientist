@@ -30,13 +30,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
-from starlette.background import BackgroundTask
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -442,17 +442,10 @@ async def list_autoskill_proposals(request: Request) -> Response:
     draft's texts (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
     from EvoScientist.langgraph_dev import autoskills_api
 
-    status, body, records = await asyncio.to_thread(
+    status, body = await asyncio.to_thread(
         autoskills_api.list_drafts_body, request.query_params.get("status") or None
     )
-    response = Response(body, status_code=status, media_type="application/json")
-    if records:
-        # The review records are written once the body has been sent: a
-        # request that never delivers the payload leaves its drafts unarmed.
-        response.background = BackgroundTask(
-            autoskills_api.record_shown_drafts, records
-        )
-    return response
+    return Response(body, status_code=status, media_type="application/json")
 
 
 async def get_autoskill_proposal_file(request: Request) -> Response:
@@ -460,22 +453,19 @@ async def get_autoskill_proposal_file(request: Request) -> Response:
     the approval would start from, for an update's diff."""
     from EvoScientist.langgraph_dev import autoskills_api
 
-    records = []
     status, body = await asyncio.to_thread(
         autoskills_api.read_draft_file,
         request.path_params["proposal_id"],
         request.query_params.get("path", ""),
         installed=request.query_params.get("installed") == "1",
-        records=records,
     )
     if isinstance(body, str):
-        response = Response(body, media_type="text/plain; charset=utf-8")
-        if records:
-            response.headers["X-EvoScientist-Review-Token"] = records[0][4]
-            response.background = BackgroundTask(
-                autoskills_api.record_shown_drafts, records
-            )
-        return response
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        return Response(
+            body,
+            media_type="text/plain; charset=utf-8",
+            headers={"X-EvoScientist-Content-Digest": digest},
+        )
     return JSONResponse(body, status_code=status)
 
 
@@ -507,7 +497,7 @@ async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
         action,
         scope=body.get("scope"),
         expected_updated_at=body.get("expected_updated_at"),
-        review_token=body.get("review_token"),
+        expected_content_digest=body.get("expected_content_digest"),
     )
     return JSONResponse(payload, status_code=status)
 

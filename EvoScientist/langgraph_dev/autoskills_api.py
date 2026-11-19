@@ -16,7 +16,6 @@ import contextlib
 import json
 import logging
 import os
-import secrets
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -28,6 +27,7 @@ from EvoScientist.memory.autoskills.proposals import (
     _SKILL_SCOPES,
     InstallTarget,
     SkillProposal,
+    _content_digest,
     _failure_text,
     _read_regular,
     _resolves_within_root,
@@ -37,9 +37,7 @@ from EvoScientist.memory.autoskills.proposals import (
     installed_skills_read_once,
     list_skill_proposals,
     proposal_install_target,
-    record_rendered_proposal,
     reject_skill_proposal,
-    rendered_files,
     revert_skill_proposal,
 )
 
@@ -69,7 +67,6 @@ _REVERT_STATUS = {
     "skill_changed": 409,
     "revert_failed": 409,
 }
-_ShownDraftRecord = tuple[Path, dict[str, Any], list[tuple[str, str]], str, str]
 # One decision at a time, so two tabs approving one draft install it once.
 _DECISIONS = threading.Lock()
 
@@ -101,25 +98,29 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
         return None
     if proposal.scope not in _SCOPES:
         return None
-    # The proposal came from the listing's own read of its manifest, so the
-    # row is already the draft an approval would use. Confirming it with a
-    # second lookup reads the folder again, and a folder removed between the
-    # two reads fails the page. A single draft is still confirmed by
-    # ``find_skill_proposal`` where one file is served.
-    if proposal.proposal_id != proposal.path.name:
+    found = find_skill_proposal(paths.MEMORIES_DIR, proposal.proposal_id)
+    if found is None or found.path != proposal.path:
         return None
     return key
 
 
-def _inline(path: Path, folder: Path) -> tuple[str, bool]:
-    """The start of a draft's text file, and whether it was cut."""
+def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes]:
+    """The payload text, whether it was cut, and its bytes for the digest."""
     # A character takes at most four bytes, so one byte more shows a longer text.
     limit = MAX_INLINE_CHARS * 4 + 1
     data = _read_regular(path, limit) if _resolves_within_root(path, folder) else None
     if data is None:
-        return "", False
+        return "", False, b""
     text = data.decode("utf-8", errors="replace")
-    return text[:MAX_INLINE_CHARS], len(text) > MAX_INLINE_CHARS
+    shown = text[:MAX_INLINE_CHARS]
+    # A row can vouch only for its delivered text, including when that text is cut.
+    return shown, len(text) > MAX_INLINE_CHARS, shown.encode("utf-8")
+
+
+def _inline(path: Path, folder: Path) -> tuple[str, bool]:
+    """The start of a draft's text file, and whether it was cut."""
+    text, truncated, _data = _read_inline(path, folder)
+    return text, truncated
 
 
 def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
@@ -170,77 +171,35 @@ def _installed(base: Path, relative: Path) -> bool:
         return False
 
 
-def _shown_draft_record(
-    proposal: SkillProposal, draft: dict[str, Any]
-) -> _ShownDraftRecord | None:
-    """The review record of a draft whose content this response returns.
-
-    The list inlines ``SKILL.md`` and ``RATIONALE.md``. Every other copied
-    file is appended to ``skill_md``, which is the body the page shows, so
-    the record is of text present in the payload. The file rows stay
-    metadata. A draft that cannot be read in full, or whose text was cut,
-    is left unrecorded.
-
-    Nothing is recorded here. The record is built from the text the
-    response carries and written by the caller once that response has been
-    delivered, so a request that never delivers the payload leaves the
-    draft unarmed.
-    """
-    assert proposal.manifest is not None
-    try:
-        rendered = rendered_files(proposal.path)
-    except (OSError, ValueError):
-        return None
-    by_path = dict(rendered)
-    skill = by_path.get("SKILL.md")
-    if skill is None or draft.get("skill_md") != skill[:MAX_INLINE_CHARS]:
-        # The inlined text is not the file an approval would copy.
-        return None
-    rationale = by_path.get("RATIONALE.md")
-    if (
-        rationale is not None
-        and draft.get("rationale_md") != rationale[:MAX_INLINE_CHARS]
-    ):
-        return None
-    if draft.get("skill_md_truncated") or draft.get("rationale_md_truncated"):
-        # A cut text is not the whole draft, so it is not a review of it.
-        return None
-    # The two markdown texts are inlined above. Every other copied file is
-    # returned in ``contents``, path to text, so the payload holds the whole
-    # draft and the review record is of that text. A file row stays metadata.
-    draft["contents"] = {
-        relative: content
-        for relative, content in rendered
-        if relative not in {"SKILL.md", "RATIONALE.md"}
-    }
-    token = secrets.token_urlsafe(24)
-    draft["review_token"] = token
-    return (proposal.path, proposal.manifest, rendered, proposal.effective_scope, token)
-
-
-def record_shown_drafts(records: list[_ShownDraftRecord]) -> None:
-    """Record the reviews of the drafts whose text a response carried.
-
-    Called once the response has been delivered: a request that never
-    delivered the payload leaves its drafts unarmed. The token was generated
-    with the payload, but is not trusted for a decision until this record is
-    written after delivery.
-    """
-    for path, manifest, rendered, scope, token in records:
-        record_rendered_proposal(path, manifest, rendered, scope=scope, token=token)
-
-
 def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     folder = proposal.path.resolve()
     # A decided draft's texts are read through the file route: the list is
     # polled and decided drafts only grow in number.
     skill_md: tuple[str | None, bool | None] = (None, None)
     rationale_md = skill_md
+    contents: dict[str, str] | None = None
+    content_digest = None
     target: InstallTarget | None = None
     install_error = None
     if proposal.status == "pending":
-        skill_md = _inline(folder / "SKILL.md", folder)
-        rationale_md = _inline(folder / "RATIONALE.md", folder)
+        contents = {}
+        skill = _read_inline(folder / "SKILL.md", folder)
+        skill_md = (skill[0], skill[1])
+        rationale = _read_inline(folder / "RATIONALE.md", folder)
+        rationale_md = (rationale[0], rationale[1])
+        digest_files = {"SKILL.md": skill[2]}
+        try:
+            relatives = copied_files(folder)
+        except OSError:
+            relatives = []
+        for relative in relatives:
+            name = relative.as_posix()
+            if name == "SKILL.md":
+                continue
+            text, _truncated, data = _read_inline(folder / relative, folder)
+            contents[name] = text
+            digest_files[name] = data
+        content_digest = _content_digest(digest_files)
         computed = _install_target(proposal, key)
         if isinstance(computed, str):
             install_error = computed
@@ -265,6 +224,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "workspace_dir": key,
         "created_at": proposal.created_at,
         "updated_at": proposal.updated_at,
+        "expected_updated_at": proposal.updated_at,
         "approved_at": proposal.approved_at,
         "approved_by": (
             proposal.approved_by if proposal.approved_by in _APPROVERS else None
@@ -279,8 +239,8 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "skill_md_truncated": skill_md[1],
         "rationale_md": rationale_md[0],
         "rationale_md_truncated": rationale_md[1],
-        "contents": {} if proposal.status == "pending" else None,
-        "review_token": None,
+        "contents": contents,
+        "content_digest": content_digest,
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -288,10 +248,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     }
 
 
-def list_drafts(
-    status: str | None = None,
-    records: list[_ShownDraftRecord] | None = None,
-) -> tuple[int, dict[str, Any]]:
+def list_drafts(status: str | None = None) -> tuple[int, dict[str, Any]]:
     """Every served project's drafts; counts ignore the ``status`` filter."""
     if status is not None and status not in _STATUSES:
         return 400, {"error": "invalid_status"}
@@ -309,16 +266,8 @@ def list_drafts(
             by_project[key][proposal.status] += 1
             if status is not None and proposal.status != status:
                 continue
-            record = None
             try:
                 draft = _draft(proposal, key)
-                if proposal.status == "pending" and proposal.manifest is not None:
-                    # The row is in the response, so its inlined texts are
-                    # what the page shows. Build that review record only. A
-                    # filter that dropped the row never reaches here, and a
-                    # draft that cannot be sent does not either: the payload
-                    # is encoded below, before anything is recorded.
-                    record = _shown_draft_record(proposal, draft)
                 json.dumps(draft, ensure_ascii=False).encode("utf-8")
             except Exception:
                 # One draft that cannot be read or sent must not fail the page.
@@ -326,33 +275,17 @@ def list_drafts(
                     "Could not list draft %s.", proposal.proposal_id, exc_info=True
                 )
                 continue
-            if record is not None:
-                if records is None:
-                    # An in-process caller receives the payload as the return
-                    # value, so the text is delivered with it.
-                    record_shown_drafts([record])
-                else:
-                    # A response on its way out: the caller records once it
-                    # has been delivered.
-                    records.append(record)
             drafts.append(draft)
     return 200, {"proposals": drafts, "counts": counts, "by_project": by_project}
 
 
-def list_drafts_body(
-    status: str | None = None,
-) -> tuple[int, bytes, list[_ShownDraftRecord]]:
-    """:func:`list_drafts` encoded as the response body, off the event loop.
-
-    The review records come back with it, unrecorded: the caller writes them
-    once the body has been delivered.
-    """
-    records: list[_ShownDraftRecord] = []
-    code, payload = list_drafts(status, records)
+def list_drafts_body(status: str | None = None) -> tuple[int, bytes]:
+    """:func:`list_drafts` encoded as the response body, off the event loop."""
+    code, payload = list_drafts(status)
     body = json.dumps(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     )
-    return code, body.encode("utf-8"), records
+    return code, body.encode("utf-8")
 
 
 def _relative_path(value: str) -> str | None:
@@ -381,19 +314,13 @@ def _read_text(path: Path) -> tuple[int, str | dict[str, Any]]:
 
 
 def read_draft_file(
-    proposal_id: str,
-    rel_path: str,
-    *,
-    installed: bool,
-    records: list[_ShownDraftRecord] | None = None,
+    proposal_id: str, rel_path: str, *, installed: bool
 ) -> tuple[int, str | dict[str, Any]]:
     """A file an approval copies (the draft's, or with ``installed`` the installed
     skill's) or the draft's own rationale; a ``str`` body is its text."""
     relative = _relative_path(rel_path)
     if relative is None:
         return 400, {"error": "invalid_path"}
-    # Looking the draft up does not record a review. The installed copy is
-    # not the pending draft, and one file is not the whole draft either.
     proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     served = _served_keys(registry.REGISTRY.registered())
     key = _listed(proposal, served) if proposal is not None else None
@@ -419,45 +346,7 @@ def read_draft_file(
         return 404, {"error": "not_found"}
     if not _resolves_within_root(path, folder):
         return 400, {"error": "invalid_path"}
-    status, body = _read_text(path)
-    if (
-        status == 200
-        and not installed
-        and isinstance(body, str)
-        and proposal.status == "pending"
-        and proposal.manifest is not None
-    ):
-        # This response returns one file. Record a review only when that
-        # file is the whole draft an approval would copy: a single-file
-        # draft's body is then on screen, and a larger draft stays unrecorded
-        # until the list returns every copied file.
-        try:
-            rendered = rendered_files(proposal.path)
-        except (OSError, ValueError):
-            rendered = []
-        if rendered == [(relative, body)]:
-            if records is None:
-                # A direct in-process caller is the same single-client rule
-                # as the CLI. HTTP passes ``records`` and uses a token.
-                record_rendered_proposal(
-                    proposal.path,
-                    proposal.manifest,
-                    rendered,
-                    scope=proposal.effective_scope,
-                )
-            else:
-                # The token goes in the plain-text response's header. As for
-                # the list, the record is written only after delivery.
-                records.append(
-                    (
-                        proposal.path,
-                        proposal.manifest,
-                        rendered,
-                        proposal.effective_scope,
-                        secrets.token_urlsafe(24),
-                    )
-                )
-    return status, body
+    return _read_text(path)
 
 
 def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -465,7 +354,9 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     error = str(result.get("error") or "")
     if error.startswith("Only pending proposals"):
         return 409, {"error": "not_pending", "status": result.get("status")}
-    if error.startswith("Proposal changed since it was read"):
+    if error.startswith(
+        ("Proposal changed since it was read", "Proposal changed since it was shown")
+    ):
         return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
@@ -476,7 +367,7 @@ def _apply(
     action: str,
     scope: str | None,
     expected_updated_at: str | None,
-    review_token: str | None,
+    expected_content_digest: str | None,
 ) -> tuple[int, dict[str, Any]]:
     if action == "approve":
         result = approve_skill_proposal(
@@ -488,7 +379,7 @@ def _apply(
             approved_by="user",
             exact=True,
             expected_updated_at=expected_updated_at,
-            review_token=review_token,
+            expected_content_digest=expected_content_digest,
         )
         if result.get("approved"):
             return 200, {key: result.get(key) for key in _APPROVED_KEYS}
@@ -500,7 +391,6 @@ def _apply(
             workspace_dir=workspace.root,
             exact=True,
             expected_updated_at=expected_updated_at,
-            review_token=review_token,
         )
         if result.get("rejected"):
             return 200, {
@@ -544,7 +434,7 @@ def _decide_locked(
     action: str,
     scope: str | None,
     expected_updated_at: str | None,
-    review_token: str | None,
+    expected_content_digest: str | None,
 ) -> tuple[int, dict[str, Any]]:
     proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     if proposal is None:
@@ -555,7 +445,14 @@ def _decide_locked(
     workspace = paths.Workspace(key)
     if not _served(workspace):
         return 409, {"error": "project_not_served"}
-    return _apply(proposal, workspace, action, scope, expected_updated_at, review_token)
+    return _apply(
+        proposal,
+        workspace,
+        action,
+        scope,
+        expected_updated_at,
+        expected_content_digest,
+    )
 
 
 def _sendable(payload: dict[str, Any]) -> dict[str, Any]:
@@ -574,15 +471,17 @@ def decide(
     *,
     scope: object = None,
     expected_updated_at: object = None,
-    review_token: object = None,
+    expected_content_digest: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Approve, reject or revert one draft of a served project; with
-    ``expected_updated_at``, a draft resubmitted or decided since is refused.
-    A WebUI approval or rejection presents the token its rendering returned."""
+    """Decide one served draft, refusing versions or content the client did not read.
+
+    The shipped WebUI omits ``expected_content_digest``; its absence leaves that
+    optional check disabled while ``expected_updated_at`` still guards the version.
+    """
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
     if not isinstance(expected_updated_at, str | None) or not isinstance(
-        review_token, str | None
+        expected_content_digest, str | None
     ):
         return 400, {"error": "invalid_body"}
     with _DECISIONS:
@@ -592,7 +491,7 @@ def decide(
                 action,
                 scope if isinstance(scope, str) else None,
                 expected_updated_at,
-                review_token,
+                expected_content_digest,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.
