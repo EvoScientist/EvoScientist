@@ -27,8 +27,6 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.7": 500_000,
     "grok-4.6": 500_000,
     "grok-4.5": 500_000,
-    # Tencent HY4 via OpenRouter (1M); langchain-openrouter has no profile for it.
-    "hy4": 1_048_576,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
@@ -70,6 +68,10 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("muse-spark", 1_048_576),
     # Meta Muse Wonder (OpenRouter ``meta/muse-wonder``, 1M).
     ("muse-wonder", 1_048_576),
+    # Tencent HY4 family via OpenRouter — hy4, hy4-flash (1M); no OpenRouter profile.
+    ("hy4", 1_048_576),
+    # Qwen 4 Max — flagship and dated snapshots (1M).
+    ("qwen4-max", 1_000_000),
     # Qwen 3.8 Max — flagship and dated snapshots such as ``-0902`` (1M).
     ("qwen3.8-max", 1_000_000),
     # Qwen 3.6 closed-source family — flash, plus, max-preview, etc.
