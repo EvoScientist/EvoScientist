@@ -391,6 +391,41 @@ def test_message_added_after_a_model_call_is_stamped_by_the_next_one():
     assert all(_key(m) for m in result["messages"])
 
 
+def test_rejection_beside_an_approved_call_is_stamped():
+    """The rejection is written before the approved call's stamped result."""
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
+
+    calls = [
+        {"name": "lookup", "args": {"query": "a"}, "id": "c1"},
+        {"name": "lookup", "args": {"query": "b"}, "id": "c2"},
+    ]
+    agent = create_agent(
+        model=_ScriptedToolModel(
+            replies=[AIMessage("", tool_calls=calls), AIMessage("done")]
+        ),
+        tools=[lookup],
+        middleware=[
+            MessageTimestampMiddleware(),
+            HumanInTheLoopMiddleware(interrupt_on={"lookup": True}),
+        ],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "t"}}
+    agent.invoke({"messages": [HumanMessage("go")]}, config)
+
+    result = agent.invoke(
+        Command(resume={"decisions": [{"type": "reject"}, {"type": "approve"}]}),
+        config,
+    )
+
+    tool_results = {
+        m.tool_call_id: m for m in result["messages"] if isinstance(m, ToolMessage)
+    }
+    assert tool_results["c1"].status == "error"
+    assert tool_results["c2"].content == "found b"
+    assert all(_key(m) for m in result["messages"])
+
+
 def test_stamping_costs_one_checkpoint_per_run():
     def checkpoints(stamped):
         saver = InMemorySaver()

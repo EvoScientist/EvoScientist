@@ -101,6 +101,28 @@ def _unstamped_tail(messages: Sequence[Any], now: str) -> list[BaseMessage]:
     return stamped[::-1]
 
 
+def _unstamped_since_last_reply(messages: Sequence[Any], now: str) -> list[BaseMessage]:
+    """Stamped copies of the unstamped messages after the last AI message.
+
+    Unlike the input scan, this one steps over stamped messages: in a HITL
+    batch with one call rejected and one approved, the rejection is written
+    before the approved call's stamped result.
+    """
+    stamped: list[BaseMessage] = []
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            break
+        if (
+            not isinstance(message, BaseMessage)
+            or CREATED_AT_KEY in message.response_metadata
+            # Without an id the reducer would append the copy instead of replacing.
+            or message.id is None
+        ):
+            continue
+        stamped.append(with_created_at(message, now))
+    return stamped[::-1]
+
+
 def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
     """State update stamping the current run's unstamped messages, or ``None``."""
     stamped = _unstamped_tail(messages, created_at_now())
@@ -116,7 +138,7 @@ def _stamped_model_response(
         response, result=[with_created_at(m, now) for m in response.result]
     )
     state = getattr(request, "state", None) or {}
-    pending = _unstamped_tail(state.get("messages") or [], now)
+    pending = _unstamped_since_last_reply(state.get("messages") or [], now)
     if not pending:
         return response
     return ExtendedModelResponse(
