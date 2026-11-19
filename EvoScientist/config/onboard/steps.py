@@ -830,23 +830,6 @@ def _step_model(
     # Get models for the selected provider. A live custom-openai endpoint
     # lists its own ids; an empty or failed probe keeps the registry defaults.
     if provider == "custom-openai":
-        # The URL and the key must belong to the SAME endpoint.
-        #
-        # The runtime resolves each field on its own, environment first, so a
-        # user who sets only the URL in the environment ends up with the
-        # environment's URL and the saved config's key. Probing that
-        # combination would send the saved key to an endpoint it does not
-        # belong to.
-        #
-        # So the probe pairs them by WHO names the endpoint:
-        #   - the environment names it, and it is a DIFFERENT endpoint from
-        #     the saved one: the environment's key is the one for it, and
-        #     the saved key is never sent there;
-        #   - the environment names the SAME endpoint the saved config
-        #     names: the saved key belongs to it too, so it is used;
-        #   - the saved config names it: the saved key is the one for it,
-        #     and the environment key is the fallback for a wizard that has
-        #     the URL but has not written the key back yet.
         # The probe sends the URL and the key the model calls will use:
         # the environment first, then the wizard's value.
         discovered = list_custom_openai_models(
