@@ -9,12 +9,17 @@ local endpoint is still probed, and ``OPENAI_API_KEY`` is never attached.
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import json
-from unittest.mock import MagicMock, patch
+import logging
+import threading
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
 
+from EvoScientist.llm import custom_openai_discovery as discovery
 from EvoScientist.llm.custom_openai_discovery import (
     discover_custom_openai_models,
     list_custom_openai_models,
@@ -24,100 +29,109 @@ _LISTING = {"data": [{"id": "fake-agent"}, {"id": "other-model"}]}
 
 
 def _response(status_code: int = 200, body: object = None, *, json_error: bool = False):
-    resp = MagicMock()
-    resp.status_code = status_code
-    if json_error:
-        resp.content = b"{not json"
-    else:
-        resp.content = json.dumps(body if body is not None else _LISTING).encode()
-    return resp
+    content = (
+        b"{not json"
+        if json_error
+        else json.dumps(body if body is not None else _LISTING).encode()
+    )
+    return httpx.Response(status_code, stream=httpx.ByteStream(content))
 
 
-def _patch_get(response=None, *, side_effect=None):
-    """Patch the client's request; return the patcher and what it recorded."""
+def _patch_transport(handler):
+    client = httpx.AsyncClient
+    return patch.object(
+        httpx,
+        "AsyncClient",
+        side_effect=lambda **kwargs: client(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+
+
+def _patch_request(response=None, *, side_effect=None):
     seen: dict[str, object] = {}
 
-    async def fake_get(self, url, headers=None, **kwargs):
-        seen["url"] = url
-        seen["headers"] = headers
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("Authorization")
         if side_effect is not None:
             raise side_effect
         return response
 
-    return patch.object(httpx.AsyncClient, "get", fake_get), seen
+    return _patch_transport(handler), seen
 
 
 class TestListCustomOpenaiModels:
     """Sync probe - the wizard calls this while questionary is blocking."""
 
     def test_empty_base_url_returns_empty_without_http(self):
-        patcher, seen = _patch_get(_response())
+        patcher, seen = _patch_request(_response())
         with patcher:
             assert list_custom_openai_models("") == []
             assert list_custom_openai_models(None) == []
         assert seen == {}
 
     def test_200_returns_ids(self):
-        patcher, seen = _patch_get(_response())
+        patcher, seen = _patch_request(_response())
         with patcher:
             names = list_custom_openai_models("https://llm.test/v1", "sk-test")
         assert names == ["fake-agent", "other-model"]
         assert seen["url"] == "https://llm.test/v1/models"
-        assert seen["headers"] == {"Authorization": "Bearer sk-test"}
+        assert seen["authorization"] == "Bearer sk-test"
 
     def test_empty_key_sends_no_authorization(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-sho...leak")
-        patcher, seen = _patch_get(_response())
+        patcher, seen = _patch_request(_response())
         with patcher:
             names = list_custom_openai_models("https://llm.test/v1", "")
         assert names == ["fake-agent", "other-model"]
-        assert seen["headers"] == {}
+        assert seen["authorization"] is None
 
     def test_whitespace_key_sends_no_authorization(self):
-        patcher, seen = _patch_get(_response())
+        patcher, seen = _patch_request(_response())
         with patcher:
             list_custom_openai_models("https://llm.test/v1", "   ")
-        assert seen["headers"] == {}
+        assert seen["authorization"] is None
 
     def test_non_200_returns_empty(self):
         for status in (401, 404, 500):
-            patcher, _ = _patch_get(_response(status))
+            patcher, _ = _patch_request(_response(status))
             with patcher:
                 assert list_custom_openai_models("https://llm.test/v1", "sk") == []
 
     def test_timeout_returns_empty(self):
-        patcher, _ = _patch_get(side_effect=httpx.TimeoutException("timed out"))
+        patcher, _ = _patch_request(side_effect=httpx.TimeoutException("timed out"))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_connect_error_returns_empty(self):
-        patcher, _ = _patch_get(side_effect=httpx.ConnectError("refused"))
+        patcher, _ = _patch_request(side_effect=httpx.ConnectError("refused"))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_malformed_json_returns_empty(self):
-        patcher, _ = _patch_get(_response(json_error=True))
+        patcher, _ = _patch_request(_response(json_error=True))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_missing_data_returns_empty(self):
-        patcher, _ = _patch_get(_response(body={"unexpected": []}))
+        patcher, _ = _patch_request(_response(body={"unexpected": []}))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_data_not_a_list_returns_empty(self):
-        patcher, _ = _patch_get(_response(body={"data": "nope"}))
+        patcher, _ = _patch_request(_response(body={"data": "nope"}))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == []
 
     def test_drops_entries_without_id(self):
         body = {"data": [{"id": "fake-agent"}, {"id": ""}, {}, "bare"]}
-        patcher, _ = _patch_get(_response(body=body))
+        patcher, _ = _patch_request(_response(body=body))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1") == ["fake-agent"]
 
     def test_trailing_slash_stripped_from_url(self):
-        patcher, seen = _patch_get(_response(body={"data": []}))
+        patcher, seen = _patch_request(_response(body={"data": []}))
         with patcher:
             assert list_custom_openai_models("https://llm.test/v1/") == []
         assert seen["url"] == "https://llm.test/v1/models"
@@ -129,24 +143,18 @@ class TestListCustomOpenaiModels:
         that only stopped waiting would leave the thread and its connection
         behind, and every further probe would leave another one.
         """
-        import asyncio
-        import threading
-        import time
+        workers: list[threading.Thread] = []
 
-        async def never_answers(self, url, headers=None, **kwargs):
+        async def never_answers(request):
+            workers.append(threading.current_thread())
             await asyncio.sleep(3600)
 
-        before = threading.active_count()
-        with patch.object(httpx.AsyncClient, "get", never_answers):
-            assert (
-                list_custom_openai_models("https://llm.test/v1", "sk", timeout=0.2)
-                == []
-            )
+        with _patch_transport(never_answers):
+            assert list_custom_openai_models("https://llm.test/v1", timeout=0.2) == []
 
-        deadline = time.monotonic() + 5.0
-        while threading.active_count() > before and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert threading.active_count() <= before
+        assert len(workers) == 1
+        workers[0].join(timeout=1)
+        assert not workers[0].is_alive()
 
 
 class TestDiscoverCustomOpenaiModels:
@@ -161,302 +169,220 @@ class TestDiscoverCustomOpenaiModels:
         assert names == []
 
     async def test_200_returns_ids_and_sends_key(self):
-        seen: dict[str, object] = {}
-
-        async def fake_get(self, url, headers=None):
-            seen["url"] = url
-            seen["headers"] = headers
-            return _response()
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+        patcher, seen = _patch_request(_response())
+        with patcher:
             names = await discover_custom_openai_models(
                 "https://llm.test/v1", "sk-test"
             )
         assert names == ["fake-agent", "other-model"]
-        assert seen["url"] == "https://llm.test/v1/models"
-        assert seen["headers"] == {"Authorization": "Bearer sk-test"}
+        assert seen == {
+            "url": "https://llm.test/v1/models",
+            "authorization": "Bearer sk-test",
+        }
 
     async def test_empty_key_sends_no_authorization(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
-        seen: dict[str, object] = {}
-
-        async def fake_get(self, url, headers=None):
-            seen["headers"] = headers
-            return _response()
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+        monkeypatch.setenv("OPENAI_API_KEY", "unused-openai-key")
+        patcher, seen = _patch_request(_response())
+        with patcher:
             names = await discover_custom_openai_models("https://llm.test/v1", "")
         assert names == ["fake-agent", "other-model"]
-        assert seen["headers"] == {}
+        assert seen["authorization"] is None
 
-    async def test_401_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(401)
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+    @pytest.mark.parametrize("status", [401, 404, 500])
+    async def test_non_200_returns_empty(self, status):
+        patcher, _ = _patch_request(_response(status))
+        with patcher:
             assert await discover_custom_openai_models("https://llm.test/v1") == []
 
-    async def test_404_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(404)
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+    @pytest.mark.parametrize(
+        "error", [httpx.TimeoutException("timed out"), httpx.ConnectError("refused")]
+    )
+    async def test_http_errors_return_empty(self, error):
+        patcher, _ = _patch_request(side_effect=error)
+        with patcher:
             assert await discover_custom_openai_models("https://llm.test/v1") == []
 
-    async def test_500_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(500)
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
-            assert await discover_custom_openai_models("https://llm.test/v1") == []
-
-    async def test_timeout_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            raise httpx.TimeoutException("timed out")
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
-            assert await discover_custom_openai_models("https://llm.test/v1") == []
-
-    async def test_connect_error_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            raise httpx.ConnectError("refused")
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
-            assert await discover_custom_openai_models("https://llm.test/v1") == []
-
-    async def test_malformed_json_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(json_error=True)
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
-            assert await discover_custom_openai_models("https://llm.test/v1") == []
-
-    async def test_missing_data_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(body={"object": "list"})
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
-            assert await discover_custom_openai_models("https://llm.test/v1") == []
-
-    async def test_data_not_a_list_returns_empty(self):
-        async def fake_get(self, url, headers=None):
-            return _response(body=[{"id": "fake-agent"}])
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+    @pytest.mark.parametrize(
+        "response_kwargs",
+        [
+            {"json_error": True},
+            {"body": {"object": "list"}},
+            {"body": [{"id": "fake-agent"}]},
+        ],
+    )
+    async def test_malformed_listing_returns_empty(self, response_kwargs):
+        patcher, _ = _patch_request(_response(**response_kwargs))
+        with patcher:
             assert await discover_custom_openai_models("https://llm.test/v1") == []
 
     async def test_trailing_slash_stripped_from_url(self):
-        called: dict[str, str] = {}
-
-        async def fake_get(self, url, headers=None):
-            called["url"] = url
-            return _response(body={"data": []})
-
-        with patch.object(httpx.AsyncClient, "get", fake_get):
+        patcher, seen = _patch_request(_response(body={"data": []}))
+        with patcher:
             await discover_custom_openai_models("https://llm.test/v1/")
-        assert called["url"] == "https://llm.test/v1/models"
+        assert seen["url"] == "https://llm.test/v1/models"
+
+    async def test_parses_on_the_callers_thread(self, monkeypatch):
+        parse_threads = []
+        original = discovery._names_from_body
+
+        def parse(body):
+            parse_threads.append(threading.current_thread())
+            return original(body)
+
+        monkeypatch.setattr(discovery, "_names_from_body", parse)
+        patcher, _ = _patch_request(_response())
+        with patcher:
+            assert await discover_custom_openai_models("https://llm.test/v1") == [
+                "fake-agent",
+                "other-model",
+            ]
+        assert parse_threads == [threading.current_thread()]
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+async def test_settings_and_picker_list_the_same_normalized_ids(monkeypatch):
+    import openai
+
+    from EvoScientist.config.provider_keys import check_custom_openai
+
+    body = {"data": [{"id": " first "}, {"id": "first"}, {"id": "  "}]}
+    body["data"].extend({"id": f"model-{i}"} for i in range(510))
+    # Both paths strip and de-duplicate the same way; the picker shows at
+    # most 500 rows, and the key check reports what the endpoint listed.
+    listed = ["first", *(f"model-{i}" for i in range(510))]
+    expected = listed[:500]
+    url = "https://llm.test/v1"
+
+    def list_models(request):
+        assert str(request.url) == f"{url}/models"
+        assert request.headers["Authorization"] == "Bearer sk-test"
+        return _response(body=body)
+
+    sdk_client = openai.OpenAI
+    transport = httpx.MockTransport(list_models)
+
+    def make_client(**kwargs):
+        return sdk_client(http_client=httpx.Client(transport=transport), **kwargs)
+
+    monkeypatch.setattr(openai, "OpenAI", make_client)
+    with _patch_transport(list_models):
+        discovered = await discover_custom_openai_models(url, "sk-test")
+    checked = check_custom_openai("sk-test", url)
+
+    assert discovered == expected
+    assert checked.status == "valid"
+    assert list(checked.models) == listed
 
 
-class TestBigAndLateAnswers:
-    """The deadline and the result list have to hold for a hostile endpoint."""
+class _TrackedStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.reads = 0
+        self.closed = False
 
-    def test_a_body_past_the_cap_is_not_listed(self, monkeypatch):
-        """A body past the cap is not a picker, and it is not parsed.
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.reads += 1
+            yield chunk
 
-        Parsing a huge listing is what ran past the deadline, so a body past
-        the cap is dropped rather than parsed.
-        """
-        import asyncio
+    async def aclose(self):
+        self.closed = True
 
-        from EvoScientist.llm import custom_openai_discovery as discovery
 
-        monkeypatch.setattr(discovery, "_MAX_BODY_BYTES", 16)
+@pytest.mark.parametrize("declared_length", [True, False])
+async def test_oversized_listing_stops_before_reading_the_rest(
+    monkeypatch, caplog, declared_length
+):
+    content = json.dumps(_LISTING).encode()
+    # The complete payload is valid JSON; size alone must keep it from parsing.
+    stream = _TrackedStream([content[:16], content[16:], b" "])
+    headers = {"Content-Length": str(len(content) + 1)} if declared_length else {}
+    monkeypatch.setattr(discovery, "_MAX_BODY_BYTES", 16)
+    parse = Mock(wraps=discovery._names_from_body)
+    monkeypatch.setattr(discovery, "_names_from_body", parse)
+    patcher, seen = _patch_request(httpx.Response(200, stream=stream, headers=headers))
+    with patcher, caplog.at_level(logging.DEBUG, logger=discovery.__name__):
+        assert await discover_custom_openai_models("https://llm.test/v1") == []
 
-        class _Client:
-            def __init__(self, *args, **kwargs):
-                pass
+    assert seen["url"] == "https://llm.test/v1/models"
+    # The read stops at the chunk that crosses the limit, so the rest of the
+    # body is never read.
+    assert stream.reads == 2
+    assert stream.closed
+    parse.assert_not_called()
+    assert "exceeds the 16-byte limit" in caplog.text
 
-            async def __aenter__(self):
-                return self
 
-            async def __aexit__(self, *args):
-                return False
+async def test_reads_a_compressed_listing(monkeypatch):
+    """A listing served compressed is read, not skipped.
 
-            async def get(self, *args, **kwargs):
-                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+    A server that compresses the body still serves the models, and the
+    limit applies to the decoded bytes -- the ones that get parsed.
+    """
+    content = json.dumps(_LISTING).encode()
+    compressed = gzip.compress(content)
+    stream = _TrackedStream([compressed])
 
-        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    def compressed_listing(request):
+        return httpx.Response(200, stream=stream, headers={"Content-Encoding": "gzip"})
 
-        assert asyncio.run(discovery.discover_custom_openai_models("http://x/v1")) == []
+    with _patch_transport(compressed_listing):
+        assert await discover_custom_openai_models("https://llm.test/v1") == [
+            "fake-agent",
+            "other-model",
+        ]
+    assert stream.closed
 
-    def test_a_parse_that_does_not_fit_the_deadline_is_dropped(self, monkeypatch):
-        """The parse is inside the deadline: a slow one is dropped, not waited for.
 
-        A thread cannot be interrupted, so what the timeout bounds is the WAIT
-        for the parse. Waiting for a cancelled parse instead would let the
-        parse decide how long the picker stays open.
-        """
-        import time
+async def test_a_compressed_listing_past_the_limit_is_dropped(monkeypatch):
+    content = json.dumps(_LISTING).encode()
+    monkeypatch.setattr(discovery, "_MAX_BODY_BYTES", len(content) - 1)
+    stream = _TrackedStream([gzip.compress(content)])
 
-        from EvoScientist.llm import custom_openai_discovery as discovery
+    def compressed_listing(request):
+        return httpx.Response(200, stream=stream, headers={"Content-Encoding": "gzip"})
 
-        real_loads = json.loads
+    with _patch_transport(compressed_listing):
+        assert await discover_custom_openai_models("https://llm.test/v1") == []
+    assert stream.closed
 
-        def slow_loads(payload, *args, **kwargs):
-            time.sleep(0.6)
-            return real_loads(payload, *args, **kwargs)
 
-        monkeypatch.setattr(discovery.json, "loads", slow_loads)
+async def test_accepts_a_listing_at_the_byte_limit(monkeypatch):
+    content = json.dumps(_LISTING).encode()
+    monkeypatch.setattr(discovery, "_MAX_BODY_BYTES", len(content))
+    stream = _TrackedStream([content[:10], content[10:]])
+    patcher, _ = _patch_request(httpx.Response(200, stream=stream))
+    with patcher:
+        assert await discover_custom_openai_models("https://llm.test/v1") == [
+            "fake-agent",
+            "other-model",
+        ]
+    assert stream.closed
 
-        class _Client:
-            def __init__(self, *args, **kwargs):
-                pass
 
-            async def __aenter__(self):
-                return self
+def test_a_late_success_cannot_mutate_the_returned_list(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+    late_result: list[str] = []
 
-            async def __aexit__(self, *args):
-                return False
+    async def late_listing(*args, **kwargs):
+        workers.append(threading.current_thread())
+        started.set()
+        if release.wait(timeout=5):
+            late_result.append("late")
+        return late_result
 
-            async def get(self, *args, **kwargs):
-                return httpx.Response(200, content=json.dumps(_LISTING).encode())
-
-        monkeypatch.setattr(httpx, "AsyncClient", _Client)
-
-        started = time.monotonic()
-        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
-        elapsed = time.monotonic() - started
-
-        assert names == [], names
-        assert elapsed < 1.0, elapsed
-
-    def test_walking_the_names_that_does_not_fit_the_deadline_is_dropped(
-        self, monkeypatch
-    ):
-        """Taking the names out of the body is inside the deadline too.
-
-        Walking a near-cap body costs as much as parsing it, so the walk is
-        part of the work the deadline bounds.
-        """
-        import time
-
-        from EvoScientist.llm import custom_openai_discovery as discovery
-
-        real_names = discovery._names_from_body
-
-        def slow_names(body):
-            time.sleep(0.6)
-            return real_names(body)
-
-        monkeypatch.setattr(discovery, "_names_from_body", slow_names)
-
-        class _Client:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, *args, **kwargs):
-                return httpx.Response(200, content=json.dumps(_LISTING).encode())
-
-        monkeypatch.setattr(httpx, "AsyncClient", _Client)
-
-        started = time.monotonic()
-        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
-        elapsed = time.monotonic() - started
-
-        assert names == [], names
-        assert elapsed < 1.0, elapsed
-
-    def test_the_result_is_not_the_workers_own_buffer(self, monkeypatch):
-        """A list that fills itself in after the return is not a result."""
-        import time
-
-        from EvoScientist.llm import custom_openai_discovery as discovery
-
-        real_loads = json.loads
-
-        def slow_loads(payload, *args, **kwargs):
-            time.sleep(1.0)
-            return real_loads(payload, *args, **kwargs)
-
-        monkeypatch.setattr(discovery.json, "loads", slow_loads)
-
-        class _Client:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, *args, **kwargs):
-                return httpx.Response(200, content=json.dumps(_LISTING).encode())
-
-        monkeypatch.setattr(httpx, "AsyncClient", _Client)
-
-        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
+    monkeypatch.setattr(discovery, "discover_custom_openai_models", late_listing)
+    try:
+        names = list_custom_openai_models("https://llm.test/v1", timeout=0)
+        assert started.wait(timeout=1)
+        assert workers[0].is_alive()
         assert names == []
-        time.sleep(1.2)
-        # The worker's own buffer filled; the list we were handed did not.
-        assert names == [], names
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=2)
 
-    def test_a_timed_out_parse_does_not_hold_the_caller(self, monkeypatch):
-        """The caller returns on the deadline, and the parse thread is left.
-
-        A parse cannot be interrupted, so a parse that does not fit the
-        deadline goes on in a thread of its own and its result is dropped.
-        That thread is a daemon, not the event loop's executor: an executor
-        thread would be joined when the loop closes, and the caller would
-        wait for the parse it had already given up on.
-        """
-        import threading
-        import time
-
-        from EvoScientist.llm import custom_openai_discovery as discovery
-
-        real_loads = json.loads
-
-        def slow_loads(payload, *args, **kwargs):
-            time.sleep(1.0)
-            return real_loads(payload, *args, **kwargs)
-
-        monkeypatch.setattr(discovery.json, "loads", slow_loads)
-
-        class _Client:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, *args, **kwargs):
-                return httpx.Response(200, content=json.dumps(_LISTING).encode())
-
-        monkeypatch.setattr(httpx, "AsyncClient", _Client)
-
-        started = time.monotonic()
-        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
-        elapsed = time.monotonic() - started
-
-        assert names == [], names
-        # The deadline plus the grace the cancellation needs -- not the
-        # deadline plus the whole parse.
-        assert elapsed < 0.6, elapsed
-        # The probe's own worker ends with the call. What may outlive it is
-        # the parse thread, which holds nothing the caller waits on.
-        assert not [t for t in threading.enumerate() if "fetch" in t.name]
-        assert not [t for t in threading.enumerate() if "asyncio" in t.name]
+    assert not workers[0].is_alive()
+    assert late_result == ["late"]
+    assert names == []

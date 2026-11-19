@@ -1175,16 +1175,15 @@ class TestStepModel:
                 _step_model(config, "anthropic")
 
     def test_custom_openai_offers_discovered_names(self, monkeypatch):
-        """A live endpoint's ids are the choices, ahead of the free-text entry.
-
-        The environment key is the one the probe uses: the environment
-        names the endpoint the model calls will reach, and onboarding
-        loads the file only and may not have written a kept key back.
-        """
+        """The probe prefers the environment key and offers the listed IDs verbatim."""
         from EvoScientist.config.onboard.steps import _step_model
 
         monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-from-env")
-        config = EvoScientistConfig(custom_openai_base_url="https://llm.test/v1")
+        monkeypatch.delenv("CUSTOM_OPENAI_BASE_URL", raising=False)
+        config = EvoScientistConfig(
+            custom_openai_base_url="https://llm.test/v1",
+            custom_openai_api_key="sk-from-config",
+        )
         seen: dict[str, object] = {}
 
         def fake_list(base_url, api_key=None, *, timeout=5.0):
@@ -1213,7 +1212,45 @@ class TestStepModel:
             "other-model",
             "__custom__",
         ]
-        assert all("gpt-6" not in choice.title for choice in choices[:-1])
+        assert [choice.title for choice in choices[:-1]] == [
+            "fake-agent",
+            "other-model",
+        ]
+
+    @pytest.mark.parametrize(
+        ("names", "message"),
+        [
+            (["custom-model"], "✓ The endpoint listed 1 model(s)"),
+            ([], "✗ No models listed, showing the defaults"),
+        ],
+    )
+    def test_custom_openai_reports_progress_before_probe_and_result_after(
+        self, names, message
+    ):
+        from EvoScientist.config.onboard import steps
+
+        events = []
+
+        def print_status(text, **kwargs):
+            events.append(text)
+
+        def discover(*args):
+            events.append("probe")
+            return names
+
+        config = EvoScientistConfig(custom_openai_base_url="https://llm.test/v1")
+        with (
+            patch.object(steps.console, "print", side_effect=print_status),
+            patch.object(steps, "list_custom_openai_models", side_effect=discover),
+            patch.object(steps, "questionary") as choices,
+        ):
+            choices.select.return_value.ask.return_value = "custom-model"
+            steps._step_model(config, "custom-openai")
+
+        assert len(events) == 3
+        assert "Checking endpoint for models..." in events[0]
+        assert events[1] == "probe"
+        assert message in events[2]
 
     def test_custom_openai_keeps_registry_defaults_when_discovery_empty(self):
         from EvoScientist.config.onboard.steps import _step_model

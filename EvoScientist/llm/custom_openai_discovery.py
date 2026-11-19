@@ -12,18 +12,19 @@ keyless local server is probed and ``OPENAI_API_KEY`` is never forwarded.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import threading
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 # A picker mounts one row per model, so a huge listing would make it unusable.
 _MAX_MODELS = 500
 
-# The body is parsed and walked before the names are counted, and that work
-# has to fit the deadline. A picker shows at most _MAX_MODELS rows, so a
-# body past this carries ids no picker would show: it is dropped rather
-# than parsed.
+# Leave room for metadata-rich catalogs while bounding the download and parse.
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
@@ -34,24 +35,26 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
 
 
-def _names_from_body(body: object) -> list[str]:
-    """Model ids from an OpenAI ``/models`` body: stripped, unique, capped."""
-    from ..config.provider_keys import _listed_models
-
-    listed = _listed_models(body)
-    if not listed:
-        return []
+def _names_from_body(body: object) -> list[str] | None:
+    """Return unique, stripped IDs in listing order, or None for a non-list response."""
+    if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        return None
     names: list[str] = []
     seen: set[str] = set()
-    for raw in listed:
-        name = raw.strip()
+    for item in body["data"]:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        name = str(item["id"]).strip()
         if not name or name in seen:
             continue
         seen.add(name)
         names.append(name)
-        if len(names) >= _MAX_MODELS:
-            break
     return names
+
+
+def _picker_names(body: object) -> list[str]:
+    """The IDs a picker shows: the listing's, capped at the row limit."""
+    return (_names_from_body(body) or [])[:_MAX_MODELS]
 
 
 def list_custom_openai_models(
@@ -60,21 +63,10 @@ def list_custom_openai_models(
     *,
     timeout: float = 5.0,
 ) -> list[str]:
-    """The endpoint's model ids, or ``[]`` on any failure.
+    """Return model IDs or ``[]`` to a synchronous caller.
 
-    Never raises: the wizard must still open when the endpoint is down. The
-    call has a TOTAL deadline, not just HTTPX's inactivity timeout, because
-    HTTPX's timeout only limits the wait between chunks.
-
-    The probe runs in a daemon thread, because the wizard is blocking and
-    the request must not. That thread runs the async probe, whose deadline
-    CANCELS the request, so the thread ends with the request.
-
-    The work after the response -- parsing the body and taking the names
-    out of it -- runs in a thread of its own, and the wait for it is what
-    the rest of the deadline bounds. That thread may outlive the call when
-    the body is too big to parse in time; it finishes on its own and its
-    result is dropped.
+    A daemon worker runs the async probe, which cancels an overdue download.
+    The caller waits at most ``timeout`` plus a short grace period.
     """
     if not base_url:
         return []
@@ -82,8 +74,6 @@ def list_custom_openai_models(
     names: list[str] = []
 
     def fetch() -> None:
-        import asyncio
-
         try:
             found = asyncio.run(
                 discover_custom_openai_models(base_url, api_key, timeout=timeout)
@@ -96,13 +86,36 @@ def list_custom_openai_models(
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        # The probe's own deadline cancels the request, so the thread ends
-        # when the cancellation lands. This is the grace for that -- and a
-        # listing that arrives inside it is the answer.
+        # Allow loop startup and request cleanup without waiting indefinitely.
         worker.join(0.5)
-    # A copy: the worker may still be filling its own buffer, and a caller
-    # that kept the list would see it fill itself in after the return.
+    # A worker finishing after the grace period must not change the result.
     return list(names)
+
+
+async def _download_listing(
+    base_url: str, api_key: str | None, timeout: float
+) -> bytearray | None:
+    async with (
+        httpx.AsyncClient(timeout=timeout) as client,
+        client.stream(
+            "GET", base_url.rstrip("/") + "/models", headers=_auth_headers(api_key)
+        ) as resp,
+    ):
+        if resp.status_code != 200:
+            return None
+        # The limit is on the body that gets parsed, so it is measured on the
+        # decoded bytes: a compressed listing that decodes past the limit is
+        # dropped for the same reason an oversized plain body is.
+        content = bytearray()
+        async for chunk in resp.aiter_bytes():
+            if len(content) + len(chunk) > _MAX_BODY_BYTES:
+                logger.debug(
+                    "Skipping custom OpenAI model list: body exceeds the %d-byte limit",
+                    _MAX_BODY_BYTES,
+                )
+                return None
+            content.extend(chunk)
+        return content
 
 
 async def discover_custom_openai_models(
@@ -111,83 +124,25 @@ async def discover_custom_openai_models(
     *,
     timeout: float = 1.5,
 ) -> list[str]:
-    """The endpoint's model ids, or ``[]`` on any failure.
+    """Return model IDs, or ``[]`` on failure or an exceeded deadline.
 
-    Never raises: the picker must always open, even when the endpoint is
-    down. An empty ``base_url`` returns ``[]`` without an HTTP call. The
-    timeout is a TOTAL deadline, so a trickling endpoint cannot keep the
-    picker waiting.
+    The download has a total timeout, not just HTTPX's inactivity timeout.
+    Parsing the size-limited body is synchronous and cannot be interrupted.
     """
     if not base_url:
         return []
 
     try:
-        import asyncio
-
-        # One deadline for the whole call: the download AND the parse. A
-        # listing of a million ids is 20 MB, and parsing that takes longer
-        # than the download -- so a deadline that covered only the request
-        # would let the picker wait on the parse.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await asyncio.wait_for(
-                client.get(
-                    base_url.rstrip("/") + "/models",
-                    headers=_auth_headers(api_key),
-                ),
-                timeout=max(0.0, deadline - loop.time()),
-            )
-        if resp.status_code != 200:
+        content = await asyncio.wait_for(
+            _download_listing(base_url, api_key, timeout), timeout=timeout
+        )
+        if content is None or loop.time() >= deadline:
             return []
-        # A body past the cap is not a picker: it is not parsed at all.
-        if len(resp.content) > _MAX_BODY_BYTES:
+        names = _picker_names(json.loads(content))
+        if loop.time() >= deadline:
             return []
-
-        # The parse and the names out of it are the other half of the
-        # deadline: walking a near-cap body costs as much as parsing it.
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            return []
-        return await _names_within(resp.content, remaining)
+        return names
     except Exception:
         return []
-
-
-async def _names_within(content: bytes, timeout: float) -> list[str]:
-    """The names in *content*, parsed off the event loop within *timeout*.
-
-    A parse cannot be interrupted, so what the timeout bounds is the WAIT for
-    it: a parse that does not fit is dropped and its result thrown away.
-    Waiting for a cancelled parse instead would let the body decide how long
-    the picker stays open.
-
-    The parsing thread is a daemon of its own rather than the loop's
-    executor, so a loop that closes while the parse runs does not wait for
-    it -- an executor thread would hold the caller until the parse ended.
-    """
-    import asyncio
-
-    loop = asyncio.get_running_loop()
-    finished = asyncio.Event()
-    parsed: list[list[str]] = []
-
-    def parse() -> None:
-        try:
-            names = _names_from_body(json.loads(content))
-        except Exception:
-            names = []
-        parsed.append(names)
-        try:
-            loop.call_soon_threadsafe(finished.set)
-        except RuntimeError:
-            # The loop is closed; the parse's result goes with it.
-            pass
-
-    threading.Thread(target=parse, daemon=True).start()
-    try:
-        await asyncio.wait_for(finished.wait(), timeout=timeout)
-    except TimeoutError:
-        return []
-    return list(parsed[0]) if parsed else []

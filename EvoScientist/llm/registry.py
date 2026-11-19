@@ -7,6 +7,8 @@ for the chat-model construction stack in :mod:`.models` (~2000 modules).
 
 from __future__ import annotations
 
+import asyncio
+
 
 class UnknownModelError(ValueError):
     """A router was given a model id it cannot address (a bare short name)."""
@@ -349,41 +351,54 @@ async def list_model_picker_entries(
     or failed probe keeps the defaults, so the picker still opens offline.
     """
     entries = list_models_by_provider()
-    if ollama_base_url:
-        from .ollama_discovery import discover_ollama_models
+    if not (ollama_base_url or custom_openai_base_url):
+        return entries
 
-        for detected_name in await discover_ollama_models(
-            ollama_base_url,
-            timeout=1.5,
-        ):
-            entries.append((detected_name, detected_name, "ollama"))
-        if include_custom_ollama:
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
-    if custom_openai_base_url:
-        from .custom_openai_discovery import discover_custom_openai_models
+    from .custom_openai_discovery import discover_custom_openai_models
+    from .ollama_discovery import discover_ollama_models
 
-        discovered = await discover_custom_openai_models(
-            custom_openai_base_url,
-            custom_openai_api_key,
-            timeout=1.5,
+    ollama_probe = (
+        discover_ollama_models(ollama_base_url, timeout=1.5)
+        if ollama_base_url
+        else None
+    )
+    custom_probe = (
+        discover_custom_openai_models(
+            custom_openai_base_url, custom_openai_api_key, timeout=1.5
         )
-        if discovered:
-            # In place, not appended: the custom-openai group keeps the
-            # position it has in the static registry. The discovery already
-            # stripped blank ids and removed duplicates.
-            replacement = [(name, name, "custom-openai") for name in discovered]
-            merged: list[tuple[str, str, str]] = []
-            inserted = False
-            for row in entries:
-                if row[2] == "custom-openai":
-                    if not inserted:
-                        merged.extend(replacement)
-                        inserted = True
-                    continue
-                merged.append(row)
-            if not inserted:
-                merged.extend(replacement)
-            entries = merged
+        if custom_openai_base_url
+        else None
+    )
+    ollama_models: list[str] = []
+    discovered: list[str] = []
+    if ollama_probe is not None and custom_probe is not None:
+        ollama_models, discovered = await asyncio.gather(ollama_probe, custom_probe)
+    elif ollama_probe is not None:
+        ollama_models = await ollama_probe
+    elif custom_probe is not None:
+        discovered = await custom_probe
+
+    for name in ollama_models:
+        entries.append((name, name, "ollama"))
+    if ollama_base_url and include_custom_ollama:
+        entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    if discovered:
+        # In place, not appended: the custom-openai group keeps the
+        # position it has in the static registry. The discovery already
+        # stripped blank ids and removed duplicates.
+        replacement = [(name, name, "custom-openai") for name in discovered]
+        merged: list[tuple[str, str, str]] = []
+        inserted = False
+        for row in entries:
+            if row[2] == "custom-openai":
+                if not inserted:
+                    merged.extend(replacement)
+                    inserted = True
+                continue
+            merged.append(row)
+        if not inserted:
+            merged.extend(replacement)
+        entries = merged
     return entries
 
 

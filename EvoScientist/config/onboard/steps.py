@@ -832,13 +832,20 @@ def _step_model(
     if provider == "custom-openai":
         # The probe sends the URL and the key the model calls will use:
         # the environment first, then the wizard's value.
+        console.print("  [dim]Checking endpoint for models...[/dim]", end="")
         discovered = list_custom_openai_models(
             os.environ.get("CUSTOM_OPENAI_BASE_URL") or config.custom_openai_base_url,
-            os.environ.get("CUSTOM_OPENAI_API_KEY")
-            or getattr(config, "custom_openai_api_key", ""),
+            os.environ.get("CUSTOM_OPENAI_API_KEY") or config.custom_openai_api_key,
         )
-        entries = [(name, name) for name in discovered]
-        if not entries:
+        if discovered:
+            console.print(
+                f"\r  [green]✓ The endpoint listed {len(discovered)} model(s)[/green]      "
+            )
+            entries = [(name, name) for name in discovered]
+        else:
+            console.print(
+                "\r  [yellow]✗ No models listed, showing the defaults[/yellow]      "
+            )
             entries = get_models_for_provider(provider)
     else:
         entries = get_models_for_provider(provider)
@@ -872,7 +879,8 @@ def _step_model(
     _CUSTOM_SENTINEL = "__custom__"
     choices = []
     for name, model_id in entries:
-        choices.append(Choice(title=f"{name} ({model_id})", value=name))
+        title = name if name == model_id else f"{name} ({model_id})"
+        choices.append(Choice(title=title, value=name))
     choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
     # Determine default. An explicit ``default_value`` override (e.g. a saved

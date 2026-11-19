@@ -5,9 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 
-from EvoScientist.llm.custom_openai_discovery import _names_from_body
+from EvoScientist.llm.custom_openai_discovery import _names_from_body, _picker_names
 from EvoScientist.llm.models import get_chat_model
 
 
@@ -66,31 +67,8 @@ def test_a_discovered_id_is_stripped():
 
 
 def test_a_non_model_body_lists_nothing():
-    assert _names_from_body({"error": "not a model list"}) == []
-    assert _names_from_body({"data": "nope"}) == []
-
-
-def _picker_stub():
-    """A questionary stub whose picker returns the first choice."""
-
-    class _Answer:
-        def execute(self):
-            return ""
-
-        def ask(self):
-            return ""
-
-    class _Choice:
-        @staticmethod
-        def select(*args, **kwargs):
-            return _Answer()
-
-    class _Text:
-        @staticmethod
-        def text(*args, **kwargs):
-            return _Answer()
-
-    return {"select": _Choice.select, "text": _Text.text}
+    assert _names_from_body({"error": "not a model list"}) is None
+    assert _names_from_body({"data": "nope"}) is None
 
 
 def test_a_custom_anthropic_id_is_sent_as_written(monkeypatch):
@@ -121,13 +99,14 @@ def test_a_discovered_listing_is_capped():
     """A huge listing would fill the picker with one row per model."""
     body = {"data": [{"id": f"model-{i}"} for i in range(5000)]}
 
-    names = _names_from_body(body)
+    names = _picker_names(body)
 
-    assert len(names) <= 500
-    assert names[0] == "model-0"
+    assert names == [f"model-{i}" for i in range(500)]
 
 
-def _probe_seen(monkeypatch, config, env_url=None, env_key=None):
+def _capture_onboarding_probe_credentials(
+    monkeypatch, config, env_url=None, env_key=None
+):
     """Run the onboarding probe and report the URL and key it used."""
     from EvoScientist.config.onboard import steps as steps_module
 
@@ -148,15 +127,13 @@ def _probe_seen(monkeypatch, config, env_url=None, env_key=None):
     else:
         monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", env_key)
 
-    with patch(
-        "EvoScientist.config.onboard.steps.questionary",
-        **_picker_stub(),
-    ):
+    with patch.object(steps_module, "questionary") as picker:
+        picker.select.return_value.ask.return_value = "gpt-6-luna"
         steps_module._step_model(config, "custom-openai")
     return seen
 
 
-def _config(url="http://saved-endpoint/v1", key="saved-key"):
+def _saved_endpoint_config(url="http://saved-endpoint/v1", key="saved-key"):
     return SimpleNamespace(
         model="",
         custom_openai_base_url=url,
@@ -170,9 +147,9 @@ def test_an_environment_url_is_probed_with_the_saved_key(monkeypatch):
     The environment names the URL and the config holds the key, so the
     probe sends both -- the same pair the model calls will send.
     """
-    seen = _probe_seen(
+    seen = _capture_onboarding_probe_credentials(
         monkeypatch,
-        _config(),
+        _saved_endpoint_config(),
         env_url="http://env-endpoint/v1",
         env_key=None,
     )
@@ -182,14 +159,10 @@ def test_an_environment_url_is_probed_with_the_saved_key(monkeypatch):
 
 
 def test_an_environment_key_is_probed_with_the_saved_url(monkeypatch):
-    """The saved URL keeps the environment key when it has no key of its own.
-
-    The wizard has written the URL but may not have written the key back,
-    so the live credential comes from the environment.
-    """
-    seen = _probe_seen(
+    """The probe prefers the environment key even when the URL comes from config."""
+    seen = _capture_onboarding_probe_credentials(
         monkeypatch,
-        _config(url="http://saved-endpoint/v1", key=""),
+        _saved_endpoint_config(),
         env_url=None,
         env_key="env-key",
     )
@@ -227,10 +200,10 @@ def test_the_model_calls_keep_the_saved_key_when_the_environment_names_the_url(
     assert model.openai_api_key.get_secret_value() == "sk-saved"
 
 
-def test_both_from_the_environment_are_paired(monkeypatch):
-    seen = _probe_seen(
+def test_probe_prefers_both_environment_values_over_saved_values(monkeypatch):
+    seen = _capture_onboarding_probe_credentials(
         monkeypatch,
-        _config(),
+        _saved_endpoint_config(),
         env_url="http://env-endpoint/v1",
         env_key="env-key",
     )
@@ -239,54 +212,53 @@ def test_both_from_the_environment_are_paired(monkeypatch):
     assert seen["api_key"] == "env-key", seen
 
 
-def test_both_from_the_saved_config_are_paired(monkeypatch):
-    seen = _probe_seen(monkeypatch, _config(), env_url=None, env_key=None)
+def test_probe_uses_saved_url_and_key_when_environment_values_are_unset(monkeypatch):
+    seen = _capture_onboarding_probe_credentials(
+        monkeypatch, _saved_endpoint_config(), env_url=None, env_key=None
+    )
 
     assert seen["base_url"] == "http://saved-endpoint/v1", seen
     assert seen["api_key"] == "saved-key", seen
 
 
 @pytest.mark.asyncio
-async def test_the_probe_has_a_total_deadline():
+async def test_the_probe_has_a_total_deadline(monkeypatch):
     """A slow endpoint cannot keep the picker from opening.
 
     httpx's timeout is an inactivity timeout: a server that trickles a byte
     at a time keeps it alive. The probe needs a total deadline as well.
     """
     import asyncio
-    import time
 
     from EvoScientist.llm import custom_openai_discovery as discovery
 
-    class _SlowClient:
-        def __init__(self, *args, **kwargs):
-            pass
+    class _TricklingBody(httpx.AsyncByteStream):
+        started = False
+        closed = False
 
-        async def __aenter__(self):
-            return self
+        async def __aiter__(self):
+            self.started = True
+            for _ in range(20):
+                await asyncio.sleep(0.05)
+                yield b" "
+            yield b'{"data": [{"id": "late"}]}'
 
-        async def __aexit__(self, *args):
-            return False
+        async def aclose(self):
+            self.closed = True
 
-        async def get(self, *args, **kwargs):
-            await asyncio.sleep(5)
-            raise AssertionError("the deadline did not fire")
+    body = _TricklingBody()
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=body))
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: client(transport=transport, **kwargs)
+    )
+    names = await discovery.discover_custom_openai_models(
+        "http://slow-endpoint/v1", timeout=0.3
+    )
 
-    import httpx
-
-    original = httpx.AsyncClient
-    httpx.AsyncClient = _SlowClient
-    try:
-        started = time.monotonic()
-        names = await discovery.discover_custom_openai_models(
-            "http://slow-endpoint/v1", timeout=0.3
-        )
-        elapsed = time.monotonic() - started
-    finally:
-        httpx.AsyncClient = original
-
+    assert body.started
+    assert body.closed
     assert names == []
-    assert elapsed < 2.0, elapsed
 
 
 def test_the_environment_key_wins_over_an_expired_saved_key(monkeypatch):
@@ -296,9 +268,9 @@ def test_the_environment_key_wins_over_an_expired_saved_key(monkeypatch):
     probe must use the same effective credentials the runtime will use, or
     discovery fails against an endpoint that would have answered.
     """
-    seen = _probe_seen(
+    seen = _capture_onboarding_probe_credentials(
         monkeypatch,
-        _config(url="http://same-endpoint/v1", key="expired-key"),
+        _saved_endpoint_config(url="http://same-endpoint/v1", key="expired-key"),
         env_url="http://same-endpoint/v1",
         env_key="live-key",
     )
@@ -317,23 +289,23 @@ def test_the_timed_out_request_is_aborted(monkeypatch):
     import asyncio
     import time
 
-    import httpx
-
     from EvoScientist.llm import custom_openai_discovery as discovery
 
     cancelled: list[bool] = []
 
-    class _SlowClient(httpx.AsyncClient):
-        async def get(self, *args, **kwargs):
-            try:
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                cancelled.append(True)
-                raise
-            raise AssertionError("the deadline did not fire")
+    async def never_answers(request):
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        raise AssertionError("the deadline did not fire")
 
-    monkeypatch.setattr(httpx, "AsyncClient", _SlowClient)
-
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(never_answers)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: client(transport=transport, **kwargs)
+    )
     started = time.monotonic()
     names = discovery.list_custom_openai_models("http://slow-endpoint/v1", timeout=0.3)
     elapsed = time.monotonic() - started

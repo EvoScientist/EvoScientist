@@ -1171,6 +1171,59 @@ class TestModelCommandCustomOpenaiPicker:
         )
         assert any(row[2] != "custom-openai" for row in entries[first_custom + 1 :])
 
+    async def test_picker_probes_both_endpoints_concurrently(self):
+        import asyncio
+
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.llm.registry import list_models_by_provider
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(base_url="https://llm.test/v1")
+        cfg.ollama_base_url = "http://ollama.test"
+        ollama_started = asyncio.Event()
+        custom_started = asyncio.Event()
+
+        async def ollama_probe(base_url, *, timeout):
+            assert (base_url, timeout) == (cfg.ollama_base_url, 1.5)
+            ollama_started.set()
+            await custom_started.wait()
+            return ["local-model"]
+
+        async def custom_probe(base_url, api_key=None, *, timeout):
+            assert (base_url, timeout) == (cfg.custom_openai_base_url, 1.5)
+            custom_started.set()
+            await ollama_started.wait()
+            return ["custom-model"]
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models", ollama_probe
+            ),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                custom_probe,
+            ),
+        ):
+            await asyncio.wait_for(ModelCommand().execute(ctx, []), timeout=2)
+
+        entries = ui.wait_for_model_pick.call_args.args[0]
+        static = list_models_by_provider()
+        first_custom = next(
+            i for i, row in enumerate(static) if row[2] == "custom-openai"
+        )
+        assert entries[first_custom] == (
+            "custom-model",
+            "custom-model",
+            "custom-openai",
+        )
+        assert [row for row in entries if row[2] == "custom-openai"] == [
+            entries[first_custom]
+        ]
+        assert [row for row in entries if row[2] == "ollama"] == [
+            ("local-model", "local-model", "ollama"),
+            ("Custom Ollama model...", "__custom_ollama__", "ollama"),
+        ]
+
     async def test_fallback_picker_shows_discovered_names(self):
         """``/model-fallback add`` opens a picker with the endpoint's ids.
 
