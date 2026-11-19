@@ -2592,8 +2592,9 @@ def config_set(
 
 
 def _apply_autoskills_settings(config: Any = None) -> None:
-    """Have a running server reschedule every project's AutoSkills cron,
-    reached at *config*'s address (by default the current configuration's)."""
+    """Have a running server reschedule every project's AutoSkills cron:
+    the one its record names, else the one at *config*'s address (by
+    default the current configuration's)."""
     from ..config import get_effective_config
     from ..langgraph_dev.registration import apply_autoskills_settings
 

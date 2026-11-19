@@ -1020,7 +1020,105 @@ class TestWorkspaceRemovalAndComments:
         assert "protected folder" in error
 
     @pytest.mark.parametrize(
-        "command", ["rm -r .evoscientist", "rm -rf .evoscientist/memories/$(date +%F)"]
+        "command",
+        [
+            "cd skills && rm -rf demo",
+            "cd skills; rm -rf demo",
+            "cd ./skills/ && rm -rf demo",
+            "pushd skills && rm -rf demo",
+            "cd skills/demo && rm -rf .",
+            "cd skills && rm -rf *",
+            "cd skills && rm -rf $(echo demo)",
+            "cd build || cd skills; rm -rf demo",
+            "bash -c 'cd skills && rm -rf demo'",
+            "cd skills/demo && rm -rf $X",
+            "D=skills; cd $D && rm -rf demo",
+            'D=skills; cd "$D/demo" && rm -rf x',
+            "env -C skills rm -rf demo",
+            "env -C build -C skills rm -rf demo",
+            # Options as the shell reads them.
+            'cd "-P" skills; rm -rf demo',
+            "O=-P; cd $O skills; rm -rf demo",
+            'D=sk; rm -rf "$D"ills',
+            'A=sk; D="$A"ills; rm -rf $D',
+            'D=sk; env -C "$D"ills rm -rf x',
+            'D="x skills"; rm -rf $D',
+            'for d in skills x; do rm -rf "$d"; done',
+            'for d in {skills,build}; do rm -rf "$d"; done',
+            'for d in sk{ills,x}; do rm -rf "$d"; done',
+            "env D=skills sh -c 'rm -rf \"$D\"'",
+            "env 'D=skills' sh -c 'rm -rf \"$D\"'",
+            "builtin export D=skills; rm -rf $D",
+            "env --chdir=skills/demo rm -rf x",
+            "env -C . sh -c 'rm -rf skills'",
+            'D=skills; env -C "$D" rm -rf x',
+            "D=skills; rm -rf $D",
+            'D=skills; rm -rf "$D/demo"',
+            "A=sk; D=${A}ills; rm -rf $D",
+            "export D=skills; rm -rf ${D}",
+            "X=$(true); rm -rf skills/$X",
+            "X=`true`; rm -rf skills/$X",
+            "X=$(true); cd skills && rm -rf demo$X",
+            # An env -C folder only the run knows keeps the one it is read from.
+            'env -C "$(pwd)" rm -rf skills',
+            "X=$(pwd); env -C $X rm -rf skills",
+            "cd skills; env -C `mktemp -d` rm -rf demo",
+        ],
+    )
+    @pytest.mark.parametrize("folder", ["workspace", "my workspace"])
+    def test_removals_from_every_folder_a_cd_may_enter_are_checked(
+        self, command, folder, tmp_path
+    ):
+        workspace = tmp_path / folder
+        workspace.mkdir()
+        error = self._prepare_with_workspace_folders(command, str(workspace))
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd build && rm -rf skills",
+            "pushd build && rm -rf skills",
+            "(cd build; rm -rf skills)",
+            "(cd build); rm -rf skills",
+            "rm -rf demo; cd skills",
+            "bash -c 'cd build && rm -rf skills'",
+            "bash -c 'cd EvoSkills && rm -rf skills/old'",
+            "timeout 60 bash -c 'cd build && rm -rf skills'",
+            "bash <<'EOF'\ncd build\nrm -rf skills\nEOF",
+            'echo "$(cd build && rm -rf skills)"',
+            'cd build && >"$(rm -rf skills)" echo hi',
+            "cd `mktemp -d` && rm -rf skills",
+            'cd build && echo "$(rm -rf skills)"',
+            "cd build && cat <<EOF\n$(rm -rf skills)\nEOF",
+        ],
+    )
+    def test_a_removal_is_also_read_from_the_workspace_root(
+        self, command, tmp_workspace
+    ):
+        # The folders are read in any order, so the root is always one of
+        # them; `rm -rf build/skills` names the same folder without the cd.
+        error = self._prepare_with_workspace_folders(command, tmp_workspace)
+        assert "protected folder" in error
+        assert (
+            self._prepare_with_workspace_folders("rm -rf build/skills", tmp_workspace)
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -r .evoscientist",
+            "rm -rf .evoscientist/memories/$(date +%F)",
+            "cd .evoscientist && rm -rf memories",
+            'D="x .evoscientist"; rm -rf $D',
+            # A cd runs under its own env -C folders.
+            "env -C .evoscientist sh -c 'cd memories; rm -rf profile'",
+            "env -C .evoscientist sh -c 'cd memories && env -C . rm -rf profile'",
+            "env -C .evoscientist bash -c 'D=memories; cd $D; rm -rf x'",
+            "D=$(date +%F); rm -rf .evoscientist/memories/$D",
+            'D=$(date +%F); rm -rf ".evoscientist/memories/$D"',
+        ],
     )
     def test_relative_removals_of_memories_in_the_workspace_are_refused(
         self, command, tmp_workspace, monkeypatch
@@ -1041,33 +1139,398 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf $OUT",
             'rm -rf "$OUT"/skills',
             "rm skills/demo/x.py",
-            "cd build && rm -rf skills",
-            "pushd build && rm -rf skills",
             "env -C build rm -rf skills",
             "env -iC build rm -rf skills",
             "env --chdir=build rm -rf skills",
             "env --ch build rm -rf skills",
             "env -iu X -C build rm -rf skills",
             "env LANG=C -C build rm -rf skills",
-            "(cd build; rm -rf skills)",
-            "bash -c 'cd build && rm -rf skills'",
-            "bash -c 'cd EvoSkills && rm -rf skills/old'",
-            "timeout 60 bash -c 'cd build && rm -rf skills'",
-            "bash <<'EOF'\ncd build\nrm -rf skills\nEOF",
-            'echo "$(cd build && rm -rf skills)"',
             "env -C build sh -c 'rm -rf skills' && echo done",
             "nohup env -C build rm -rf skills",
-            'cd build && >"$(rm -rf skills)" echo hi',
-            "cd `mktemp -d` && rm -rf skills",
-            'cd build && echo "$(rm -rf skills)"',
-            "cd build && cat <<EOF\n$(rm -rf skills)\nEOF",
+            "env -C build env -C sub rm -rf skills",
+            # A cd runs under its own env -C folders, before it changes folder.
+            "env -C build sh -c 'cd skills && rm -rf demo'",
+            "env -C x sh -c 'cd skills'; rm -rf demo",
+            "cd build && rm -rf demo",
+            "cd build && rm -rf *",
+            "cd src; cd -; rm -rf build",
+            'cd "$(pwd)" && rm -rf build',
+            "D=$(pwd); rm -rf $D/build",
+            'D=build; rm -rf "$D"',
+            "X=$(true); rm -rf build/$X",
             "rm -rf skill* {build,dist}",
             "rm -rf build/$(date +%F)",
             "rm -rf ./$(printf build)",
+            'for d in build dist; do rm -rf "$d"; done',
+            'for f in *.log; do rm -rf "$f"; done',
         ],
     )
     def test_other_relative_removals_pass(self, command, tmp_workspace):
         assert self._prepare_with_workspace_folders(command, tmp_workspace) is None
+
+    @pytest.mark.parametrize(
+        ("command", "shown"),
+        [
+            ("rm -rf build; cd skills", "'build' (read from 'skills', a folder"),
+            ("cd skills/demo && rm -rf x", "'x' (read from 'skills/demo', a folder"),
+            ("env -C skills rm -rf x", "'x' (read from 'skills', a folder"),
+            ("cd build && rm -rf skills", "'skills' is or holds"),
+            ("rm -rf skills; cd build", "'skills' is or holds"),
+        ],
+    )
+    def test_a_refusal_names_the_folder_the_operand_is_read_from(
+        self, command, shown, tmp_workspace
+    ):
+        error = self._prepare_with_workspace_folders(command, tmp_workspace)
+        assert shown in error
+
+    def test_a_removal_in_a_protected_folder_outside_the_workspace_is_refused(self):
+        assert "protected folder" in validate_command(
+            "env -C /M rm -rf x", ("/M", "/W"), workspace_root="/W"
+        )
+        assert (
+            validate_command(
+                "env -C /W/build rm -rf x", ("/M", "/W"), workspace_root="/W"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("windows", [False, True])
+    def test_a_drive_target_is_absolute_only_on_windows(self, monkeypatch, windows):
+        monkeypatch.setattr(backends, "_is_windows", lambda: windows)
+        commands = backends.shell_syntax.simple_commands("cd C:/W/skills")
+        root = "C:/W" if windows else "/W"
+        folders = [f for f, _ in backends._possible_folders(commands, root, {})]
+        assert folders[-1] == ("C:/W/skills" if windows else "/W/C:/W/skills")
+
+    def test_the_folders_a_removal_is_read_from_are_capped(self):
+        command = "; ".join(f"cd d{i}" for i in range(5)) + "; rm -rf x"
+        commands = backends.shell_syntax.simple_commands(command)
+        folders = [f for f, _ in backends._possible_folders(commands, "/W", {})]
+        assert folders[:3] == ["/W", "/W/d0", "/W/d1"]
+        assert len(folders) == 32
+        assert validate_command(command, workspace_root="/W") is None
+        # Past the cap, the folder a later cd enters is not known.
+        padded = "; ".join(f"cd a{i}" for i in range(7))
+        error = validate_command(
+            f"{padded}; cd .evoscientist; cd memories; rm -rf x",
+            ("/W/.evoscientist/memories",),
+            workspace_root="/W",
+        )
+        assert "more than 64 folders" in error
+        # An absolute path, written out or from a variable, needs no folder.
+        assert (
+            validate_command(f"{padded}; rm -rf /W/build", workspace_root="/W") is None
+        )
+        assert (
+            validate_command(f'{padded}; D=/W/build; rm -rf "$D"', workspace_root="/W")
+            is None
+        )
+        assert "protected folder" in validate_command(
+            f'{padded}; D=/W/skills; rm -rf "$D"', ("/W/skills",), workspace_root="/W"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "f(){ cd memories; }; cd .evoscientist; f; rm -rf x",
+            "f:() { cd memories; }; cd .evoscientist; f:; rm -rf x",
+            "function f { cd memories; }; cd .evoscientist; f; rm -rf x",
+            "for i in 1 2; do cd memories; cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; { cd memories; cd .evoscientist; }; rm -rf x",
+            'for d in .evoscientist memories; do cd "$d"; done; rm -rf x',
+            # A function defined in a string run as code.
+            'eval "f() { cd memories; }"; cd .evoscientist; f; rm -rf x',
+            "while true; do cd x; done; rm -rf build",
+            "shopt -s cdable_vars; S=.evoscientist/memories; cd S; rm -rf x",
+            'for d in */; do (cd "$d" && rm -rf build); done',
+            "until cd memories; do :; done; rm -rf x",
+            "function f() { :; cd memories; }; cd .evoscientist; f; rm -rf x",
+            "cd build; for i in 1; do eval 'cd skills'; done; rm -rf demo",
+            "for i in 1; do source x; done; cd b; rm -rf demo",
+            # A body other than `{ }`, and keywords only as written.
+            "f() if :; then cd memories; fi; cd .evoscientist; f; rm -rf x",
+            "f() case 1 in 1) cd memories;; esac; cd .evoscientist; f; rm -rf x",
+            "function f (cd memories; rm -rf x); cd .evoscientist; f",
+            'for i in 1 2; do "done"; cd memories; cd .evoscientist; done; rm -rf x',
+            "for i in 1 2; do \\done; cd memories; cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; do case x in done) :;; esac; cd memories; "
+            "cd .evoscientist; done; rm -rf x",
+            "for i in 1 2; do echo $(true) esac; cd memories; cd .evoscientist; "
+            "done; rm -rf x",
+        ],
+    )
+    def test_a_folder_change_the_check_cannot_read_in_order_is_refused(self, command):
+        error = validate_command(
+            command, ("/W/.evoscientist/memories",), workspace_root="/W"
+        )
+        assert "the folder each recursive rm runs in is not followed" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # No cd, or no relative operand: read as before.
+            "for d in build dist; do rm -rf $d; done",
+            "f(){ make; }; f; rm -rf build",
+            "for i in 1 2; do cd x; done; rm -rf /W/build",
+            # A loop or function with no cd, eval, source or `.` in it.
+            'cd experiments && for d in run_*; do rm -rf "$d/checkpoints"; done',
+            "cd results && rm -rf old && for s in 0 1 2; do mkdir -p seed_$s; done",
+            "cd tests && rm -rf .pytest_cache && for f in test_*.py; do python $f; done",
+            "cd src && make clean; while true; do sleep 1; break; done; rm -rf build",
+            "function f() { :; }; cd x; rm -rf build",
+            "cd x; case $1 in a) echo;; esac; rm -rf build",
+            # Common shapes: code run from a file or a string, a call in quotes.
+            "source .venv/bin/activate && rm -rf build",
+            'eval "$(conda shell.bash hook)"; rm -rf build',
+            'cd build && python -c "main()" && rm -rf dist',
+            "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; rm -rf build",
+            'OUT=build; rm -rf "${OUT:?}"/*',
+            "OUT=build; printf '%s\\n' done; rm -rf \"$OUT\"",
+            "OUT=build; printf '%d%%\\n' 50; rm -rf \"$OUT\"",
+            'eval "$(conda shell.bash hook)"; cd build; rm -rf dist',
+            'read f; d=$f; cd "$d"',
+            'X=${X:-build}; rm -rf "$X"',
+            # A variable used only inside a substitution: read as written.
+            'read f; cd "$(dirname "$f")"',
+            "find . -name setup.py | while read -r f; do "
+            '(cd "$(dirname "$f")" && pip install -e .); done',
+            'for f in $(git ls-files "*.egg-info"); do '
+            'rm -rf "$(dirname "$f")/build"; done',
+            # A cd to a variable whose values are not followed, with no rm.
+            'for X in $(ls -d */); do cd "$X"; done',
+            'git ls-files | while read f; do cd "$f"; done',
+            'D=pkg; source .venv/bin/activate; cd "$D" && pytest',
+            # The word "function" or "()" in quoted text or a here-doc.
+            'cd pkg && rm -rf build && git commit -m "rename function foo"',
+            "cat > notes.md <<'EOF'\nThe helper function parses args.\nEOF\n"
+            "cd x && rm -rf build",
+            # NAME=value before a regular command is set for that command only.
+            'OUT=results; while IFS= read -r f; do echo "$f"; done < l.txt; '
+            "cd $OUT && ls",
+            'OUT=build; while IFS= read -r l; do echo "$l"; done < f.txt; rm -rf $OUT',
+            'OUT=build; env OUT=$(mktemp -d) python x.py; rm -rf "$OUT"',
+            # A variable only the run sets, read as written as for xargs.
+            'while read d; do rm -rf "$d"; done < list.txt',
+            # A brace expansion, read as the words it makes.
+            'for seed in {0..4}; do rm -rf "outputs/seed_$seed"; done',
+            "read D; rm -rf $D",
+            'read R; D=$R; rm -rf "$D"',
+            'D=build; read D; rm -rf "$D"',
+        ],
+    )
+    def test_a_loop_without_a_cd_or_relative_operand_passes(self, command):
+        assert validate_command(command, ("/W/skills",), workspace_root="/W") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'D=skills :; rm -rf "$D"',
+            'f() { :; }; D=skills f; rm -rf "$D"',
+            "D=skills bash -c 'rm -rf \"$D\"'",
+            "env D=skills bash -c 'rm -rf \"$D\"'",
+            # A newline ends the assignment's command, as `;` does.
+            'D=skills\nrm -rf "$D"',
+            'f() { rm -rf "$D"; }; echo "$(D=skills f)"',
+            'a/f() { rm -rf "$D"; }; D=skills a/f',
+            "sh -c 'f() { rm -rf \"$D\"; }; D=skills f'",
+            'D=skills # note\nrm -rf "$D"',
+            'D=skills\nif true; then rm -rf "$D"; fi',
+        ],
+    )
+    def test_an_assignment_before_a_builtin_or_shell_code_counts(self, command):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "protected" in error
+
+    def test_an_env_folder_from_a_quoted_variable_is_one_folder(self):
+        error = validate_command(
+            "D='my skills'; env -C \"$D\" rm -rf demo",
+            ("/W/my skills",),
+            workspace_root="/W",
+        )
+        assert "read from 'my skills'" in error
+
+    def test_an_env_folder_at_the_root_still_matches_protected_folders(self):
+        error = validate_command(
+            "env -C / rm -rf W/skills", ("/W/skills",), workspace_root="/W"
+        )
+        assert "protected folder" in error
+
+    def test_an_empty_unquoted_cd_target_is_a_bare_cd(self, monkeypatch):
+        # A POSIX shell; cmd.exe's bare cd only prints the folder.
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        error = validate_command("D=; cd $D; cat .ssh/config", workspace_root="/W")
+        assert "'cd $D' leaves the workspace" in error
+
+    def test_a_variable_set_before_eval_is_refused_naming_eval(self):
+        error = validate_command(
+            "D=build; eval 'D=skills'; rm -rf \"$D\"",
+            ("/W/skills",),
+            workspace_root="/W",
+        )
+        assert "runs eval" in error
+        # A file run with source is code the check never sees in any case.
+        for command in (
+            'D=build; source .venv/bin/activate; rm -rf "$D"',
+            "source .venv/bin/activate && rm -rf build",
+            'D=pkg; . .venv/bin/activate; cd "$D" && rm -rf build',
+        ):
+            assert (
+                validate_command(command, ("/W/skills",), workspace_root="/W") is None
+            )
+
+    def test_a_function_body_is_read(self):
+        error = validate_command(
+            "function f { rm -rf .evoscientist/memories/x; }; f",
+            ("/W/.evoscientist/memories",),
+            workspace_root="/W",
+        )
+        assert "protected folder" in error
+
+    def test_env_folders_may_not_multiply_the_folders_past_the_cap(self):
+        command = "; ".join(f"cd d{i}" for i in range(5)) + "; cd skills; "
+        error = validate_command(
+            command + "env -C . rm -rf demo", ("/W/skills",), workspace_root="/W"
+        )
+        assert "protected folder" in error
+        values = "; ".join(f"T=v{i}" for i in range(4))
+        error = validate_command(
+            f'{values}; {command}env -C "$T" rm -rf demo',
+            ("/W/skills",),
+            workspace_root="/W",
+        )
+        assert "more than 64 folders" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # `..` made from `.`: a literal `..` is refused before this check.
+            "D=.; rm -rf $D$D/x",
+            "cd skills/demo && D=.; rm -rf $D$D",
+            "D=/opt/data; rm -rf $D",
+            "D=/W; rm -rf $D",
+            "for d in /opt/data; do rm -rf $d; done",
+            'CACHE=$HOME/.cache/x; rm -rf "$CACHE"',
+            "D=~; rm -rf $D",
+            # Glued to a substitution.
+            "D=/opt/data; rm -rf $D/run_$(date +%F)",
+            'D=/opt/data; rm -rf "$D"/run_$(date +%F)',
+            'D=~; rm -rf "$D"/x_$(date +%F)',
+            "D=.; rm -rf $D$D/x_$(date +%F)",
+            "P='..\\o'; rm -rf $P/a_$(date +%F)",
+        ],
+    )
+    def test_a_removal_of_a_variable_value_outside_is_refused(self, command):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "outside the workspace" in error
+        assert validate_command("D=/W/build; rm -rf $D", workspace_root="/W") is None
+        for glued in (
+            "D=build; rm -rf $D/x_$(date +%F)",
+            "M=a/b; rm -rf outputs/$(echo $M | tr '/' '_')",
+            "C=/data/run1; D=out; rm -rf $D/$(basename $C)",
+            "D=out; rm -rf $D/$(cat $HOME/.last_run)",
+        ):
+            assert validate_command(glued, workspace_root="/W") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'D=sk; D+=ills; rm -rf "$D"',
+            "bash -c 'D=sk; D+=ills; rm -rf \"$D\"'",
+            "D=sk; export D+=ills; rm -rf $D/x",
+            'T=.; T+=.; cd "$T"',
+            # Known values and values only the run knows.
+            'X=build; X=$(echo skills); rm -rf "$X"',
+            'T=sub; T=$(echo /etc); cd "$T"',
+            "X=build; X=$Y; Y=`echo skills`; rm -rf $X/demo",
+            # An array, or a value read with an index or an operator.
+            'dirs=(skills x); rm -rf "${dirs[@]}"',
+            'D=skills/; rm -rf "${D%/}"',
+            "D=x; rm -rf ${D:-skills}",
+            # IFS changes how an unquoted value splits.
+            "IFS=:; D=x:skills; rm -rf $D",
+            # A value that refers back to its own variable.
+            'D=.evoscientist; D=$D/memories; rm -rf "$D/old"',
+            "B=skills; A=$B; B=$A; rm -rf $A",
+            "T=.; T=$T.; cd $T",
+            # A variable set other than with a plain NAME=value.
+            "D=x; printf -v D skills; rm -rf $D",
+            "declare -n D=E; E=skills; rm -rf $D",
+            ": ${D:=skills}; rm -rf $D",
+            # A cd to such a variable in front of a recursive rm.
+            'read d; cd "$d"; rm -rf skills',
+            # A value made from a variable only the run sets.
+            'read R; D=skills$R; rm -rf "$D"',
+            'read R; D=$HOME$R; cd "$D"',
+            'DIRS="build skills"; for d in $DIRS; do rm -rf "$d"; done',
+            'for d in $(ls) skills; do rm -rf "$d"; done',
+            # Read as the shell reads the words, and through a nameref.
+            'D=x; declare -n R=D; R=skills; rm -rf "$D"',
+            'declare "-n" D=P; P=skills; rm -rf $D',
+            # Set with a value the check does not follow, or after eval.
+            'printf -v D /; cd "$D"',
+            ': ${D:=/opt}; cd "$D"',
+            'D=/; eval :; cd "$D"',
+            # A cd to a nameref goes to the value of the variable it names.
+            'T=.; D=$T$T; declare -n N=D; cd "$N"',
+            "D=/; local -n N=D; cd $N",
+            'T=.; D=$T$T; declare -n N; N=D; pushd "$N"',
+            'T=.; D=$T$T; N=D; declare -n N; E=$N; cd "$E"',
+            'T=.; D=$T$T; X=N; N=D; declare -n "$X"; cd "$N"',
+            # A nameref may write to a variable the command never assigns.
+            'declare -n N=D; N=skills; rm -rf "$D"',
+            'declare -n N=D; N=/; cd "$D"',
+            'D=x; printf "-v" D skills; rm -rf $D',
+            'D=x; read "D"; cd "$D"; rm -rf demo',
+            'D=x; readarray D; cd "$D"; rm -rf demo',
+            "D=x; getopts ab D; rm -rf $D",
+            "D=x; let D=1; rm -rf $D",
+            "D=x; printf -vD skills; rm -rf $D",
+            "D=x; O=-n; declare $O R=D; R=skills; rm -rf $D",
+            ": ${D=skills}; rm -rf $D",
+            ': ${D[0]:=skills}; rm -rf "$D"',
+            'for D\nin skills; do :; done; rm -rf "$D"',
+            "D=x; x=skills; rm -rf ${!D}",
+            'for d in `ls` skills; do rm -rf "$d"; done',
+            'D=x; N=D; read "$N"; rm -rf $D',
+            'select S in skills b; do rm -rf "$S"; done',
+            'D=x; mapfile -t "D"; cd "$D"; rm -rf demo',
+            'D=build; N=D; printf -v "$N" skills; rm -rf "$D"',
+            "D=build; printf -v 'D[0]' skills; rm -rf \"$D\"",
+            "D=a0skills; printf '%n' IFS; rm -rf $D",
+            'D=skills; rm -rf "${D:?${M}}"',
+            'D=build; unset D; rm -rf "${D}skills"',
+            'for d in "{skills,b}"; do rm -rf "$d"; done',
+            "REPLY=x; read <<'EOF'\nskills\nEOF\ncd \"$REPLY\"; rm -rf demo",
+            'printf -v "IFS" X; D="a skills"; rm -rf $D',
+        ],
+    )
+    def test_a_word_whose_variable_has_values_the_check_cannot_know_is_refused(
+        self, command
+    ):
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "may name paths the check does not follow" in error
+
+    @pytest.mark.parametrize(
+        ("tail", "word"),
+        [
+            ('T=$HOME; cd "$T"', '"$T"'),
+            ('T=skills; rm -rf "$T"', '"$T"'),
+            ('P=$HOME; Q=; Q=x; R=; R=x; S=; S=x; U=; U=x; cd "$P$Q$R$S$U"', None),
+            ('P=skills; Q=; Q=x; R=; R=x; S=; S=x; U=; U=x; rm -rf "$P$Q$R$S$U"', None),
+        ],
+    )
+    def test_a_word_with_more_values_than_the_check_reads_is_refused(self, tail, word):
+        many = "; ".join(f"T=a{i}" for i in range(16)) if word else "P=a"
+        command = f"{many}; {tail}"
+        error = validate_command(command, ("/W/skills",), workspace_root="/W")
+        assert "may name paths the check does not follow" in error
+        # Within the cap, each value is checked.
+        fewer = command.replace("T=a15; ", "")
+        fewer = fewer.replace("U=; U=x; ", "").replace("$U", "")
+        assert "may name paths the check does not follow" not in validate_command(
+            fewer, ("/W/skills",), workspace_root="/W"
+        )
 
     @pytest.mark.parametrize("bash", [False, True])
     def test_relative_protected_removals_on_windows(self, monkeypatch, bash):
@@ -1285,6 +1748,19 @@ class TestWorkspaceRemovalAndComments:
                 'nohup sh -c "python3 ./src/train.py > ./logs/t.log" &',
             ),
             ('cd src && bash -c "ls /results"', 'cd src && bash -c "ls /W/results"'),
+            ('sh -c -- "cat /tmp/x"', 'sh -c -- "cat ./tmp/x"'),
+            ('bash -login -c "cat /tmp/x"', 'bash -login -c "cat ./tmp/x"'),
+            ('zsh -opipefail -c "cat /tmp/x"', 'zsh -opipefail -c "cat ./tmp/x"'),
+            ('bash -c -e "cat /tmp/x"', 'bash -c -e "cat ./tmp/x"'),
+            (
+                'bash --rcfile ./rc -lc "cat /tmp/x"',
+                'bash --rcfile ./rc -lc "cat ./tmp/x"',
+            ),
+            (
+                'bash --init-file ./rc -c "cat /tmp/x"',
+                'bash --init-file ./rc -c "cat ./tmp/x"',
+            ),
+            ('sh -O extglob -c "cat /tmp/x"', 'sh -O extglob -c "cat ./tmp/x"'),
         ],
     )
     def test_shell_c_scripts_are_rewritten(self, command, expected):
@@ -1415,6 +1891,50 @@ class TestSandboxCommandChecks:
         ],
     )
     def test_cd_inside_the_workspace_passes(self, command):
+        assert validate_command(command, workspace_root="/W") is None
+
+    @pytest.mark.parametrize(
+        ("command", "shown"),
+        [
+            ('TARGET=/etc; cd "$TARGET" && cat passwd', "'cd \"$TARGET\"'"),
+            # `..` made from `.`: a literal `..` is refused before this check.
+            ('T=.; cd "$T$T"', "'cd \"$T$T\"'"),
+            ("T=.; cd $T$T && ls", "'cd $T$T'"),
+            ('T=$HOME; cd "$T"', "'cd \"$T\"'"),
+            ('T=~; cd "$T"', "'cd \"$T\"'"),
+            ('T=.; cd "$T$T/sub"', "'cd \"$T$T/sub\"'"),
+            ("export T=/etc; pushd ${T}", "'pushd ${T}'"),
+            ('A=.; B=$A$A; cd "$B"', "'cd \"$B\"'"),
+            ("T=src; T=.; cd $T$T", "'cd $T$T'"),
+            ('T=".. "; cd $T', "'cd $T'"),
+            ("bash -c 'T=.; cd \"$T$T\"'", "'cd \"$T$T\"'"),
+            # Also set another way: its plain values are still checked.
+            ('D=.; false && read D; cd "$D$D"', "'cd \"$D$D\"'"),
+        ],
+    )
+    def test_cd_to_a_variable_set_in_the_command_is_checked(
+        self, command, shown, monkeypatch
+    ):
+        monkeypatch.setattr(backends, "_is_windows", lambda: False)
+        assert f"{shown} leaves the workspace" in validate_command(
+            command, workspace_root="/W"
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "OUT=results; cd $OUT && ls",
+            'T=src; cd "$T/sub"',
+            "T=/W/src; cd $T",
+            "T=.; cd '$T$T'",
+            'cd "$(pwd)"',
+            'T=$(dirname x); cd "$T"',
+            'cd "$WORKDIR"',
+            # A quoted empty value stays an argument: cd stays put.
+            'D=; cd "$D"; ls',
+        ],
+    )
+    def test_cd_to_a_variable_inside_the_workspace_passes(self, command):
         assert validate_command(command, workspace_root="/W") is None
 
     @pytest.mark.parametrize("bash", [False, True])
@@ -3327,6 +3847,30 @@ class TestProcessKillByName:
             "timeout 30 sh <<'EOF'\npkill -f train\nEOF",
             "nohup bash <<EOF\npkill -f x\nEOF",
             "bash -c 'pkill -f x' -n",
+            "bash -euo pipefail -c 'pkill -f x'",
+            "bash -o pipefail -c 'pkill -f x'",
+            "bash -c -e 'pkill -f x'",
+            "zsh -O -c 'pkill -f x'",
+            "zsh -opipefail -c 'pkill -f x'",
+            "zsh -onomatch -c 'pkill -f x'",
+            "bash -oO pipefail extglob -c 'pkill -f x'",
+            "zsh --emulate sh -c 'pkill -f x'",
+            # +c turns on command mode like -c; it is not undone by +
+            "bash +c 'pkill -f x'",
+            "zsh +c 'pkill -f x'",
+            "zsh -c +c 'pkill -f x'",
+            "sh +ec 'pkill -f x'",
+            "bash +s script.sh <<'EOF'\npkill -f x\nEOF",
+            "bash -c -- 'pkill -f x'",
+            "bash --login -c 'pkill -f x'",
+            "bash -posix -c 'pkill -f x'",
+            "sh -noprofile -norc -c 'pkill -f x'",
+            "bash -rcfile ./rc -c 'pkill -f x'",
+            "bash -posix + -c 'pkill -f x'",
+            "zsh -s + -c 'echo hi' <<'EOF'\npkill -f x\nEOF",
+            "bash -e -rcfile 'pkill -f x' -c 'echo hi'",
+            "bash +rcfile 'pkill -f x' -c 'echo hi'",
+            "zsh -rcfile 'pkill -f x'",
             "env 'RUN_NAME=test train' pkill -f train",
             "env -S 'pkill -f x'",
             "env -S'pkill -f x'",

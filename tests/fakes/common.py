@@ -169,6 +169,28 @@ class StubChannel(Channel):
         self._typing_started.append(chat_id)
 
 
+def stub_consumer(workspace, gateway, **kwargs):
+    """An ``InboundConsumer`` over one ``StubChannel`` and *gateway*."""
+    from EvoScientist.channels.bus.message_bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.channels.consumer import InboundConsumer
+
+    bus = MessageBus()
+    manager = ChannelManager(bus, media_dir=workspace.root / "media")
+    manager.register(StubChannel())
+    return InboundConsumer(
+        bus=bus,
+        manager=manager,
+        agent=MagicMock(),
+        thread_id="",
+        workspace=workspace,
+        graph_gateway=gateway,
+        inference_timeout=5.0,
+        drain_timeout=1.0,
+        **kwargs,
+    )
+
+
 class QueueFakeChannel(Channel):
     """Concrete channel with queue receive and captured outbound messages."""
 
