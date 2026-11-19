@@ -64,7 +64,7 @@ from langchain_openai.chatgpt_oauth import (
 
 SIGN_IN_HINT = (
     'ChatGPT sign-in required (openai_auth_mode is "oauth"). '
-    "Start EvoSci in a terminal to sign in."
+    "Sign in with EvoSci login chatgpt, or from Settings in the desktop app."
 )
 SIGN_IN_AGAIN = (
     'ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again '
