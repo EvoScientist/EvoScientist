@@ -1158,12 +1158,19 @@ def _merge_runs_config_kwargs(
        sub-agent launched (or continued) while the caller runs on, say, a free
        model does not silently fall back to a billed config-default.
 
+    ``model`` and ``model_provider`` travel as one pair, never as two
+    independently-merged keys: a model name only means something to the
+    provider that serves it. A caller's model without a provider goes out
+    with ``model_provider: None``, so the sub-agent picks its provider the
+    way the main run does.
+
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
+    caller = _caller_configurable.get() or {}
     overrides = {
         **(folders or {}),
         **_read_cfg_configurable(),
-        **(_caller_configurable.get() or {}),
+        **caller,
     }
     if not overrides:
         return kwargs
@@ -1182,6 +1189,10 @@ def _merge_runs_config_kwargs(
             if key not in ("workspace_dir", "run_dir")
         }
     merged_configurable = {**existing_configurable, **overrides}
+    if "model" in caller and "model_provider" not in caller:
+        # None rather than a missing key, so a provider saved on the run's
+        # assistant cannot pair with this model either.
+        merged_configurable["model_provider"] = None
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     if isinstance(kwargs.get("assistant_id"), str):
