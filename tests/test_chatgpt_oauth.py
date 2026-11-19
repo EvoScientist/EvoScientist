@@ -878,9 +878,19 @@ def test_ipv4_wildcard_holder_is_port_in_use(free_port):
 
 @needs_ipv6
 def test_first_answer_wins_when_both_addresses_answer_at_once(
-    free_port, token_endpoint
+    free_port, token_endpoint, monkeypatch
 ):
+    # The order of ready sockets is platform-dependent, so the test follows
+    # the order the flow actually took.
     clients = []
+    handled = []
+    real_handle = chatgpt_oauth._CallbackServer.handle_request
+
+    def _recording(server):
+        handled.append(server.address_family)
+        return real_handle(server)
+
+    monkeypatch.setattr(chatgpt_oauth._CallbackServer, "handle_request", _recording)
 
     def on_url(url):
         state = _state_from(url)
@@ -895,11 +905,19 @@ def test_first_answer_wins_when_both_addresses_answer_at_once(
 
     try:
         token = chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+        outcome = ("signed_in", token.plan_type)
+    except chatgpt_oauth.SignInError as err:
+        outcome = ("refused", err.code)
     finally:
         for client in clients:
             client.close()
 
-    assert token.plan_type == "plus"
+    [first] = handled  # the other answer is never read
+    expected = {
+        socket.AF_INET: ("signed_in", "plus"),
+        socket.AF_INET6: ("refused", "sign_in_failed"),
+    }
+    assert outcome == expected[first]
 
 
 def test_interrupt_while_starting_closes_the_first_server(free_port, monkeypatch):
