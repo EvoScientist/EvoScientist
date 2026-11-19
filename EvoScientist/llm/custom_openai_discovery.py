@@ -134,11 +134,22 @@ async def discover_custom_openai_models(
             )
         if resp.status_code != 200:
             return []
-        # A body past the cap is not a picker. It is not parsed either: the
-        # parse of a huge listing is what ran past the deadline, and the
-        # names are worth less than the picker opening.
+        # A body past the cap is not a picker: it is not parsed at all.
         if len(resp.content) > _MAX_BODY_BYTES:
             return []
-        return _names_from_body(json.loads(resp.content))
+
+        # The parse is the other half of the deadline. A thread cannot be
+        # interrupted, so the wait for it is what gets the timeout -- the
+        # parse goes on in the background and its result is dropped if it
+        # did not fit. Waiting for a cancelled thread instead would let the
+        # parse decide how long the picker stays open.
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return []
+        parse = asyncio.ensure_future(asyncio.to_thread(json.loads, resp.content))
+        done, _pending = await asyncio.wait({parse}, timeout=remaining)
+        if not done:
+            return []
+        return _names_from_body(parse.result())
     except Exception:
         return []

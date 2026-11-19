@@ -293,6 +293,47 @@ class TestBigAndLateAnswers:
 
         assert asyncio.run(discovery.discover_custom_openai_models("http://x/v1")) == []
 
+    def test_a_parse_that_does_not_fit_the_deadline_is_dropped(self, monkeypatch):
+        """The parse is inside the deadline: a slow one is dropped, not waited for.
+
+        A thread cannot be interrupted, so what the timeout bounds is the WAIT
+        for the parse. Waiting for a cancelled parse instead would let the
+        parse decide how long the picker stays open.
+        """
+        import time
+
+        from EvoScientist.llm import custom_openai_discovery as discovery
+
+        real_loads = json.loads
+
+        def slow_loads(payload, *args, **kwargs):
+            time.sleep(0.6)
+            return real_loads(payload, *args, **kwargs)
+
+        monkeypatch.setattr(discovery.json, "loads", slow_loads)
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return httpx.Response(200, content=json.dumps(_LISTING).encode())
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+        started = time.monotonic()
+        names = discovery.list_custom_openai_models("http://x/v1", timeout=0.2)
+        elapsed = time.monotonic() - started
+
+        assert names == [], names
+        assert elapsed < 1.0, elapsed
+
     def test_the_result_is_not_the_workers_own_buffer(self, monkeypatch):
         """A list that fills itself in after the return is not a result."""
         import time
