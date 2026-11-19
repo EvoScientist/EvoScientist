@@ -639,6 +639,115 @@ def _submit_update(memory_dir, skills_dir, skill_name):
     return result
 
 
+def test_update_refusal_restores_installed_skill_after_resubmit(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "refusal-update", "Installed version", "Original installed body."
+    )
+    (installed / "keep.txt").write_text("keep this file", encoding="utf-8")
+    original_files = {
+        path.relative_to(installed).as_posix(): path.read_bytes()
+        for path in installed.rglob("*")
+        if path.is_file()
+    }
+    _submit_update(memory_dir, skills_dir, "refusal-update")
+    draft = autoskill_proposals_dir(memory_dir) / "refusal-update" / "SKILL.md"
+    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
+    real_copy = module._copy_proposed_skill
+
+    def copy_then_resubmit(snapshot, destination):
+        outcome = real_copy(snapshot, destination)
+        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
+            return outcome
+        draft.write_text(
+            "---\nname: refusal-update\ndescription: Resubmitted.\n---\n\n"
+            "New pending body.\n",
+            encoding="utf-8",
+        )
+        result = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="refusal-update",
+            cluster_hash="cluster-update-refusal-update",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Resubmitted update.",
+            operation="update",
+            target_skill_name="refusal-update",
+            skills_dir=skills_dir,
+        )
+        assert result["submitted"] is True, result
+        return outcome
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_resubmit)
+    result = approve_skill_proposal(
+        memory_dir, "refusal-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert _manifest(memory_dir, "refusal-update")["status"] == "pending"
+    assert {
+        path.relative_to(installed).as_posix(): path.read_bytes()
+        for path in installed.rglob("*")
+        if path.is_file()
+    } == original_files
+
+
+def test_update_refusal_keeps_an_edit_the_user_made_during_the_approval(
+    tmp_path, monkeypatch
+):
+    """A refusal puts back what the install wrote, not what the user wrote.
+
+    The user can edit the installed skill while the approval runs. A
+    refusal that restores the whole folder would discard that edit.
+    """
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "edited-update", "Installed version", "Original installed body."
+    )
+    _submit_update(memory_dir, skills_dir, "edited-update")
+    draft = autoskill_proposals_dir(memory_dir) / "edited-update" / "SKILL.md"
+    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
+    real_copy = module._copy_proposed_skill
+
+    def copy_then_edit(snapshot, destination):
+        outcome = real_copy(snapshot, destination)
+        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
+            return outcome
+        (installed / "SKILL.md").write_text(
+            "---\nname: edited-update\ndescription: The user's own edit.\n---\n\n"
+            "Edited by the user.\n",
+            encoding="utf-8",
+        )
+        draft.write_text(
+            "---\nname: edited-update\ndescription: Resubmitted.\n---\n\n"
+            "New pending body.\n",
+            encoding="utf-8",
+        )
+        result = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="edited-update",
+            cluster_hash="cluster-update-edited-update",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Resubmitted update.",
+            operation="update",
+            target_skill_name="edited-update",
+            skills_dir=skills_dir,
+        )
+        assert result["submitted"] is True, result
+        return outcome
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_edit)
+    result = approve_skill_proposal(
+        memory_dir, "edited-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert "Edited by the user." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_find_skill_proposal_matches_exact_id_only(tmp_path):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
@@ -2537,8 +2646,10 @@ def test_a_failed_update_in_place_keeps_the_skill_and_says_so(tmp_path, monkeypa
     failed = approve_skill_proposal(memory_dir, "paper-review", skills_dir=skills_dir)
 
     assert failed["approved"] is False
-    assert "may already be changed" in failed["error"]
-    assert (installed / "SKILL.md").is_file()
+    assert "may already be changed" not in failed["error"]
+    assert (installed / "SKILL.md").read_text(encoding="utf-8") == (
+        "---\nname: paper-review\ndescription: Use when reviewing papers.\n---\n\n# Old\n\n"
+    )
     assert _manifest(memory_dir, "paper-review")["status"] == "pending"
 
 

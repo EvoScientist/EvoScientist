@@ -906,6 +906,54 @@ def _content_digest(source: Path | Mapping[str, bytes]) -> str:
     return digest.hexdigest()
 
 
+def _backup_destination(destination: Path) -> Path:
+    """Copy an existing install before an update can overwrite it."""
+    backup_parent = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.backup-", dir=destination.parent)
+    )
+    backup = backup_parent / destination.name
+    try:
+        shutil.copytree(destination, backup, symlinks=True)
+    except BaseException:
+        shutil.rmtree(backup_parent, ignore_errors=True)
+        raise
+    return backup
+
+
+def _restore_destination(
+    destination: Path, backup: Path, installed_digests: dict[str, str]
+) -> None:
+    """Put back the files an install overwrote, leaving newer edits alone.
+
+    Only a file that still holds what the install wrote is replaced; one the
+    user changed since is left as it is, because the refusal is not a reason
+    to discard their edit.
+    """
+    current = _regular_files(destination)
+    original = _regular_files(backup)
+    if current is None or original is None:
+        raise OSError(f"Could not read the install folder: {destination}")
+    for name, path in current.items():
+        if name not in original:
+            # The install added this file and nobody changed it since.
+            if name in installed_digests:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            continue
+        if name not in installed_digests:
+            continue
+        with path.open("rb") as handle:
+            current_digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if current_digest != installed_digests[name]:
+            # The user changed this file after the install wrote it.
+            continue
+        _copy_file_atomic(original[name], path)
+    # A folder the install added and the user left alone goes away with it.
+    for name in set(installed_digests) - set(original):
+        with contextlib.suppress(OSError):
+            (destination / name).unlink()
+
+
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
     """Make the install folder; True when this call created it.
 
@@ -1713,6 +1761,7 @@ def approve_skill_proposal(
     proposal_dir = proposal.path
     manifest_path = proposal_dir / "manifest.json"
     snapshot: Path | None = None
+    destination_backup: Path | None = None
     wanted_workspace = _normalize_workspace_dir(workspace_dir)
     try:
         try:
@@ -1829,6 +1878,23 @@ def approve_skill_proposal(
             mark_left: bool = False,
             updated_at: str | None = None,
         ) -> dict[str, Any]:
+            nonlocal destination_backup
+            if changed and destination_backup is not None:
+                try:
+                    _restore_destination(
+                        destination, destination_backup, approved_digests
+                    )
+                    shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                    destination_backup = None
+                    changed = False
+                except OSError as exc:
+                    error += (
+                        f" (could not restore the installed skill: {exc}; "
+                        f"backup retained at {destination_backup})"
+                    )
+            if destination_backup is not None and not changed:
+                shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                destination_backup = None
             if changed:
                 error += " (the installed skill may already be changed)"
             if leftover is not None:
@@ -1902,6 +1968,8 @@ def approve_skill_proposal(
                 created = _create_destination(
                     destination, must_create=target.base_path != destination
                 )
+                if not created:
+                    destination_backup = _backup_destination(destination)
             except (OSError, ValueError, RecursionError) as exc:
                 return install_failed(
                     f"Could not install the skill: {exc}",
@@ -1986,9 +2054,12 @@ def approve_skill_proposal(
                 )
                 return install_failed(
                     f"Skill install path escapes its destination: {blocked_path}",
-                    changed=False,
+                    changed=not created,
                     leftover=leftover,
                 )
+        if destination_backup is not None:
+            shutil.rmtree(destination_backup.parent, ignore_errors=True)
+            destination_backup = None
         _notify_approved_skill()
         return {
             "approved": True,
