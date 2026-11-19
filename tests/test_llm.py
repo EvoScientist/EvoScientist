@@ -3577,10 +3577,11 @@ class TestAnthropicApiKey:
             return list(model.stream("hi"))
         return await model.ainvoke("hi") if use_async else model.invoke("hi")
 
+    @pytest.mark.parametrize("stream", [False, True])
     @pytest.mark.parametrize("use_async", [False, True])
     @pytest.mark.parametrize("plain_key", [False, True])
     async def test_missing_key_fails_before_network(
-        self, monkeypatch, use_async, plain_key
+        self, monkeypatch, use_async, plain_key, stream
     ):
         from EvoScientist.middleware.error_normalization import MissingApiKeyError
 
@@ -3590,7 +3591,7 @@ class TestAnthropicApiKey:
         requests = TestAnthropicThinkingBinding._serve(model, "")
 
         with pytest.raises(MissingApiKeyError) as info:
-            await self._invoke(model, use_async)
+            await self._invoke(model, use_async, stream)
 
         assert requests == []
         assert str(info.value) == (
