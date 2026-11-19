@@ -729,24 +729,18 @@ def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
 
 
 def build_ask_user_resume(interrupt_id: str | None, payload: dict) -> "Command":
-    """Build an ask_user resume Command keyed by interrupt_id.
+    """Key an ask_user answer by the id of the interrupt the client displayed.
 
-    Same requirement as :func:`build_hitl_resume`: when the agent calls
-    ``ask_user`` twice in one message (parallel tool calls), both interrupts
-    are pending at once and a flat ``Command(resume=payload)`` raises
-    ``RuntimeError: When there are multiple pending interrupts …``. Keying
-    by the id of the event the client actually displayed answers that
-    interrupt and re-parks the rest; they re-emit on the next stream and
-    are drained one at a time. LangGraph unwraps ``{id: value}`` to
-    ``value`` inside the node, so ``_parse_answers`` sees the payload
-    unchanged. Safe for N=1 too.
+    An event without a real id (the stream decoders' ``"default"``) resumes
+    flat: LangGraph reads ``resume`` as an id map only when every key is an
+    xxh3-128 digest, so a keyed ``{"default": payload}`` would be handed to
+    the node as the answer itself.
 
-    The helper owns the unkeyed fallback: a missing id (or the literal
-    ``"default"`` some clients used to pass) must NOT become a resume key.
-    LangGraph only treats ``resume`` as an id map when every key is an
-    xxh3-128 hex digest, so ``{"default": payload}`` would be handed to the
-    node as the answer itself and the user's answer would be lost. A
-    keyless event is resumed flat, which is what worked before keying.
+    Keying matters when the agent calls ``ask_user`` twice in one message:
+    both interrupts are pending at once and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. The
+    keyed resume answers the interrupt the client displayed and re-parks the
+    rest, which re-emit on the next stream and are drained one at a time.
     """
     from langgraph.types import Command
 

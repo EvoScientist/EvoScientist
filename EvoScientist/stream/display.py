@@ -2008,21 +2008,11 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
-                # Order only: with parallel calls every pending interrupt
-                # emits its own ask_user event, and the last one would
-                # otherwise overwrite the first in the prompt slot. Keeping
-                # the FIRST makes the Rich CLI ask in the same order as the
-                # TUI and the channels consumer, which stop at their first
-                # ask_user event. Nothing is lost either way: a skipped
-                # sibling re-emits on the resume stream and keyed resumes
-                # (build_ask_user_resume) drain the pendings one at a time.
+                # Ask the first ask_user, as the TUI and the consumer do; the
+                # others come back on the resume stream.
                 pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
-                if (
-                    event_type == "ask_user"
-                    and pending_ask_user_before is not None
-                    and state.pending_ask_user is not pending_ask_user_before
-                ):
+                if event_type == "ask_user" and pending_ask_user_before is not None:
                     state.pending_ask_user = pending_ask_user_before
 
                 # Relay thinking to channel when transitioning away from
