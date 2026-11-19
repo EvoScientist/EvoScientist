@@ -1178,6 +1178,121 @@ def variable_references(word: str) -> set[str]:
     return {match.group(1) or match.group(2) for match, _ in _references(word)}
 
 
+def brace_words(word: str) -> list[str] | None:
+    """The words a brace expansion in *word*, as written, makes; *word*
+    itself when it has none (see :func:`_brace_words`)."""
+    return _brace_words(word) if "{" in word or "}" in word else [word]
+
+
+# A brace list or sequence the shell expands (`{a,b}`, `{1..3}`, `{a..c}`).
+_EXPANDING_BRACE_RE = re.compile(
+    r"\{[^{}]*,[^{}]*\}|\{(?:-?\d+\.\.-?\d+(?:\.\.-?\d+)?|[A-Za-z]\.\.[A-Za-z])\}"
+)
+
+
+def expands_braces(word: str) -> bool:
+    """Whether bash expands a brace list or sequence in *word* as written:
+    one outside quotes, in a word with no escape or expansion that
+    :func:`brace_words` declines to read."""
+    return not re.search(r"[\"'\\$`]", word) and bool(_EXPANDING_BRACE_RE.search(word))
+
+
+_ANSI_C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+
+
+def _ansi_c_text(body: str) -> str:
+    """What bash reads for the inside of a ``$'...'`` word: its backslash
+    escapes decoded (``\\x69`` is ``i``)."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] != "\\" or i + 1 == len(body):
+            out.append(body[i])
+            i += 1
+            continue
+        escape = body[i + 1]
+        if escape in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[escape])
+            i += 2
+            continue
+        digits = {"x": (r"[0-9a-fA-F]{1,2}", 16), "u": (r"[0-9a-fA-F]{1,4}", 16)}
+        digits["U"] = (r"[0-9a-fA-F]{1,8}", 16)
+        if escape in digits:
+            pattern, base = digits[escape]
+            number = re.match(pattern, body[i + 2 :])
+            if number:
+                out.append(chr(min(int(number.group(0), base), 0x10FFFF)))
+                i += 2 + len(number.group(0))
+                continue
+        elif escape in "01234567":
+            number = re.match(r"[0-7]{1,3}", body[i + 1 :])
+            assert number is not None
+            out.append(chr(int(number.group(0), 8) & 0xFF))
+            i += 1 + len(number.group(0))
+            continue
+        elif escape == "c" and i + 2 < len(body):
+            out.append(chr(ord(body[i + 2]) & 0x1F))
+            i += 3
+            continue
+        out.append(body[i : i + 2])  # an escape bash keeps as written
+        i += 2
+    return "".join(out)
+
+
+def ansi_c_unquoted(word: str) -> str | None:
+    """*word* as written, with each ``$'...'`` outside other quotes written
+    as the single-quoted text bash reads for it (``$'sk\\x69lls'`` reads
+    ``'skills'``); ``None`` when it has none."""
+    out: list[str] = []
+    quote: str | None = None
+    found = False
+    i = 0
+    while i < len(word):
+        char = word[i]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif quote == '"':
+            if char == "\\" and i + 1 < len(word):
+                out.append(word[i : i + 2])
+                i += 2
+                continue
+            quote = None if char == '"' else quote
+        elif char == "\\" and i + 1 < len(word):
+            out.append(word[i : i + 2])
+            i += 2
+            continue
+        elif word.startswith("$'", i):
+            end = i + 2
+            while end < len(word) and word[end] != "'":
+                end += 2 if word[end] == "\\" else 1
+            if end >= len(word):
+                return None  # not closed: not one word the check reads
+            text = _ansi_c_text(word[i + 2 : end])
+            out.append("'" + text.replace("'", "'\\''") + "'")
+            found = True
+            i = end + 1
+            continue
+        elif char in "'\"":
+            quote = char
+        out.append(char)
+        i += 1
+    return "".join(out) if found else None
+
+
 def braced_value(word: str) -> str | None:
     """A word as written, as the shell reads it, with each ``$NAME`` it
     expands written ``${NAME}``, so quote removal keeps where the name ends

@@ -1022,6 +1022,73 @@ class TestWorkspaceRemovalAndComments:
     @pytest.mark.parametrize(
         "command",
         [
+            "rm -rf {skills,x}",
+            "rm -rf sk{i,}lls",
+            "rm -rf skills{,}",
+            "rm -rf {old,skills}/",
+            "rm -rf {build,skills/demo}",
+            "rm -rf $'skills'",
+            "rm -rf $'sk\\x69lls'",
+            "rm -rf $'sk\\151lls'",
+            "rm -rf sk$'ill's",
+            "cd build && rm -rf {skills,x}",
+        ],
+    )
+    def test_removals_read_as_bash_expands_them_are_refused(
+        self, command, tmp_path, monkeypatch
+    ):
+        # Brace lists and $'...' words name the folder bash passes to rm (#846).
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "uses_bash", lambda: True)
+        error = self._prepare_with_workspace_folders(command, str(tmp_path))
+        assert "protected folder" in error
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf {build,dist}",
+            "rm -rf x{1..3}",
+            "rm -rf $'build'",
+            "rm -rf '{skills,x}'",
+            "rm -rf {x}",
+            "rm -rf \"$'skills'\"",
+            "echo {skills,x}",
+        ],
+    )
+    def test_removals_read_as_bash_expands_them_may_pass(
+        self, command, tmp_path, monkeypatch
+    ):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "uses_bash", lambda: True)
+        assert self._prepare_with_workspace_folders(command, str(tmp_path)) is None
+
+    def test_a_brace_list_too_big_to_read_is_refused(self, tmp_path, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(agent_shell, "uses_bash", lambda: True)
+        names = ",".join(f"d{i}" for i in range(20))
+        error = self._prepare_with_workspace_folders(
+            f"rm -rf {{{names}}}", str(tmp_path)
+        )
+        assert "too many values" in error
+
+    def test_cmd_exe_operands_are_read_as_written(self, monkeypatch):
+        # cmd.exe expands neither braces nor $'...' (#846).
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "uses_bash", lambda: False)
+        [found] = backends.shell_syntax.simple_commands("rm -rf {skills,x} $'skills'")
+        assert [arg for arg, _ in backends._recursive_rm_operands(found)] == [
+            "{skills,x}",
+            "$'skills'",
+        ]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "cd skills && rm -rf demo",
             "cd skills; rm -rf demo",
             "cd ./skills/ && rm -rf demo",
