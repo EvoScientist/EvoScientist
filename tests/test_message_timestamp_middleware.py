@@ -178,6 +178,41 @@ def test_tool_command_messages_are_stamped():
     assert out.update["todos"] == []
 
 
+def test_tool_result_keeps_an_existing_stamp():
+    result = ToolMessage(
+        "r", tool_call_id="c", response_metadata={CREATED_AT_KEY: _EARLIER}
+    )
+
+    out = MessageTimestampMiddleware().wrap_tool_call(None, lambda _: result)
+
+    assert _key(out) == _EARLIER
+
+
+def test_tool_command_without_a_message_list_is_returned_as_is():
+    command = Command(update={"todos": []})
+
+    out = MessageTimestampMiddleware().wrap_tool_call(None, lambda _: command)
+
+    assert out is command
+
+
+def test_tool_command_messages_share_one_time():
+    command = Command(
+        update={
+            "messages": [
+                ToolMessage("a", tool_call_id="c1"),
+                ToolMessage("b", tool_call_id="c2"),
+            ]
+        }
+    )
+
+    first, second = (
+        MessageTimestampMiddleware().wrap_tool_call(None, lambda _: command)
+    ).update["messages"]
+
+    assert _key(first) == _key(second)
+
+
 async def test_async_tool_message_is_stamped():
     async def handler(_):
         return ToolMessage("r", tool_call_id="c")
@@ -246,6 +281,30 @@ def test_agent_run_stamps_every_message_in_order():
     assert all(_ISO_UTC_MS.match(s) for s in stamps)
     assert stamps == sorted(stamps)
     assert datetime.fromisoformat(stamps[0]) >= before.replace(microsecond=0)
+
+
+def test_input_is_stamped_when_the_run_starts():
+    """``before_agent`` stamps the input before the model sees it, not with
+    the reply."""
+    seen = []
+
+    class _Recording(_ScriptedToolModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen.extend(_key(m) for m in messages if isinstance(m, HumanMessage))
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    agent = create_agent(
+        model=_Recording(replies=[AIMessage("done")]),
+        middleware=[MessageTimestampMiddleware()],
+        checkpointer=InMemorySaver(),
+    )
+
+    agent.invoke(
+        {"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "t"}}
+    )
+
+    assert seen
+    assert all(seen)
 
 
 def test_second_run_keeps_earlier_stamps():
@@ -342,6 +401,85 @@ def test_stamping_costs_one_checkpoint_per_run():
         return len(list(saver.list(config)))
 
     assert checkpoints(stamped=True) == checkpoints(stamped=False) + 1
+
+
+def _deep_agent(replies, workspace):
+    from deepagents import create_deep_agent
+    from deepagents.backends import FilesystemBackend
+
+    return create_deep_agent(
+        model=_ScriptedToolModel(
+            replies=replies, profile={"max_input_tokens": 200_000}
+        ),
+        tools=[lookup],
+        backend=FilesystemBackend(root_dir=str(workspace.root), virtual_mode=True),
+        middleware=[MessageTimestampMiddleware()],
+        checkpointer=InMemorySaver(),
+    )
+
+
+def test_deep_agent_run_stamps_every_message(workspace):
+    """``create_deep_agent`` stores messages with its own reducer."""
+    config = {"configurable": {"thread_id": "t"}}
+
+    result = _deep_agent(_tool_turn(), workspace).invoke(
+        {"messages": [HumanMessage("go")]}, config
+    )
+
+    assert [type(m).__name__ for m in result["messages"]] == [
+        "HumanMessage",
+        "AIMessage",
+        "ToolMessage",
+        "AIMessage",
+    ]
+    assert all(_ISO_UTC_MS.match(_key(m)) for m in result["messages"])
+
+
+async def test_deep_agent_async_run_keeps_earlier_stamps(workspace):
+    agent = _deep_agent([*_tool_turn(), AIMessage("again")], workspace)
+    config = {"configurable": {"thread_id": "t"}}
+    first = await agent.ainvoke({"messages": [HumanMessage("a")]}, config)
+    earlier = {m.id: _key(m) for m in first["messages"]}
+
+    second = await agent.ainvoke({"messages": [HumanMessage("b")]}, config)
+
+    assert {m.id: _key(m) for m in second["messages"][:4]} == earlier
+    assert len(second["messages"]) == 6
+    assert all(_key(m) for m in second["messages"])
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openai_responses"])
+def test_stamp_never_reaches_a_provider_request(provider):
+    """``response_metadata`` is not part of any request the providers build."""
+    messages = [
+        HumanMessage("go", response_metadata={CREATED_AT_KEY: _EARLIER}),
+        AIMessage(
+            "",
+            tool_calls=[{"name": "lookup", "args": {"query": "x"}, "id": "c1"}],
+            response_metadata={CREATED_AT_KEY: _EARLIER},
+        ),
+        ToolMessage(
+            "found x", tool_call_id="c1", response_metadata={CREATED_AT_KEY: _EARLIER}
+        ),
+    ]
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        model = ChatAnthropic(model="claude-sonnet-4-5", api_key="placeholder")
+    else:
+        from langchain_openai import ChatOpenAI
+
+        model = ChatOpenAI(
+            model="gpt-4o",
+            api_key="placeholder",
+            use_responses_api=provider == "openai_responses",
+        )
+
+    payload = repr(model._get_request_payload(messages))
+
+    assert "found x" in payload
+    assert CREATED_AT_KEY not in payload
+    assert _EARLIER not in payload
 
 
 # --- wiring -------------------------------------------------------------------
