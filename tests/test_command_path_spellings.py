@@ -17,7 +17,6 @@ from EvoScientist.backends import _convert_command_paths, validate_command
         "'/tmp/out.txt'",
         "--output=/tmp/out.txt",
         "-o/tmp/out.txt",
-        "OUT=/tmp/out.txt",
         '--output="/tmp/out.txt"',
     ],
 )
@@ -173,7 +172,7 @@ def test_path_assignment_substitutions_cannot_hide_host_paths(tmp_path, command)
     assert validate_command(converted, workspace_root=str(tmp_path)) is not None
 
 
-@pytest.mark.parametrize("prefix", ["--output=", "-o", "OUT="])
+@pytest.mark.parametrize("prefix", ["--output=", "-o"])
 def test_attached_mixed_quoted_path_maps_its_unquoted_head(tmp_path, prefix):
     command, uses_tmp = _convert_command_paths(
         f'echo {prefix}/tmp/"out file"', workspace_root=str(tmp_path)
@@ -272,7 +271,7 @@ def test_search_list_substitutions_do_not_hide_paths(tmp_path, name, syntax):
     assert validate_command(converted, workspace_root=str(tmp_path)) is not None
 
 
-@pytest.mark.parametrize("prefix", ["--out=", "OUT=", "-o"])
+@pytest.mark.parametrize("prefix", ["--out=", "-o"])
 def test_attached_existing_non_system_workspace_file_is_mapped(tmp_path, prefix):
     (tmp_path / "results").mkdir()
     (tmp_path / "results/x.csv").touch()
@@ -298,6 +297,15 @@ def test_path_named_file_variable_is_validated(tmp_path, command):
     assert prepare_sandbox_command(command, str(tmp_path))[1] is not None
 
 
+def _assignment_root(tmp_path):
+    """How an assignment's value spells the workspace: its path, or ``.`` when
+    the path needs quoting."""
+    from EvoScientist.backends import _platform_quote
+
+    root = _platform_quote(str(tmp_path))
+    return "." if root[0] in "'\"" else root
+
+
 @pytest.mark.parametrize("quote", ["", '"', "'"])
 def test_path_named_file_variable_tmp_value_is_mapped(tmp_path, quote):
     from EvoScientist.backends import prepare_sandbox_command
@@ -306,7 +314,8 @@ def test_path_named_file_variable_tmp_value_is_mapped(tmp_path, quote):
         f"OUTPUT_PATH={quote}/tmp/out.csv{quote} python train.py", str(tmp_path)
     )
     assert error is None
-    assert shlex.split(command)[0] == "OUTPUT_PATH=./tmp/out.csv"
+    root = _assignment_root(tmp_path)
+    assert command == f"OUTPUT_PATH={root}/tmp/out.csv python train.py"
 
 
 @pytest.mark.parametrize(
@@ -411,6 +420,78 @@ def test_attached_tmp_after_cd_uses_workspace_root(tmp_path, prefix):
 @pytest.mark.parametrize(
     "command",
     [
+        "OUT=/tmp/x; cd sub && echo $OUT",
+        'export OUT=/tmp/x && cd sub && echo "$OUT"',
+        "OUT=/tmp/x python w.py",
+        'OUT=/tmp/"x"; cd sub',
+        "make -C src DESTDIR=/tmp/x install",
+        "DESTDIR=/tmp/x make -C src install",
+        "env DESTDIR=/tmp/x make -C src install",
+        "OUT=/tmp/x sh -c 'cd sub && echo $OUT'",
+    ],
+)
+def test_assigned_tmp_names_the_workspace_tmp(tmp_path, command):
+    # A variable can be read after a cd or in another folder (make -C).
+    from EvoScientist.backends import prepare_sandbox_command
+
+    converted, uses_tmp = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert uses_tmp
+    assert converted == command.replace("=/tmp/", f"={_assignment_root(tmp_path)}/tmp/")
+    assert prepare_sandbox_command(command, str(tmp_path)) == (converted, None)
+
+
+@pytest.mark.parametrize(
+    "command", ['OUT="/tmp/x"', 'export "OUT=/tmp/x"', "export 'OUT=/tmp/x'"]
+)
+def test_quoted_assigned_tmp_names_the_workspace_tmp(tmp_path, command):
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    expected = command.split("OUT=")[0].rstrip("'\"")
+    assert converted == f"{expected}OUT={_assignment_root(tmp_path)}/tmp/x"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('OUT=/tmp/"out file"; cd sub', 'OUT={root}/tmp/"out file"; cd sub'),
+        ("OUT=/results/x.csv; cd sub", "OUT={root}/results/x.csv; cd sub"),
+    ],
+)
+def test_assigned_value_spellings_name_the_workspace(tmp_path, command, expected):
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results/x.csv").touch()
+    converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
+    assert converted == expected.format(root=_assignment_root(tmp_path))
+
+
+def test_assigned_tmp_stays_relative_when_the_root_needs_quoting(tmp_path):
+    # An unquoted $OUT would split at the space in the root.
+    root = tmp_path / "my ws"
+    root.mkdir()
+    converted, uses_tmp = _convert_command_paths(
+        "OUT=/tmp/x; mkdir -p $OUT", workspace_root=str(root)
+    )
+    assert uses_tmp
+    assert converted == "OUT=./tmp/x; mkdir -p $OUT"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
+def test_execute_assigned_tmp_path_used_after_cd(tmp_path):
+    from EvoScientist.backends import CustomSandboxBackend
+
+    if _assignment_root(tmp_path) == ".":
+        pytest.skip("a temp folder that needs quoting keeps ./")
+    (tmp_path / "sub").mkdir()
+    result = CustomSandboxBackend(root_dir=str(tmp_path), virtual_mode=True).execute(
+        "OUT=/tmp/x; cd sub && echo payload > $OUT"
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "tmp" / "x").read_text() == "payload\n"
+    assert not (tmp_path / "sub" / "tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         'bash -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
         'bash -euo pipefail -c "CUDA_HOME=/usr/local/cuda; python train.py > /var/tmp/log"',
         'bash -o pipefail -c "PATH=/usr/bin:/bin; cat /etc/passwd"',
@@ -475,12 +556,15 @@ def test_search_list_substitution_tmp_paths_are_mapped(tmp_path, quote):
     [
         ('scp user@host:"/tmp/log.txt" .', 'scp user@host:"/tmp/log.txt" .'),
         ('kubectl cp pod:"/tmp/a.csv" a.csv', 'kubectl cp pod:"/tmp/a.csv" a.csv'),
-        ('curl -F file=@"/tmp/plot.png" host', "curl -F file=@./tmp/plot.png host"),
+        (
+            'curl -F file=@"/tmp/plot.png" host',
+            "curl -F file=@{root}/tmp/plot.png host",
+        ),
     ],
 )
 def test_only_a_quoted_span_after_a_colon_is_kept(tmp_path, command, expected):
     converted, _ = _convert_command_paths(command, workspace_root=str(tmp_path))
-    assert converted == expected
+    assert converted == expected.format(root=_assignment_root(tmp_path))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path spelling")

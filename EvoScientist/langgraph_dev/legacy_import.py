@@ -30,11 +30,10 @@ at the next setup.
 
 The marks live in the runtime's store, next to what the import put there
 (:data:`IMPORTED_KEY`), so the two are written together: a store that is
-lost, or never written (``langgraph_dev_file_persistence: false``), loses the
-marks with the imported crons, and the next start imports again. They hold
-only strings and numbers, so the runtime's store never depends on this
-module to load. ``tests/test_legacy_import.py`` checks that the runtime's
-startup loader keeps the key.
+lost loses the marks with the imported crons, and the next start imports
+again. They hold only strings and numbers, so the runtime's store never
+depends on this module to load. ``tests/test_legacy_import.py`` checks
+that the runtime's startup loader keeps the key.
 """
 
 from __future__ import annotations
