@@ -980,6 +980,8 @@ def _check_api_key(model: Any) -> None:
 
 
 def _patch_anthropic_thinking_binding() -> None:
+    """Wrap ``ChatAnthropic._create`` / ``_acreate``: refuse a call with no API
+    key, and resend a request refused for a stale thinking block."""
     global _anthropic_thinking_binding_patched
     if _anthropic_thinking_binding_patched:
         return

@@ -3570,7 +3570,11 @@ class TestAnthropicApiKey:
         )
 
     @staticmethod
-    async def _invoke(model, use_async):
+    async def _invoke(model, use_async, stream=False):
+        if stream:
+            if use_async:
+                return [chunk async for chunk in model.astream("hi")]
+            return list(model.stream("hi"))
         return await model.ainvoke("hi") if use_async else model.invoke("hi")
 
     @pytest.mark.parametrize("use_async", [False, True])
