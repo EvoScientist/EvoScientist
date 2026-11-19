@@ -1040,6 +1040,16 @@ class TestWorkspaceRemovalAndComments:
             'rm -rf "sk"{ills,x}',
             "rm -rf $'skills\\0unused'",
             "rm -rf $'skills\\x00z'",
+            # Bash makes the braces before it expands `$`, and joins a line
+            # continuation first.
+            "rm -rf {skills,$}",
+            "rm -rf {skills,$X}",
+            "rm -rf {skills,${X}}",
+            "X=zz; rm -rf {skills,$X}",
+            "rm -rf sk\\\n{ills,x}",
+            "rm -rf sk\\\nills",
+            "rm -rf skills\\\n",
+            "rm -rf /sk\\\nills",
         ],
     )
     def test_removals_read_as_bash_expands_them_are_refused(
@@ -1062,6 +1072,8 @@ class TestWorkspaceRemovalAndComments:
             "rm -rf {x}",
             "rm -rf \"$'skills'\"",
             "echo {skills,x}",
+            "rm -rf {#cache,build}",
+            'rm -rf "$OUT"/{tmp,cache}',
         ],
     )
     def test_removals_read_as_bash_expands_them_may_pass(

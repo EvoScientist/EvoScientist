@@ -59,18 +59,29 @@ class TestBashReadsOperands:
             ('"sk"{ills,x}', ["skills", "skx"]),
             ("'{a,b}'", ["{a,b}"]),
             ("\\{a,b}", ["{a,b}"]),
+            ("sk\\\n{ills,x}", ["skills", "skx"]),
+            # Only the run knows what `$D` expands to.
             ("$D{a,b}", None),
         ],
     )
     def test_brace_words(self, word, expected):
         assert shell_syntax.brace_words(word) == expected
 
-    def test_brace_words_as_written_keep_the_quoting(self):
-        assert shell_syntax.brace_words("'~'{a,b}", as_written=True) == [
-            "'~'a",
-            "'~'b",
-        ]
-        assert shell_syntax.brace_words("{~,x}", as_written=True) == ["~", "x"]
+    @pytest.mark.parametrize(
+        ("word", "expected"),
+        [
+            ("'~'{a,b}", ["'~'a", "'~'b"]),
+            ("{~,x}", ["~", "x"]),
+            # Expansions come after the braces, as written.
+            ("{skills,$X}", ["skills", "$X"]),
+            ("{skills,${X}}", ["skills", "${X}"]),
+            ("{skills,$}", ["skills", "'$'"]),
+            ('"$D"/{a,b}', ['"$D"/a', '"$D"/b']),
+            ("$(pwd)/{a,b}", ["$(pwd)/a", "$(pwd)/b"]),
+        ],
+    )
+    def test_brace_words_as_written_keep_the_quoting(self, word, expected):
+        assert shell_syntax.brace_words(word, as_written=True) == expected
 
     @pytest.mark.parametrize(
         ("word", "expands"),
@@ -81,7 +92,10 @@ class TestBashReadsOperands:
             ("{x}", False),
             ("'{a,b}'", False),
             ("\\{a,b}", False),
-            ("$D{a,b}", False),
+            ("$D{a,b}", True),
+            ("{skills,${X}}", True),
+            ("${X}", False),
+            ("${X:-a,b}", False),
             ("plain", False),
         ],
     )

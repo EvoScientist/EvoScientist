@@ -1690,15 +1690,23 @@ def _bash_operand_words(
             # The operand stays a word as written: `$'~'` is a quoted `~`.
             raw = arg = unquoted
             token = {**token, "raw": raw, "value": tokens[0]["value"]}
-    if not shell_syntax.expands_braces(raw):
+    # A line continuation joins the word for bash (`sk\<newline>ills` is
+    # `skills`), with or without braces around it.
+    if not (shell_syntax.expands_braces(raw) or "\\\n" in raw):
         return [(arg, token)]
     written = shell_syntax.brace_words(raw, as_written=True)
     if written is None:
         raise shell_syntax.UnknownValues(arg)
     words = []
     for each in written:
-        value = str(shell_syntax.tokenize(each)[0]["value"]) if each else ""
-        words.append((each, {**token, "raw": each, "value": value}))
+        if not each:
+            continue  # bash drops an empty unquoted word (`{,x}`)
+        # Read as a word, not as a command line: an expanded `#cache` is no
+        # comment.
+        tokens = shell_syntax.tokenize("\\" + each if each.startswith("#") else each)
+        if len(tokens) != 1 or tokens[0]["type"] != "word":
+            raise shell_syntax.UnknownValues(arg)
+        words.append((each, {**token, "raw": each, "value": tokens[0]["value"]}))
     return words
 
 
