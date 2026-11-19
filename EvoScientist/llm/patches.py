@@ -1133,13 +1133,9 @@ def _merge_runs_config_kwargs(
 
     ``model`` and ``model_provider`` travel as one pair, never as two
     independently-merged keys: a model name only means something to the
-    provider that serves it. A caller that picked a model *without* a
-    provider therefore carries no provider, and none may be inherited from
-    another source — the server's config-default provider does not serve the
-    caller's model, and pairing the two sends that model to a provider that
-    cannot serve it (issue #784). Such a sub-agent resolves the name from the
-    registry, exactly like the main run does with the same provider-less
-    name.
+    provider that serves it. A caller's model without a provider goes out
+    with ``model_provider: None``, so the sub-agent picks its provider the
+    way the main run does.
 
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
@@ -1167,16 +1163,8 @@ def _merge_runs_config_kwargs(
         }
     merged_configurable = {**existing_configurable, **overrides}
     if "model" in caller and "model_provider" not in caller:
-        # The caller picked a model without a provider: keep the pair whole
-        # and let the sub-agent resolve the name from the registry, the way
-        # the main run resolves the same provider-less name. A provider from
-        # another source (the server's config-default, or the caller's own
-        # request) would be a provider that does not serve this model.
-        #
-        # The provider is set to None rather than removed: LangGraph merges
-        # the child assistant's SAVED config into the run, so a missing key
-        # lets that saved provider back in and the inconsistent pair is
-        # rebuilt. An explicit None overrides it.
+        # None rather than a missing key, so a provider saved on the run's
+        # assistant cannot pair with this model either.
         merged_configurable["model_provider"] = None
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}

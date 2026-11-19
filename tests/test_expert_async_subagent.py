@@ -951,6 +951,39 @@ class TestCallerModelInheritance:
         assert configurable["model"] == "free"
         assert configurable["model_provider"] == "openrouter"
 
+    def test_start_sends_no_provider_for_a_provider_less_caller_model(self, workspace):
+        """A caller that picked a model without a provider sends no provider.
+
+        The server's config-default provider does not serve the caller's
+        model, so pairing them would ship the model to a provider that
+        cannot serve it. The key is present and None, so a provider saved
+        on the assistant cannot pair with it either.
+        """
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            start.func(
+                description="w",
+                subagent_type="literature-review",
+                runtime=self._runtime(provider=None),
+            )
+
+        configurable = client.runs.create.call_args.kwargs["config"]["configurable"]
+        assert (configurable["model"], configurable["model_provider"]) == ("free", None)
+
     @pytest.mark.asyncio
     async def test_astart_forwards_caller_model_over_cfg(self, workspace):
         mw = EvoAsyncSubAgentMiddleware(
