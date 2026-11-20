@@ -377,6 +377,54 @@ class TestConvertVirtualPaths:
         )
         assert result == "cat ./debate_sim.py"
 
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            (
+                "python merge.py /tmp/a.csv,/home/u/proj/b.csv",
+                "python merge.py ./tmp/a.csv,/home/u/proj/b.csv",
+            ),
+            (
+                "python x.py --dirs=/tmp/a,/home/u/proj/data,/home/u/proj/out",
+                "python x.py --dirs=./tmp/a,/home/u/proj/data,/home/u/proj/out",
+            ),
+            (
+                "python merge.py /tmp/a.csv,/home/u/proj",
+                "python merge.py ./tmp/a.csv,/home/u/proj",
+            ),
+            (
+                "python merge.py /home/u/data/a.csv,/home/u/proj/b.csv",
+                "python merge.py /home/u/data/a.csv,/home/u/proj/b.csv",
+            ),
+        ],
+    )
+    def test_system_path_list_keeps_entries_before_workspace(self, command, expected):
+        """Regression (#858): a list entry naming the workspace must not drop
+        the entries before it."""
+        result = convert_virtual_paths_in_command(command, workspace_name="proj")
+        assert result == expected
+
+    def test_system_path_list_entry_outside_workspace_is_refused(self, tmp_workspace):
+        """Regression (#858): the host path before the workspace entry is kept,
+        so validation reports it instead of the command running without it."""
+        _, error = prepare_sandbox_command(
+            "python merge.py /home/u/data/a.csv,/home/u/workspace/b.csv",
+            tmp_workspace,
+        )
+        assert error is not None
+        assert "/home/u/data/a.csv" in error
+
+    @pytest.mark.parametrize("separator", [",", ":"])
+    def test_system_path_list_never_runs_with_a_hidden_host_path(
+        self, tmp_workspace, separator
+    ):
+        """A host path between list entries is refused (comma lists) or
+        dropped with the old rewrite (`:` lists, which validation does not
+        split), never passed to the command."""
+        word = separator.join(["/tmp/a.csv", "/etc/passwd", "/home/u/workspace/b.csv"])
+        command, error = prepare_sandbox_command(f"cat {word}", tmp_workspace)
+        assert error is not None or "/etc/passwd" not in command
+
     def test_convert_virtual_paths_has_no_ssh_remote_path_exemption(self):
         """Masking remote commands is prepare_sandbox_command's job."""
         result = convert_virtual_paths_in_command("ssh host ls /project")

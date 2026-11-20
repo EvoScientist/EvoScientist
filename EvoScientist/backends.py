@@ -2430,13 +2430,16 @@ def _rewrite_path_word(
         return in_workspace(path[len(workspace_root.rstrip("/")) :]), False
 
     # Fix hallucinated system absolute paths that reference the workspace.
+    # Not in a comma list (`/tmp/a,/home/u/<ws>/b`): the entries before the
+    # workspace name would be dropped. Lists joined with `:` or `=` keep the
+    # old rewrite, because validation does not check a path after those.
     if workspace_name and _is_system_path(path):
         marker = f"/{workspace_name}/"
         idx = path.rfind(marker)
-        if idx != -1:
+        if idx != -1 and "," not in path[:idx]:
             rest = path[idx + len(marker) - 1 :]
             return in_workspace("" if rest == "/" else rest), False
-        if path.endswith(f"/{workspace_name}"):
+        if path.endswith(f"/{workspace_name}") and "," not in path:
             return in_workspace(""), False
 
     if path == "/tmp" or path.startswith("/tmp/"):
