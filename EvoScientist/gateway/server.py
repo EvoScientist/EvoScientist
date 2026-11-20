@@ -626,44 +626,106 @@ class LangGraphServerThreadStore(ThreadStore):
         return cloned_thread_id
 
 
+def _lifecycle_graph_name(data: Mapping[str, Any] | None) -> str | None:
+    """The sub-agent name a lifecycle start event carries, if any.
+
+    LangGraph's lifecycle transformer copies the nested run's
+    ``lc_agent_name`` (its own or one inherited from the parent) into
+    ``graph_name`` on its start event, and the namespace segment when there
+    is none. The server's stream suppresses the raw ``tasks`` events that
+    carry the same name in their metadata, so this is where the name
+    actually arrives.
+    """
+    if data is None:
+        return None
+    name = data.get("graph_name")
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
+
+
+def _lifecycle_is_subagent(data: Mapping[str, Any] | None) -> bool:
+    """Whether the lifecycle event names a real sub-agent.
+
+    LangGraph's lifecycle transformer sets ``cause`` to a ``toolCall`` only
+    when the nested run was started by a tool call -- a run started by
+    anything else (an agent run inside a middleware hook, for instance) gets
+    no cause at all. The cause is therefore what tells the two apart, and it
+    decides on its own.
+
+    The absence of a cause means no tool call started a named run; a
+    tool-started run without a name keeps its namespace segment either way.
+    """
+    if data is None:
+        return False
+    cause = _as_raw_map(data.get("cause"))
+    if cause is None:
+        return False
+    return cause.get("type") == "toolCall"
+
+
+def _lifecycle_cause_tool_call_id(data: Mapping[str, Any] | None) -> str | None:
+    """The LLM tool call that started a nested run, if the event names it.
+
+    The transformer's cause carries the tool call the model made, so the
+    sub-agent can be announced under its own ``task`` line -- the way the
+    local gateway does -- rather than under the namespace segment.
+    """
+    if data is None:
+        return None
+    cause = _as_raw_map(data.get("cause"))
+    if cause is None:
+        return None
+    call_id = cause.get("tool_call_id")
+    if not isinstance(call_id, str):
+        return None
+    stripped = call_id.strip()
+    return stripped or None
+
+
 @dataclass(slots=True)
 class _ServerSubagentTracker:
     """Infer subagent start/end events from LangGraph server namespaces."""
 
     emitter: StreamEventEmitter
     registry: _SubagentRegistry
-    _active: dict[tuple[str, ...], tuple[str, str | None]] = field(default_factory=dict)
+    _active: dict[tuple[str, ...], str] = field(default_factory=dict)
+    # Paths whose child already ended. A late event for one of these must not
+    # announce a second start with no matching end.
+    _ended: set[tuple[str, ...]] = field(default_factory=set)
 
     def process(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         namespace = tuple(_event_namespace(event))
-        if namespace:
-            events.extend(self._ensure_registered(namespace[:1], tool_call_id=None))
-
         method = event.get("method")
         params = _as_raw_map(event.get("params"))
         data = _as_raw_map(params.get("data")) if params is not None else None
-        if data is None:
-            return events
 
         if method == "lifecycle":
-            phase = data.get("event")
+            phase = data.get("event") if data is not None else None
             if phase == "started" and namespace:
-                events.extend(self._ensure_registered(namespace, tool_call_id=None))
-            elif phase in ("completed", "failed") and namespace:
-                events.extend(self._end(namespace))
-        elif method == "tasks":
-            if "result" in data:
-                # A result that carries interrupts is a child that only paused.
+                # A nested run announces its own name in ``graph_name``: the
+                # server's lifecycle transformer copies the sub-agent's
+                # ``lc_agent_name`` there when the nested run is a sub-agent.
+                # Without it the name falls back to the namespace segment,
+                # which is the tool name -- so a sync sub-agent showed up as
+                # "tools" (#791).
                 events.extend(
-                    self._end_triggered_child(
+                    self._ensure_registered(
                         namespace,
-                        data.get("id"),
-                        paused=bool(data.get("interrupts")),
+                        tool_call_id=_lifecycle_cause_tool_call_id(data),
+                        name=self._lifecycle_name(data),
                     )
                 )
-            elif namespace:
-                events.extend(self._ensure_registered(namespace, tool_call_id=None))
+            elif phase in ("completed", "failed") and namespace:
+                events.extend(self._end(namespace))
+        elif namespace and self.registry.resolve(namespace[:1]) is None:
+            # A child's input values come before its lifecycle start, and the
+            # server mirrors tool results under ``tools:<call id>``: register
+            # the path for routing only, so only a lifecycle start announces.
+            head = namespace[:1]
+            self.registry.register(head, self._parse_namespace_segment(head[0])[0])
         return events
 
     def finish(self) -> list[dict[str, Any]]:
@@ -672,55 +734,64 @@ class _ServerSubagentTracker:
             self._active.keys(), key=lambda item: len(item), reverse=True
         ):
             events.extend(self._end(path))
+        self._active.clear()
+        self._ended.clear()
         self.registry.close()
         return events
+
+    def _lifecycle_name(self, data: Mapping[str, Any] | None) -> str | None:
+        """The name to announce for a nested run the lifecycle event names.
+
+        The transformer copies any ``lc_agent_name`` the nested run carries
+        into ``graph_name``, including one inherited from the parent (an
+        unnamed agent run inside a middleware hook), so the name counts only
+        when ``cause`` says a tool call started the run.
+        """
+        if not _lifecycle_is_subagent(data):
+            return None
+        return _lifecycle_graph_name(data)
 
     def _ensure_registered(
         self,
         path: tuple[str, ...],
         *,
         tool_call_id: str | None,
+        name: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not path or path in self._active:
+        if not path:
             return []
-        name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
-        trigger_call_id = tool_call_id or parsed_tool_call_id
+        if path in self._ended:
+            # The child already ended. A late start for it must not announce
+            # a second start, and must not overwrite the registry's name.
+            return []
+        active = self._active.get(path)
+        if active is not None:
+            # Already announced: the start is not repeated and the name is not
+            # rewritten, so a late event cannot rename a child the user
+            # already sees.
+            return []
+        fallback_name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
+        resolved = name or fallback_name
         instance_id = ":".join(path)
-        self._active[path] = (name, trigger_call_id)
-        self.registry.register(path, name)
+        self._active[path] = resolved
+        self.registry.register(path, resolved)
         return [
             self.emitter.subagent_start(
-                name,
+                resolved,
                 "",
                 instance_id=instance_id,
-                tool_call_id=trigger_call_id or "",
+                tool_call_id=tool_call_id or parsed_tool_call_id or "",
             ).data
         ]
 
-    def _end(
-        self, path: tuple[str, ...], *, paused: bool = False
-    ) -> list[dict[str, Any]]:
-        active = self._active.pop(path, None)
-        if active is None:
+    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+        name = self._active.get(path)
+        if name is None:
             return []
-        name, _tool_call_id = active
-        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        self._active.pop(path, None)
+        self._ended.add(path)
+        end = self.emitter.subagent_end(name, instance_id=":".join(path))
         return [end.data]
-
-    def _end_triggered_child(
-        self,
-        namespace: tuple[str, ...],
-        result_id: object,
-        *,
-        paused: bool = False,
-    ) -> list[dict[str, Any]]:
-        if not result_id:
-            return []
-        events: list[dict[str, Any]] = []
-        for path, (_name, tool_call_id) in list(self._active.items()):
-            if path[:-1] == namespace and tool_call_id == result_id:
-                events.extend(self._end(path, paused=paused))
-        return events
 
     @staticmethod
     def _parse_namespace_segment(segment: str) -> tuple[str, str | None]:
