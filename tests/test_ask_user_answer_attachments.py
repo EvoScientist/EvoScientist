@@ -44,7 +44,7 @@ def _answer_stream(root: Path, case: str):
             }
             return
 
-        assert request.message.resume["status"] == "answered"
+        assert request.message.resume["paper-question"]["status"] == "answered"
         paper = root / "media" / "paper.pdf"
         if case == "modified":
             paper.write_bytes(b"edited paper contents")

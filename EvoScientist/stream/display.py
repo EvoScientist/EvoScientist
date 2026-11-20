@@ -2009,7 +2009,12 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
+                # Ask the first ask_user, as the TUI and the consumer do; the
+                # others come back on the resume stream.
+                pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
+                if event_type == "ask_user" and pending_ask_user_before is not None:
+                    state.pending_ask_user = pending_ask_user_before
 
                 # Relay thinking to channel when transitioning away from
                 # thinking phase.  Uses content comparison so that replayed
@@ -2294,13 +2299,14 @@ def _run_streaming(
                         )
                     except _StreamPromptCancelled:
                         return _stopped_response()
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from ..backends import build_ask_user_resume
 
+                interrupt_id = state.pending_ask_user.get("interrupt_id")
                 state.pending_ask_user = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
-                message = Command(resume=result)
+                message = build_ask_user_resume(interrupt_id, result)
                 approve_all_carry = turn_granted or _session_auto_approve
                 continue
 

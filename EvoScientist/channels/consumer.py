@@ -530,8 +530,6 @@ class InboundConsumer:
         with unrecognized text, returns the intercepted inbound reply so the
         caller can refeed it as a new agent turn after this one unwinds.
         """
-        from langgraph.types import Command
-
         stream_input: GraphRunInput = msg.content
 
         try:
@@ -747,7 +745,11 @@ class InboundConsumer:
                         received_files=received_files,
                     )
 
-                    stream_input = Command(resume=result)
+                    from ..backends import build_ask_user_resume
+
+                    stream_input = build_ask_user_resume(
+                        interrupt_data.get("interrupt_id"), result
+                    )
                     approve_all_carry = self._approval_policy.is_session_granted(
                         session_key
                     )
