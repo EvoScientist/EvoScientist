@@ -1878,7 +1878,15 @@ def test_approve_route_leaves_nothing_after_a_failed_copy(
     assert draft["install_error"] is None
 
 
-def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_index):
+def test_concurrent_decisions_decide_one_draft_once(
+    served, monkeypatch, quiet_skill_index
+):
+    """Two approvals of one draft: one installs, the other is told it is decided.
+
+    The API takes one decision at a time, so the second call finds the draft
+    already approved. The install itself is serialized by the destination
+    lock, which ``test_autoskills_lock.py`` covers.
+    """
     import threading
 
     from EvoScientist.langgraph_dev import autoskills_api
