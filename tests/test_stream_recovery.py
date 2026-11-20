@@ -657,6 +657,10 @@ async def test_hard_killed_thread_recovered_at_start_of_next_run():
 
     snap = await resumed.aget_state(cfg)
     assert snap.next == ()
+    # Recovery writes outside the agent's hooks, so it stamps the results itself.
+    closed_in_state = _tool_messages(snap.values["messages"])
+    assert len(closed_in_state) == 3
+    assert all(m.response_metadata.get("evo_created_at") for m in closed_in_state)
 
 
 async def test_partially_finished_batch_keeps_real_result_and_closes_the_rest():

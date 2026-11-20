@@ -354,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        SubagentMessageTimestampMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         WindowsFilePathMiddleware,
@@ -395,6 +396,11 @@ def _inject_subagent_middleware(
             # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
+            # Stamps the reply of the attempt that succeeded: a failed one
+            # raises before the stamp. Outside the tool error handler, so the
+            # error results it builds are stamped when the tool fails. No input
+            # stamp: that hook would add a checkpoint to every ``task`` call.
+            SubagentMessageTimestampMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
             # Per-run model channel: mirrors the main agent's stack so a
@@ -987,6 +993,7 @@ def _get_default_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        MessageTimestampMiddleware,
         ModelFallbackMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
@@ -1086,6 +1093,10 @@ def _get_default_middleware(
         # middlewares) and normalizes them into a non-dataclass envelope
         # wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
+        # Stamps the reply of the attempt that succeeded: a failed one
+        # raises before the stamp. Outside the fallback chain, so messages
+        # added mid-run get the time that attempt started.
+        MessageTimestampMiddleware(),
         ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
