@@ -104,7 +104,15 @@ def test_existing_stamp_is_never_rewritten():
     assert _key(out.result[0]) == _EARLIER
 
 
-def test_messages_added_since_the_last_model_call_are_stamped_with_the_reply():
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_messages_added_since_the_last_model_call_get_the_call_start(
+    monkeypatch, use_async
+):
+    started, returned = "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:09.000Z"
+    clock = [started]
+    monkeypatch.setattr(
+        "EvoScientist.middleware.message_timestamp.created_at_now", lambda: clock[0]
+    )
     history = [
         HumanMessage("go", id="h1", response_metadata={CREATED_AT_KEY: _EARLIER}),
         AIMessage("", id="a1", response_metadata={CREATED_AT_KEY: _EARLIER}),
@@ -112,13 +120,23 @@ def test_messages_added_since_the_last_model_call_are_stamped_with_the_reply():
     ]
     request = SimpleNamespace(state={"messages": history})
 
-    out = MessageTimestampMiddleware().wrap_model_call(
-        request, lambda _: ModelResponse(result=[AIMessage("done")])
-    )
+    def reply(_):
+        clock[0] = returned
+        return ModelResponse(result=[AIMessage("done")])
+
+    async def areply(request):
+        return reply(request)
+
+    middleware = MessageTimestampMiddleware()
+    if use_async:
+        out = await middleware.awrap_model_call(request, areply)
+    else:
+        out = middleware.wrap_model_call(request, reply)
 
     [pending] = out.command.update["messages"]
     assert pending.id == "t1"
-    assert _key(pending) == _key(out.model_response.result[0])
+    assert _key(pending) == started
+    assert _key(out.model_response.result[0]) == returned
     assert CREATED_AT_KEY not in history[2].response_metadata
 
 
@@ -416,7 +434,7 @@ def test_message_added_after_a_model_call_is_stamped_by_the_next_one():
 
     *_, rejected, reply = result["messages"]
     assert rejected.content == "rejected"
-    assert _key(rejected) == _key(reply)
+    assert _key(rejected) <= _key(reply)
     assert all(_key(m) for m in result["messages"])
 
 
@@ -471,8 +489,8 @@ def test_subagent_stamps_cost_no_checkpoint():
 
     assert stamped == unstamped
     assert all(_ISO_UTC_MS.match(_key(m)) for m in messages)
-    # The input has no hook of its own: it gets the first reply's time.
-    assert _key(messages[0]) == _key(messages[1])
+    # The input has no hook of its own: it gets the first model call's start.
+    assert _key(messages[0]) <= _key(messages[1])
 
 
 def test_stamping_costs_one_checkpoint_per_run():

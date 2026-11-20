@@ -12,9 +12,9 @@ message and never rewrites it:
 - AI messages when the model call returns (``wrap_model_call``);
 - tool messages when the tool returns (``wrap_tool_call``);
 - messages other hooks add to state mid-run (todo errors, HITL rejections,
-  rubric revisions), when the next model call returns: ``wrap_model_call``
-  sends their stamped copies in the same state update as the reply, so no
-  extra checkpoint is written for them.
+  rubric revisions), with the start time of the next successful model-call
+  attempt: ``wrap_model_call`` sends their stamped copies in the same state
+  update as the reply, so no extra checkpoint is written for them.
 
 Code that writes into thread state outside the agent (``update_state``) stamps
 its messages itself with :func:`created_at_now` and :func:`with_created_at`.
@@ -146,15 +146,16 @@ def stamp_new_messages(messages: Sequence[Any]) -> dict[str, Any] | None:
 
 
 def _stamped_model_response(
-    request: ModelRequest, response: ModelResponse, now: str
+    request: ModelRequest, response: ModelResponse, started: str, now: str
 ) -> ModelResponse | ExtendedModelResponse:
-    """Stamp the reply, plus any unstamped message added to state since the
-    last model call; those copies keep their ids, so they replace in place."""
+    """Stamp the reply with *now*, plus any unstamped message added to state
+    since the last model call with *started*, when this call began; those
+    copies keep their ids, so they replace in place."""
     response = replace(
         response, result=[with_created_at(m, now) for m in response.result]
     )
     state = getattr(request, "state", None) or {}
-    pending = _unstamped_since_last_reply(state.get("messages") or [], now)
+    pending = _unstamped_since_last_reply(state.get("messages") or [], started)
     if not pending:
         return response
     return ExtendedModelResponse(
@@ -167,7 +168,8 @@ class SubagentMessageTimestampMiddleware(AgentMiddleware):
 
     No ``before_agent`` hook: it is a graph node, and a sync sub-agent runs on
     the parent's checkpointer, so it would cost a checkpoint per ``task``
-    call. The sub-agent's input is stamped with its first reply instead.
+    call. The sub-agent's input gets the start time of its first successful
+    model call.
     """
 
     name = "message_timestamp"
@@ -177,16 +179,18 @@ class SubagentMessageTimestampMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse | ExtendedModelResponse:
+        started = created_at_now()
         response = handler(request)
-        return _stamped_model_response(request, response, created_at_now())
+        return _stamped_model_response(request, response, started, created_at_now())
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | ExtendedModelResponse:
+        started = created_at_now()
         response = await handler(request)
-        return _stamped_model_response(request, response, created_at_now())
+        return _stamped_model_response(request, response, started, created_at_now())
 
     def wrap_tool_call(
         self,
