@@ -1194,7 +1194,7 @@ async def _handle_bus_message(bus, manager, msg) -> None:
     cm = ChannelMessage(
         msg_id=str(uuid.uuid4()),
         content=msg.content,
-        media=list(msg.media or ()),
+        media=list(msg.media),
         sender=msg.sender_id,
         channel_type=msg.channel,
         metadata=msg.metadata,

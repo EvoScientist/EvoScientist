@@ -9,7 +9,6 @@ import pytest
 
 from EvoScientist.channels.bus.events import InboundMessage
 from tests.fakes.common import FakeGraphGateway, stub_consumer
-from tests.test_channel_media_forwarding import _queued_media
 
 
 def _read(path: str, call_id: str):
@@ -55,7 +54,7 @@ def _answer_stream(root: Path, case: str):
             replacement.replace(paper)
         elif case == "alias":
             paper.with_name("alias.pdf").hardlink_to(paper)
-        if case == "initial-modified":
+        if case.startswith("initial-"):
             for event in _read("/media/initial.pdf", "initial"):
                 yield event
         for event in _read(
@@ -111,7 +110,7 @@ def _initial_message(root: Path, case: str):
         sender_id="user",
         chat_id="chat",
         content="Summarise a paper",
-        media=[str(initial)] if case == "initial-modified" else [],
+        media=[str(initial)] if case.startswith("initial-") else [],
     )
 
 
@@ -130,6 +129,7 @@ def _expected(root: Path, case: str):
         "modified",
         "replaced",
         "alias",
+        "initial-unchanged",
         "initial-modified",
         "text-only",
         "multiple",
@@ -150,7 +150,9 @@ async def test_standalone_question_answer_attachments(workspace, case):
         while not consumer.bus.outbound.empty():
             queued.append(consumer.bus.outbound.get_nowait())
         assert any(out.content == "Summary complete" for out in queued)
-        assert _queued_media(queued) == _expected(workspace.root, case)
+        assert [path for out in queued for path in out.media] == _expected(
+            workspace.root, case
+        )
         assert consumer._reply_registry._pending == {}
     finally:
         task.cancel()
@@ -293,6 +295,7 @@ async def _tui_handler(monkeypatch, workspace, msg, gateway):
         "modified",
         "replaced",
         "alias",
+        "initial-unchanged",
         "initial-modified",
         "text-only",
         "multiple",
@@ -350,6 +353,7 @@ async def test_channel_question_answer_attachments(
         )
         await asyncio.wait_for(reply, timeout=5)
         assert len(gateway.requests) == 2
+        assert gateway.requests[0].message == msg.content
         assert sent == _expected(workspace.root, case)
         assert channel_mod._message_queue.empty()
         assert channel_mod._reply_registry._pending == {}
@@ -358,33 +362,3 @@ async def test_channel_question_answer_attachments(
         reply.cancel()
         await asyncio.gather(consumer, reply, return_exceptions=True)
         channel_mod.forget_channel_origin("question-attachment-thread")
-
-
-async def test_bus_message_with_media_none_is_queued(monkeypatch, tmp_path):
-    """An inbound message with media=None must not raise when bridged."""
-    import asyncio
-
-    from EvoScientist.channels.bus.events import InboundMessage
-    from EvoScientist.channels.bus.message_bus import MessageBus
-    from EvoScientist.channels.channel_manager import ChannelManager
-    from EvoScientist.cli import channel as channel_mod
-
-    queued = []
-
-    def enqueue(message):
-        queued.append(message)
-        result = asyncio.get_running_loop().create_future()
-        result.set_result("done")
-        return result
-
-    monkeypatch.setattr(channel_mod, "_enqueue_channel_message", enqueue)
-    bus = MessageBus()
-    manager = ChannelManager(bus, media_dir=tmp_path / "media")
-    message = InboundMessage(
-        channel="stub", sender_id="u1", chat_id="c1", content="go", media=None
-    )
-
-    await channel_mod._handle_bus_message(bus, manager, message)
-
-    assert len(queued) == 1
-    assert queued[0].media == []

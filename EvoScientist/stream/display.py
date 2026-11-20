@@ -1878,7 +1878,6 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
-    received_media: list[str] | None = None,
     received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
@@ -1918,10 +1917,9 @@ def _run_streaming(
             calls name real files anywhere.
         routes: The agent's file tool routes (``file_tool_routes``), so a
             path under ``/skills/`` or ``/memories/`` names that tier's file.
-        received_media: Files attached to this turn, which are not echoed
-            when a read_file result names an unchanged attachment.
-        received_files: Shared file states for a channel turn, extended by
-            attachments received while answering its questions.
+        received_files: The files that came from the user during this turn
+            (:func:`received_media_state`); a read of one is not sent back
+            while it is unchanged.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1955,7 +1953,6 @@ def _run_streaming(
                 cancel_scope=cancel_scope,
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
-                received_media=received_media,
                 received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
@@ -1975,8 +1972,6 @@ def _run_streaming(
     state = _state if _state is not None else StreamState()
     if _media_sent is None:
         _media_sent = set()
-    if received_files is None:
-        received_files = received_media_state(received_media)
     _MIN_THINKING_LEN = 200
 
     def _stopped_response() -> str:
