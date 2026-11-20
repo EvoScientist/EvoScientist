@@ -19,6 +19,7 @@ from langgraph.types import Command, Interrupt
 from pydantic import ValidationError
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
+from ..middleware.message_timestamp import created_at_now, with_created_at
 from ..middleware.tool_history_repair import (
     _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
 )
@@ -342,6 +343,9 @@ async def _recover_interrupted_graph_state(
         else:
             patch = _interrupted_dangling_patch(list(messages))
         if patch:
+            # Written outside the agent, so no hook stamps these results.
+            now = created_at_now()
+            patch = [with_created_at(m, now) for m in patch]
             # Attribute the synthetic results to the stuck execution node so
             # they land in history exactly where the real results would have.
             write_node = (
