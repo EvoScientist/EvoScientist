@@ -4019,6 +4019,38 @@ class TestProcessKillByName:
         assert validate_command(command) is None
 
 
+class TestRelativePathSegmentsAreNotSystemPaths:
+    """A system-looking segment of a relative path is not an absolute path (#860)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls runs/*/optimizer.pt",
+            "ls output/checkpoint-*/optimizer.pt",
+            "wc -l data/*/dev.jsonl",
+            "wc -l data/*/dev/*.jsonl",
+            "ls envs/*/bin/python",
+            "du -sh runs/*/tmp",
+            "mkdir -p out/{a,b}/tmp",
+            "ls bindings/c++/bin",
+            "cat 'data (1)/dev.csv'",
+        ],
+    )
+    def test_relative_segments_pass(self, command):
+        assert validate_command(command) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "a.csv,/etc/passwd",
+            "x '/etc/passwd'",
+            "cat /tmp/{..,a}/etc/passwd",
+        ],
+    )
+    def test_a_separate_absolute_path_is_still_blocked(self, command):
+        assert validate_command(command) is not None
+
+
 class TestAbsolutePathDetection:
     """Validate that commands containing absolute system paths are blocked."""
 

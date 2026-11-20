@@ -1186,9 +1186,16 @@ def _extract_all_paths(
     # dashes, slashes. Looks inside quotes and unquoted tokens alike.
     # Excludes URL-like patterns (preceded by ://)
     path_re = re.compile(
-        r"(?<![:=/.\w])"  # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+        # A slash starts a path only after a real delimiter: a glob, brace or
+        # bracket continuation belongs to the same relative path, not a new
+        # absolute one. Quotes remain delimiters, so quoted host paths are
+        # still caught.
+        r"(?<![:/=.\w*?\]})+-])"
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
+        # A system folder name ends at "/" or at the end of the path: the
+        # "/opt" in "runs/*/optimizer.pt" is not an absolute system path.
+        r"(?=$|[\s'\",;|&<>)}\]])"
     )
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
