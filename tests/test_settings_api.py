@@ -249,6 +249,23 @@ class TestChatGPTSignIn:
         assert "tok-access-secret" not in response.text
         assert "tok-refresh-secret" not in response.text
 
+    def test_page_loads_when_the_sign_in_module_does_not(self, server, monkeypatch):
+        import sys
+
+        import EvoScientist.llm as llm_pkg
+
+        monkeypatch.delattr(llm_pkg, "chatgpt_oauth", raising=False)
+        monkeypatch.setitem(sys.modules, "EvoScientist.llm.chatgpt_oauth", None)
+
+        response = server.get("/api/settings")
+
+        assert response.status_code == 200
+        assert response.json()["chatgpt"] == {
+            "signed_in": False,
+            "plan": None,
+            "problem": "sign-in is unavailable",
+        }
+
 
 class TestSetupNeeded:
     def test_no_file(self, server):

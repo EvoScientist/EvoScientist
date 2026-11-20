@@ -185,14 +185,16 @@ def watch_stdin(fd: int, stop: threading.Event) -> None:
     except OSError as exc:
         logger.debug("stdin read failed: %s", exc)
     finally:
-        os.close(fd)
-    stop.set()
+        try:
+            os.close(fd)
+        finally:
+            stop.set()
 
 
 def _is_stop(line: bytes) -> bool:
     try:
         message = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):  # deep nesting raises RecursionError
         return False
     return isinstance(message, dict) and message.get("command") == "stop"
 

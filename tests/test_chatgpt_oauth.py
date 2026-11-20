@@ -1029,6 +1029,41 @@ def test_stop_cancels_and_frees_the_port(free_port):
         pass
 
 
+def test_a_stop_while_waiting_wins_over_a_callback_that_arrives(
+    free_port, token_endpoint, monkeypatch
+):
+    stop = threading.Event()
+    clients = []
+    real_selector = chatgpt_oauth.selectors.DefaultSelector
+
+    class _StopDuringSelect(real_selector):
+        def select(self, timeout=None):
+            ready = super().select(timeout)
+            if ready:
+                stop.set()  # the cancel lands while the answer is ready
+            return ready
+
+    monkeypatch.setattr(chatgpt_oauth.selectors, "DefaultSelector", _StopDuringSelect)
+
+    def on_url(url):
+        client = socket.create_connection(("127.0.0.1", free_port))
+        query = f"code=c1&state={_state_from(url)}"
+        client.sendall(f"GET /auth/callback?{query} HTTP/1.0\r\n\r\n".encode())
+        clients.append(client)
+
+    try:
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(
+                on_url=on_url, stop=stop, port=free_port, timeout=10
+            )
+    finally:
+        for client in clients:
+            client.close()
+
+    assert err.value.code == "cancelled"
+    assert token_endpoint == []
+
+
 def test_timeout_is_timed_out(free_port):
     with pytest.raises(chatgpt_oauth.SignInError) as err:
         chatgpt_oauth._authorize(on_url=lambda url: None, port=free_port, timeout=0.5)
@@ -1321,6 +1356,31 @@ def test_token_exchange_never_tells_the_user_to_call_upstreams_function(
         chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
 
     assert str(exc_info.value) == SIGN_IN_INCOMPLETE
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>proxy login</html>"),
+        httpx.Response(200, json=["not", "a", "token"]),
+        httpx.Response(200, json="token"),
+        httpx.Response(200, content=b"<html>\xe9t\xe9</html>"),  # Latin-1
+    ],
+    ids=["html", "list", "string", "not-utf8"],
+)
+def test_a_token_answer_that_is_not_a_token_object_is_sign_in_failed(
+    free_port, monkeypatch, response
+):
+    _token_endpoint(monkeypatch, lambda request: response)
+
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
+
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert (err.value.code, str(err.value)) == ("sign_in_failed", SIGN_IN_INCOMPLETE)
 
 
 def test_login_passes_other_failures_through(data_dir, monkeypatch, no_browser):

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import logging
 import os
 import re
 from dataclasses import fields
@@ -58,6 +59,8 @@ from EvoScientist.config.settings import (
     set_config_values,
     validate_setting,
 )
+
+logger = logging.getLogger(__name__)
 
 # Fields that decide what the agent may run and who can reach the server.
 # The WebUI may be reachable from other machines, so they change only with
@@ -360,9 +363,13 @@ def read_settings() -> dict[str, Any]:
 
 def _chatgpt_view() -> dict[str, Any]:
     """Whether a ChatGPT plan is signed in on this machine; never the token."""
-    from ..llm import chatgpt_oauth
+    try:
+        from ..llm import chatgpt_oauth
 
-    state = chatgpt_oauth.status()
+        state = chatgpt_oauth.status()
+    except Exception:  # the sign-in module does not load; the page still does
+        logger.debug("ChatGPT sign-in state unavailable", exc_info=True)
+        return {"signed_in": False, "plan": None, "problem": "sign-in is unavailable"}
     return {"signed_in": state.signed_in, "plan": state.plan, "problem": state.problem}
 
 

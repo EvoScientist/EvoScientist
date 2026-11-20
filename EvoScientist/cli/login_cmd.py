@@ -20,12 +20,15 @@ in) or ``error`` (``internal_error``).
 Every run ends with exactly one ``signed_in``, ``signed_out`` or ``error``
 line, then exits (0, or 1 after ``error``). Start ``EvoSci`` itself (not
 through a shell) with a stdin pipe: closing stdin or writing a
-``{"command": "stop"}`` line cancels a sign-in that waits for the browser.
+``{"command": "stop"}`` line cancels a sign-in that waits for the browser, as
+does SIGTERM on macOS and Linux (a second SIGTERM can end the process at
+once, with no terminal line).
 """
 
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import threading
 import traceback
@@ -55,9 +58,12 @@ def _internal_error(emit: Emit, exc: BaseException) -> int:
 
 def run_login_json(emit: Emit, stop: threading.Event) -> int:
     """Run the JSON sign-in until it ends; returns the exit code."""
-    import httpx
+    try:
+        import httpx
 
-    from ..llm import chatgpt_oauth
+        from ..llm import chatgpt_oauth
+    except Exception as exc:
+        return _internal_error(emit, exc)
 
     def _on_url(url: str) -> None:
         emit(_event("url", url=url))
@@ -85,9 +91,9 @@ def run_login_json(emit: Emit, stop: threading.Event) -> int:
 
 def run_logout_json(emit: Emit) -> int:
     """Remove the stored sign-in; returns the exit code."""
-    from ..llm import chatgpt_oauth
-
     try:
+        from ..llm import chatgpt_oauth
+
         chatgpt_oauth.logout()
     except Exception as exc:
         return _internal_error(emit, exc)
@@ -116,14 +122,29 @@ def login_chatgpt_command(
 
     emit = _json_mode()
     stop = threading.Event()
-    if stdin_is_pipe():
-        threading.Thread(
-            target=watch_stdin,
-            args=(os.dup(sys.stdin.fileno()), stop),
-            name="login-json-stdin",
-            daemon=True,
-        ).start()
-    raise typer.Exit(run_login_json(emit, stop))
+
+    def _on_sigterm(_signum: int, _frame: Any) -> None:
+        # Hand a second SIGTERM to the previous action: re-entering
+        # Event.set() from a nested handler would deadlock on its lock.
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        stop.set()
+
+    # Read first, so a SIGTERM right after the install finds it; None when the
+    # old action was not set from Python.
+    previous_sigterm = signal.getsignal(signal.SIGTERM) or signal.SIG_DFL
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        if stdin_is_pipe():
+            threading.Thread(
+                target=watch_stdin,
+                args=(os.dup(sys.stdin.fileno()), stop),
+                name="login-json-stdin",
+                daemon=True,
+            ).start()
+        code = run_login_json(emit, stop)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+    raise typer.Exit(code)
 
 
 @logout_app.command("chatgpt")

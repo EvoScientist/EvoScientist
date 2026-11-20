@@ -144,6 +144,99 @@ def test_json_login_ctrl_c_ends_with_cancelled(monkeypatch):
     }
 
 
+@pytest.fixture
+def sign_in_module_missing(monkeypatch):
+    """``from ..llm import chatgpt_oauth`` raises, as after an upstream rename."""
+    import EvoScientist.llm as llm_pkg
+
+    monkeypatch.delattr(llm_pkg, "chatgpt_oauth", raising=False)
+    monkeypatch.setitem(sys.modules, "EvoScientist.llm.chatgpt_oauth", None)
+
+
+@pytest.mark.parametrize(
+    ("fn", "args"),
+    [(login_cmd.run_login_json, (threading.Event(),)), (login_cmd.run_logout_json, ())],
+    ids=["login", "logout"],
+)
+def test_json_import_failure_still_ends_with_one_error_line(
+    sign_in_module_missing, fn, args
+):
+    code, events = _events(fn, *args)
+
+    assert code == 1
+    assert [(e["event"], e["code"]) for e in events] == [("error", "internal_error")]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill SIGTERM ends the process")
+def test_json_sigterm_ends_with_cancelled(monkeypatch, capsys):
+    import signal
+    import time
+
+    monkeypatch.setattr(
+        "EvoScientist.stream.json_sink.redirect_console_to_stderr", lambda: None
+    )
+    monkeypatch.setattr("EvoScientist.setup.protocol.stdin_is_pipe", lambda: False)
+
+    def _sign_in(*, on_url, stop=None, timeout=None):
+        on_url(URL)
+        os.kill(os.getpid(), signal.SIGTERM)  # the app stops the login
+        os.kill(os.getpid(), signal.SIGTERM)  # a second one reaches the old action
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if stop.is_set():
+                raise chatgpt_oauth.SignInError(
+                    "cancelled", chatgpt_oauth.SIGN_IN_CANCELLED
+                )
+            time.sleep(0.01)
+        return chatgpt_oauth.ChatGPTLogin(signed_in=True, plan="plus")
+
+    monkeypatch.setattr(chatgpt_oauth, "sign_in", _sign_in)
+    outer = []
+
+    def _outer(signum, frame):  # keeps pytest alive if the command installs none
+        outer.append(signum)
+
+    original = signal.signal(signal.SIGTERM, _outer)
+    try:
+        with pytest.raises(typer.Exit) as exit_info:
+            login_cmd.login_chatgpt_command(json_output=True)
+        after = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert exit_info.value.exit_code == 1
+    assert [e["event"] for e in events] == ["url", "error"]
+    assert events[-1]["code"] == "cancelled"
+    assert outer == [signal.SIGTERM]
+    assert after is _outer
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no SIGTERM handler to compare")
+def test_json_login_puts_the_sigterm_action_back(monkeypatch, capsys):
+    import signal
+
+    monkeypatch.setattr(
+        "EvoScientist.stream.json_sink.redirect_console_to_stderr", lambda: None
+    )
+    monkeypatch.setattr("EvoScientist.setup.protocol.stdin_is_pipe", lambda: False)
+    monkeypatch.setattr(chatgpt_oauth, "sign_in", _fake_sign_in())
+
+    def _outer(signum, frame):
+        pass
+
+    original = signal.signal(signal.SIGTERM, _outer)
+    try:
+        with pytest.raises(typer.Exit) as exit_info:
+            login_cmd.login_chatgpt_command(json_output=True)
+        after = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+    assert exit_info.value.exit_code == 0
+    assert after is _outer
+
+
 def test_json_command_watches_a_piped_stdin(monkeypatch, capsys):
     """The command itself starts the watcher: closing stdin cancels."""
     from EvoScientist.setup import protocol

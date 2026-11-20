@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import errno
 import http.server
+import json
 import logging
 import os
 import re
@@ -389,6 +390,8 @@ def _authorize(
             if time.monotonic() >= deadline:
                 raise SignInError("timed_out", SIGN_IN_TIMED_OUT)
             for key, _ in selector.select(_POLL_SECONDS):
+                if stop is not None and stop.is_set():
+                    break  # the next round reports the cancel
                 key.fileobj.handle_request()
                 if _answered():
                     break  # a second answer in the same round must not overwrite it
@@ -416,8 +419,10 @@ def _authorize(
                 "code_verifier": verifier,
             },
         )
+        if not isinstance(payload, dict):
+            raise RuntimeError("The token answer is not a JSON object.")
         return _token_from_response(payload)
-    except RuntimeError as exc:
+    except (RuntimeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         # Upstream's wording points at its own function; say it in ours.
         raise SignInError("sign_in_failed", SIGN_IN_INCOMPLETE) from exc
 
