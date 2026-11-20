@@ -283,7 +283,9 @@ async def _run_shadow_turn(
 # Finish reasons that mean the generation completed. Anything else (``length``,
 # ``max_tokens``, ``error``, ``content_filter``, ...) is not a message to send.
 # A model that reports no finish reason counts as clean.
-_CLEAN_FINISH_REASONS = frozenset({"stop", "end_turn", "STOP", "stop_sequence"})
+_CLEAN_FINISH_REASONS = frozenset(
+    {"stop", "end_turn", "STOP", "stop_sequence", "completed"}
+)
 
 
 def _finish_reason(message: Any) -> str | None:

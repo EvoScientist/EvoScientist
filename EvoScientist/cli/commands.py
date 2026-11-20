@@ -43,7 +43,6 @@ from . import (
     async_notifier,
     login_cmd,  # noqa: F401 — registers `EvoSci login` / `EvoSci logout`
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
-    service_cmd,  # noqa: F401 — registers `EvoSci service`
     workspace_cmd,  # noqa: F401 — registers `EvoSci workspace`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
@@ -3540,15 +3539,6 @@ def _main_callback(
                         console.print(f"[yellow]{notice}[/yellow]")
                         raise typer.Exit(exit_code)
                 finally:
-                    # Model failures can bypass middleware ``after_agent``
-                    # hooks. Close any remaining QuickJS workers while this
-                    # event loop is still available; their synchronous GC
-                    # fallback can deadlock during interpreter shutdown.
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
                     try:
                         print_resume_hint(tid, console=console)
                     except Exception:
