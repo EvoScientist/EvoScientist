@@ -510,6 +510,7 @@ def test_push_is_appended_in_one_write_as_the_terminal_node_and_delivered(armed)
     assert message["content"] == "The run finished."
     assert message["id"] == "proactive-p1"
     assert read_proactive_tag(message["additional_kwargs"])["proactive_id"] == "p1"
+    assert message["response_metadata"]["evo_created_at"].endswith("Z")
     assert published == [("t1", "The run finished.")]
 
 
