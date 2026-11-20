@@ -1044,6 +1044,25 @@ def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     return None
 
 
+def _copy_draft_snapshot(proposal_dir: Path, snapshot: Path) -> None:
+    """Copy a draft into a snapshot folder, refusing a file that links out.
+
+    The snapshot is a private folder the approval hashes, so the source is
+    what needs checking: a copied file must not reach outside the draft.
+    """
+    resolved_source = proposal_dir.resolve()
+    resolved_snapshot = snapshot.resolve()
+    for relative in copied_files(proposal_dir):
+        source = _draft_source(proposal_dir, resolved_source, relative)
+        target = snapshot / relative
+        if not _resolves_within_root(target.parent, resolved_snapshot):
+            raise OSError(
+                f"Skill snapshot path escapes its folder: {relative.as_posix()}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _copy_file_atomic(source, target)
+
+
 def submit_autoskill_proposal(
     *,
     memory_dir: str | Path,
@@ -1687,9 +1706,7 @@ def _snapshot_proposal(
     snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     snapshot = Path(tempfile.mkdtemp(prefix=f"{proposal_dir.name}-", dir=snapshot_root))
     try:
-        blocked = _copy_proposed_skill(proposal_dir, snapshot)
-        if blocked is not None:
-            raise ValueError(f"Skill snapshot path escapes its destination: {blocked}")
+        _copy_draft_snapshot(proposal_dir, snapshot)
         contents = _copied_contents(snapshot)
         approved_digests = {
             name: hashlib.sha256(data).hexdigest() for name, data in contents.items()

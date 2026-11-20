@@ -375,6 +375,40 @@ def test_approval_refuses_content_changed_since_the_client_digest(tmp_path):
     assert not (skills_dir / "focused-validation").exists()
 
 
+def test_the_snapshot_is_copied_without_the_install_copy(tmp_path, monkeypatch):
+    """The snapshot copy is its own step, not the install copy.
+
+    The install copy reads the verified snapshot. If the snapshot were made
+    with the same call, a caller that intercepts the install copy would also
+    intercept the snapshot, and the approval would refuse before it ever
+    installed.
+    """
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    real_copy = module._copy_proposed_skill
+    copied = []
+
+    def record(source, destination):
+        copied.append((Path(source), Path(destination)))
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", record)
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+
+    result = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert result["approved"] is True, result
+    assert len(copied) == 1, copied
+    source, destination = copied[0]
+    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
+    assert source.resolve().is_relative_to(snapshot_root), source
+    assert destination == skills_dir / "focused-validation", destination
+
+
 def test_approval_installs_the_snapshot_it_hashed(tmp_path, monkeypatch):
     from EvoScientist.memory.autoskills import proposals as module
 
