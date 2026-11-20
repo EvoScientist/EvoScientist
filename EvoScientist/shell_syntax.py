@@ -1178,6 +1178,283 @@ def variable_references(word: str) -> set[str]:
     return {match.group(1) or match.group(2) for match, _ in _references(word)}
 
 
+def _expansion_end(word: str, start: int) -> int | None:
+    """The end of the ``$`` or backquote expansion at *start* in *word*
+    (``$NAME``, ``$1``, ``${...}``, ``$(...)``, ```...```); ``None`` for a
+    ``$`` that expands nothing (``{a,$}``), ``-1`` for one left open."""
+    if word[start] == "`":
+        end = start + 1
+        while end < len(word) and word[end] != "`":
+            end += 2 if word[end] == "\\" else 1
+        return end + 1 if end < len(word) else -1
+    opener = word[start + 1 : start + 2]
+    if opener in ("{", "("):
+        closer = "}" if opener == "{" else ")"
+        depth = 0
+        end = start + 1
+        while end < len(word):
+            char = word[end]
+            if char == "\\":
+                end += 2
+                continue
+            if char in "'\"":
+                close = word.find(char, end + 1)
+                if close == -1:
+                    return -1
+                end = close + 1
+                continue
+            if char == opener:
+                depth += 1
+            elif char == closer:
+                depth -= 1
+                if not depth:
+                    return end + 1
+            end += 1
+        return -1
+    name = re.match(r"[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]", word[start + 1 :])
+    return start + 1 + name.end() if name else None
+
+
+# What a stand-in replaces: a quoted or escaped character, or an expansion
+# written as it is, bare or inside double quotes.
+_QUOTED, _EXPANSION, _QUOTED_EXPANSION = "quoted", "expansion", "quoted expansion"
+
+
+def _quote_marked(word: str) -> tuple[str, dict[str, tuple[str, str]]] | None:
+    """*word* as written with its quotes removed and each part that brace
+    expansion leaves alone replaced by a stand-in: a quoted or escaped
+    character, and a ``$`` or backquote expansion, which bash makes after
+    brace expansion (``{skills,$X}`` reads ``skills $X``). With the map back
+    and what each stand-in is. A backslash-newline is removed outside single
+    quotes, as bash does. ``None`` for an unclosed quote or expansion."""
+    stand_ins: dict[str, tuple[str, str]] = {}
+    out: list[str] = []
+
+    def mark(text: str, kind: str) -> None:
+        existing = (
+            next((k for k, v in stand_ins.items() if v == (text, kind)), None)
+            if kind == _QUOTED
+            else None
+        )
+        if existing is None:
+            if len(stand_ins) >= 0x1900:  # the Private Use Area
+                raise ValueError(word)
+            existing = chr(0xE000 + len(stand_ins))
+            stand_ins[existing] = (text, kind)
+        out.append(existing)
+
+    def expansion(at: int, kind: str) -> int | None:
+        """Mark the expansion at *at*; the index after it, or ``None`` when
+        the ``$`` there expands nothing."""
+        end = _expansion_end(word, at)
+        if end is None:
+            return None
+        if end == -1:
+            raise ValueError(word)
+        mark(word[at:end], kind)
+        return end
+
+    i = 0
+    try:
+        while i < len(word):
+            char = word[i]
+            if char == "'":
+                end = word.find("'", i + 1)
+                if end == -1:
+                    return None
+                for inner in word[i + 1 : end]:
+                    mark(inner, _QUOTED)
+                i = end + 1
+            elif char == '"':
+                i += 1
+                while i < len(word) and word[i] != '"':
+                    if word[i] in "$`":
+                        after = expansion(i, _QUOTED_EXPANSION)
+                        if after is not None:
+                            i = after
+                            continue
+                    if word[i] == "\\" and word[i + 1 : i + 2] == "\n":
+                        i += 2
+                        continue
+                    if word[i] == "\\" and word[i + 1 : i + 2] in ("$", "`", '"', "\\"):
+                        i += 1
+                    mark(word[i], _QUOTED)
+                    i += 1
+                if i >= len(word):
+                    return None
+                i += 1
+            elif char == "\\":
+                if i + 1 == len(word):
+                    return None
+                if word[i + 1] != "\n":  # a line continuation is removed
+                    mark(word[i + 1], _QUOTED)
+                i += 2
+            elif char in "$`":
+                after = expansion(i, _EXPANSION)
+                if after is None:  # a `$` that expands nothing is a character
+                    mark(char, _QUOTED)
+                    after = i + 1
+                i = after
+            else:
+                if 0xE000 <= ord(char) < 0xF900:
+                    return None  # a stand-in written in the word itself
+                out.append(char)
+                i += 1
+    except ValueError:
+        return None
+    return "".join(out), stand_ins
+
+
+def brace_words(word: str, *, as_written: bool = False) -> list[str] | None:
+    """The words a brace expansion in *word*, as written, makes, with quotes
+    removed: braces inside quotes stay as they are (``'{a,b}'`` is one word)
+    and the ones outside expand (``'sk'{ills,x}`` reads ``skills skx``).
+    With *as_written*, each word keeps the quoting of its characters
+    (``'sk'ills``), so a later step reads it as the shell does (an unquoted
+    ``~`` still names the home folder) and each ``$`` expansion as written
+    (``{skills,$X}`` reads ``skills $X``). ``None`` for a word whose quoting
+    is not closed, one :func:`_brace_words` declines to read (more words than
+    :data:`_VALUES_CAP`), and, without *as_written*, one with an expansion,
+    which only the run can read."""
+    marked = _quote_marked(word)
+    if marked is None:
+        return None
+    plain, stand_ins = marked
+    if not as_written and any(kind != _QUOTED for _, kind in stand_ins.values()):
+        return None
+    # With no unquoted `{` nothing expands; a lone `}` is a plain character.
+    words = _brace_words(plain) if "{" in plain else [plain]
+    if words is None:
+        return None
+
+    def written(char: str) -> str:
+        if char not in stand_ins:
+            return char
+        text, kind = stand_ins[char]
+        if kind == _EXPANSION:
+            return text
+        if kind == _QUOTED_EXPANSION:
+            return f'"{text}"'
+        return "\\'" if text == "'" else f"'{text}'"
+
+    def decoded(char: str) -> str:
+        return stand_ins[char][0] if char in stand_ins else char
+
+    restore = written if as_written else decoded
+    return ["".join(restore(char) for char in each) for each in words]
+
+
+# A brace list or sequence the shell expands (`{a,b}`, `{1..3}`, `{a..c}`).
+_EXPANDING_BRACE_RE = re.compile(
+    r"\{[^{}]*,[^{}]*\}|\{(?:-?\d+\.\.-?\d+(?:\.\.-?\d+)?|[A-Za-z]\.\.[A-Za-z])\}"
+)
+
+
+def expands_braces(word: str) -> bool:
+    """Whether bash expands a brace list or sequence in *word* as written:
+    one outside quotes (``'sk'{ills,x}`` does, ``'{a,b}'`` does not); the
+    braces of a ``${...}`` expansion are not one (``{skills,$X}`` is)."""
+    marked = _quote_marked(word)
+    return marked is not None and bool(_EXPANDING_BRACE_RE.search(marked[0]))
+
+
+_ANSI_C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+
+
+def _ansi_c_text(body: str) -> str:
+    """What bash reads for the inside of a ``$'...'`` word: its backslash
+    escapes decoded (``\\x69`` is ``i``)."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] != "\\" or i + 1 == len(body):
+            out.append(body[i])
+            i += 1
+            continue
+        escape = body[i + 1]
+        if escape in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[escape])
+            i += 2
+            continue
+        digits = {"x": (r"[0-9a-fA-F]{1,2}", 16), "u": (r"[0-9a-fA-F]{1,4}", 16)}
+        digits["U"] = (r"[0-9a-fA-F]{1,8}", 16)
+        if escape in digits:
+            pattern, base = digits[escape]
+            number = re.match(pattern, body[i + 2 :])
+            if number:
+                out.append(chr(min(int(number.group(0), base), 0x10FFFF)))
+                i += 2 + len(number.group(0))
+                continue
+        elif escape in "01234567":
+            number = re.match(r"[0-7]{1,3}", body[i + 1 :])
+            assert number is not None
+            out.append(chr(int(number.group(0), 8) & 0xFF))
+            i += 1 + len(number.group(0))
+            continue
+        elif escape == "c" and i + 2 < len(body):
+            out.append(chr(ord(body[i + 2]) & 0x1F))
+            i += 3
+            continue
+        out.append(body[i : i + 2])  # an escape bash keeps as written
+        i += 2
+    # Bash ends the text at a NUL: `$'skills\0x'` reads `skills`.
+    return "".join(out).split("\0", 1)[0]
+
+
+def ansi_c_unquoted(word: str) -> str | None:
+    """*word* as written, with each ``$'...'`` outside other quotes written
+    as the single-quoted text bash reads for it (``$'sk\\x69lls'`` reads
+    ``'skills'``); ``None`` when it has none."""
+    out: list[str] = []
+    quote: str | None = None
+    found = False
+    i = 0
+    while i < len(word):
+        char = word[i]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif quote == '"':
+            if char == "\\" and i + 1 < len(word):
+                out.append(word[i : i + 2])
+                i += 2
+                continue
+            quote = None if char == '"' else quote
+        elif char == "\\" and i + 1 < len(word):
+            out.append(word[i : i + 2])
+            i += 2
+            continue
+        elif word.startswith("$'", i):
+            end = i + 2
+            while end < len(word) and word[end] != "'":
+                end += 2 if word[end] == "\\" else 1
+            if end >= len(word):
+                return None  # not closed: not one word the check reads
+            text = _ansi_c_text(word[i + 2 : end])
+            out.append("'" + text.replace("'", "'\\''") + "'")
+            found = True
+            i = end + 1
+            continue
+        elif char in "'\"":
+            quote = char
+        out.append(char)
+        i += 1
+    return "".join(out) if found else None
+
+
 def braced_value(word: str) -> str | None:
     """A word as written, as the shell reads it, with each ``$NAME`` it
     expands written ``${NAME}``, so quote removal keeps where the name ends

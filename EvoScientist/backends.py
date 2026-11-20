@@ -1640,12 +1640,31 @@ def _recursive_rm_operands(
 ) -> list[tuple[str, dict[str, object] | None]]:
     """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
     ``--recursive``, in any spelling), with their tokens. Options are read as
-    the shell passes them to rm, so a quoted ``'-r'`` counts too."""
+    the shell passes them to rm, so a quoted ``'-r'`` counts too. Each operand
+    is read as the words bash makes of it (see :func:`_bash_operand_words`).
+
+    Raises:
+        shell_syntax.UnknownValues: an operand's brace expansion makes more
+            words than the check reads.
+    """
     if found.name != "rm":
         return []
+    # Options are read on the words bash makes too: `rm {-r,-f} x` is
+    # `rm -r -f x`. A brace list too big to read is refused only when the rm
+    # removes folders, or when the list may hold an option.
+    words: list[tuple[str, dict[str, object] | None]] = []
+    too_big: shell_syntax.UnknownValues | None = None
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        try:
+            words.extend(_bash_operand_words(arg, token))
+        except shell_syntax.UnknownValues as exc:
+            if re.search(r"(?:^|[{,])-", arg):
+                raise
+            too_big = too_big or exc
+            words.append((arg, token))
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
-    for arg, token in zip(found.args, found.tokens, strict=True):
+    for arg, token in words:
         value = str(token["value"]) if token is not None else arg
         if not options_done and value == "--":
             options_done = True
@@ -1657,7 +1676,59 @@ def _recursive_rm_operands(
             )
         else:
             operands.append((arg, token))
-    return operands if recursive else []
+    if not recursive:
+        return []
+    if too_big is not None:
+        raise too_big
+    return operands
+
+
+def _bash_operand_words(
+    arg: str, token: dict[str, object] | None
+) -> list[tuple[str, dict[str, object] | None]]:
+    """An rm operand as the words bash passes to rm: a ``$'...'`` part
+    decoded (``$'sk\\x69lls'`` is ``skills``) and a brace expansion made
+    (``{skills,x}`` is ``skills`` and ``x``), each with a token of its own;
+    the operand itself when bash makes no other word of it, and under
+    cmd.exe, which does neither (#846).
+
+    Raises:
+        shell_syntax.UnknownValues: a brace expansion with more words than
+            the check reads.
+    """
+    if token is None:
+        return [(arg, token)]
+    if _is_windows():
+        from . import agent_shell
+
+        if not agent_shell.uses_bash():
+            return [(arg, token)]
+    raw = str(token["raw"])
+    unquoted = shell_syntax.ansi_c_unquoted(raw)
+    if unquoted is not None:
+        tokens = shell_syntax.tokenize(unquoted)
+        if len(tokens) == 1 and tokens[0]["type"] == "word":
+            # The operand stays a word as written: `$'~'` is a quoted `~`.
+            raw = arg = unquoted
+            token = {**token, "raw": raw, "value": tokens[0]["value"]}
+    # A line continuation joins the word for bash (`sk\<newline>ills` is
+    # `skills`), with or without braces around it.
+    if not (shell_syntax.expands_braces(raw) or "\\\n" in raw):
+        return [(arg, token)]
+    written = shell_syntax.brace_words(raw, as_written=True)
+    if written is None:
+        raise shell_syntax.UnknownValues(arg)
+    words = []
+    for each in written:
+        if not each:
+            continue  # bash drops an empty unquoted word (`{,x}`)
+        # Read as a word, not as a command line: an expanded `#cache` is no
+        # comment.
+        tokens = shell_syntax.tokenize("\\" + each if each.startswith("#") else each)
+        if len(tokens) != 1 or tokens[0]["type"] != "word":
+            raise shell_syntax.UnknownValues(arg)
+        words.append((each, {**token, "raw": each, "value": tokens[0]["value"]}))
+    return words
 
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
@@ -2052,22 +2123,29 @@ def validate_command(
             )
     # Every absolute operand of a recursive rm, however it is spelled.
     if not dangerous and workspace_root:
-        for found in commands:
-            for operand, token in _recursive_rm_operands(found):
-                path = _removal_target(token) if token is not None else operand
-                bare = path.lstrip("'\"")
-                if _is_home_word(operand):
-                    problem = "outside"
-                elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
-                    continue
-                elif token is None:
-                    problem = "outside"  # glued to a substitution
-                else:
-                    problem = _removal_problem(path, workspace_root, protected)
-                if problem == "protected":
-                    return _protected_removal_error(operand)
-                if problem is not None:
-                    return _outside_removal_error(operand)
+        try:
+            removals = [
+                removal
+                for found in commands
+                for removal in _recursive_rm_operands(found)
+            ]
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
+        for operand, token in removals:
+            path = _removal_target(token) if token is not None else operand
+            bare = path.lstrip("'\"")
+            if _is_home_word(operand):
+                problem = "outside"
+            elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
+                continue
+            elif token is None:
+                problem = "outside"  # glued to a substitution
+            else:
+                problem = _removal_problem(path, workspace_root, protected)
+            if problem == "protected":
+                return _protected_removal_error(operand)
+            if problem is not None:
+                return _outside_removal_error(operand)
         try:
             refusal = _folder_removal_error(
                 command, commands, workspace_root, protected
@@ -2085,13 +2163,20 @@ def validate_command(
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:
-        for found in commands:
-            for operand, token in _recursive_rm_operands(found):
-                if _whole_system_target(operand, token):
-                    return (
-                        f"Command blocked: rm would remove '{operand}', the root, a "
-                        f"drive or the home folder, which is refused in every mode."
-                    )
+        try:
+            removals = [
+                removal
+                for found in commands
+                for removal in _recursive_rm_operands(found)
+            ]
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
+        for operand, token in removals:
+            if _whole_system_target(operand, token):
+                return (
+                    f"Command blocked: rm would remove '{operand}', the root, a "
+                    f"drive or the home folder, which is refused in every mode."
+                )
 
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
