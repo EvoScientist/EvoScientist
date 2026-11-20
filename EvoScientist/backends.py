@@ -1004,6 +1004,96 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# Limits for brace expansion. Past them the word is treated as unsafe.
+_BRACE_EXPANSION_LIMIT = 4096  # words one word may expand to
+_BRACE_EXPANSION_CHARS = 1 << 20  # characters held while expanding
+_BRACE_WORD_MAX_BRACES = 256  # `{` in one word
+_BRACE_WORD_MAX_CHARS = 1 << 16  # length of one word that has a `{`
+_BRACE_INT_SEQUENCE_RE = re.compile(r"[+-]?\d+\.\.[+-]?\d+(?:\.\.[+-]?\d+)?")
+_BRACE_CHAR_SEQUENCE_RE = re.compile(r"(.)\.\.(.)(?:\.\.[+-]?\d+)?", re.DOTALL)
+# Expansion only joins text the word already has, so a `..` part needs
+# `..` in the word or a `.` next to `{`, `,` or `}`.
+_BRACE_MAY_BUILD_DOTDOT_RE = re.compile(r"\.\.|[{},]\.|\.[{},]")
+
+
+class _BraceExpansionTooLarge(Exception):
+    pass
+
+
+def _brace_choices(body: str) -> list[str] | None:
+    """Return what ``{body}`` expands to, or None if bash keeps it literal."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(body):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    if parts:
+        return [*parts, body[start:]]
+    if _BRACE_INT_SEQUENCE_RE.fullmatch(body):
+        # Numbers only: no choice can be or build a `..` component.
+        return ["0"]
+    seq = _BRACE_CHAR_SEQUENCE_RE.fullmatch(body)
+    if seq:
+        lo, hi = sorted((ord(seq.group(1)), ord(seq.group(2))))
+        if hi - lo >= _BRACE_EXPANSION_LIMIT:
+            raise _BraceExpansionTooLarge
+        return [chr(c) for c in range(lo, hi + 1)]
+    return None
+
+
+def _first_brace_expansion(word: str) -> tuple[int, int, list[str]] | None:
+    """Find the first ``{...}`` that bash expands: (start, end, choices)."""
+    # Match braces in one pass so a word full of `{` stays linear.
+    closing: dict[int, int] = {}
+    opened: list[int] = []
+    for i, ch in enumerate(word):
+        if ch == "{":
+            opened.append(i)
+        elif ch == "}" and opened:
+            closing[opened.pop()] = i
+    for start in sorted(closing):
+        end = closing[start]
+        choices = _brace_choices(word[start + 1 : end])
+        if choices is not None:
+            return start, end, choices
+    return None
+
+
+def _expand_braces(word: str) -> list[str] | None:
+    """Expand brace lists and sequences in ``word`` like bash does.
+
+    Returns None when the result would pass the expansion limits.
+    """
+    if word.count("{") > _BRACE_WORD_MAX_BRACES or len(word) > _BRACE_WORD_MAX_CHARS:
+        return None
+    pending = [word]
+    expanded: list[str] = []
+    chars = len(word)
+    try:
+        while pending:
+            current = pending.pop()
+            found = _first_brace_expansion(current)
+            if found is None:
+                expanded.append(current)
+                continue
+            start, end, choices = found
+            if len(pending) + len(expanded) + len(choices) > _BRACE_EXPANSION_LIMIT:
+                return None
+            chars += len(choices) * len(current)
+            if chars > _BRACE_EXPANSION_CHARS:
+                return None
+            pending.extend(current[:start] + c + current[end + 1 :] for c in choices)
+    except _BraceExpansionTooLarge:
+        return None
+    return expanded
+
+
 # What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
 # ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
 _GLUED_VALUE_PREFIX_RE = re.compile(
@@ -1021,19 +1111,28 @@ def _has_traversal_component(command: str) -> bool:
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
-        if ".." in PurePosixPath(token).parts:
+        # Brace expansion can build `..` (`/tmp/{..,a}/x`, `/tmp/.{.,a}/x`).
+        words = (
+            _expand_braces(token)
+            if "{" in token and _BRACE_MAY_BUILD_DOTDOT_RE.search(token)
+            else [token]
+        )
+        if words is None:
             return True
-        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
-        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
-        value = token
-        for _ in range(4):
-            glued = _GLUED_VALUE_PREFIX_RE.match(value)
-            if glued is None:
-                break
-            value = value[glued.end() :]
-            entries = [value] if glued[0].startswith("-") else value.split(":")
-            if any(".." in PurePosixPath(entry).parts for entry in entries):
+        for word in words:
+            if ".." in PurePosixPath(word).parts:
                 return True
+            # A glued value can hold another prefix (CFLAGS=-I../x), a few deep
+            # at most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+            value = word
+            for _ in range(4):
+                glued = _GLUED_VALUE_PREFIX_RE.match(value)
+                if glued is None:
+                    break
+                value = value[glued.end() :]
+                entries = [value] if glued[0].startswith("-") else value.split(":")
+                if any(".." in PurePosixPath(entry).parts for entry in entries):
+                    return True
 
     # The substitution helper reads shell words, not whole commands: comments
     # and literal heredoc bodies must not affect its quote tracking.
@@ -1185,11 +1284,17 @@ def _extract_all_paths(
     # Pattern: match absolute paths starting with / followed by word chars, dots,
     # dashes, slashes. Looks inside quotes and unquoted tokens alike.
     # Excludes URL-like patterns (preceded by ://)
-    path_re = re.compile(
-        r"(?<![:=/.\w])"  # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+    system_path = (
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+    # not preceded by :, =, /, ., or word char (avoid URLs, env vars, ./paths)
+    path_re = re.compile(r"(?<![:=/.\w])" + system_path)
+    # A later path inside a word may also follow a list or map separator
+    # (`<root>/a.csv:/etc/passwd`, `<root>/a.csv=/etc/passwd`). After `)`,
+    # `]` or `+` it is a folder of the path itself (`<root>/Project (2)/tmp`,
+    # `<root>/c++/usr`): no tool splits a list on those.
+    later_path_re = re.compile(r"(?<![/.\w)\]+])" + system_path)
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
@@ -1206,18 +1311,55 @@ def _extract_all_paths(
         value = str(token["value"])
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
-        if (
+        # Scan past the allowed root, so its own folder names
+        # (`Project (2)`) are not read as later paths.
+        allowed_root = max(
             (
-                path.startswith("/")
-                or (_is_windows() and PureWindowsPath(path).is_absolute())
+                prefix.rstrip("/\\")
+                for prefix in allow_prefixes
+                if _under_any(path, (prefix,))
+            ),
+            key=len,
+            default="",
+        )
+        # A system path later in the word, outside the allowed folders. Read
+        # from the decoded value, so quote-split spellings (`/e""tc`) count.
+        # A toolchain setting (`-DCMAKE_PREFIX_PATH=<root>/x;/usr/local`) is
+        # skipped as a whole below, so its later entries are not operands.
+        later_system_path = (
+            None
+            if _is_toolchain_path_assignment(raw)
+            else next(
+                (
+                    found[1]
+                    for i in range(len(allowed_root) + 1, len(path))
+                    if (found := later_path_re.match(path, i))
+                    and not _under_any(path[i:], allow_prefixes)
+                    and found[1] not in _PASSTHROUGH_DEVICE_PATHS
+                ),
+                None,
             )
-            and _under_any(path, allow_prefixes)
+        )
+        starts_allowed = (
+            path.startswith("/")
+            or (_is_windows() and PureWindowsPath(path).is_absolute())
+        ) and _under_any(path, allow_prefixes)
+        if (
+            starts_allowed
             and not re.search(r"[$`;\n|&<>]|\s/", path)
+            and later_system_path is None
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
             # concatenations. Keep a literal allowed path together, but do
-            # not exempt code or substitutions that can name other paths.
+            # not exempt code or substitutions that can name other paths,
+            # nor a word with a second system path later in it
+            # (`<root>/a.csv,/home/u/b.csv`, `<root>/a.csv:/etc/passwd`).
+            # A later path that is itself allowed (`<root>/a,<root>/b`) or a
+            # passthrough device (`<root>/a,/dev/null`) is fine.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
+        elif starts_allowed and later_system_path is not None:
+            # The raw scan below misses it when quotes split it.
+            paths.append(later_system_path)
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))

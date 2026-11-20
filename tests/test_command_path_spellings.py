@@ -1,5 +1,6 @@
 """Quoted and attached paths name the same workspace files as bare paths."""
 
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -685,6 +686,211 @@ def test_spaced_workspace_keeps_parent_components_refused(tmp_path, operand):
     root = tmp_path / "my project"
     root.mkdir()
     assert prepare_sandbox_command(f"cd sub && cat {operand}", str(root))[1] is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project", "Project (2)"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv,/home/u/data.csv",
+        "cd sub && python x.py --files=/tmp/a.csv,/tmp/b.csv",
+        "cd sub && python x.py --files=/tmp/a.csv:/etc/passwd",
+        "cd sub && python x.py --map=/tmp/a.csv=/etc/passwd",
+        "python x.py --files=/memories/a:/etc/passwd",
+        "cd sub && eval \"/tmp/tool '/etc/passwd'\"",
+        "python x.py --files=/memories/a,/etc/passwd",
+        "cd sub && python x.py --files=/memories/a,/etc/passwd",
+    ],
+)
+def test_allowed_path_word_does_not_hide_a_later_system_path(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    error = prepare_sandbox_command(command, str(root))[1]
+    assert error is not None
+    assert "absolute system path" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["ws", "my project", "Project (2)"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && python x.py --files=/tmp/a.csv",
+        "cd sub && python x.py --files=/data/a.csv,/data/b.csv",
+        "cd sub && cat /tmp/{a,b}/x.csv",
+        "python x.py --files=/memories/a,/memories/b",
+        "cd sub && python x.py --files=/data/a.csv:/data/b.csv",
+        "cd sub && cat /tmp/a.csv",
+        "cd sub && echo {1..3} /tmp/{a,b}.csv",
+    ],
+)
+def test_allowed_path_word_with_only_workspace_paths_still_runs(
+    tmp_path, monkeypatch, root_name, command
+):
+    from EvoScientist import paths
+    from EvoScientist.backends import prepare_sandbox_command
+
+    monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+    root = tmp_path / root_name
+    root.mkdir()
+    assert prepare_sandbox_command(command, str(root))[1] is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("root_name", ["c++", "data [v2]", "run=1", "a:b"])
+def test_workspace_name_ending_in_a_symbol_keeps_its_own_paths(tmp_path, root_name):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / root_name
+    root.mkdir()
+    assert prepare_sandbox_command("cd sub && cat /tmp/a.csv", str(root))[1] is None
+    error = prepare_sandbox_command(
+        "cd sub && python x.py --files=/tmp/a.csv,/etc/passwd", str(root)
+    )[1]
+    assert "/etc/passwd" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("folder", ["Project (2)", "c++", "data [v2]", "x)"])
+def test_folder_name_ending_in_a_symbol_inside_workspace_runs(tmp_path, folder):
+    from EvoScientist.backends import prepare_sandbox_command, validate_command
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    for rest in ("tmp/a.csv", "usr/lib.a", "etc/x"):
+        command = f'cd sub && cat "/tmp/{folder}/{rest}"'
+        assert prepare_sandbox_command(command, str(root))[1] is None
+        command = f'cat "{root}/{folder}/{rest}"'
+        assert validate_command(command, allow_prefixes=(str(root),)) is None
+    for sep in (",", ":", "=", "@", "(", " '"):
+        command = f'cd sub && python x.py --files="/tmp/{folder}/a.csv{sep}/etc/passwd"'
+        assert "/etc/passwd" in prepare_sandbox_command(command, str(root))[1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat /tmp/{..,a}/{..,b}/.ssh/id_rsa",
+        "cat ./{a,..}/x",
+        "cat '{..,a}'/x",
+        "ls {a,..,b}",
+        # `..` built from a choice and the text next to it, or nested.
+        "cat /tmp/.{.,a}/etc/passwd",
+        "cat /tmp/{.,a}./etc/passwd",
+        "cat /tmp/{a,{b,..}}/x",
+        "cat /tmp/.{-../}/etc/passwd",
+        # Glued to an option or assignment (checked per expanded word).
+        "make CFLAGS=-I{..,x}/include",
+        "env PYTHONPATH=a:{..,b}/lib python x.py",
+        "gcc -I{a,..}/include x.c",
+    ],
+)
+def test_brace_choice_of_parent_folder_is_traversal(command, tmp_path):
+    from EvoScientist.backends import validate_command
+
+    error = validate_command(command, allow_prefixes=(str(tmp_path),))
+    assert error is not None
+    assert "'..' path traversal" in error
+
+
+_JSON_ROWS = json.dumps([{"id": i, "v": i / 2} for i in range(13)])
+_JSON_POINTS = json.dumps([{"x": i, "y": i, "z": i} for i in range(8)])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo {1..5}",
+        "cat ./{a,b}..txt",
+        "ls ./{a..c}/x",
+        "cat a{..,b}",
+        "for i in {1..100000}; do echo $i; done",
+        "cat ./file{1,2}.txt",
+        "cat ./{{a,b},c}/x",
+        # JSON arguments: many `{...}` but no `.` next to a brace.
+        f"curl -s -d '{_JSON_ROWS}' https://example.com/api",
+        f"python plot.py --points '{_JSON_POINTS}'",
+    ],
+)
+def test_brace_lists_without_a_parent_folder_are_no_traversal(command):
+    from EvoScientist.backends import _has_traversal_component
+
+    assert not _has_traversal_component(command)
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "{\x00..\U0010ffff}",  # a character range too big to expand
+        "a{b,.c}" * 20,  # 2**20 words
+        "{" * 50_000 + "}" * 50_000 + ".",  # too many braces to scan
+        "x" * 70_000 + "{a,.b}",  # too long to expand
+    ],
+)
+def test_brace_words_too_big_to_expand_are_refused(word):
+    import time
+
+    from EvoScientist.backends import _has_traversal_component
+
+    started = time.monotonic()
+    assert _has_traversal_component(f"cat {word}")
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    ("files", "allowed"),
+    [
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv", True),
+        ("/tmp/my project/a.csv,/tmp/my project/b.csv,/etc/passwd", False),
+        ("/tmp/my project/a.csv,/etc/passwd,/tmp/my project/b.csv", False),
+        ("/tmp/my project/a.csv,/tmp/my projectX/b.csv", False),
+        ("/tmp/my project/a.csv,/dev/null", True),
+        ("/tmp/my project/a.csv,/dev/null,/etc/passwd", False),
+        ('/tmp/my project/a.csv,/e""tc/passwd', False),
+        ('/tmp/my project/a.csv,/h""ome/u/b.csv', False),
+        ("/tmp/my project/a.csv:/etc/passwd", False),
+        ("/tmp/my project/a.csv=/etc/passwd", False),
+        ("/tmp/my project/a.csv:/tmp/my project/b.csv", True),
+    ],
+)
+def test_allowed_path_word_may_repeat_an_allowed_spaced_folder(files, allowed):
+    from EvoScientist.backends import validate_command
+
+    error = validate_command(
+        f'python x.py --files="{files}"', allow_prefixes=("/tmp/my project",)
+    )
+    assert (error is None) is allowed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cmake -DCMAKE_PREFIX_PATH="/opt/ws/x;/usr/local" -S src',
+        'make "LIBDIR=/opt/ws/lib;/usr/lib"',
+    ],
+)
+def test_toolchain_setting_under_allowed_folder_keeps_later_entries(command):
+    from EvoScientist.backends import validate_command
+
+    assert validate_command(command, allow_prefixes=("/opt/ws",)) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host paths")
+@pytest.mark.parametrize("later", ['/e""tc/passwd', '/et""c/shadow', '/h""ome/u/b.csv'])
+def test_quote_split_system_path_after_allowed_folder_is_refused(later):
+    from EvoScientist.backends import validate_command
+
+    command = f'python x.py --files="/tmp/work/a.csv,{later}"'
+    assert validate_command(command, allow_prefixes=("/tmp/work",)) is not None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution")
