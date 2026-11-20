@@ -727,6 +727,58 @@ def test_update_refusal_restores_installed_skill_after_resubmit(tmp_path, monkey
     } == original_files
 
 
+def test_update_refusal_removes_the_folders_the_install_added(tmp_path, monkeypatch):
+    """A refusal leaves the folder as it was, empty folders included.
+
+    An install that added a file under a new folder leaves that folder
+    behind when the approval is refused, so the refusal has to take it with
+    the file.
+    """
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "folder-update", "Installed version", "Original installed body."
+    )
+    original = sorted(
+        path.relative_to(installed).as_posix() for path in installed.rglob("*")
+    )
+    _submit_update(memory_dir, skills_dir, "folder-update")
+    draft = autoskill_proposals_dir(memory_dir) / "folder-update"
+    (draft / "nested" / "new").mkdir(parents=True)
+    (draft / "nested" / "new" / "extra.txt").write_text("added\n", encoding="utf-8")
+    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
+    real_copy = module._copy_proposed_skill
+
+    def copy_then_resubmit(snapshot, destination):
+        outcome = real_copy(snapshot, destination)
+        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
+            return outcome
+        result = submit_autoskill_proposal(
+            memory_dir=memory_dir,
+            skill_name="folder-update",
+            cluster_hash="cluster-update-folder-update",
+            source_observation_ids=["O-1", "O-2", "O-3"],
+            rationale="Resubmitted update.",
+            operation="update",
+            target_skill_name="folder-update",
+            skills_dir=skills_dir,
+        )
+        assert result["submitted"] is True, result
+        return outcome
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_resubmit)
+    result = approve_skill_proposal(
+        memory_dir, "folder-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert (
+        sorted(path.relative_to(installed).as_posix() for path in installed.rglob("*"))
+        == original
+    )
+
+
 def test_update_refusal_keeps_an_edit_the_user_made_during_the_approval(
     tmp_path, monkeypatch
 ):

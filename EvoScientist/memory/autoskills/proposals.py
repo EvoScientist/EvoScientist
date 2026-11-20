@@ -949,9 +949,19 @@ def _restore_destination(
             continue
         _copy_file_atomic(original[name], path)
     # A folder the install added and the user left alone goes away with it.
-    for name in set(installed_digests) - set(original):
+    added = set(installed_digests) - set(original)
+    for name in added:
         with contextlib.suppress(OSError):
             (destination / name).unlink()
+    # The folders the install created for those files go with them.
+    for name in added:
+        parent = (destination / name).parent
+        while parent != destination and parent.is_dir():
+            if any(parent.iterdir()):
+                break
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+            parent = parent.parent
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
