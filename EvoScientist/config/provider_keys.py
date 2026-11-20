@@ -586,10 +586,14 @@ def check_custom_openai(api_key: str, base_url: str) -> KeyCheck:
     passed explicitly, so the SDK never falls back to ``OPENAI_API_KEY`` and
     sends the user's OpenAI key to another server.
     """
+    api_key = api_key.strip()
     if not api_key:
+        # This action validates a credential; discovery can list without one.
         return _SKIPPED
     if not base_url:
         return KeyCheck("unavailable", "No base URL to check")
+
+    from ..llm.custom_openai_discovery import _names_from_body
 
     try:
         import openai
@@ -602,7 +606,7 @@ def check_custom_openai(api_key: str, base_url: str) -> KeyCheck:
         )
         # The SDK does not validate the body, so decide on the raw JSON.
         raw = client.models.with_raw_response.list()
-        models = _listed_models(raw.http_response.json())
+        models = _names_from_body(raw.http_response.json())
     except (openai.AuthenticationError, openai.PermissionDeniedError):
         return _INVALID
     except openai.NotFoundError:
@@ -615,7 +619,7 @@ def check_custom_openai(api_key: str, base_url: str) -> KeyCheck:
         return _classify_validation_error(e)
     if models is None:
         return KeyCheck("unavailable", "The endpoint's model list has no data")
-    return _models_listed(models)
+    return _models_listed(tuple(models))
 
 
 def check_custom_anthropic(api_key: str, base_url: str) -> KeyCheck:
