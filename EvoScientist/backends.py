@@ -1090,13 +1090,14 @@ def _collect_executable_positions(command: str) -> set[int]:
     return offsets
 
 
-def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
-    """True if *path* equals a prefix or is a strict descendant.
+def _allowed_root(path: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The longest allow prefix that is *path* or its ancestor, else ``None``.
 
     Boundary-aware: ``str.startswith`` alone would let ``/A/skills_evil``
     match the prefix ``/A/skills`` — anchoring on ``/`` blocks neighbour
     directories that merely share a name prefix.
     """
+    best: str | None = None
     for prefix in allow_prefixes:
         normalized = prefix.rstrip("/")
         # Skip empty/root prefixes: they'd reduce the check to startswith("/")
@@ -1104,8 +1105,14 @@ def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool
         if not normalized:
             continue
         if path == normalized or path.startswith(normalized + "/"):
-            return True
-    return False
+            if best is None or len(normalized) > len(best):
+                best = normalized
+    return best
+
+
+def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool:
+    """True if *path* equals a prefix or is a strict descendant."""
+    return _allowed_root(path, allow_prefixes) is not None
 
 
 _SEARCH_LIST_VARIABLES = frozenset(
@@ -1177,8 +1184,8 @@ def _extract_all_paths(
     paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
     Skips paths in executable position (command name).
 
-    Paths matched by ``allow_prefixes`` (via ``_is_under_allowed_prefix``)
-    are dropped.
+    Paths under ``allow_prefixes`` are dropped; a word that starts with one
+    is still checked for a later system path outside them.
     """
     exe_offsets = _collect_executable_positions(command)
     paths: list[str] = []
@@ -1190,6 +1197,26 @@ def _extract_all_paths(
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+
+    def _later_blocked_path(path: str, root: str) -> str | None:
+        """The first system path past *root* that no allowed folder holds
+        (``<root>/a.csv,/etc/passwd``), else ``None``."""
+        # Past the root's separator, so the root's own child stays allowed.
+        start = len(root) + 1
+        while (match := path_re.search(path, start)) is not None:
+            # path_re stops inside a spaced root, so match roots on the text;
+            # a bare root can end before a quote, comma or bracket.
+            here = _allowed_root_any(
+                path[match.start() :], allow_prefixes
+            ) or _allowed_root_any(match[1], allow_prefixes)
+            if here is not None:
+                start = match.start() + len(here) + 1
+            elif match[1] in _PASSTHROUGH_DEVICE_PATHS:
+                start = match.end()
+            else:
+                return match[1]
+        return None
+
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
     tokens = shell_syntax.parse(command).tokens
@@ -1206,17 +1233,22 @@ def _extract_all_paths(
         value = str(token["value"])
         attached = _attached_path_word(value)
         path = attached[1] if attached is not None else value
+        root = _allowed_root_any(path, allow_prefixes)
         if (
             (
                 path.startswith("/")
                 or (_is_windows() and PureWindowsPath(path).is_absolute())
             )
-            and _under_any(path, allow_prefixes)
+            and root is not None
             and not re.search(r"[$`;\n|&<>]|\s/", path)
         ):
             # The raw regex splits spaced roots and quoted-root + /tmp
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths.
+            # Read from the decoded word, so quote-split spellings count.
+            later = _later_blocked_path(path, root)
+            if later is not None:
+                paths.append(later)
             allowed_path_words.append((int(token["start"]), int(token["end"])))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
@@ -1275,14 +1307,20 @@ def _removal_target(token: dict[str, object]) -> str:
     return str(token["value"]).replace("\\", "/")
 
 
-def _under_any(path: str, folders: tuple[str, ...]) -> bool:
-    """Whether *path* is one of *folders* or inside one, with either separator
-    (case-insensitive on Windows)."""
+def _allowed_root_any(path: str, folders: tuple[str, ...]) -> str | None:
+    """The longest folder holding *path*, with either separator
+    (case-insensitive on Windows); ``None`` when none holds it."""
     path = path.replace("\\", "/")
     folders = tuple(folder.replace("\\", "/") for folder in folders)
     if _is_windows():
         path, folders = path.lower(), tuple(folder.lower() for folder in folders)
-    return _is_under_allowed_prefix(path, folders)
+    return _allowed_root(path, folders)
+
+
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether *path* is one of *folders* or inside one, with either separator
+    (case-insensitive on Windows)."""
+    return _allowed_root_any(path, folders) is not None
 
 
 def _removal_problem(
