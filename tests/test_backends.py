@@ -1422,7 +1422,10 @@ class TestWorkspaceRemovalAndComments:
     )
     def test_a_removal_of_a_variable_value_outside_is_refused(self, command):
         error = validate_command(command, ("/W/skills",), workspace_root="/W")
-        assert "outside the workspace" in error
+        # A cmd.exe ``..\`` assignment is refused earlier as traversal than as
+        # an outside-workspace removal; both are refusals of the same escape.
+        assert error is not None
+        assert "outside the workspace" in error or "path traversal" in error
         assert validate_command("D=/W/build; rm -rf $D", workspace_root="/W") is None
         for glued in (
             "D=build; rm -rf $D/x_$(date +%F)",
@@ -4016,6 +4019,49 @@ class TestProcessKillByName:
         ],
     )
     def test_kill_by_pid_and_mentions_stay_allowed(self, command):
+        assert validate_command(command) is None
+
+
+class TestCmdExeRemovalChecks:
+    """cmd.exe reads ``..\\`` as traversal and ``rd /s`` as recursive (#836)."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "type ..\\secret.txt",
+            "cd ..\\.. && dir",
+            "rd /s /q ..\\..",
+            "rmdir /s /q ..\\..",
+        ],
+    )
+    def test_backslash_traversal_is_refused(self, command):
+        assert validate_command(command) is not None
+
+    @pytest.mark.parametrize("command", ["rd /s /q skills", "rmdir /s /q skills"])
+    def test_recursive_folder_removal_is_checked(self, command, monkeypatch):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+        ws = r"C:\Users\me\proj"
+        error = prepare_sandbox_command(command, ws, skills_dir=ws + r"\skills")[1]
+        assert "protected folder" in error, command
+
+    @pytest.mark.parametrize(
+        "command", ["rd /s /q %USERPROFILE%", "rmdir /s /q %USERPROFILE%"]
+    )
+    def test_dangerous_mode_still_refuses_home(self, command):
+        assert validate_command(command, dangerous=True) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rd skills",
+            "rmdir empty-folder",
+            "dir notes",
+        ],
+    )
+    def test_non_recursive_removals_are_unaffected(self, command):
         assert validate_command(command) is None
 
 

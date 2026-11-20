@@ -1013,7 +1013,17 @@ _GLUED_VALUE_PREFIX_RE = re.compile(
 
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
-    from pathlib import PurePosixPath
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    # cmd.exe keeps backslashes and does not treat ``/`` as a separator, so a
+    # ``..\`` step has to be read as traversal there too. Git Bash and the
+    # POSIX shells keep the POSIX reading.
+    windows = False
+    if _is_windows():
+        from . import agent_shell
+
+        windows = not agent_shell.uses_bash()
+    path_type = PureWindowsPath if windows else PurePosixPath
 
     parsed = shell_syntax.parse(command)
     tokens = parsed.tokens
@@ -1021,7 +1031,7 @@ def _has_traversal_component(command: str) -> bool:
     # Quotes and escapes can split a literal path component as written.
     # Inspect shell-decoded words too.
     for token in (*command.split(), *decoded):
-        if ".." in PurePosixPath(token).parts:
+        if ".." in path_type(token).parts:
             return True
         # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
         # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
@@ -1032,7 +1042,7 @@ def _has_traversal_component(command: str) -> bool:
                 break
             value = value[glued.end() :]
             entries = [value] if glued[0].startswith("-") else value.split(":")
-            if any(".." in PurePosixPath(entry).parts for entry in entries):
+            if any(".." in path_type(entry).parts for entry in entries):
                 return True
 
     # The substitution helper reads shell words, not whole commands: comments
@@ -1641,13 +1651,26 @@ def _recursive_rm_operands(
     """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
     ``--recursive``, in any spelling), with their tokens. Options are read as
     the shell passes them to rm, so a quoted ``'-r'`` counts too."""
-    if found.name != "rm":
+    name = (found.name or "").lower()
+    # cmd.exe's ``rd``/``rmdir /s`` deletes a folder tree just as ``rm -r``
+    # does; without it the protected-folder check never saw those commands.
+    cmd_rd = name in ("rd", "rmdir")
+    if name != "rm" and not cmd_rd:
         return []
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
     for arg, token in zip(found.args, found.tokens, strict=True):
         value = str(token["value"]) if token is not None else arg
-        if not options_done and value == "--":
+        if cmd_rd:
+            # Virtual-path conversion rewrites ``/s`` to ``./s`` before the
+            # validation runs, so accept both spellings. Only a short option
+            # token counts: ``./skills`` is an operand, not ``/s``.
+            flag = value.removeprefix(".")
+            if not options_done and re.fullmatch(r"/[A-Za-z]{1,3}", flag):
+                recursive = recursive or "s" in flag[1:].lower()
+                continue
+            operands.append((arg, token))
+        elif not options_done and value == "--":
             options_done = True
         elif not options_done and value.startswith("-") and value != "-":
             recursive = recursive or (
