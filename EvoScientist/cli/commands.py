@@ -43,7 +43,6 @@ from . import (
     async_notifier,
     login_cmd,  # noqa: F401 — registers `EvoSci login` / `EvoSci logout`
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
-    service_cmd,  # noqa: F401 — registers `EvoSci service`
     workspace_cmd,  # noqa: F401 — registers `EvoSci workspace`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
