@@ -3540,15 +3540,6 @@ def _main_callback(
                         console.print(f"[yellow]{notice}[/yellow]")
                         raise typer.Exit(exit_code)
                 finally:
-                    # Model failures can bypass middleware ``after_agent``
-                    # hooks. Close any remaining QuickJS workers while this
-                    # event loop is still available; their synchronous GC
-                    # fallback can deadlock during interpreter shutdown.
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
                     try:
                         print_resume_hint(tid, console=console)
                     except Exception:

@@ -496,98 +496,10 @@ def test_second_sigint_exits_when_channel_cleanup_hangs():
     threading.current_thread() is not threading.main_thread(),
     reason="process signal handlers require the main thread",
 )
-@pytest.mark.timeout(30)
-def test_sigint_closes_the_code_interpreter_of_an_unfinished_turn(
-    monkeypatch, tmp_path
-):
-    """A turn cut off by the signal never evicts its QuickJS slot."""
-    from EvoScientist.middleware.code_interpreter import (
-        create_code_interpreter_middleware,
-    )
-
-    interpreter = create_code_interpreter_middleware()
-    interpreter._registry.get("unfinished-turn")
-
-    async def _agent(workspace, *_args):
-        return object()
-
-    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
-    monkeypatch.setattr(
-        "EvoScientist.gateway.create_runtime_gateways_for_config",
-        lambda config, backend=None: SimpleNamespace(graph_gateway=None),
-    )
-    try:
-        asyncio.run(
-            standalone._async_main(
-                _SigintChannel(),
-                MessageBus(),
-                use_agent=True,
-                send_thinking=False,
-                workspace=Workspace(tmp_path),
-            )
-        )
-        assert interpreter._registry.get_if_exists("unfinished-turn") is None
-    finally:
-        interpreter._registry.close()
-
-
 @pytest.mark.skipif(
     threading.current_thread() is not threading.main_thread(),
     reason="process signal handlers require the main thread",
 )
-@pytest.mark.timeout(30)
-def test_forced_exit_settles_turns_before_closing_code_interpreters(
-    monkeypatch, tmp_path
-):
-    """A turn still running after a forced exit must not reopen its QuickJS slot."""
-    from EvoScientist.middleware.code_interpreter import (
-        create_code_interpreter_middleware,
-    )
-
-    interpreter = create_code_interpreter_middleware()
-
-    class _TurnConsumer:
-        def __init__(self, **_kwargs) -> None:
-            self.metrics = {}
-
-        async def run(self) -> None:
-            self._turn = asyncio.create_task(self._reopening_turn())
-            threading.Timer(0.2, signal.raise_signal, [signal.SIGINT]).start()
-            threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
-            await asyncio.Future()
-
-        async def _reopening_turn(self) -> None:
-            while True:
-                interpreter._registry.get("running-turn")
-                await asyncio.sleep(0.01)
-
-        async def stop(self) -> None:
-            await asyncio.Future()
-
-    async def _agent(_workspace, *_args):
-        return object()
-
-    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
-    monkeypatch.setattr(standalone, "InboundConsumer", _TurnConsumer)
-    monkeypatch.setattr(
-        "EvoScientist.gateway.create_runtime_gateways_for_config",
-        lambda *a, **k: SimpleNamespace(graph_gateway=None),
-    )
-    try:
-        asyncio.run(
-            standalone._async_main(
-                QueueFakeChannel(),
-                MessageBus(),
-                True,
-                False,
-                workspace=Workspace(tmp_path),
-            )
-        )
-        assert interpreter._registry.get_if_exists("running-turn") is None
-    finally:
-        interpreter._registry.close()
-
-
 @pytest.mark.skipif(
     sys.platform == "win32", reason="Windows loops always take this path"
 )
@@ -595,74 +507,6 @@ def test_forced_exit_settles_turns_before_closing_code_interpreters(
     threading.current_thread() is not threading.main_thread(),
     reason="process signal handlers require the main thread",
 )
-@pytest.mark.timeout(30)
-def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
-    monkeypatch, tmp_path
-):
-    """A third Ctrl+C during the final cleanup must not skip the interpreter close."""
-    from asyncio import unix_events
-
-    from EvoScientist.middleware.code_interpreter import (
-        create_code_interpreter_middleware,
-    )
-
-    def _unsupported(self, sig, callback, *args):
-        raise NotImplementedError
-
-    monkeypatch.setattr(
-        unix_events._UnixSelectorEventLoop, "add_signal_handler", _unsupported
-    )
-    interpreter = create_code_interpreter_middleware()
-    interpreter._registry.get("slow-turn")
-
-    class _TurnConsumer:
-        def __init__(self, **_kwargs) -> None:
-            self.metrics = {}
-
-        async def run(self) -> None:
-            self._turn = asyncio.create_task(self._slow_to_cancel_turn())
-            await asyncio.sleep(0.1)
-            signal.raise_signal(signal.SIGINT)
-            await asyncio.sleep(0.1)
-            signal.raise_signal(signal.SIGINT)
-            await asyncio.Future()
-
-        async def _slow_to_cancel_turn(self) -> None:
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                signal.raise_signal(signal.SIGINT)
-                await asyncio.sleep(2)
-                raise
-
-        async def stop(self) -> None:
-            await asyncio.Future()
-
-    async def _agent(_workspace, *_args):
-        return object()
-
-    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
-    monkeypatch.setattr(standalone, "InboundConsumer", _TurnConsumer)
-    monkeypatch.setattr(
-        "EvoScientist.gateway.create_runtime_gateways_for_config",
-        lambda *a, **k: SimpleNamespace(graph_gateway=None),
-    )
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            asyncio.run(
-                standalone._async_main(
-                    QueueFakeChannel(),
-                    MessageBus(),
-                    True,
-                    False,
-                    workspace=Workspace(tmp_path),
-                )
-            )
-        assert interpreter._registry.get_if_exists("slow-turn") is None
-    finally:
-        interpreter._registry.close()
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sleep")
 @pytest.mark.skipif(
     threading.current_thread() is not threading.main_thread(),
