@@ -35,6 +35,7 @@ from .patches import (
 )
 from .registry import (
     _ANTHROPIC_ROUTED_PROVIDERS,
+    _CUSTOM_ENDPOINT_PROVIDERS,
     _MODEL_ENTRIES,
     _OPENAI_ROUTED_PROVIDERS,
     _THINKING_CAPABLE_PROVIDERS,
@@ -496,10 +497,15 @@ def get_chat_model(
                 break
     # Routers keep to their own entries: another provider's id may name an
     # older or different model there.
+    #
+    # A custom endpoint serves the ids it is asked for, so a name given with
+    # one is sent as written: the global registry fallback would rewrite it
+    # into another provider's id, which such an endpoint does not serve.
     if (
         model_id is None
         and model in MODELS
         and provider not in ("openrouter", "requesty")
+        and provider not in _CUSTOM_ENDPOINT_PROVIDERS
     ):
         model_id, default_provider = MODELS[model]
         provider = provider or default_provider

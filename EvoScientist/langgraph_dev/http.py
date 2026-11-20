@@ -78,9 +78,12 @@ async def get_models(_request: Request) -> JSONResponse:
     Ollama models when ``ollama_base_url`` is configured — same
     ``discover_ollama_models()`` call, same 1.5-s timeout, same
     fail-soft semantics (the probe returns ``[]`` on any error, never
-    raises). The TUI's "Custom Ollama model…" sentinel is intentionally
-    omitted — that's a widget-specific input affordance, not part of
-    the registry surface.
+    raises) — and by listing the models a configured ``custom-openai``
+    endpoint actually serves (``GET {base_url}/models``). A successful
+    listing replaces the static ``custom-openai`` defaults in place; a
+    failed or empty probe leaves them. The TUI's "Custom Ollama
+    model…" sentinel is intentionally omitted — that's a widget-specific
+    input affordance, not part of the registry surface.
 
     ``default`` reflects the deployment's currently-configured fallback
     (``config.yaml``'s ``model`` / ``provider`` — what ``/model reset``
@@ -88,8 +91,9 @@ async def get_models(_request: Request) -> JSONResponse:
     the registry, so the picker can still label it.
 
     Uses ``get_effective_config()`` (not ``load_config()``) so env-var
-    overrides like ``OLLAMA_BASE_URL`` from ``_ENV_MAPPINGS`` are
-    honored — matching the deploy's actual model-building behavior.
+    overrides like ``OLLAMA_BASE_URL`` and ``CUSTOM_OPENAI_BASE_URL``
+    from ``_ENV_MAPPINGS`` are honored — matching the deploy's actual
+    model-building behavior.
     Offloaded to a thread because ``get_effective_config()`` reads the
     config file, blocking I/O that langgraph-dev's ``blockbuster``
     middleware refuses on the async event loop (would surface as a 500).
@@ -100,6 +104,8 @@ async def get_models(_request: Request) -> JSONResponse:
         for name, model_id, provider in await list_model_picker_entries(
             getattr(cfg, "ollama_base_url", None),
             include_custom_ollama=False,
+            custom_openai_base_url=getattr(cfg, "custom_openai_base_url", None),
+            custom_openai_api_key=getattr(cfg, "custom_openai_api_key", None),
         )
     ]
     return JSONResponse(
