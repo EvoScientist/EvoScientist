@@ -61,9 +61,22 @@ class TestExtractModelAndProvider:
             extract_model_and_provider,
         )
 
-        # Unknown models are always rejected, even with an explicit provider
+        # Unknown models are rejected for a registry provider. ``ollama`` and
+        # ``custom-openai`` are the exceptions: their ids are not in MODELS.
         with pytest.raises(ValueError, match="Unknown model"):
-            extract_model_and_provider(["my-custom-model", "custom-openai"])
+            extract_model_and_provider(["my-custom-model", "anthropic"])
+
+    def test_custom_openai_provider_accepts_endpoint_model(self):
+        """An id only the custom endpoint serves is not in MODELS.
+        ``custom-openai`` must pass it through, like ``ollama`` does."""
+        from EvoScientist.commands.implementation.model import (
+            extract_model_and_provider,
+        )
+
+        assert extract_model_and_provider(["fake-agent", "custom-openai"]) == (
+            "fake-agent",
+            "custom-openai",
+        )
 
     def test_provider_override_on_known_model(self):
         from EvoScientist.commands.implementation.model import (
@@ -1106,6 +1119,211 @@ class TestModelCommandOllamaPicker:
         committed = set_cfg.call_args[0][0]
         assert committed.model == "llama3.3"
         assert committed.provider == "ollama"
+
+
+class TestModelCommandCustomOpenaiPicker:
+    """A configured custom-openai endpoint replaces the static defaults."""
+
+    def _make_ctx_and_cfg(self, *, base_url: str | None, api_key: str | None = ""):
+        cfg = SimpleNamespace(
+            model="claude-sonnet-5-5",
+            provider="anthropic",
+            ollama_base_url=None,
+            custom_openai_base_url=base_url,
+            custom_openai_api_key=api_key,
+        )
+        ui = MagicMock()
+        ui.supports_interactive = True
+        ui.wait_for_model_pick = AsyncMock(return_value=None)
+        ctx = MagicMock()
+        ctx.ui = ui
+        return ctx, cfg, ui
+
+    async def test_picker_shows_discovered_names_and_drops_defaults(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(
+            base_url="https://llm.test/v1", api_key="sk-test"
+        )
+        seen: dict[str, object] = {}
+
+        async def fake_discover(base_url, api_key=None, *, timeout):
+            seen["base_url"] = base_url
+            seen["api_key"] = api_key
+            return ["fake-agent"]
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            await ModelCommand().execute(ctx, [])
+
+        assert seen == {"base_url": "https://llm.test/v1", "api_key": "sk-test"}
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        custom_rows = [(n, mid, p) for (n, mid, p) in entries if p == "custom-openai"]
+        assert custom_rows == [("fake-agent", "fake-agent", "custom-openai")]
+        # Replacing the static group keeps its place; it is not appended.
+        first_custom = next(
+            i for i, row in enumerate(entries) if row[2] == "custom-openai"
+        )
+        assert any(row[2] != "custom-openai" for row in entries[first_custom + 1 :])
+
+    async def test_picker_probes_both_endpoints_concurrently(self):
+        import asyncio
+
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.llm.registry import list_models_by_provider
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(base_url="https://llm.test/v1")
+        cfg.ollama_base_url = "http://ollama.test"
+        ollama_started = asyncio.Event()
+        custom_started = asyncio.Event()
+
+        async def ollama_probe(base_url, *, timeout):
+            assert (base_url, timeout) == (cfg.ollama_base_url, 1.5)
+            ollama_started.set()
+            await custom_started.wait()
+            return ["local-model"]
+
+        async def custom_probe(base_url, api_key=None, *, timeout):
+            assert (base_url, timeout) == (cfg.custom_openai_base_url, 1.5)
+            custom_started.set()
+            await ollama_started.wait()
+            return ["custom-model"]
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.ollama_discovery.discover_ollama_models", ollama_probe
+            ),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                custom_probe,
+            ),
+        ):
+            await asyncio.wait_for(ModelCommand().execute(ctx, []), timeout=2)
+
+        entries = ui.wait_for_model_pick.call_args.args[0]
+        static = list_models_by_provider()
+        first_custom = next(
+            i for i, row in enumerate(static) if row[2] == "custom-openai"
+        )
+        assert entries[first_custom] == (
+            "custom-model",
+            "custom-model",
+            "custom-openai",
+        )
+        assert [row for row in entries if row[2] == "custom-openai"] == [
+            entries[first_custom]
+        ]
+        assert [row for row in entries if row[2] == "ollama"] == [
+            ("local-model", "local-model", "ollama"),
+            ("Custom Ollama model...", "__custom_ollama__", "ollama"),
+        ]
+
+    async def test_fallback_picker_shows_discovered_names(self):
+        """``/model-fallback add`` opens a picker with the endpoint's ids.
+
+        It passes the endpoint's settings on, so dropping those two
+        arguments would go unnoticed.
+        """
+        from EvoScientist.commands.implementation.model_fallback import (
+            ModelFallbackCommand,
+        )
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(
+            base_url="https://llm.test/v1", api_key="sk-test"
+        )
+
+        seen: dict[str, object] = {}
+
+        async def fake_discover(base_url, api_key=None, *, timeout):
+            seen["base_url"] = base_url
+            seen["api_key"] = api_key
+            return ["fake-agent"]
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            await ModelFallbackCommand().execute(ctx, ["add"])
+
+        assert seen == {"base_url": "https://llm.test/v1", "api_key": "sk-test"}
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        custom_rows = [row for row in entries if row[2] == "custom-openai"]
+        assert custom_rows == [("fake-agent", "fake-agent", "custom-openai")]
+
+    async def test_picker_keeps_static_defaults_when_discovery_empty(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.llm.registry import list_models_by_provider
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(base_url="https://llm.test/v1")
+
+        async def fake_discover(base_url, api_key=None, *, timeout):
+            return []
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                side_effect=fake_discover,
+            ),
+        ):
+            await ModelCommand().execute(ctx, [])
+
+        entries = ui.wait_for_model_pick.call_args[0][0]
+        expected = [
+            row for row in list_models_by_provider() if row[2] == "custom-openai"
+        ]
+        custom_rows = [row for row in entries if row[2] == "custom-openai"]
+        assert custom_rows == expected
+        assert ("fake-agent", "fake-agent", "custom-openai") not in entries
+
+    async def test_picker_skips_discovery_when_base_url_unset(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, _ui = self._make_ctx_and_cfg(base_url="")
+        discovery = AsyncMock(return_value=["fake-agent"])
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+                discovery,
+            ),
+        ):
+            await ModelCommand().execute(ctx, [])
+
+        discovery.assert_not_called()
+
+    async def test_argument_accepts_discovered_name(self):
+        """``/model fake-agent custom-openai`` must not be rejected as unknown."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        ctx, cfg, ui = self._make_ctx_and_cfg(base_url="https://llm.test/v1")
+        ctx.work_dir = Path("/tmp/test")
+        ctx.checkpointer = MagicMock()
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch("EvoScientist.EvoScientist._build_chat_model"),
+            patch("EvoScientist.EvoScientist.set_active_config") as set_cfg,
+            patch("EvoScientist.EvoScientist.set_chat_model_instance"),
+            patch("EvoScientist.cli.agent._load_agent", return_value=MagicMock()),
+        ):
+            await ModelCommand().execute(ctx, ["fake-agent", "custom-openai"])
+
+        ui.append_system.assert_called()
+        assert "Unknown model" not in ui.append_system.call_args[0][0]
+        committed = set_cfg.call_args[0][0]
+        assert committed.model == "fake-agent"
+        assert committed.provider == "custom-openai"
 
 
 @pytest.mark.asyncio

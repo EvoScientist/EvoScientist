@@ -40,8 +40,11 @@ def extract_model_and_provider(
 
     Raises:
         ValueError: If the model is not in the registry. Skipped when
-            ``provider_override == "ollama"``, since Ollama models are
-            locally-installed and never appear in ``MODELS``.
+            ``provider_override`` is ``"ollama"`` or ``"custom-openai"``.
+            Ollama models are locally-installed, and a custom OpenAI
+            endpoint serves ids that never appear in ``MODELS``. Neither
+            goes through ``resolve_provider``: that only honours a preferred
+            provider when the name already has a registry entry for it.
     """
     from ...llm.models import MODELS
     from ...llm.registry import resolve_provider
@@ -49,11 +52,10 @@ def extract_model_and_provider(
     model_name = args[0]
     provider_override = args[1] if len(args) > 1 else None
 
-    # Ollama models are locally-installed — not in the registry. Pass the name
-    # through verbatim; get_chat_model's "Assume full model ID" fallback
-    # (models.py) accepts them.
-    if provider_override == "ollama":
-        return model_name, "ollama"
+    # Not in the registry. Pass the name through verbatim; get_chat_model's
+    # "Assume full model ID" fallback (models.py) accepts them.
+    if provider_override in ("ollama", "custom-openai"):
+        return model_name, provider_override
 
     if model_name not in MODELS:
         raise ValueError(f"Unknown model '{model_name}'")
@@ -127,6 +129,8 @@ class ModelCommand(Command):
         entries = await list_model_picker_entries(
             getattr(cfg, "ollama_base_url", None),
             include_custom_ollama=True,
+            custom_openai_base_url=getattr(cfg, "custom_openai_base_url", None),
+            custom_openai_api_key=getattr(cfg, "custom_openai_api_key", None),
         )
 
         result = await ctx.ui.wait_for_model_pick(

@@ -7,6 +7,8 @@ for the chat-model construction stack in :mod:`.models` (~2000 modules).
 
 from __future__ import annotations
 
+import asyncio
+
 
 class UnknownModelError(ValueError):
     """A router was given a model id it cannot address (a bare short name)."""
@@ -62,6 +64,10 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
+# The user's own endpoints serve the ids they are asked for, so a name given
+# with one is sent as written, never rewritten into another provider's id.
+_CUSTOM_ENDPOINT_PROVIDERS = frozenset({"custom-openai", "custom-anthropic"})
+
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax", "xiaomi", "xiaomi-token-plan"}
 
@@ -101,14 +107,14 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-sonnet-5-5", "claude-sonnet-5-5", "anthropic"),
     ("claude-haiku-5-5", "claude-haiku-5-5", "anthropic"),
     # OpenAI
-    ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
+    ("gpt-6.2-sol", "gpt-6.2-sol", "openai"),
+    ("gpt-6.2-astra", "gpt-6.2-astra", "openai"),
     ("gpt-6.1-terra", "gpt-6.1-terra", "openai"),
+    ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
+    ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-6-sol", "gpt-6-sol", "openai"),
     ("gpt-6-luna", "gpt-6-luna", "openai"),
-    ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
-    ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
-    ("gpt-5.6-luna", "gpt-5.6-luna", "openai"),
     # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
     # Listed before the native providers and OpenRouter so that a short name
     # shared with them never resolves here (the dict below is last-entry-wins);
@@ -173,10 +179,13 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),
     ("claude-haiku-5.5", "anthropic/claude-haiku-5.5", "openrouter"),
-    ("gpt-6.1-sol", "openai/gpt-6.1-sol", "openrouter"),
+    ("gpt-6.2-sol", "openai/gpt-6.2-sol", "openrouter"),
+    ("gpt-6.2-astra", "openai/gpt-6.2-astra", "openrouter"),
     ("gpt-6.1-terra", "openai/gpt-6.1-terra", "openrouter"),
-    ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
+    ("gpt-6.1-sol", "openai/gpt-6.1-sol", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
+    ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
+    ("gemini-4-neon", "google/gemini-4-neon", "openrouter"),
     ("gemini-4-hydrogen", "google/gemini-4-hydrogen", "openrouter"),
     ("gemini-4-carbon", "google/gemini-4-carbon", "openrouter"),
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
@@ -196,6 +205,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.7", "x-ai/grok-4.7", "openrouter"),
     ("hy4", "tencent/hy4", "openrouter"),
+    ("hy4-flash", "tencent/hy4-flash", "openrouter"),
+    ("qwen4-max", "qwen/qwen4-max", "openrouter"),
     ("qwen3.8-max", "qwen/qwen3.8-max-0902", "openrouter"),
     ("qwen3.8-flash", "qwen/qwen3.8-flash", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
@@ -334,19 +345,65 @@ async def list_model_picker_entries(
     ollama_base_url: str | None,
     *,
     include_custom_ollama: bool,
+    custom_openai_base_url: str | None = None,
+    custom_openai_api_key: str | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Return model picker entries, optionally including local Ollama models."""
-    entries = list_models_by_provider()
-    if ollama_base_url:
-        from .ollama_discovery import discover_ollama_models
+    """Return model picker entries, optionally including live endpoint models.
 
-        for detected_name in await discover_ollama_models(
-            ollama_base_url,
-            timeout=1.5,
-        ):
-            entries.append((detected_name, detected_name, "ollama"))
-        if include_custom_ollama:
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    Ollama rows are appended. When ``custom_openai_base_url`` is set and the
+    endpoint lists models, those names replace the static ``custom-openai``
+    defaults in place (the group stays where the registry put it). An empty
+    or failed probe keeps the defaults, so the picker still opens offline.
+    """
+    entries = list_models_by_provider()
+    if not (ollama_base_url or custom_openai_base_url):
+        return entries
+
+    from .custom_openai_discovery import discover_custom_openai_models
+    from .ollama_discovery import discover_ollama_models
+
+    ollama_probe = (
+        discover_ollama_models(ollama_base_url, timeout=1.5)
+        if ollama_base_url
+        else None
+    )
+    custom_probe = (
+        discover_custom_openai_models(
+            custom_openai_base_url, custom_openai_api_key, timeout=1.5
+        )
+        if custom_openai_base_url
+        else None
+    )
+    ollama_models: list[str] = []
+    discovered: list[str] = []
+    if ollama_probe is not None and custom_probe is not None:
+        ollama_models, discovered = await asyncio.gather(ollama_probe, custom_probe)
+    elif ollama_probe is not None:
+        ollama_models = await ollama_probe
+    elif custom_probe is not None:
+        discovered = await custom_probe
+
+    for name in ollama_models:
+        entries.append((name, name, "ollama"))
+    if ollama_base_url and include_custom_ollama:
+        entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    if discovered:
+        # In place, not appended: the custom-openai group keeps the
+        # position it has in the static registry. The discovery already
+        # stripped blank ids and removed duplicates.
+        replacement = [(name, name, "custom-openai") for name in discovered]
+        merged: list[tuple[str, str, str]] = []
+        inserted = False
+        for row in entries:
+            if row[2] == "custom-openai":
+                if not inserted:
+                    merged.extend(replacement)
+                    inserted = True
+                continue
+            merged.append(row)
+        if not inserted:
+            merged.extend(replacement)
+        entries = merged
     return entries
 
 

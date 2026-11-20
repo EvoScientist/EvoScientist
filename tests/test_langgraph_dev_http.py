@@ -165,6 +165,124 @@ def test_ollama_discovery_skipped_when_base_url_absent():
     ]
 
 
+def test_custom_openai_models_replace_defaults_in_place():
+    """A configured custom-openai endpoint lists its own models in the
+    static group's position. The three defaults are dropped, and the
+    rows after that group stay after it.
+    """
+    from EvoScientist.llm.models import list_models_by_provider
+
+    mock_cfg = EvoScientistConfig(
+        model="claude-sonnet-4-6",
+        provider="custom-anthropic",
+        custom_openai_base_url="https://llm.test/v1",
+        custom_openai_api_key="sk-test",
+    )
+    seen: dict[str, object] = {}
+
+    async def fake_discover(base_url, api_key=None, *, timeout):
+        seen["base_url"] = base_url
+        seen["api_key"] = api_key
+        seen["timeout"] = timeout
+        return ["fake-agent"]
+
+    static = list(list_models_by_provider())
+    first = next(i for i, row in enumerate(static) if row[2] == "custom-openai")
+    rest = [row for row in static if row[2] != "custom-openai"]
+    removed_before = sum(1 for row in static[:first] if row[2] == "custom-openai")
+    insert_at = first - removed_before
+    expected_rows = [
+        *rest[:insert_at],
+        ("fake-agent", "fake-agent", "custom-openai"),
+        *rest[insert_at:],
+    ]
+    expected = [{"name": n, "model_id": m, "provider": p} for n, m, p in expected_rows]
+
+    with (
+        patch(
+            "EvoScientist.langgraph_dev.http.get_effective_config",
+            return_value=mock_cfg,
+        ),
+        patch(
+            "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+            new=fake_discover,
+        ),
+    ):
+        body = client.get("/api/models").json()
+
+    assert seen == {
+        "base_url": "https://llm.test/v1",
+        "api_key": "sk-test",
+        "timeout": 1.5,
+    }
+    assert body["entries"] == expected
+    assert not any(
+        e["name"] in {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
+        and e["provider"] == "custom-openai"
+        for e in body["entries"]
+    )
+
+
+def test_custom_openai_defaults_kept_when_discovery_empty():
+    """Unreachable endpoint: the response stays the static registry."""
+    from EvoScientist.llm.models import list_models_by_provider
+
+    mock_cfg = EvoScientistConfig(
+        custom_openai_base_url="https://llm.test/v1",
+    )
+
+    async def fake_discover(base_url, api_key=None, *, timeout):
+        return []
+
+    with (
+        patch(
+            "EvoScientist.langgraph_dev.http.get_effective_config",
+            return_value=mock_cfg,
+        ),
+        patch(
+            "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+            new=fake_discover,
+        ),
+    ):
+        body = client.get("/api/models").json()
+
+    assert body["entries"] == [
+        {"name": n, "model_id": m, "provider": p}
+        for n, m, p in list_models_by_provider()
+    ]
+
+
+def test_custom_openai_discovery_skipped_when_base_url_absent():
+    mock_cfg = EvoScientistConfig(
+        model="claude-sonnet-4-6", provider="custom-anthropic"
+    )
+    calls: list[str | None] = []
+
+    async def spy_discover(base_url, api_key=None, *, timeout):
+        calls.append(base_url)
+        return ["fake-agent"]
+
+    with (
+        patch(
+            "EvoScientist.langgraph_dev.http.get_effective_config",
+            return_value=mock_cfg,
+        ),
+        patch(
+            "EvoScientist.llm.custom_openai_discovery.discover_custom_openai_models",
+            new=spy_discover,
+        ),
+    ):
+        body = client.get("/api/models").json()
+
+    assert calls == []
+    from EvoScientist.llm.models import list_models_by_provider
+
+    assert body["entries"] == [
+        {"name": n, "model_id": m, "provider": p}
+        for n, m, p in list_models_by_provider()
+    ]
+
+
 # ---- /api/teams -----------------------------------------------------------
 
 

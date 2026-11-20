@@ -119,14 +119,14 @@ def _shorten_path(path: str) -> str:
 
 
 def _agent_shell_notices(backend: str | None = None) -> list[str]:
-    """The agent shell's setup hint, the server's ccproxy missing, the
-    server's drift warnings, a server unavailable for this project, one reachable from other machines and where
+    """The server's ccproxy missing, the server's drift warnings, a server
+    unavailable for this project, one reachable from other machines and where
     a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
-    They also go to the terminal or the log, which Textual hides while the
-    app runs, so the TUI shows them as notifications.
+    They also go to the terminal, which Textual hides while the app runs, so
+    the TUI shows them as notifications. The agent shell's setup hint is
+    logged when the agent is built, and the TUI shows logged warnings.
     """
-    from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
     from ..langgraph_dev.registration import exposure_messages
     from .commands import dangerous_flag_note
@@ -148,7 +148,6 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     )
     older = lg_manager.OLDER_SERVER
     notices = [
-        setup_hint(),
         lg_manager.CCPROXY_MISSING,
         older,
         drift,
@@ -1758,6 +1757,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
+            received_media: list[str] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1799,6 +1799,7 @@ def run_textual_interactive(
                 forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
+                received_media_state,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1866,6 +1867,7 @@ def run_textual_interactive(
                 self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
+            _received_files = received_media_state(received_media)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2121,6 +2123,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                    _todo_sent = False
                 _hitl_round += 1
                 events = None
                 try:
@@ -2208,8 +2211,9 @@ def run_textual_interactive(
                         if (
                             on_todo_cb
                             and not _todo_sent
-                            and event_type == "tool_call"
+                            and event_type == "tool_result"
                             and event.get("name") == "write_todos"
+                            and event.get("success", True)
                             and state.todo_items
                         ):
                             if (
@@ -2233,6 +2237,7 @@ def run_textual_interactive(
                                 media_dir=self._dirs.sandbox_media_dir,
                                 dangerous=_media_dangerous,
                                 routes=_media_routes,
+                                received_files=_received_files,
                             )
 
                         # -- Remove loading spinner on first content event --
@@ -2350,21 +2355,6 @@ def run_textual_interactive(
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
                                     tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -2384,14 +2374,17 @@ def run_textual_interactive(
                             ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
-                            # Update todo from results
-                            if (
-                                result_name in ("write_todos", "read_todos")
-                                and state.todo_items
+                            # Update todo from results; the first Task List
+                            # panel goes above its call.
+                            if result_name in ("write_todos", "read_todos") and (
+                                state.todo_items or todo_w is not None
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tw is not None:
+                                        await container.mount(todo_w, before=tw)
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
                             # Show "Analyzing results..." if all tools done, no text yet
@@ -2678,11 +2671,11 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_ask_user_resume
 
-                                _stream_input = Command(resume=result)
+                                _stream_input = build_ask_user_resume(
+                                    event.get("interrupt_id"), result
+                                )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
                                 )
@@ -3469,6 +3462,7 @@ def run_textual_interactive(
                         else None,
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
+                        received_media=msg.media,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
@@ -4591,8 +4585,13 @@ def run_textual_interactive(
                 resumed=resumed,
                 resume_warning=resume_warning,
             )
+            from .tui_logging import tui_warning_notifications
+
             try:
-                await app.run_async()
+                # Around run_async: only after _shutdown closes the driver is the
+                # alternate screen surely left, and buffered records print after that.
+                with tui_warning_notifications(app):
+                    await app.run_async()
             finally:
                 from .resume_hint import print_resume_hint
 
