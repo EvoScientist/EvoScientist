@@ -330,7 +330,14 @@ def test_agent_run_stamps_every_message_in_order():
     assert datetime.fromisoformat(stamps[0]) >= before.replace(microsecond=0)
 
 
-def test_input_is_stamped_when_the_run_starts():
+async def _invoke(agent, run_input, config, use_async):
+    if use_async:
+        return await agent.ainvoke(run_input, config)
+    return agent.invoke(run_input, config)
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_input_is_stamped_when_the_run_starts(use_async):
     """``before_agent`` stamps the input before the model sees it, not with
     the reply."""
     seen = []
@@ -346,8 +353,11 @@ def test_input_is_stamped_when_the_run_starts():
         checkpointer=InMemorySaver(),
     )
 
-    agent.invoke(
-        {"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "t"}}
+    await _invoke(
+        agent,
+        {"messages": [HumanMessage("go")]},
+        {"configurable": {"thread_id": "t"}},
+        use_async,
     )
 
     assert seen
@@ -438,7 +448,8 @@ def test_message_added_after_a_model_call_is_stamped_by_the_next_one():
     assert all(_key(m) for m in result["messages"])
 
 
-def test_rejection_beside_an_approved_call_is_stamped():
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_rejection_beside_an_approved_call_is_stamped(use_async):
     """The rejection is written before the approved call's stamped result."""
     from langchain.agents.middleware import HumanInTheLoopMiddleware
 
@@ -458,11 +469,13 @@ def test_rejection_beside_an_approved_call_is_stamped():
         checkpointer=InMemorySaver(),
     )
     config = {"configurable": {"thread_id": "t"}}
-    agent.invoke({"messages": [HumanMessage("go")]}, config)
+    await _invoke(agent, {"messages": [HumanMessage("go")]}, config, use_async)
 
-    result = agent.invoke(
+    result = await _invoke(
+        agent,
         Command(resume={"decisions": [{"type": "reject"}, {"type": "approve"}]}),
         config,
+        use_async,
     )
 
     tool_results = {
@@ -617,7 +630,9 @@ def test_main_stack_stamps_inside_retry_and_outside_fallback(
     assert names.index("message_timestamp") < names.index("model_fallback")
 
 
-def test_subagent_stack_stamps_inside_retry(workspace, no_configured_model):
+def test_subagent_stack_stamps_inside_retry_and_outside_tool_errors(
+    workspace, no_configured_model
+):
     from EvoScientist.config import EvoScientistConfig
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
@@ -627,5 +642,6 @@ def test_subagent_stack_stamps_inside_retry(workspace, no_configured_model):
     middleware = subs[0]["middleware"]
     names = _names(middleware)
     assert names.index("model_retry") < names.index("message_timestamp")
+    assert names.index("message_timestamp") < names.index("tool_error_handler")
     [stamp] = [m for m in middleware if m.name == "message_timestamp"]
     assert type(stamp) is SubagentMessageTimestampMiddleware
