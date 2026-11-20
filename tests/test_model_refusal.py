@@ -4,31 +4,47 @@ from __future__ import annotations
 
 import io
 import json
+from functools import partial
 from types import SimpleNamespace
 
+import anthropic
+import httpx2
 import pytest
 from deepagents import create_deep_agent
-from langchain.agents.middleware.types import ModelResponse
+from deepagents.middleware.subagents import _refusal_notice_for
+from langchain.agents.middleware import ModelRefusalMiddleware
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain_anthropic import ChatAnthropic
 from langchain_core.exceptions import ModelRefusalError
-from langchain_core.messages import AIMessage
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph_api.serde import json_dumpb
+from typer.testing import CliRunner
 
-from EvoScientist.llm.errors import ProviderStreamError
-from EvoScientist.middleware.error_normalization import (
-    ErrorNormalizationMiddleware,
-    ModelRefusalDetectionMiddleware,
+from EvoScientist.cli import commands
+from EvoScientist.cli._app import app
+from EvoScientist.config import EvoScientistConfig
+from EvoScientist.EvoScientist import (
+    _get_default_middleware,
+    _inject_subagent_middleware,
 )
+from EvoScientist.gateway.local import LocalGraphGateway
+from EvoScientist.gateway.types import GraphTarget, RunRequest
+from EvoScientist.llm.errors import ProviderStreamError
+from EvoScientist.middleware import error_normalization as errors
+from EvoScientist.middleware import model_fallback as fallback
+from EvoScientist.stream.json_sink import stream_json
+
+
+def _event(kind, **data):
+    return {"type": kind, **data}
 
 
 @pytest.fixture(autouse=True)
 def _clean_fallback_chain():
-    from EvoScientist.middleware.model_fallback import (
-        _reset_chain_initialization,
-        clear_fallbacks,
-    )
-
-    clear_fallbacks()
+    fallback.clear_fallbacks()
     yield
-    _reset_chain_initialization()
+    fallback._reset_chain_initialization()
 
 
 def _message(reason="refusal", *, content=None):
@@ -45,94 +61,65 @@ def _message(reason="refusal", *, content=None):
     )
 
 
-def _request():
-    from langchain_anthropic import ChatAnthropic
-
-    return SimpleNamespace(
-        model=ChatAnthropic(model="claude-sonnet-4-6", api_key="test", max_retries=0)
-    )
+def _model(model="claude-sonnet-4-6", **kwargs):
+    return ChatAnthropic(model=model, api_key="test", max_retries=0, **kwargs)
 
 
-async def _call(middleware, response, use_async):
-    async def handler(_request):
-        return response
+async def _call(middleware, handler, use_async, request=None):
+    async def ahandler(request):
+        return handler(request)
 
-    if use_async:
-        return await middleware.awrap_model_call(_request(), handler)
-    return middleware.wrap_model_call(_request(), lambda _: response)
+    invoke = ahandler if use_async else handler
+    for m in reversed(middleware):
+        wrap = m.awrap_model_call if use_async else m.wrap_model_call
+        invoke = partial(wrap, handler=invoke)
+    request = request if request is not None else SimpleNamespace(model=_model())
+    return await invoke(request) if use_async else invoke(request)
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize(
-    "content",
-    [
-        [],
-        [{"type": "text", "text": "Partial answer"}],
-        [
+@pytest.mark.parametrize("case", ["empty", "partial", "refusal-block", "normal"])
+async def test_v1_response_detection(use_async, case):
+    content = [] if case == "empty" else [{"type": "text", "text": "Partial answer"}]
+    if case == "refusal-block":
+        content = [
             {
                 "type": "refusal",
                 "refusal": "Cannot continue",
                 "extras": {"category": "safety"},
             }
-        ],
-    ],
-)
-async def test_v1_metadata_refusal_raises_with_details(use_async, content):
-    message = _message(content=content)
+        ]
+    reason = "end_turn" if case == "normal" else "refusal"
+    message = _message(reason, content=content)
     response = ModelResponse(result=[message])
-    middleware = ModelRefusalDetectionMiddleware()
-
+    middleware = [errors.ModelRefusalDetectionMiddleware()]
+    if reason == "end_turn":
+        result = await _call(middleware, lambda _: response, use_async)
+        assert result is response
+        assert result.result[0] is message
+        assert message.content == [{"type": "text", "text": "Partial answer"}]
+        return
     with pytest.raises(ModelRefusalError, match=r"safety.*Cannot continue") as caught:
-        await _call(middleware, response, use_async)
-    assert caught.value.raw_message.response_metadata == message.response_metadata
-    assert (
-        sum(b["type"] == "refusal" for b in caught.value.raw_message.content_blocks)
-        == 1
-    )
+        await _call(middleware, lambda _: response, use_async)
+    raw = caught.value.raw_message
+    assert raw.response_metadata == message.response_metadata
+    assert sum(b["type"] == "refusal" for b in raw.content_blocks) == 1
     assert message.content == content
     if any(b["type"] == "refusal" for b in content):
-        assert caught.value.raw_message is message
-
-
-@pytest.mark.parametrize("use_async", [False, True])
-async def test_normal_v1_response_is_untouched(use_async):
-    message = _message("end_turn")
-    response = ModelResponse(result=[message])
-    middleware = ModelRefusalDetectionMiddleware()
-
-    result = await _call(middleware, response, use_async)
-    assert result is response
-    assert result.result[0] is message
-    assert message.content == [{"type": "text", "text": "Partial answer"}]
+        assert raw is message
 
 
 @pytest.mark.parametrize("use_async", [False, True])
 async def test_existing_refusal_error_keeps_its_type_and_single_block(use_async):
-    from deepagents.middleware.subagents import _refusal_notice_for
-    from langchain.agents.middleware import ModelRefusalMiddleware
-
     block = {"type": "refusal", "refusal": "Already refused"}
     message = _message(content=[block])
     response = ModelResponse(result=[message])
-    outer = ErrorNormalizationMiddleware(pass_through_refusals=True)
-    inner = ModelRefusalMiddleware()
-
-    async def invoke():
-        async def answer(_request):
-            return response
-
-        if use_async:
-
-            async def handler(request):
-                return await inner.awrap_model_call(request, answer)
-
-            return await outer.awrap_model_call(_request(), handler)
-        return outer.wrap_model_call(
-            _request(), lambda req: inner.wrap_model_call(req, lambda _: response)
-        )
-
+    middleware = [
+        errors.ErrorNormalizationMiddleware(pass_through_refusals=True),
+        ModelRefusalMiddleware(),
+    ]
     with pytest.raises(ModelRefusalError, match="Already refused") as caught:
-        await invoke()
+        await _call(middleware, lambda _: response, use_async)
     assert caught.value.raw_message is message
     assert message.content == [block]
     assert "The subagent stopped because a model refused" in _refusal_notice_for(
@@ -140,45 +127,40 @@ async def test_existing_refusal_error_keeps_its_type_and_single_block(use_async)
     )
 
 
+def _provider_message(reason, *, message_id="msg_test", output_tokens=0):
+    return {
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [],
+        "stop_reason": reason,
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": output_tokens},
+    }
+
+
+def _stop_details():
+    return {"category": "safety", "explanation": "Cannot continue"}
+
+
 def _sse(reason, *, text="Partial answer"):
+    delta = {
+        "stop_reason": reason,
+        "stop_sequence": None,
+        "stop_details": _stop_details(),
+    }
     events = [
-        {
-            "type": "message_start",
-            "message": {
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-6",
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 1, "output_tokens": 0},
-            },
-        },
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        },
-        {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": text},
-        },
-        {"type": "content_block_stop", "index": 0},
-        {
-            "type": "message_delta",
-            "delta": {
-                "stop_reason": reason,
-                "stop_sequence": None,
-                "stop_details": {
-                    "category": "safety",
-                    "explanation": "Cannot continue",
-                },
-            },
-            "usage": {"output_tokens": 3},
-        },
-        {"type": "message_stop"},
+        _event("message_start", message=_provider_message(None)),
+        _event(
+            "content_block_start", index=0, content_block={"type": "text", "text": ""}
+        ),
+        _event(
+            "content_block_delta", index=0, delta={"type": "text_delta", "text": text}
+        ),
+        _event("content_block_stop", index=0),
+        _event("message_delta", delta=delta, usage={"output_tokens": 3}),
+        _event("message_stop"),
     ]
     return "".join(
         f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events
@@ -187,10 +169,6 @@ def _sse(reason, *, text="Partial answer"):
 
 @pytest.fixture
 async def anthropic_model():
-    import anthropic
-    import httpx2
-    from langchain_anthropic import ChatAnthropic
-
     clients = []
 
     def build(reason, *, text="Partial answer"):
@@ -204,9 +182,7 @@ async def anthropic_model():
 
         client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
         clients.append(client)
-        model = ChatAnthropic(
-            model="claude-sonnet-4-6", api_key="test", max_tokens=1024, max_retries=0
-        )
+        model = _model(max_tokens=1024)
         model.__dict__["_async_client"] = anthropic.AsyncAnthropic(
             api_key="test", max_retries=0, http_client=client
         )
@@ -222,21 +198,14 @@ async def anthropic_model():
 async def test_real_anthropic_stream_through_local_gateway(
     anthropic_model, reason, with_fallback, workspace, monkeypatch
 ):
-    from EvoScientist.gateway.local import LocalGraphGateway
-    from EvoScientist.gateway.types import GraphTarget, RunRequest
-    from EvoScientist.middleware.model_fallback import add_fallback
-    from EvoScientist.stream.json_sink import stream_json
-
     model = anthropic_model(reason)
-    fallback = anthropic_model("end_turn", text="Fallback answer")
-    monkeypatch.setattr("EvoScientist.llm.models.get_chat_model", lambda **_: fallback)
-    if with_fallback:
-        add_fallback("fallback", "anthropic")
-    graph = create_deep_agent(
-        model=model,
-        middleware=_refusal_stack(workspace, model, "main"),
-        subagents=[],
+    fallback_model = anthropic_model("end_turn", text="Fallback answer")
+    monkeypatch.setattr(
+        "EvoScientist.llm.models.get_chat_model", lambda **_: fallback_model
     )
+    if with_fallback:
+        fallback.add_fallback("fallback", "anthropic")
+    graph = _main_graph(workspace, model)
     request = RunRequest(
         message="hello", thread_id="refusal-test", target=GraphTarget(local_graph=graph)
     )
@@ -245,10 +214,8 @@ async def test_real_anthropic_stream_through_local_gateway(
     if failed:
         with pytest.raises(ProviderStreamError, match="Model refused") as caught:
             await stream_json(LocalGraphGateway(), request, out=output)
-        assert (
-            caught.value.__cause__.raw_message.response_metadata["output_version"]
-            == "v1"
-        )
+        metadata = caught.value.__cause__.raw_message.response_metadata
+        assert metadata["output_version"] == "v1"
     else:
         assert await stream_json(LocalGraphGateway(), request, out=output) == (
             "Partial answer\n\nFallback answer"
@@ -267,18 +234,8 @@ async def test_real_anthropic_stream_through_local_gateway(
 def test_single_shot_cli_reports_refusal(
     monkeypatch, tmp_path, anthropic_model, reason, output_format, workspace
 ):
-    from typer.testing import CliRunner
-
-    from EvoScientist.cli import commands
-    from EvoScientist.cli._app import app
-    from EvoScientist.config import EvoScientistConfig
-
     model = anthropic_model(reason)
-    graph = create_deep_agent(
-        model=model,
-        middleware=_refusal_stack(workspace, model, "main"),
-        subagents=[],
-    )
+    graph = _main_graph(workspace, model)
     config = EvoScientistConfig(ui_backend="cli", enable_async_subagents=False)
     monkeypatch.setattr("EvoScientist.config.get_effective_config", lambda _: config)
     monkeypatch.setattr("EvoScientist.config.apply_config_to_env", lambda _: None)
@@ -298,74 +255,41 @@ def test_single_shot_cli_reports_refusal(
 
 
 def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
-    import anthropic
-    import httpx2
-    from langchain_anthropic import ChatAnthropic
-    from langchain_core.language_models.fake_chat_models import (
-        FakeMessagesListChatModel,
-    )
-    from langchain_core.messages import ToolMessage
-
     class Parent(FakeMessagesListChatModel):
         def bind_tools(self, tools, **kwargs):
             return self
 
     def respond(request):
-        return httpx2.Response(
-            200,
-            json={
-                "id": "msg_refused",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-sonnet-4-6",
-                "content": [],
-                "stop_reason": "refusal",
-                "stop_sequence": None,
-                "stop_details": {
-                    "category": "safety",
-                    "explanation": "Cannot continue",
-                },
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-            },
+        payload = _provider_message(
+            "refusal", message_id="msg_refused", output_tokens=1
         )
+        payload["stop_details"] = _stop_details()
+        return httpx2.Response(200, json=payload)
 
     with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
-        child = ChatAnthropic(
-            model="claude-sonnet-4-6", api_key="test", max_tokens=1024, max_retries=0
-        )
+        child = _model(max_tokens=1024)
         child.__dict__["_client"] = anthropic.Anthropic(
             api_key="test", max_retries=0, http_client=client
         )
+        task = {
+            "name": "task",
+            "id": "task-1",
+            "args": {"subagent_type": "researcher", "description": "hello"},
+        }
         parent = Parent(
             responses=[
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "task",
-                            "id": "task-1",
-                            "args": {
-                                "subagent_type": "researcher",
-                                "description": "hello",
-                            },
-                        }
-                    ],
-                ),
+                AIMessage(content="", tool_calls=[task]),
                 AIMessage(content="Continue without the researcher"),
             ]
         )
-        graph = create_deep_agent(
-            model=parent,
-            subagents=[
-                {
-                    "name": "researcher",
-                    "description": "Research",
-                    "system_prompt": "Research",
-                    "model": child,
-                    "middleware": _refusal_stack(workspace, child, "sync-subagent"),
-                }
-            ],
-        )
+        subagent = {
+            "name": "researcher",
+            "description": "Research",
+            "system_prompt": "Research",
+            "model": child,
+            "middleware": _refusal_stack(workspace, child, "sync-subagent"),
+        }
+        graph = create_deep_agent(model=parent, subagents=[subagent])
         result = graph.invoke({"messages": [{"role": "user", "content": "hello"}]})
 
     tasks = [m for m in result["messages"] if isinstance(m, ToolMessage)]
@@ -378,14 +302,10 @@ def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
 
 
 def test_main_refusal_keeps_its_webui_message():
-    from langgraph_api.serde import json_dumpb
-
-    from EvoScientist.middleware.error_normalization import _normalize
-
     refusal = ModelRefusalError.from_refusal(
         {"type": "refusal", "refusal": "Cannot continue"}, raw_message=_message()
     )
-    normalized = _normalize(_request(), refusal)
+    normalized = errors._normalize(SimpleNamespace(model=_model()), refusal)
     payload = json.loads(json_dumpb(normalized if normalized is not None else refusal))
 
     assert "Model refused" in payload["message"]
@@ -393,13 +313,13 @@ def test_main_refusal_keeps_its_webui_message():
     assert payload["provider"] == "anthropic"
 
 
-def _refusal_stack(workspace, model, kind):
-    from EvoScientist.config import EvoScientistConfig
-    from EvoScientist.EvoScientist import (
-        _get_default_middleware,
-        _inject_subagent_middleware,
+def _main_graph(workspace, model):
+    return create_deep_agent(
+        model=model, middleware=_refusal_stack(workspace, model, "main"), subagents=[]
     )
 
+
+def _refusal_stack(workspace, model, kind):
     cfg = EvoScientistConfig()
     if kind == "sync-subagent":
         subs = [{"name": "researcher"}]
@@ -433,15 +353,7 @@ def _refusal_stack(workspace, model, kind):
 async def test_refused_primary_uses_configured_fallbacks(
     monkeypatch, workspace, kind, use_async, fallback_reasons
 ):
-    from functools import partial
-
-    from langchain.agents.middleware.types import ModelRequest
-
-    from EvoScientist.middleware.model_fallback import set_fallback_chain
-
-    primary = _request().model
-    from langchain_anthropic import ChatAnthropic
-
+    primary = _model()
     fallbacks = [
         ChatAnthropic(
             model="fallback",
@@ -452,39 +364,24 @@ async def test_refused_primary_uses_configured_fallbacks(
     ]
     reasons = {id(primary): "refusal"}
     reasons.update(zip(map(id, fallbacks), fallback_reasons, strict=True))
-    models = dict(
-        zip((f"fallback-{i}" for i in range(len(fallbacks))), fallbacks, strict=True)
-    )
+    models = {f"fallback-{i}": model for i, model in enumerate(fallbacks)}
     monkeypatch.setattr(
         "EvoScientist.llm.models.get_chat_model", lambda model, provider: models[model]
     )
-    set_fallback_chain([(name, "anthropic") for name in models])
+    fallback.set_fallback_chain([(name, "anthropic") for name in models])
     middleware = _refusal_stack(workspace, primary, kind)
     called = []
 
     def answer(request):
         called.append(request.model)
         reason = reasons[id(request.model)]
-        return ModelResponse(
-            result=[
-                _message(
-                    reason,
-                    content="Fallback answer" if reason == "end_turn" else None,
-                )
-            ]
-        )
+        content = "Fallback answer" if reason == "end_turn" else None
+        return ModelResponse(result=[_message(reason, content=content)])
 
-    async def aanswer(request):
-        return answer(request)
-
-    invoke = aanswer if use_async else answer
-    for m in reversed(middleware):
-        wrap = m.awrap_model_call if use_async else m.wrap_model_call
-        invoke = partial(wrap, handler=invoke)
     request = ModelRequest(model=primary, messages=[], tools=[], state={})
 
     async def run():
-        return await invoke(request) if use_async else invoke(request)
+        return await _call(middleware, answer, use_async, request)
 
     if "end_turn" in fallback_reasons:
         response = await run()
