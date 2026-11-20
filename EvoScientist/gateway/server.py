@@ -946,9 +946,7 @@ class _ServerSubagentTracker:
             return None
         return _lifecycle_graph_name(data)
 
-    def _register_head_for_routing(
-        self, namespace: tuple[str, ...]
-    ) -> None:
+    def _register_head_for_routing(self, namespace: tuple[str, ...]) -> None:
         """Register a namespace head for routing only, never announcing.
 
         Mirrors the merged #852 fallback: a child's input values come
