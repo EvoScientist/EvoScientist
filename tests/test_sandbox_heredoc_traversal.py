@@ -5,10 +5,12 @@ in a direct command was refused. The body is code only when a shell reads it;
 on ``cat`` the same body is data.
 """
 
+import time
+
 import pytest
 
+from EvoScientist import backends, shell_syntax
 from EvoScientist.backends import validate_command
-from EvoScientist.shell_syntax import _SHELL_OPTION_VALUE_RE
 
 
 class TestTraversalInShellCodeBodies:
@@ -226,16 +228,156 @@ class TestTraversalInShellCodeBodies:
         assert result is not None
         assert "traversal" in result
 
-    @pytest.mark.parametrize("cluster", ["-oc", "-oe", "-euo", "-o", "-O", "+o"])
-    def test_value_taking_short_option_is_matched_anywhere_in_a_cluster(self, cluster):
-        assert _SHELL_OPTION_VALUE_RE.fullmatch(cluster) is not None
-
-    @pytest.mark.parametrize("cluster", ["-c", "-ec", "-e", "+n"])
-    def test_value_taking_short_option_pattern_skips_plain_flags(self, cluster):
-        assert _SHELL_OPTION_VALUE_RE.fullmatch(cluster) is None
-
     def test_c_cluster_takes_its_value_and_leaves_the_heredoc_as_data(self):
         # `-oc pipefail` consumes pipefail as the value of `-o`, so no `-c`
         # script is present and the here-document is not run by that shell.
         command = "bash -oc pipefail <<'EOF'\ncd '../x'\nEOF"
         assert validate_command(command) is None
+
+    def test_xargs_supplied_script_with_quotes_is_checked(self):
+        result = validate_command("xargs bash -c <<'EOF'\n'cd \"../x\"'\nEOF")
+        assert result is not None
+        assert "traversal" in result
+
+    def test_xargs_input_is_parsed_without_shell_comment_rules(self):
+        command = "xargs -n 1 bash -c <<'EOF'\n# 'cat \"../secret\"'\nEOF"
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "xargs -I{} bash -c '{}' <<'EOF'\ncd '../x'\nEOF",
+            "xargs -I % sh -c '%' <<'EOF'\ncd '../x'\nEOF",
+            "cat <<'EOF' | xargs -I{} bash -c '{}'\ncd '../x'\nEOF",
+            "xargs -i bash -c '{}' <<'EOF'\ncd '../x'\nEOF",
+            "xargs --replace bash -c '{}' <<'EOF'\ncd '../x'\nEOF",
+        ],
+    )
+    def test_xargs_replace_option_feeds_code_to_shell(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat <<'EOF' |& bash\ncat '../secret'\nEOF",
+            "cat <<'EOF' |& xargs bash -c\ncd '../x'\nEOF",
+        ],
+    )
+    def test_pipe_stderr_operator_feeds_shell_heredoc(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat <<'EOF' | cat | bash\ncat '../secret'\nEOF",
+            "cat <<'EOF' | tee out.log | bash\ncd '../x'\nEOF",
+            "cat <<'EOF' |& cat |& bash\ncd '../x'\nEOF",
+        ],
+    )
+    def test_forwarding_pipeline_stages_are_followed(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat <<'DATA' | bash <<'CODE'\ncd '../x'\nDATA\necho ok\nCODE",
+            "cat <<'DATA' | bash < /dev/null\ncd '../x'\nDATA",
+            "cat <<'A' | cat <<'B' | bash\ncd '../a'\nA\necho ok\nB",
+            "cat <<'A'\ncd '../a'\nA\necho ok | bash",
+        ],
+    )
+    def test_stdin_redirection_overrides_piped_heredoc(self, command):
+        assert validate_command(command) is None
+
+    def test_stderr_redirection_does_not_override_piped_heredoc(self):
+        command = "cat <<'DATA' | bash 2>/dev/null\ncd '../x'\nDATA"
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -c 'bash' <<'EOF'\ncd '../x'\nEOF",
+            "bash -c 'sh -s' <<'EOF'\ncd '../x'\nEOF",
+            "cat <<'EOF' | bash -c 'bash'\ncd '../x'\nEOF",
+            "{ bash; } <<'EOF'\ncd '../x'\nEOF",
+            "( bash ) <<'EOF'\ncd '../x'\nEOF",
+            "cat <<'EOF' | { bash; }\ncd '../x'\nEOF",
+            "cat <<'EOF' | ( bash )\ncd '../x'\nEOF",
+        ],
+    )
+    def test_inherited_stdin_in_c_script_and_groups_is_checked(self, command):
+        result = validate_command(command)
+        assert result is not None
+        assert "traversal" in result
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -c 'cat' <<'EOF'\ncd '../x'\nEOF",
+            "{ cat; } <<'EOF'\ncd '../x'\nEOF",
+            "( cat ) <<'EOF'\ncd '../x'\nEOF",
+            "{ bash <<'CODE'; } <<'DATA'\necho ok\nCODE\ncd '../x'\nDATA",
+            "{ echo ok | bash; } <<'DATA'\ncd '../x'\nDATA",
+        ],
+    )
+    def test_group_or_c_script_heredoc_stays_data_when_not_run_as_code(self, command):
+        assert validate_command(command) is None
+
+    def test_nested_heredocs_scale_linearly_and_detect_deep_traversal(
+        self, monkeypatch
+    ):
+        def build(inner: str, depth: int) -> str:
+            text = inner
+            for level in range(depth):
+                tag = f"L{level}"
+                text = f"bash <<'{tag}'\n{text}\n{tag}"
+            return text
+
+        calls = 0
+        original = backends._has_traversal_component
+
+        def counting(command: str, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(command, **kwargs)
+
+        monkeypatch.setattr(backends, "_has_traversal_component", counting)
+
+        safe = build("echo ok", depth=20)
+        started = time.monotonic()
+        assert validate_command(safe) is None
+        assert time.monotonic() - started < 2.0
+        assert calls <= 25
+
+        calls = 0
+        unsafe = build("cd '../x'", depth=20)
+        result = validate_command(unsafe)
+        assert result is not None
+        assert "traversal" in result
+        assert calls <= 25
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "zsh -O -c 'x'",
+            "zsh -opipefail -c 'x'",
+            "zsh -onomatch -c 'x'",
+            "bash +c 'x'",
+            "bash -euo pipefail -c 'x'",
+        ],
+    )
+    def test_shell_code_handles_main_option_spellings(self, command):
+        shell = shell_syntax.simple_commands(command)[0]
+        script, _stdin = shell_syntax._shell_code(shell)
+        assert script is not None
+        assert shell.args[script] == "'x'"

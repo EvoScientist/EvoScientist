@@ -956,7 +956,32 @@ def _note_refused_replay(exc: BaseException, refused: str) -> None:
     exc.add_note(f"Raised while resending a request refused with: {refused}")
 
 
+def _check_api_key(model: Any) -> None:
+    """Fail at once when an Anthropic model has no API key.
+
+    Without a key ``ChatAnthropic`` hands the SDK an empty one, which sends a
+    bare ``Authorization: Bearer`` header; the HTTP layer refuses it and the
+    SDK reports "Connection error." after its retries (#782). The check runs
+    at call time, not in ``get_chat_model``, so the model still builds before
+    a key is saved. Claude sign-in through ccproxy sets a placeholder key and
+    routed providers resolve their own, so neither is empty here.
+    """
+    key = getattr(model, "anthropic_api_key", None)
+    value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+    if value:
+        return
+    from ..middleware.error_normalization import MissingApiKeyError
+
+    raise MissingApiKeyError(
+        "No Anthropic API key is set. Save it with "
+        "`EvoSci config set anthropic_api_key <key>`, set the "
+        "ANTHROPIC_API_KEY environment variable, or run `EvoSci onboard`."
+    )
+
+
 def _patch_anthropic_thinking_binding() -> None:
+    """Wrap ``ChatAnthropic._create`` / ``_acreate``: refuse a call with no API
+    key, and resend a request refused for a stale thinking block."""
     global _anthropic_thinking_binding_patched
     if _anthropic_thinking_binding_patched:
         return
@@ -967,6 +992,7 @@ def _patch_anthropic_thinking_binding() -> None:
         _orig_acreate = ChatAnthropic._acreate
 
         def _create(self: Any, payload: dict) -> Any:
+            _check_api_key(self)
             payload = _with_known_thinking_setting(self, payload)
             try:
                 return _orig_create(self, payload)
@@ -1001,6 +1027,7 @@ def _patch_anthropic_thinking_binding() -> None:
                 raise
 
         async def _acreate(self: Any, payload: dict) -> Any:
+            _check_api_key(self)
             payload = _with_known_thinking_setting(self, payload)
             try:
                 return await _orig_acreate(self, payload)
@@ -1131,12 +1158,19 @@ def _merge_runs_config_kwargs(
        sub-agent launched (or continued) while the caller runs on, say, a free
        model does not silently fall back to a billed config-default.
 
+    ``model`` and ``model_provider`` travel as one pair, never as two
+    independently-merged keys: a model name only means something to the
+    provider that serves it. A caller's model without a provider goes out
+    with ``model_provider: None``, so the sub-agent picks its provider the
+    way the main run does.
+
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
+    caller = _caller_configurable.get() or {}
     overrides = {
         **(folders or {}),
         **_read_cfg_configurable(),
-        **(_caller_configurable.get() or {}),
+        **caller,
     }
     if not overrides:
         return kwargs
@@ -1155,6 +1189,10 @@ def _merge_runs_config_kwargs(
             if key not in ("workspace_dir", "run_dir")
         }
     merged_configurable = {**existing_configurable, **overrides}
+    if "model" in caller and "model_provider" not in caller:
+        # None rather than a missing key, so a provider saved on the run's
+        # assistant cannot pair with this model either.
+        merged_configurable["model_provider"] = None
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     if isinstance(kwargs.get("assistant_id"), str):

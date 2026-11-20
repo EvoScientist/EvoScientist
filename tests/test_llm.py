@@ -3561,6 +3561,73 @@ class TestAnthropicStructuredOutput:
 # =============================================================================
 
 
+class TestAnthropicApiKey:
+    @staticmethod
+    def _model(monkeypatch, api_key):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+        return get_chat_model(
+            "claude-sonnet-5-5", provider="anthropic", max_tokens=1024, max_retries=0
+        )
+
+    @staticmethod
+    async def _invoke(model, use_async, stream=False):
+        if stream:
+            if use_async:
+                return [chunk async for chunk in model.astream("hi")]
+            return list(model.stream("hi"))
+        return await model.ainvoke("hi") if use_async else model.invoke("hi")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("use_async", [False, True])
+    @pytest.mark.parametrize("plain_key", [False, True])
+    async def test_missing_key_fails_before_network(
+        self, monkeypatch, use_async, plain_key, stream
+    ):
+        from EvoScientist.middleware.error_normalization import MissingApiKeyError
+
+        model = self._model(monkeypatch, "")
+        if plain_key:
+            model = model.model_copy(update={"anthropic_api_key": ""})
+        requests = TestAnthropicThinkingBinding._serve(model, "")
+
+        with pytest.raises(MissingApiKeyError) as info:
+            await self._invoke(model, use_async, stream)
+
+        assert requests == []
+        assert str(info.value) == (
+            "No Anthropic API key is set. Save it with "
+            "`EvoSci config set anthropic_api_key <key>`, set the "
+            "ANTHROPIC_API_KEY environment variable, or run `EvoSci onboard`."
+        )
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    @pytest.mark.parametrize("api_key", ["sk-ant-test", "ccproxy-oauth"])
+    async def test_key_is_checked_on_each_call(self, monkeypatch, use_async, api_key):
+        from pydantic import SecretStr
+
+        from EvoScientist.middleware.error_normalization import MissingApiKeyError
+
+        model = self._model(monkeypatch, api_key)
+        requests = TestAnthropicThinkingBinding._serve(model, "")
+        response = await self._invoke(model, use_async)
+        assert response.text == "ok"
+        assert len(requests) == 1
+
+        model.anthropic_api_key = SecretStr("")
+        with pytest.raises(MissingApiKeyError):
+            await self._invoke(model, use_async)
+        assert len(requests) == 1
+
+    def test_patch_is_idempotent(self, monkeypatch):
+        from langchain_anthropic import ChatAnthropic
+
+        self._model(monkeypatch, "sk-ant-test")
+        create, acreate = ChatAnthropic._create, ChatAnthropic._acreate
+        self._model(monkeypatch, "sk-ant-test")
+        assert ChatAnthropic._create is create
+        assert ChatAnthropic._acreate is acreate
+
+
 class TestAnthropicThinkingBinding:
     MISMATCH = (
         "messages.1.content.0: Invalid `signature` in `thinking` block. The block "

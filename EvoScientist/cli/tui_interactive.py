@@ -2671,11 +2671,11 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_ask_user_resume
 
-                                _stream_input = Command(resume=result)
+                                _stream_input = build_ask_user_resume(
+                                    event.get("interrupt_id"), result
+                                )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
                                 )

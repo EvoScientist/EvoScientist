@@ -924,6 +924,7 @@ def create_rubric_middleware(
     from langchain_core._api import LangChainBetaWarning
 
     from .model_retry import ModelCallBoundaryMiddleware
+    from .tool_error_handler import ToolErrorHandlerMiddleware
     from .windows_paths import WindowsFilePathMiddleware
 
     # Eviction thresholds off: both eviction paths write files through the
@@ -943,6 +944,10 @@ def create_rubric_middleware(
             grader_middleware=[
                 *([model_retry] if model_retry is not None else []),
                 grader_fs,
+                # A file tool that raises costs the criterion it concerns, not
+                # the whole grading: the grader reads the error and still
+                # decides the rest.
+                ToolErrorHandlerMiddleware(),
                 # The transcript can name files by their Windows host path.
                 WindowsFilePathMiddleware(),
                 _GraderCallBudget(max_calls=GRADER_MAX_CALLS),
