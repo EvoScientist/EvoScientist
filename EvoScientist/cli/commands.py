@@ -41,6 +41,7 @@ from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import (
     async_notifier,
+    login_cmd,  # noqa: F401 — registers `EvoSci login` / `EvoSci logout`
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
     service_cmd,  # noqa: F401 — registers `EvoSci service`
     workspace_cmd,  # noqa: F401 — registers `EvoSci workspace`

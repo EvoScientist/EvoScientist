@@ -214,9 +214,9 @@ class EvoScientistConfig:
     # API Keys
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
-    anthropic_auth_mode: str = "api_key"  # "api_key" | "oauth"
+    anthropic_auth_mode: Literal["api_key", "oauth"] = "api_key"
     openai_api_key: str = ""
-    openai_auth_mode: str = "api_key"  # "api_key" | "oauth"
+    openai_auth_mode: Literal["api_key", "oauth"] = "api_key"
     nvidia_api_key: str = ""
     google_api_key: str = ""
     minimax_api_key: str = ""

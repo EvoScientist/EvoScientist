@@ -1,9 +1,16 @@
-"""Tests for the direct ChatGPT sign-in route. Nothing here touches the network."""
+"""Tests for the direct ChatGPT sign-in route. Nothing here leaves the machine."""
 
+import base64
+import contextlib
 import json
 import logging
 import os
+import socket
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -657,43 +664,569 @@ def test_status_with_unreadable_token(signed_in):
     assert (state.signed_in, state.problem) == (False, "token file is unreadable")
 
 
-# --- login -------------------------------------------------------------------
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions"
+)
+def test_unreachable_auth_folder_is_not_signed_in(signed_in):
+    signed_in.parent.chmod(0)
+    try:
+        state = status()
+    finally:
+        signed_in.parent.chmod(0o700)
+
+    assert (state.signed_in, state.problem) == (False, "token file is unreadable")
 
 
-def test_login_stores_the_token_and_reports_the_plan(data_dir, monkeypatch, capsys):
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions"
+)
+def test_unreachable_auth_folder_is_reported_where_exists_hides_it(
+    signed_in, monkeypatch
+):
+    # Python 3.14's Path.exists() answers False instead of raising here.
+    monkeypatch.setattr(Path, "exists", lambda self, **kwargs: False)
+    signed_in.parent.chmod(0)
+    try:
+        state = status()
+    finally:
+        signed_in.parent.chmod(0o700)
+
+    assert (state.signed_in, state.problem) == (False, "token file is unreadable")
+
+
+# --- sign-in flow (a real loopback callback; the token endpoint is faked) ------
+
+
+def _jwt(claims: dict) -> str:
+    def _segment(value: dict) -> str:
+        raw = json.dumps(value).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{_segment({'alg': 'none'})}.{_segment(claims)}.sig"
+
+
+TOKEN_PAYLOAD = {
+    "access_token": "tok-access",
+    "refresh_token": "tok-refresh",
+    "expires_in": 3600,
+    "id_token": _jwt(
+        {
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_1",
+                "chatgpt_plan_type": "plus",
+            }
+        }
+    ),
+}
+
+
+@pytest.fixture
+def free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.fixture
+def token_endpoint(monkeypatch):
+    """The token exchange answers with TOKEN_PAYLOAD and records what it got."""
     calls = []
 
-    def _fake_login(*, store_path, open_browser):
-        calls.append((store_path, open_browser))
-        _write_token(store_path)
+    def _post(url, data, **kwargs):
+        calls.append((url, data))
+        return dict(TOKEN_PAYLOAD)
 
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _fake_login)
+    monkeypatch.setattr(chatgpt_oauth, "_post_form", _post)
+    return calls
 
-    state = login(open_browser=True)
 
-    assert [open_browser for _, open_browser in calls] == [True]
-    assert (state.signed_in, state.plan) == (True, "plus")
-    assert PORT_FORWARD_HINT not in capsys.readouterr().out
-    if os.name == "posix":
-        assert token_path().parent.stat().st_mode & 0o777 == 0o700
+@contextlib.contextmanager
+def _listening_socket(port: int):
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind(("127.0.0.1", port))
+        holder.listen()
+        yield holder
+    finally:
+        holder.close()
+
+
+def _port_is_listening(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        client.settimeout(1)
+        return client.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _state_from(url: str) -> str:
+    return urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["state"][0]
+
+
+def _get(port: int, path: str, *, host: str = "127.0.0.1", **params) -> int:
+    query = urllib.parse.urlencode(params)
+    netloc = f"[{host}]" if ":" in host else host
+    try:
+        with urllib.request.urlopen(
+            f"http://{netloc}:{port}{path}?{query}", timeout=10
+        ) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def _in_background(*requests):
+    """Send callback requests from another thread; the flow serves them."""
+    statuses = []
+
+    def _send():
+        for port, path, params in requests:
+            statuses.append(_get(port, path, **params))
+
+    threading.Thread(target=_send, daemon=True).start()
+    return statuses
+
+
+def test_url_is_handed_out_after_the_port_is_bound(free_port, token_endpoint):
+    seen = []
+
+    def on_url(url):
+        seen.append((url, _port_is_listening(free_port)))
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
+
+    token = chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    [(url, listening)] = seen
+    assert listening is True
+    assert url.startswith("https://auth.openai.com/oauth/authorize?")
+    assert "code_challenge_method=S256" in url
+    assert (token.access_token, token.plan_type) == ("tok-access", "plus")
+    [(token_url, form)] = token_endpoint
+    assert (token_url, form["grant_type"], form["code"]) == (
+        "https://auth.openai.com/oauth/token",
+        "authorization_code",
+        "c1",
+    )
+
+
+def test_busy_port_reports_before_any_url(free_port):
+    with _listening_socket(free_port):
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
+
+    assert (err.value.code, str(err.value)) == ("port_in_use", PORT_IN_USE)
+
+
+def _ipv6_loopback_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_ipv6 = pytest.mark.skipif(
+    not _ipv6_loopback_available(), reason="no IPv6 loopback here"
+)
+
+
+@contextlib.contextmanager
+def _listening_v6(host: str, port: int, *, v6only: bool):
+    holder = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        holder.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, int(v6only))
+        holder.bind((host, port))
+        holder.listen()
+        yield holder
+    finally:
+        holder.close()
+
+
+@needs_ipv6
+def test_port_held_on_ipv6_loopback_reports_before_any_url(free_port):
+    """A browser may try ::1 first; the code must not reach another program."""
+    with _listening_v6("::1", free_port, v6only=True):
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
+
+    assert err.value.code == "port_in_use"
+
+
+@needs_ipv6
+def test_dual_stack_holder_is_port_in_use(free_port):
+    """Another program on every address could still get the browser's callback."""
+    with _listening_v6("::", free_port, v6only=False):
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
+
+    assert err.value.code == "port_in_use"
+
+
+def test_ipv4_wildcard_holder_is_port_in_use(free_port):
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        holder.bind(("0.0.0.0", free_port))
+        holder.listen()
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
+    finally:
+        holder.close()
+
+    assert err.value.code == "port_in_use"
+
+
+@needs_ipv6
+def test_first_answer_wins_when_both_addresses_answer_at_once(
+    free_port, token_endpoint, monkeypatch
+):
+    # The order of ready sockets is platform-dependent, so the test follows
+    # the order the flow actually took.
+    clients = []
+    handled = []
+    real_handle = chatgpt_oauth._CallbackServer.handle_request
+
+    def _recording(server):
+        handled.append(server.address_family)
+        return real_handle(server)
+
+    monkeypatch.setattr(chatgpt_oauth._CallbackServer, "handle_request", _recording)
+
+    def on_url(url):
+        state = _state_from(url)
+        for family, host, query in (
+            (socket.AF_INET, "127.0.0.1", f"code=c1&state={state}"),
+            (socket.AF_INET6, "::1", f"error=access_denied&state={state}"),
+        ):
+            client = socket.socket(family, socket.SOCK_STREAM)
+            client.connect((host, free_port))
+            client.sendall(f"GET /auth/callback?{query} HTTP/1.0\r\n\r\n".encode())
+            clients.append(client)
+
+    try:
+        token = chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+        outcome = ("signed_in", token.plan_type)
+    except chatgpt_oauth.SignInError as err:
+        outcome = ("refused", err.code)
+    finally:
+        for client in clients:
+            client.close()
+
+    [first] = handled  # the other answer is never read
+    expected = {
+        socket.AF_INET: ("signed_in", "plus"),
+        socket.AF_INET6: ("refused", "sign_in_failed"),
+    }
+    assert outcome == expected[first]
+
+
+def test_interrupt_while_starting_closes_the_first_server(free_port, monkeypatch):
+    started = []
+
+    class _Recorded(chatgpt_oauth._CallbackServer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            started.append(self)
+
+    def _interrupted(port, handler):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(chatgpt_oauth, "_CallbackServer", _Recorded)
+    monkeypatch.setattr(chatgpt_oauth, "_ipv6_server", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
+
+    [server] = started
+    assert server.socket.fileno() == -1
+
+
+def test_callback_page_sends_no_referrer(free_port, token_endpoint):
+    headers = []
+
+    def on_url(url):
+        query = urllib.parse.urlencode({"code": "c1", "state": _state_from(url)})
+
+        def _send():
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{free_port}/auth/callback?{query}", timeout=10
+            ) as resp:
+                headers.append(resp.headers.get("Referrer-Policy"))
+
+        threading.Thread(target=_send, daemon=True).start()
+
+    chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+    for _ in range(50):
+        if headers:
+            break
+        time.sleep(0.05)
+
+    assert headers == ["no-referrer"]
+
+
+@needs_ipv6
+def test_callback_over_ipv6_loopback_signs_in(free_port, token_endpoint):
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", {"host": "::1", **callback}))
+
+    token = chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert token.plan_type == "plus"
+
+
+@needs_ipv6
+def test_ipv6_loopback_is_held_while_waiting(free_port):
+    taken = []
+
+    def on_url(url):
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as other:
+            other.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                other.bind(("::1", free_port))
+            except OSError:
+                taken.append(True)
+        raise chatgpt_oauth.SignInError("cancelled", "stop here")
+
+    with pytest.raises(chatgpt_oauth.SignInError):
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=5)
+
+    assert taken == [True]
+
+
+def test_an_idle_connection_does_not_hold_a_cancel(free_port):
+    stop = threading.Event()
+    idle = []
+
+    def on_url(url):
+        # A connection that never sends a request (a browser preconnect).
+        idle.append(socket.create_connection(("127.0.0.1", free_port)))
+        threading.Timer(0.2, stop.set).start()
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(
+                on_url=on_url, stop=stop, port=free_port, timeout=30
+            )
+    finally:
+        for conn in idle:
+            conn.close()
+
+    assert err.value.code == "cancelled"
+    assert time.monotonic() - started < 2.5
+
+
+def test_stop_cancels_and_frees_the_port(free_port):
+    stop = threading.Event()
+
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(
+            on_url=lambda url: stop.set(), stop=stop, port=free_port, timeout=10
+        )
+
+    assert err.value.code == "cancelled"
+    with _listening_socket(free_port):
+        pass
+
+
+def test_a_stop_while_waiting_wins_over_a_callback_that_arrives(
+    free_port, token_endpoint, monkeypatch
+):
+    stop = threading.Event()
+    clients = []
+    real_selector = chatgpt_oauth.selectors.DefaultSelector
+
+    class _StopDuringSelect(real_selector):
+        def select(self, timeout=None):
+            ready = super().select(timeout)
+            if ready:
+                stop.set()  # the cancel lands while the answer is ready
+            return ready
+
+    monkeypatch.setattr(chatgpt_oauth.selectors, "DefaultSelector", _StopDuringSelect)
+
+    def on_url(url):
+        client = socket.create_connection(("127.0.0.1", free_port))
+        query = f"code=c1&state={_state_from(url)}"
+        client.sendall(f"GET /auth/callback?{query} HTTP/1.0\r\n\r\n".encode())
+        clients.append(client)
+
+    try:
+        with pytest.raises(chatgpt_oauth.SignInError) as err:
+            chatgpt_oauth._authorize(
+                on_url=on_url, stop=stop, port=free_port, timeout=10
+            )
+    finally:
+        for client in clients:
+            client.close()
+
+    assert err.value.code == "cancelled"
+    assert token_endpoint == []
+
+
+def test_timeout_is_timed_out(free_port):
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=lambda url: None, port=free_port, timeout=0.5)
+
+    assert err.value.code == "timed_out"
+
+
+def test_error_callback_is_sign_in_failed(free_port, token_endpoint):
+    def on_url(url):
+        callback = {"error": "access_denied", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
+
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert err.value.code == "sign_in_failed"
+    assert token_endpoint == []
+
+
+def test_state_mismatch_is_sign_in_failed(free_port, token_endpoint):
+    def on_url(url):
+        callback = {"code": "c1", "state": "forged"}
+        _in_background((free_port, "/auth/callback", callback))
+
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert err.value.code == "sign_in_failed"
+    assert "state mismatch" in str(err.value)
+    assert token_endpoint == []
+
+
+def test_stray_request_then_real_callback_signs_in(free_port, token_endpoint):
+    statuses = []
+
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        statuses.extend(
+            [
+                _in_background(
+                    (free_port, "/favicon.ico", {}),
+                    (free_port, "/auth/callback", callback),
+                )
+            ]
+        )
+
+    token = chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert token.plan_type == "plus"
+    assert statuses[0][0] == 404
+
+
+def test_token_endpoint_failure_is_sign_in_incomplete(free_port, monkeypatch):
+    def _post(url, data, **kwargs):
+        raise RuntimeError(
+            "OAuth request to https://auth.openai.com/oauth/token failed with "
+            "status 400: re-run `login_chatgpt()`"
+        )
+
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
+
+    monkeypatch.setattr(chatgpt_oauth, "_post_form", _post)
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert (err.value.code, str(err.value)) == ("sign_in_failed", SIGN_IN_INCOMPLETE)
+
+
+# --- login, sign-in and sign-out -----------------------------------------------
+
+AUTH_URL = "https://auth.openai.com/oauth/authorize?state=s1"
+
+
+def _fake_authorize(*, url=AUTH_URL, error=None, started=None):
+    """Stands in for the browser authorization: hands out ``url``, then answers."""
+
+    def _authorize(*, on_url, stop=None, timeout=None, port=None):
+        if started is not None:
+            started.append(True)
+        on_url(url)
+        if error is not None:
+            raise error
+        return _token()
+
+    return _authorize
+
+
+@pytest.fixture
+def no_browser(monkeypatch):
+    """Records the links the terminal sign-in would open."""
+    opened = []
+    monkeypatch.setattr(chatgpt_oauth.webbrowser, "open", opened.append)
+    return opened
 
 
 def _auth_files(path: Path) -> list[str]:
     return sorted(p.name for p in path.parent.iterdir() if not p.name.endswith(".lock"))
 
 
-def test_login_swaps_the_token_in_under_the_lock_a_refresh_holds(data_dir, monkeypatch):
+def test_login_stores_the_token_and_reports_the_plan(
+    data_dir, monkeypatch, capsys, no_browser
+):
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
+
+    state = login(open_browser=True)
+
+    assert (state.signed_in, state.plan) == (True, "plus")
+    assert PORT_FORWARD_HINT not in capsys.readouterr().out
+    if os.name == "posix":
+        assert token_path().parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_login_prints_the_url_line_and_opens_the_browser(
+    data_dir, monkeypatch, capsys, no_browser
+):
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
+
+    login(open_browser=True)
+
+    out = capsys.readouterr().out
+    assert (
+        f"\nChatGPT sign-in: open the following URL in a browser:\n  {AUTH_URL}\n"
+        in out
+    )
+    assert no_browser == [AUTH_URL]
+
+
+def test_login_without_a_browser_prints_the_hint_and_opens_nothing(
+    data_dir, monkeypatch, capsys, no_browser
+):
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
+
+    login(open_browser=False)
+
+    out = capsys.readouterr().out
+    assert PORT_FORWARD_HINT in out
+    assert AUTH_URL in out
+    assert no_browser == []
+
+
+def test_sign_in_never_prints(data_dir, monkeypatch, capsys, no_browser):
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
+    urls = []
+
+    state = chatgpt_oauth.sign_in(on_url=urls.append)
+
+    assert state.signed_in is True
+    assert urls == [AUTH_URL]
+    assert capsys.readouterr().out == ""
+    assert no_browser == []
+
+
+def test_sign_in_swaps_the_token_in_under_the_lock_a_refresh_holds(
+    data_dir, monkeypatch
+):
     """Sign-in and refresh must never write the token file at the same time."""
     from filelock import FileLock, Timeout
 
     lock_file = str(token_path().with_name("chatgpt.lock"))
     real_replace = os.replace
-    written_to = []
-    swapped_in = []
-
-    def _fake_login(*, store_path, open_browser):
-        written_to.append(store_path)
-        _write_token(store_path)
+    swaps = []
 
     def _replace(src, dst):
         if Path(dst) == token_path():
@@ -701,44 +1234,47 @@ def test_login_swaps_the_token_in_under_the_lock_a_refresh_holds(data_dir, monke
             try:
                 probe.acquire()
             except Timeout:
-                swapped_in.append("lock held")
+                swaps.append((Path(src) != token_path(), "lock held"))
             else:
                 probe.release()
-                swapped_in.append("lock free")
+                swaps.append((Path(src) != token_path(), "lock free"))
         real_replace(src, dst)
 
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _fake_login)
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
     monkeypatch.setattr(chatgpt_oauth.os, "replace", _replace)
 
-    assert login(open_browser=True).signed_in is True
-
-    assert written_to != [token_path()]
-    assert swapped_in == ["lock held"]
+    assert chatgpt_oauth.sign_in(on_url=lambda url: None).signed_in is True
+    assert swaps == [(True, "lock held")]
     assert _auth_files(token_path()) == ["chatgpt.json"]
     assert list(token_path().parent.glob("*.new*")) == []
 
 
 def test_a_failed_sign_in_leaves_another_one_in_flight_alone(data_dir, monkeypatch):
     """Each attempt stores beside the token file under its own name."""
+    mismatch = chatgpt_oauth.SignInError("sign_in_failed", "state mismatch")
+    second = []
 
-    def _second_attempt_fails(*, store_path, open_browser):
-        store_path.write_text("{")
-        raise RuntimeError("ChatGPT OAuth callback state mismatch.")
+    class _Provider(chatgpt_oauth._FileChatGPTOAuthTokenProvider):
+        def save(self, token):
+            super().save(token)
+            if not second:
+                # Another sign-in fails after this one stored its file, before the swap.
+                second.append(True)
+                monkeypatch.setattr(
+                    chatgpt_oauth, "_authorize", _fake_authorize(error=mismatch)
+                )
+                with pytest.raises(RuntimeError, match="state mismatch"):
+                    login(open_browser=False)
 
-    def _first_attempt(*, store_path, open_browser):
-        _write_token(store_path)
-        # Another sign-in starts and fails before this one is swapped in.
-        monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _second_attempt_fails)
-        with pytest.raises(RuntimeError, match="state mismatch"):
-            login(open_browser=False)
+    monkeypatch.setattr(chatgpt_oauth, "_FileChatGPTOAuthTokenProvider", _Provider)
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
 
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _first_attempt)
-
-    assert login(open_browser=False).signed_in is True
+    assert chatgpt_oauth.sign_in(on_url=lambda url: None).signed_in is True
+    assert second == [True]
     assert _auth_files(token_path()) == ["chatgpt.json"]
 
 
-def test_login_finds_an_unusable_lock_before_the_browser_step(data_dir, monkeypatch):
+def test_sign_in_finds_an_unusable_lock_before_the_browser_step(data_dir, monkeypatch):
     class _Unusable:
         def __enter__(self):
             raise PermissionError(13, "Permission denied")
@@ -748,17 +1284,16 @@ def test_login_finds_an_unusable_lock_before_the_browser_step(data_dir, monkeypa
 
     started = []
     monkeypatch.setattr(chatgpt_oauth, "_token_lock", lambda path: _Unusable())
-    monkeypatch.setattr(
-        chatgpt_oauth, "login_chatgpt", lambda **kwargs: started.append(kwargs)
-    )
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize(started=started))
 
     with pytest.raises(PermissionError):
-        login(open_browser=True)
-
+        chatgpt_oauth.sign_in(on_url=lambda url: None)
     assert started == []
 
 
-def test_login_succeeds_even_if_its_leftovers_cannot_be_removed(data_dir, monkeypatch):
+def test_sign_in_succeeds_even_if_its_leftovers_cannot_be_removed(
+    data_dir, monkeypatch
+):
     real_unlink = Path.unlink
 
     def _unlink(self, *args, **kwargs):
@@ -766,96 +1301,126 @@ def test_login_succeeds_even_if_its_leftovers_cannot_be_removed(data_dir, monkey
             raise PermissionError(13, "Permission denied")
         return real_unlink(self, *args, **kwargs)
 
-    monkeypatch.setattr(
-        chatgpt_oauth,
-        "login_chatgpt",
-        lambda *, store_path, open_browser: _write_token(store_path),
-    )
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize())
     monkeypatch.setattr(Path, "unlink", _unlink)
 
-    assert login(open_browser=True).signed_in is True
+    assert chatgpt_oauth.sign_in(on_url=lambda url: None).signed_in is True
 
 
-def test_failed_login_keeps_the_token_already_stored(signed_in, monkeypatch):
+def test_failed_login_keeps_the_token_already_stored(
+    signed_in, monkeypatch, no_browser
+):
     before = signed_in.read_text()
-
-    def _half_done(*, store_path, open_browser):
-        store_path.write_text("{")
-        raise RuntimeError("ChatGPT OAuth callback state mismatch.")
-
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _half_done)
+    mismatch = chatgpt_oauth.SignInError("sign_in_failed", "state mismatch")
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize(error=mismatch))
 
     with pytest.raises(RuntimeError, match="state mismatch"):
         login(open_browser=True)
-
     assert signed_in.read_text() == before
     assert _auth_files(signed_in) == ["chatgpt.json"]
 
 
-def test_login_without_a_browser_prints_the_port_forward_hint(
-    data_dir, monkeypatch, capsys
-):
-    monkeypatch.setattr(
-        chatgpt_oauth,
-        "login_chatgpt",
-        lambda *, store_path, open_browser: _write_token(store_path),
-    )
-
-    login(open_browser=False)
-
-    assert PORT_FORWARD_HINT in capsys.readouterr().out
-
-
-def test_login_reports_a_busy_callback_port_in_our_words(data_dir, monkeypatch):
-    def _port_taken(*, store_path, open_browser):
-        try:
-            raise OSError(48, "Address already in use")
-        except OSError as exc:
-            raise RuntimeError("Could not bind ... pass `port=`") from exc
-
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _port_taken)
-
-    with pytest.raises(RuntimeError) as exc_info:
-        login(open_browser=True)
+def test_login_reports_a_busy_callback_port_in_our_words(data_dir, free_port):
+    with _listening_socket(free_port):
+        with pytest.raises(RuntimeError) as exc_info:
+            chatgpt_oauth._authorize(on_url=pytest.fail, port=free_port, timeout=5)
 
     assert str(exc_info.value) == PORT_IN_USE
 
 
 @pytest.mark.parametrize(
-    "upstream_error",
+    "token_answer",
     [
         _ChatGPTOAuthRefreshError(
             "ChatGPT refresh token is no longer valid (`invalid_grant`). "
             "Re-run `login_chatgpt()` to obtain a new token."
         ),
-        RuntimeError(
-            "Token response did not include a refresh token and no prior "
-            "refresh token was available; re-run `login_chatgpt()`."
-        ),
+        {"access_token": "tok-access", "expires_in": 3600},
     ],
+    ids=["refused", "no-refresh-token"],
 )
-def test_login_never_tells_the_user_to_call_upstreams_function(
-    data_dir, monkeypatch, upstream_error
+def test_token_exchange_never_tells_the_user_to_call_upstreams_function(
+    free_port, monkeypatch, token_answer
 ):
-    def _fails(*, store_path, open_browser):
-        raise upstream_error
+    def _post(url, data, **kwargs):
+        if isinstance(token_answer, Exception):
+            raise token_answer
+        return dict(token_answer)
 
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _fails)
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
 
+    monkeypatch.setattr(chatgpt_oauth, "_post_form", _post)
     with pytest.raises(RuntimeError) as exc_info:
-        login(open_browser=True)
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
 
     assert str(exc_info.value) == SIGN_IN_INCOMPLETE
 
 
-def test_login_passes_other_failures_through(data_dir, monkeypatch):
-    def _state_mismatch(*, store_path, open_browser):
-        raise RuntimeError("ChatGPT OAuth callback state mismatch.")
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>proxy login</html>"),
+        httpx.Response(200, json=["not", "a", "token"]),
+        httpx.Response(200, json="token"),
+        httpx.Response(200, content=b"<html>\xe9t\xe9</html>"),  # Latin-1
+    ],
+    ids=["html", "list", "string", "not-utf8"],
+)
+def test_a_token_answer_that_is_not_a_token_object_is_sign_in_failed(
+    free_port, monkeypatch, response
+):
+    _token_endpoint(monkeypatch, lambda request: response)
 
-    monkeypatch.setattr(chatgpt_oauth, "login_chatgpt", _state_mismatch)
+    def on_url(url):
+        callback = {"code": "c1", "state": _state_from(url)}
+        _in_background((free_port, "/auth/callback", callback))
+
+    with pytest.raises(chatgpt_oauth.SignInError) as err:
+        chatgpt_oauth._authorize(on_url=on_url, port=free_port, timeout=10)
+
+    assert (err.value.code, str(err.value)) == ("sign_in_failed", SIGN_IN_INCOMPLETE)
+
+
+def test_login_passes_other_failures_through(data_dir, monkeypatch, no_browser):
+    mismatch = chatgpt_oauth.SignInError("sign_in_failed", "state mismatch")
+    monkeypatch.setattr(chatgpt_oauth, "_authorize", _fake_authorize(error=mismatch))
 
     with pytest.raises(RuntimeError, match="state mismatch"):
         login(open_browser=True)
+
+
+def test_logout_removes_the_token_under_the_lock(signed_in, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    lock_file = str(token_path().with_name("chatgpt.lock"))
+    real_unlink = os.unlink
+    removals = []
+
+    def _unlink(path, *args, **kwargs):
+        if Path(path) == token_path():
+            probe = FileLock(lock_file, timeout=0)
+            try:
+                probe.acquire()
+            except Timeout:
+                removals.append("lock held")
+            else:
+                probe.release()
+                removals.append("lock free")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(chatgpt_oauth.os, "unlink", _unlink)
+
+    assert chatgpt_oauth.logout() is True
+    assert removals == ["lock held"]
+    assert not signed_in.exists()
+    assert status().signed_in is False
+
+
+def test_logout_without_a_token_is_not_an_error(data_dir):
+    assert chatgpt_oauth.logout() is False
+    assert not token_path().parent.exists()
 
 
 # --- parallel tool calls delivered whole -------------------------------------
@@ -1061,10 +1626,11 @@ def test_provider_tag_is_openai(signed_in):
 
 def test_upstream_names_this_module_relies_on_exist():
     from langchain_openai.chat_models.codex import _ChatOpenAICodex
-    from langchain_openai.chatgpt_oauth import login_chatgpt
+    from langchain_openai.chatgpt_oauth import _CallbackHandler
 
     assert issubclass(chatgpt_oauth.EvoChatOpenAICodex, _ChatOpenAICodex)
-    assert callable(login_chatgpt)
+    assert hasattr(_CallbackHandler, "server_result")
+    assert hasattr(_CallbackHandler, "callback_path")
     assert hasattr(_FileChatGPTOAuthTokenProvider, "_read_from_disk")
     assert hasattr(_FileChatGPTOAuthTokenProvider(path=Path("unused")), "_cached")
     assert issubclass(_ChatGPTOAuthRefreshError, RuntimeError)

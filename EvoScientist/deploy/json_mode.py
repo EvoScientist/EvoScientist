@@ -93,7 +93,6 @@ How a program runs the command:
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import signal
@@ -107,7 +106,7 @@ from typing import Any
 from ..langgraph_dev.assistants import chat_assistant_id
 from ..langgraph_dev.registration import ServerExposure, exposure_messages
 from ..paths import Workspace
-from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe
+from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe, watch_stdin
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +142,6 @@ HEALTH_INTERVAL = 2.0
 HEALTH_FAILURES = 3
 # How often the wait loop looks at the stop request and the owned process.
 _TICK = 0.5
-# A stdin line longer than this is not a command and is dropped.
-_MAX_LINE = 65536
 _STDIN_THREAD = "deploy-json-stdin"
 # How long ``--tunnel`` waits for cloudflared's URL, as ``read_tunnel_url``.
 _TUNNEL_WAIT = 35.0
@@ -243,39 +240,6 @@ def _take_stdin() -> int:
 
         ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))
     return private
-
-
-def _watch_stdin(fd: int, stop: threading.Event) -> None:
-    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
-
-    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
-    buffer lock, which interpreter shutdown may need.
-    """
-    pending = b""
-    try:
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            if any(_is_stop(line) for line in lines):
-                break
-            if len(pending) > _MAX_LINE:
-                pending = b""  # not a command line; drop it
-    except OSError as exc:
-        logger.debug(f"stdin read failed: {exc}")
-    finally:
-        os.close(fd)
-    stop.set()
-
-
-def _is_stop(line: bytes) -> bool:
-    try:
-        message = json.loads(line)
-    except ValueError:
-        return False
-    return isinstance(message, dict) and message.get("command") == "stop"
 
 
 class _Run:
@@ -558,7 +522,7 @@ def run_json(
     # stops it as soon as the start returns.
     if stdin_is_pipe():
         threading.Thread(
-            target=_watch_stdin,
+            target=watch_stdin,
             args=(_take_stdin(), stop),
             name=_STDIN_THREAD,
             daemon=True,
