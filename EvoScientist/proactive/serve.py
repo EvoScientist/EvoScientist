@@ -807,11 +807,15 @@ class ProactiveServe:
         node is not unique, fall back to ``model`` plus a clear of exactly
         that post-append state.
         """
+        from ..middleware.message_timestamp import CREATED_AT_KEY, created_at_now
+
         message = {
             "type": "ai",
             "content": text,
             "id": proactive_message_id(proactive_id),
             "additional_kwargs": build_proactive_tag(proactive_id),
+            # Written outside the agent, so no hook stamps it.
+            "response_metadata": {CREATED_AT_KEY: created_at_now()},
         }
         topology = self._main_topology()
         if topology.terminal_node is not None:
