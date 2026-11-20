@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +13,7 @@ from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
 from EvoScientist.paths import Workspace
+from EvoScientist.runtime import AsyncRuntime
 from EvoScientist.stream import display as display_mod
 from tests.fakes.common import (
     FakeCheckpointAgent,
@@ -155,6 +159,45 @@ class TestRichLoopClosesAtADecline:
 
         gateway = self._stopped_run(agent, hitl_prompt_fn=_stop_then_decline)
         self._assert_closed_as_rejected(agent, gateway)
+
+    @pytest.mark.parametrize(
+        "stop_at_prompt", [False, True], ids=["declined", "stopped"]
+    )
+    def test_stop_interrupts_a_stalled_checkpoint_close(
+        self, monkeypatch, stop_at_prompt
+    ):
+        cancel_scope = "scope:stalled-close"
+        close_started = threading.Event()
+        close_cancelled = threading.Event()
+        agent = _parked_agent()
+        gateway = FakeGraphGateway(stream=_one_approval_then_done(), checkpoint=agent)
+
+        async def _stalled_read(_config):
+            close_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                close_cancelled.set()
+                raise
+
+        def _decline(_requests):
+            if stop_at_prompt:
+                display_mod.request_stream_cancel(cancel_scope)
+            return None
+
+        monkeypatch.setattr(agent, "aget_state", _stalled_read)
+        with ThreadPoolExecutor(max_workers=1) as executor, AsyncRuntime() as runtime:
+            worker = executor.submit(
+                self._run,
+                gateway,
+                runtime=runtime,
+                cancel_scope=cancel_scope,
+                hitl_prompt_fn=_decline,
+            )
+            assert close_started.wait(2)
+            display_mod.request_stream_cancel(cancel_scope)
+            assert worker.result(timeout=2) == "partial\n[Stopped.]"
+            assert close_cancelled.is_set()
 
     @pytest.mark.parametrize(
         "outcome",
