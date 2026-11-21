@@ -60,7 +60,7 @@ class TestReplyInterceptionOrdering:
 
         # A prompt is waiting on fake:chat1 (as the engine's wait_reply would).
         reply_fut = asyncio.ensure_future(
-            channel_mod._reply_registry.wait("fake:chat1", timeout=5.0)
+            channel_mod._reply_registry.wait_event("fake:chat1", timeout=5.0)
         )
         await asyncio.sleep(0.01)
 
@@ -77,7 +77,7 @@ class TestReplyInterceptionOrdering:
 
         # The reply is delivered into the pending wait...
         got = await asyncio.wait_for(reply_fut, timeout=2.0)
-        assert got == "1"
+        assert got.content == "1"
         # ...and did NOT become a queued agent turn.
         await asyncio.sleep(0.05)
         assert _message_queue.empty()

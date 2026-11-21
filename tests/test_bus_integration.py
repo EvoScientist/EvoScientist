@@ -432,7 +432,7 @@ class TestBusInboundConsumer:
 
         # Simulate a HITL/ask_user prompt waiting for this chat's reply.
         reply_fut = asyncio.ensure_future(
-            channel_mod._reply_registry.wait("fake:chat1", timeout=5.0)
+            channel_mod._reply_registry.wait_event("fake:chat1", timeout=5.0)
         )
         await asyncio.sleep(0.01)  # let the wait register
 
@@ -450,7 +450,7 @@ class TestBusInboundConsumer:
 
         # The pending wait receives "/stop" (engine will treat it as cancel).
         released = await asyncio.wait_for(reply_fut, timeout=2.0)
-        assert released == "/stop"
+        assert released.content == "/stop"
 
         outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
         assert outbound.content == "Stopped."

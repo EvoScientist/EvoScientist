@@ -540,12 +540,15 @@ class _BridgeIO(InteractionIO):
         msg: ChannelMessage,
         capabilities: ChannelCapabilities,
         session_key: str,
+        *,
+        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
     ) -> None:
         self._bus = bus
         self._msg = msg
         self.capabilities = capabilities
         self.base_metadata = msg.metadata
         self._session_key = session_key
+        self._received_files = received_files
 
     async def send(self, content: str, *, metadata: dict | None = None) -> bool:
         from ..channels.bus.events import OutboundMessage
@@ -570,7 +573,17 @@ class _BridgeIO(InteractionIO):
             return False
 
     async def wait_reply(self, *, timeout: float) -> str | None:
-        return await _reply_registry.wait(self._session_key, timeout)
+        from ..channels.bus.events import InboundMessage
+        from ..stream.display import received_media_state
+
+        reply = await _reply_registry.wait_event(self._session_key, timeout)
+        if reply is None:
+            return None
+        if self._received_files is not None and isinstance(
+            reply.context, InboundMessage
+        ):
+            self._received_files.update(received_media_state(reply.context.media))
+        return reply.content
 
 
 def _ask_user_result_timeout(question_count: int) -> float:
@@ -786,13 +799,14 @@ def _run_engine_on_bus(coro, *, result_timeout: float, on_error):
 def channel_ask_user_prompt(
     ask_user_data: dict,
     msg: ChannelMessage | None = None,
+    *,
+    received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
 ) -> dict:
     """Collect answers to ask_user questions from a channel user.
 
     Thin bridge: runs :func:`channels.interaction.resolve_ask_user` on the
-    bus loop over a :class:`_BridgeIO` and blocks for the result.  Signature
-    and return shape are unchanged (callers in ``interactive.py`` /
-    ``commands.py`` / ``tui_interactive.py`` are untouched).
+    bus loop over a :class:`_BridgeIO` and blocks for the result. Files
+    attached to its replies extend the turn's received files before resuming.
 
     Returns ``{"answers": [...], "status": "answered"}`` or
     ``{"status": "cancelled"}``.
@@ -805,7 +819,11 @@ def channel_ask_user_prompt(
 
     # ask_user never uses buttons; a plain capability set suffices.
     io = _BridgeIO(
-        msg.bus_ref, msg, ChannelCapabilities(), _channel_message_session_key(msg)
+        msg.bus_ref,
+        msg,
+        ChannelCapabilities(),
+        _channel_message_session_key(msg),
+        received_files=received_files,
     )
     return _run_engine_on_bus(
         resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT),
@@ -1095,7 +1113,7 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             # pending, still deliver /stop into it so the blocking engine
             # unwinds immediately (it treats /stop as a clean cancel).
             if is_stop_command(msg.content):
-                if _reply_registry.try_resolve(session_key, msg.content):
+                if _reply_registry.try_resolve(session_key, msg.content, context=msg):
                     _channel_logger.info(
                         f"[bus] stop request released interaction wait for "
                         f"{msg.channel}:{msg.chat_id}"
@@ -1108,7 +1126,7 @@ async def _bus_inbound_consumer(bus, manager) -> None:
             # Reply interception sits ahead of normal enqueue — if a prompt
             # is waiting on this chat, the next message is its reply and
             # must NOT be enqueued as a fresh agent turn.
-            if _reply_registry.try_resolve(session_key, msg.content):
+            if _reply_registry.try_resolve(session_key, msg.content, context=msg):
                 _channel_logger.info(
                     f"[bus] interaction reply from {msg.channel}:{msg.sender_id}: "
                     f"{msg.content[:60]}"

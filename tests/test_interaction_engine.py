@@ -366,18 +366,6 @@ class TestResolveApproval:
 
 
 class TestPendingReplyRegistry:
-    async def test_register_wait_resolve(self):
-        reg = I.PendingReplyRegistry()
-
-        async def _resolver():
-            # Give wait() a tick to register before resolving.
-            await asyncio.sleep(0.01)
-            assert reg.try_resolve("s1", "hello") is True
-
-        got, _ = await asyncio.gather(reg.wait("s1", timeout=1.0), _resolver())
-        assert got == "hello"
-        assert "s1" not in reg  # cleaned up after wait
-
     async def test_wait_event_returns_reply_context(self):
         reg = I.PendingReplyRegistry()
         context = object()
@@ -394,7 +382,7 @@ class TestPendingReplyRegistry:
 
     async def test_wait_timeout_returns_none(self):
         reg = I.PendingReplyRegistry()
-        got = await reg.wait("s1", timeout=0.02)
+        got = await reg.wait_event("s1", timeout=0.02)
         assert got is None
         assert "s1" not in reg
 
@@ -404,7 +392,7 @@ class TestPendingReplyRegistry:
 
     async def test_reregister_cancels_stale(self):
         reg = I.PendingReplyRegistry()
-        first = asyncio.ensure_future(reg.wait("s1", timeout=1.0))
+        first = asyncio.ensure_future(reg.wait_event("s1", timeout=1.0))
         await asyncio.sleep(0.01)  # let first register
         # A second interaction on the same chat re-registers, cancelling the
         # first waiter so it unwinds promptly (returns None) instead of
@@ -417,7 +405,7 @@ class TestPendingReplyRegistry:
 
     async def test_clear_cancels_all(self):
         reg = I.PendingReplyRegistry()
-        fut = asyncio.ensure_future(reg.wait("s1", timeout=1.0))
+        fut = asyncio.ensure_future(reg.wait_event("s1", timeout=1.0))
         await asyncio.sleep(0.01)
         reg.clear()
         got = await fut
@@ -425,7 +413,7 @@ class TestPendingReplyRegistry:
 
     async def test_task_cancellation_propagates(self):
         reg = I.PendingReplyRegistry()
-        task = asyncio.create_task(reg.wait("s1", timeout=1.0))
+        task = asyncio.create_task(reg.wait_event("s1", timeout=1.0))
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
