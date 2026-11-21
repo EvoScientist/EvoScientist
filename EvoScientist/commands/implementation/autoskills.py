@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from rich.console import Group
 from rich.table import Table
+from rich.text import Text
 
 from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
+
+if TYPE_CHECKING:
+    from ...memory.autoskills.proposals import SkillProposal
 
 AUTOSKILLS_COMMAND = "/autoskills"
 _PROPOSAL_STATUSES = {
@@ -15,6 +21,12 @@ _PROPOSAL_STATUSES = {
     "approved": "approved",
     "rejected": "rejected",
 }
+
+
+@dataclass(frozen=True)
+class _ProposalSnapshot:
+    updated_at: str
+    content_digest: str | None = None
 
 
 class AutoSkillsCommand(Command):
@@ -27,7 +39,7 @@ class AutoSkillsCommand(Command):
         SubCommand("status", "Show AutoSkills config and proposals for review"),
         SubCommand("help", "Show AutoSkills command examples"),
         SubCommand("list", "List autoskill proposals, optionally filtered by status"),
-        SubCommand("review", "Review autoskill proposals awaiting a decision"),
+        SubCommand("review", "Review one autoskill proposal by id"),
         SubCommand("approve", "Approve an autoskill proposal by id"),
         SubCommand("reject", "Reject an autoskill proposal by id"),
         SubCommand("run", "Run AutoSkills once now"),
@@ -37,6 +49,9 @@ class AutoSkillsCommand(Command):
         SubCommand("cadence", "Set nightly, weekly, or monthly cadence"),
         SubCommand("time", "Set local run time as HH:MM"),
     ]
+
+    def __init__(self) -> None:
+        self._snapshots: dict[tuple[str, str], _ProposalSnapshot] = {}
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Dispatch one ``autoskills`` subcommand."""
@@ -49,7 +64,7 @@ class AutoSkillsCommand(Command):
         elif sub in {"list", "ls", "proposals"}:
             await self._list_command(ctx, rest)
         elif sub == "review":
-            await self._list(ctx, status="pending")
+            await self._review_command(ctx, rest)
         elif sub in {"approve", "accept"}:
             scope, scope_error = self._scope_arg(rest)
             if scope_error is not None:
@@ -124,7 +139,7 @@ class AutoSkillsCommand(Command):
         if pending:
             ctx.ui.append_system(
                 (
-                    f"Next: {AUTOSKILLS_COMMAND} review, then "
+                    f"Next: {AUTOSKILLS_COMMAND} review <id>, then "
                     f"{AUTOSKILLS_COMMAND} approve <id> or "
                     f"{AUTOSKILLS_COMMAND} reject <id>."
                 ),
@@ -165,6 +180,56 @@ class AutoSkillsCommand(Command):
             )
             return
         await self._list(ctx, status=status)
+
+    async def _review_command(self, ctx: CommandContext, args: list[str]) -> None:
+        if len(args) != 1:
+            ctx.ui.append_system(
+                f"Usage: {AUTOSKILLS_COMMAND} review <id>",
+                style="yellow",
+            )
+            return
+        await self._review(ctx, args[0])
+
+    async def _review(self, ctx: CommandContext, proposal_id: str) -> None:
+        """Render the copied files of one pending proposal."""
+        from ...memory.autoskills.proposals import _content_digest, _copied_contents
+
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"No unique autoskill proposal matching {proposal_id!r}.",
+                style="yellow",
+            )
+            return
+        if proposal.status != "pending":
+            ctx.ui.append_system(
+                f"Draft {proposal.proposal_id} is not pending ({proposal.status}).",
+                style="yellow",
+            )
+            return
+        try:
+            contents = await asyncio.to_thread(_copied_contents, proposal.path)
+            content_digest = _content_digest(contents)
+        except (OSError, ValueError) as exc:
+            ctx.ui.append_system(
+                f"Could not read proposal {proposal.proposal_id}: {exc}",
+                style="red",
+            )
+            return
+        files = [
+            (name, contents[name].decode("utf-8", errors="replace"))
+            for name in sorted(contents)
+        ]
+
+        shown = [
+            Text(f"Draft {proposal.proposal_id}", style="bold"),
+            Text(f"Scope: {proposal.effective_scope}", style="dim"),
+        ]
+        for relative, content in files:
+            shown.append(Text(f"--- {relative}", style="cyan"))
+            shown.append(Text(content))
+        ctx.ui.mount_renderable(Group(*shown))
+        self._remember(ctx, proposal, content_digest=content_digest)
 
     async def _list(self, ctx: CommandContext, *, status: str | None = None) -> None:
         """Render the proposal table, optionally filtered by status."""
@@ -218,8 +283,11 @@ class AutoSkillsCommand(Command):
                 proposal.description,
             )
         ctx.ui.mount_renderable(table)
+        for proposal in proposals:
+            self._remember(ctx, proposal)
         ctx.ui.append_system(
-            f"Use {AUTOSKILLS_COMMAND} approve <id> or "
+            f"Use {AUTOSKILLS_COMMAND} review <id> to inspect a draft, then "
+            f"{AUTOSKILLS_COMMAND} approve <id> or "
             f"{AUTOSKILLS_COMMAND} reject <id>.",
             style="dim",
         )
@@ -241,18 +309,31 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             ctx.ui.append_system(
-                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                f"Run {AUTOSKILLS_COMMAND} list to copy a proposal ID.",
                 style="dim",
             )
             return
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"Approval failed: No unique proposal matching {proposal_id!r}",
+                style="red",
+            )
+            return
         workspace_dir = self._workspace_dir(ctx)
+        snapshot = self._snapshots.get((workspace_dir, proposal.proposal_id))
         result = await asyncio.to_thread(
             approve_skill_proposal,
             paths.MEMORIES_DIR,
-            proposal_id,
+            proposal.proposal_id,
+            exact=True,
             skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
             scope=scope,
+            expected_updated_at=snapshot.updated_at
+            if snapshot
+            else proposal.updated_at,
+            expected_content_digest=snapshot.content_digest if snapshot else None,
         )
         if result.get("approved"):
             verb = "Updated" if result.get("operation") == "update" else "Approved"
@@ -282,16 +363,28 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             ctx.ui.append_system(
-                f"Run {AUTOSKILLS_COMMAND} review to copy a proposal ID.",
+                f"Run {AUTOSKILLS_COMMAND} list to copy a proposal ID.",
                 style="dim",
             )
             return
+        proposal = await asyncio.to_thread(self._resolve, ctx, proposal_id)
+        if proposal is None:
+            ctx.ui.append_system(
+                f"Reject failed: No unique proposal matching {proposal_id!r}",
+                style="red",
+            )
+            return
         workspace_dir = self._workspace_dir(ctx)
+        snapshot = self._snapshots.get((workspace_dir, proposal.proposal_id))
         result = await asyncio.to_thread(
             reject_skill_proposal,
             paths.MEMORIES_DIR,
-            proposal_id,
+            proposal.proposal_id,
+            exact=True,
             workspace_dir=workspace_dir,
+            expected_updated_at=snapshot.updated_at
+            if snapshot
+            else proposal.updated_at,
         )
         if result.get("rejected"):
             ctx.ui.append_system(
@@ -435,7 +528,10 @@ class AutoSkillsCommand(Command):
         rows = [
             (AUTOSKILLS_COMMAND, "Show this command reference"),
             (f"{AUTOSKILLS_COMMAND} status", "Show config and the next useful action"),
-            (f"{AUTOSKILLS_COMMAND} review", "Review proposals waiting for a decision"),
+            (
+                f"{AUTOSKILLS_COMMAND} review <id>",
+                "Show one proposal's files for review",
+            ),
             (
                 f"{AUTOSKILLS_COMMAND} approve <id> [scope]",
                 "Install a reviewed autoskill; scope is workspace or global",
@@ -462,8 +558,43 @@ class AutoSkillsCommand(Command):
             style="dim",
         )
 
+    def _remember(
+        self,
+        ctx: CommandContext,
+        proposal: Any,
+        *,
+        content_digest: str | None = None,
+    ) -> None:
+        if content_digest is None:
+            content_digest = getattr(proposal, "content_digest", None)
+        if not isinstance(content_digest, str):
+            key = (self._workspace_dir(ctx), proposal.proposal_id)
+            previous = self._snapshots.get(key)
+            content_digest = (
+                previous.content_digest
+                if previous is not None and previous.updated_at == proposal.updated_at
+                else None
+            )
+        key = (self._workspace_dir(ctx), proposal.proposal_id)
+        self._snapshots[key] = _ProposalSnapshot(
+            updated_at=proposal.updated_at,
+            content_digest=content_digest,
+        )
+
+    def _resolve(self, ctx: CommandContext, proposal_id: str) -> SkillProposal | None:
+        from ... import paths
+        from ...memory.autoskills.proposals import resolve_skill_proposal
+
+        proposal = resolve_skill_proposal(
+            paths.MEMORIES_DIR, proposal_id, workspace_dir=self._workspace_dir(ctx)
+        )
+        if proposal is not None and proposal.path.name == proposal.proposal_id:
+            return proposal
+        return None
+
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
+
         return str(ctx.workspace.root)
 
     @staticmethod

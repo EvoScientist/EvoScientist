@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,7 @@ from EvoScientist import local_secret, paths
 from EvoScientist.langgraph_dev import registry
 from EvoScientist.langgraph_dev.autoskills_api import MAX_FILE_BYTES, MAX_INLINE_CHARS
 from EvoScientist.memory.autoskills.proposals import (
+    _content_digest,
     approve_skill_proposal,
     autoskill_proposals_dir,
     processed_cluster_hashes,
@@ -191,6 +194,9 @@ def test_list_inlines_texts_and_lists_files(server, served):
     assert draft["source_observation_ids"] == ["O-1", "O-2", "O-3"]
     assert draft["approved_by"] is None
     assert draft["approved_skill_present"] is None
+    assert draft["expected_updated_at"] == draft["updated_at"]
+    assert len(draft["content_digest"]) == 64
+    assert "review_token" not in draft
 
 
 def test_list_orders_files_by_path_text(server, served):
@@ -230,6 +236,8 @@ def test_list_inlines_no_text_for_a_decided_draft(
         "skill_md_truncated",
         "rationale_md",
         "rationale_md_truncated",
+        "contents",
+        "content_digest",
     ):
         assert draft[field] is None
     assert draft["description"] == "Use when testing focused-validation."
@@ -243,6 +251,40 @@ def test_list_truncates_large_skill_md(server, served):
 
     assert draft["skill_md_truncated"] is True
     assert len(draft["skill_md"]) == MAX_INLINE_CHARS
+
+
+def test_list_only_issues_a_decision_digest_for_complete_previews(
+    server, served, secret, quiet_skill_index, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    name = "focused-validation"
+    relative = "scripts/check.py"
+    script = "# " + "x" * 300 + "\n"
+    _draft(served, name, files={relative: script})
+    complete = _only_draft(server)
+    payload = {"SKILL.md": complete["skill_md"].encode("utf-8")}
+    payload.update(
+        {path: text.encode("utf-8") for path, text in complete["contents"].items()}
+    )
+    assert complete["content_digest"] == _content_digest(payload)
+
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 200)
+    partial = _only_draft(server)
+    assert partial["skill_md_truncated"] is False
+    assert partial["rationale_md_truncated"] is False
+    assert partial["contents"][relative] == script[:200]
+    decision = {"expected_updated_at": partial["updated_at"]}
+    if partial["content_digest"] is not None:
+        decision["expected_content_digest"] = partial["content_digest"]
+
+    response = _decide(server, name, "approve", secret, **decision)
+
+    assert response.status_code == 200, response.json()
+    assert partial["content_digest"] is None
+    assert partial["review_incomplete"] == "truncated"
+    assert complete["review_incomplete"] is None
+    assert (served.skills_dir / name / relative).read_bytes() == script.encode("utf-8")
 
 
 def test_list_reports_install_error_for_collision(server, served):
@@ -349,7 +391,8 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_by", "rejected_at", "approved_skill_path",
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
-        "rationale_md", "rationale_md_truncated", "files", "install_target",
+        "rationale_md", "rationale_md_truncated", "contents", "content_digest",
+        "review_incomplete", "expected_updated_at", "files", "install_target",
         "install_base", "install_error",
     }  # fmt: skip
 
@@ -768,8 +811,17 @@ def _file(server, name: str, path: str, **params):
     )
 
 
-def test_file_route_returns_text(server, served):
+def test_file_route_returns_text_digest_without_recording_a_review(
+    server, served, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals
+
     _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    monkeypatch.setattr(
+        proposals,
+        "_write_manifest",
+        lambda *_args, **_kwargs: pytest.fail("the file route wrote review state"),
+    )
 
     response = _file(server, "focused-validation", "scripts/check.py")
 
@@ -777,6 +829,11 @@ def test_file_route_returns_text(server, served):
     assert response.headers["content-type"].startswith("text/plain")
     assert "charset=utf-8" in response.headers["content-type"]
     assert response.text == "print(1)\n"
+    assert (
+        response.headers["X-EvoScientist-Content-Digest"]
+        == hashlib.sha256(response.content).hexdigest()
+    )
+    assert "X-EvoScientist-Review-Token" not in response.headers
 
 
 @pytest.mark.parametrize(
@@ -1033,12 +1090,20 @@ def test_decision_routes_need_the_secret(server, served, action):
     assert _only_draft(server)["status"] == "pending"
 
 
-def test_approve_route_installs_into_the_drafts_project(
+def test_approve_route_matching_digest_installs_into_the_drafts_project(
     server, served, secret, quiet_skill_index
 ):
     _draft(served, "focused-validation")
+    shown = _only_draft(server)
 
-    response = _decide(server, "focused-validation", "approve", secret)
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        expected_updated_at=shown["expected_updated_at"],
+        expected_content_digest=shown["content_digest"],
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1051,6 +1116,97 @@ def test_approve_route_installs_into_the_drafts_project(
     assert draft["status"] == "approved"
     assert draft["approved_by"] == "user"
     assert body["updated_at"] == draft["updated_at"]
+
+
+def test_approve_route_stale_digest_is_refused_as_draft_changed(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    shown = _only_draft(server)
+    skill = (
+        autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
+    )
+    skill.write_text(
+        skill.read_text(encoding="utf-8").replace("Steps.", "Changed after listing."),
+        encoding="utf-8",
+    )
+
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        expected_updated_at=shown["expected_updated_at"],
+        expected_content_digest=shown["content_digest"],
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "draft_changed"
+    assert not (served.skills_dir / "focused-validation").exists()
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_reports_post_install_staleness_with_cleanup_detail(
+    server, served, secret, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals
+
+    name = "focused-validation"
+    _draft(served, name)
+    shown = _only_draft(server)
+    installed = served.skills_dir / name
+    newer_version = proposals._version_stamp(shown["updated_at"])
+    real_copy = proposals._copy_proposed_skill
+
+    def change_after_install(source, destination):
+        blocked = real_copy(source, destination)
+        if destination == installed:
+            assert (installed / "SKILL.md").is_file()
+            _edit_manifest(name, updated_at=newer_version)
+        return blocked
+
+    monkeypatch.setattr(proposals, "_copy_proposed_skill", change_after_install)
+    # The recovery path matters when a stale install could not be rolled back.
+    monkeypatch.setattr(proposals, "_remove_unchanged_copy", lambda *_: False)
+    response = _decide(
+        server, name, "approve", secret, expected_updated_at=shown["updated_at"]
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "draft_changed", body
+    assert body["updated_at"] == newer_version
+    assert "could not be removed" in body["detail"]
+    assert str(installed) in body["detail"]
+    assert (installed / "SKILL.md").is_file()
+    assert _only_draft(server)["status"] == "pending"
+
+
+def test_approve_route_without_client_digest_installs_the_current_snapshot(
+    server, served, secret, quiet_skill_index
+):
+    _draft(served, "focused-validation")
+    shown = _only_draft(server)
+    skill = (
+        autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
+    )
+    skill.write_text(
+        skill.read_text(encoding="utf-8").replace("Steps.", "Current WebUI body."),
+        encoding="utf-8",
+    )
+
+    response = _decide(
+        server,
+        "focused-validation",
+        "approve",
+        secret,
+        scope="workspace",
+        expected_updated_at=shown["expected_updated_at"],
+    )
+
+    assert response.status_code == 200, response.json()
+    installed = served.skills_dir / "focused-validation" / "SKILL.md"
+    assert "Current WebUI body." in installed.read_text(encoding="utf-8")
 
 
 def test_approve_route_global_scope(server, served, secret, quiet_skill_index):
@@ -1699,14 +1855,16 @@ def test_approve_route_leaves_nothing_after_a_failed_copy(
     from EvoScientist.memory.autoskills import proposals
 
     _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
+    snapshot_root = paths.MEMORIES_DIR.resolve() / proposals.AUTOSKILL_SNAPSHOTS_DIR
     calls = []
     real_copy = proposals._copy_file_atomic
 
-    def full_disk(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 2:
-            raise OSError(28, "No space left on device")
-        return real_copy(*args, **kwargs)
+    def full_disk(source, target):
+        if Path(source).resolve().is_relative_to(snapshot_root):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+        return real_copy(source, target)
 
     monkeypatch.setattr(proposals, "_copy_file_atomic", full_disk)
 
@@ -1720,24 +1878,31 @@ def test_approve_route_leaves_nothing_after_a_failed_copy(
     assert draft["install_error"] is None
 
 
-def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_index):
+def test_concurrent_decisions_decide_one_draft_once(
+    served, monkeypatch, quiet_skill_index
+):
+    """Two approvals of one draft: one installs, the other is told it is decided.
+
+    The API takes one decision at a time, so the second call finds the draft
+    already approved. The install itself is serialized by the destination
+    lock, which ``test_autoskills_lock.py`` covers.
+    """
     import threading
-    import time
 
     from EvoScientist.langgraph_dev import autoskills_api
     from EvoScientist.memory.autoskills import proposals
 
     _draft(served, "focused-validation")
     real_copy = proposals._copy_proposed_skill
-    copies = []
+    snapshot_root = paths.MEMORIES_DIR.resolve() / proposals.AUTOSKILL_SNAPSHOTS_DIR
+    installs = []
 
-    def slow_copy(*args, **kwargs):
-        # Both approvals would pass the pending check before either writes.
-        copies.append(1)
-        time.sleep(0.2)
-        return real_copy(*args, **kwargs)
+    def copy_install(source, destination):
+        if Path(source).resolve().is_relative_to(snapshot_root):
+            installs.append(1)
+        return real_copy(source, destination)
 
-    monkeypatch.setattr(proposals, "_copy_proposed_skill", slow_copy)
+    monkeypatch.setattr(proposals, "_copy_proposed_skill", copy_install)
     results = []
 
     def approve():
@@ -1752,7 +1917,7 @@ def test_concurrent_approvals_install_once(served, monkeypatch, quiet_skill_inde
     assert sorted(status for status, _ in results) == [200, 409]
     refused = next(payload for status, payload in results if status == 409)
     assert refused == {"error": "not_pending", "status": "approved"}
-    assert len(copies) == 1
+    assert len(installs) == 1
 
 
 def test_decisions_run_off_the_event_loop(server, served, secret, monkeypatch):
