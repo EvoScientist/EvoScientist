@@ -147,8 +147,8 @@ class TestListCustomOpenaiModels:
 
         The thread the request runs on is the only place a leak shows up
         that a test can see on its own: a process-wide thread count moves
-        with every other test's timers, and under ``-n 4`` it moves with
-        another worker's too.
+        with every other test's timers -- one that ends mid-test makes the
+        count too low, one that a leak is counted against hides it.
         """
         probe_thread: list[threading.Thread] = []
 
