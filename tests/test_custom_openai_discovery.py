@@ -14,6 +14,7 @@ import gzip
 import json
 import logging
 import threading
+import time
 from unittest.mock import Mock, patch
 
 import httpx
@@ -136,25 +137,25 @@ class TestListCustomOpenaiModels:
             assert list_custom_openai_models("https://llm.test/v1/") == []
         assert seen["url"] == "https://llm.test/v1/models"
 
-    def test_a_timed_out_probe_leaves_no_worker_running(self):
-        """An endpoint that never answers does not leave a thread behind.
+    def test_a_timed_out_probe_leaves_nothing_running(self):
+        """An endpoint that never answers leaves no probe behind.
 
-        The deadline cancels the request, so the worker ends with it. A probe
-        that only stopped waiting would leave the thread and its connection
+        The deadline cancels the request, so the probe ends with it. A probe
+        that only stopped waiting would leave its work and its connection
         behind, and every further probe would leave another one.
         """
-        workers: list[threading.Thread] = []
+        before = threading.active_count()
 
         async def never_answers(request):
-            workers.append(threading.current_thread())
             await asyncio.sleep(3600)
 
         with _patch_transport(never_answers):
             assert list_custom_openai_models("https://llm.test/v1", timeout=0.2) == []
 
-        assert len(workers) == 1
-        workers[0].join(timeout=1)
-        assert not workers[0].is_alive()
+        deadline = time.monotonic() + 2.0
+        while threading.active_count() > before and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert threading.active_count() == before
 
 
 class TestDiscoverCustomOpenaiModels:
