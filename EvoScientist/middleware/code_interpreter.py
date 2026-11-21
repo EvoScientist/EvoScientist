@@ -12,10 +12,9 @@ Excluded from PTC by design:
       is always the top-level ``task()`` REPL global (with ``responseSchema``),
       so a ``tools.task`` variant would be a conflicting, degraded duplicate
     - ``start_async_task`` / ``update_async_task`` / ``cancel_async_task`` —
-      they record the task in state through a ``Command``, which the REPL
-      drops (langchain-ai/deepagents#5652), so a task started there is never
-      tracked; ``check_async_task`` / ``list_async_tasks`` read tracked tasks
-      and stay
+      they record the task in state through a ``Command``; tracking a task
+      started from code is untested, so they stay out;
+      ``check_async_task`` / ``list_async_tasks`` read tracked tasks and stay
     - ``execute`` (shell) — would bypass ``HumanInTheLoopMiddleware`` approval
     - ``write_file`` / ``edit_file`` — side-effectful, no batch benefit
     - ``think_tool`` — reflection is not batchable
@@ -34,12 +33,6 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import logging
-import sys
-import weakref
-
 from langchain.agents.middleware.types import ModelRequest
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -48,35 +41,15 @@ from langchain_quickjs import CodeInterpreterMiddleware
 # values; tests / ad-hoc callers can omit and get sensible defaults.
 _DEFAULT_TIMEOUT_SECONDS: float = 60.0
 _DEFAULT_MAX_RESULT_CHARS: int = 10000
-_CLOSE_TIMEOUT_SECONDS: float = 10.0
-
-logger = logging.getLogger(__name__)
 
 _MEMORY_FIRST_INTERPRETER_PROMPT = (
     "\n\nWhen memory tools (search_observations, read_memory) are available, use "
     "them before `code_interpreter` for workspace inspection or implementation work."
 )
 
-_live_interpreters: weakref.WeakSet[EvoCodeInterpreterMiddleware]
-
 
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
-    """Code interpreter middleware with EvoScientist's memory preflight hint.
-
-    ``after_agent`` / ``aafter_agent`` only skip a run that ended before
-    ``before_agent`` ran. They are otherwise NOT gated. An
-    earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
-    where ``code_interpreter`` wasn't called saved ~50 ms/turn of
-    ``create_snapshot()`` work, but also skipped the slot eviction upstream
-    performs in the same hook (``finally: self._registry.evict(slot_id)``
-    in ``langchain_quickjs.middleware.CodeInterpreterMiddleware.after_agent``).
-    ``before_agent`` restores the REPL on every turn that follows a touched
-    one via ``self._registry.get(slot_id)`` (get-or-create), so skipping
-    eviction leaked one ``ThreadWorker`` + QuickJS Runtime per persistent
-    slot that ever went touched → quiet. The regression test
-    ``test_after_agent_evicts_slot_on_untouched_turn`` guards against
-    reintroducing the gate.
-    """
+    """Code interpreter middleware with EvoScientist's memory preflight hint."""
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
@@ -92,56 +65,6 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if not state.get("_quickjs_slot_id"):
             return None
         return await super().aafter_agent(state, runtime)
-
-    async def aclose(self) -> None:
-        """Evict active REPLs on their worker loops before event-loop shutdown."""
-        registry = self._registry
-        with registry._lock:
-            slot_ids = tuple(registry._slots)
-        for slot_id in slot_ids:
-            with contextlib.suppress(Exception):
-                await registry.aevict(slot_id)
-        self._ptc_tools_by_slot.clear()
-
-    # Upstream's close blocks on each slot's worker thread, and those threads
-    # can no longer run once the interpreter is finalizing.
-    def __del__(self) -> None:
-        if sys.is_finalizing():
-            return
-        super().__del__()
-
-
-_live_interpreters = weakref.WeakSet()
-
-
-async def aclose_code_interpreters(
-    *,
-    timeout: float = _CLOSE_TIMEOUT_SECONDS,
-) -> None:
-    """Close live QuickJS middleware without blocking application shutdown."""
-    middlewares = tuple(_live_interpreters)
-    if not middlewares:
-        return
-
-    close_tasks = [middleware.aclose() for middleware in middlewares]
-    try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*close_tasks, return_exceptions=True),
-            timeout=timeout,
-        )
-    except TimeoutError:
-        logger.warning(
-            "code interpreter cleanup did not finish within %g seconds",
-            timeout,
-        )
-        return
-
-    for result in results:
-        if isinstance(result, BaseException):
-            logger.debug(
-                "code interpreter cleanup failed",
-                exc_info=(type(result), result, result.__traceback__),
-            )
 
 
 # Read-only, batchable tools that benefit from being callable inside JS:
@@ -185,11 +108,9 @@ def create_code_interpreter_middleware(
         Configured ``CodeInterpreterMiddleware`` ready to append to an agent's
         middleware stack.
     """
-    middleware = EvoCodeInterpreterMiddleware(
+    return EvoCodeInterpreterMiddleware(
         ptc=_DEFAULT_PTC_ALLOWLIST,
         timeout=timeout,
         max_result_chars=max_result_chars,
         tool_name="code_interpreter",
     )
-    _live_interpreters.add(middleware)
-    return middleware

@@ -1615,11 +1615,8 @@ class TestDbStats(unittest.IsolatedAsyncioTestCase):
 class TestReduceMessagesDeltaNoneState(unittest.TestCase):
     """Direct unit tests for the inline ``_reduce_messages_delta`` reducer.
 
-    Regression for the None-state crash: ``DeltaChannel.replay_writes``
-    can hand the reducer ``state=None`` for threads whose earliest
-    checkpoint never seeded ``messages: []``. Before the fix, the slow
-    path passed ``None`` straight into ``convert_to_messages`` and raised;
-    now ``state or []`` is substituted.
+    Callers always pass a list; a ``None`` state is accepted defensively and
+    treated as the empty list.
     """
 
     def test_none_state_simple_append(self):
@@ -1647,7 +1644,7 @@ def _signature(messages):
 
 
 def _import_upstream_reducer():
-    """Import deepagents' private delta reducer, or fail loudly.
+    """Import langgraph's private delta reducer, or fail loudly.
 
     A ``pytest.fail`` (not ``skip``) is deliberate: this test is the
     tripwire that fires when the upstream private symbol is renamed or
@@ -1655,12 +1652,12 @@ def _import_upstream_reducer():
     inline copy (``sessions.py``) and upstream go unnoticed.
     """
     try:
-        from deepagents._messages_reducer import (
+        from langgraph.graph.message import (
             _messages_delta_reducer as upstream,
         )
     except ImportError as exc:  # pragma: no cover - tripwire path
         pytest.fail(
-            "deepagents._messages_reducer._messages_delta_reducer could not "
+            "langgraph.graph.message._messages_delta_reducer could not "
             f"be imported ({exc}). The upstream private reducer that EvoSci's "
             "inline copy in sessions.py (_reduce_messages_delta) mirrors has "
             "moved or been renamed. Re-locate the upstream symbol and "
@@ -1671,7 +1668,7 @@ def _import_upstream_reducer():
 
 
 class TestReduceMessagesDeltaUpstreamParity:
-    """Behavioral parity vs deepagents' private ``_messages_delta_reducer``.
+    """Behavioral parity vs langgraph's private ``_messages_delta_reducer``.
 
     Drift detector: if upstream changes the reducer's semantics (dedup,
     tombstone, reset, coercion) the EvoSci inline copy must be updated to
@@ -1688,9 +1685,19 @@ class TestReduceMessagesDeltaUpstreamParity:
 
     def _assert_parity(self, upstream, state, writes):
         evo_out = _reduce_messages_delta(state, writes)
-        up_out = upstream(state, writes)
+        # langgraph's reducer leaves a missing state to DeltaChannel; ours
+        # also accepts None, defensively.
+        up_out = upstream([] if state is None else state, writes)
         assert _signature(evo_out) == _signature(up_out)
         return evo_out
+
+    def test_deepagents_messages_channel_uses_this_reducer(self, upstream):
+        # Parity only matters while deepagents' messages channel uses it.
+        from deepagents.graph import DeepAgentState
+        from langgraph.graph import StateGraph
+
+        channel = StateGraph(DeepAgentState).channels["messages"]
+        assert channel.reducer is upstream
 
     def test_parity_none_state_append(self, upstream):
         out = self._assert_parity(
