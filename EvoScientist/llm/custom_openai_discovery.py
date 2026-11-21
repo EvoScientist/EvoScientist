@@ -124,10 +124,12 @@ async def discover_custom_openai_models(
     *,
     timeout: float = 1.5,
 ) -> list[str]:
-    """Return model IDs, or ``[]`` on failure or an exceeded deadline.
+    """Return model IDs, or ``[]`` on failure or a download past the deadline.
 
     The download has a total timeout, not just HTTPX's inactivity timeout.
-    Parsing the size-limited body is synchronous and cannot be interrupted.
+    Parsing the size-limited body is synchronous and cannot be interrupted,
+    so a listing that finishes parsing after the deadline is still returned:
+    it is already known, and dropping it would save nothing.
     """
     if not base_url:
         return []
