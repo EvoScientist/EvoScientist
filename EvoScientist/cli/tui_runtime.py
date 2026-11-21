@@ -182,15 +182,10 @@ async def run_streaming_async(
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        try:
-            response = await settle_cancelled_worker(
-                worker,
-                on_cancel=lambda: request_stream_cancel(kwargs.get("cancel_scope")),
-            )
-        finally:
-            from ..middleware.code_interpreter import aclose_code_interpreters
-
-            await aclose_code_interpreters()
+        response = await settle_cancelled_worker(
+            worker,
+            on_cancel=lambda: request_stream_cancel(kwargs.get("cancel_scope")),
+        )
         if recover_on_cancel:
             current = asyncio.current_task()
             if current is not None and current.uncancel() > 0:
