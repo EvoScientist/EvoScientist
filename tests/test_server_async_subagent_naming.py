@@ -27,11 +27,14 @@ Every event shape below is built from the PRODUCTION producers:
   together with its terminal record in one update.
 - The CLI "[Async tasks update]" message is run INPUT, so it never
   arrives in an updates event. It is used here only in NEGATIVE checks:
-  the tracker must not end a child on it. The end signal is the terminal
-  async_tasks record, which arrives only when the agent calls
-  ``check_async_task``: Evo disables deepagents' automatic status-pull
-  hooks, and the CLI message lets the model acknowledge without checking,
-  so if the agent never checks, no end is emitted.
+  the tracker must not end a child on it. The end signal is a terminal
+  async_tasks record observed in the live stream. A check call is one way
+  such a record arrives, but not the only one: ``cancel_async_task``
+  writes a ``cancelled`` record, and ``list_async_tasks`` can write a
+  terminal record too, and the tracker ends the child on either. Evo
+  disables deepagents' automatic status-pull hooks, and the CLI message
+  lets the model acknowledge without checking, so if the agent never
+  observes the task again, no end is emitted.
 
 A record is state, not a launch event: it announces or re-arms a child
 only when a run-causing tool call actually produced that run in this
@@ -497,6 +500,15 @@ def _start_triggers(events: list[dict]) -> list[str | None]:
     return [e.get("tool_call_id") for e in events if e.get("type") == "subagent_start"]
 
 
+def _start_pairs(events: list[dict]) -> list[tuple[str, str | None]]:
+    """(instance_id, tool_call_id) per start, so a swapped instance id fails."""
+    return [
+        (e["instance_id"], e.get("tool_call_id"))
+        for e in events
+        if e.get("type") == "subagent_start"
+    ]
+
+
 def _tracker() -> tuple[_ServerSubagentTracker, _SubagentRegistry]:
     registry = _SubagentRegistry()
     return _ServerSubagentTracker(
@@ -520,6 +532,42 @@ async def _gateway_run(events: list[dict]) -> list[dict]:
             RunRequest(message="hi", thread_id="abc12345")
         )
     ]
+
+
+async def _gateway_two_turns(
+    turn_1_events: list[dict], turn_2_events: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Run two turns on ONE gateway and parent thread.
+
+    The stream object is shared across both turns; only its queued
+    events are swapped between them, so a lifecycle error caused by
+    reusing a gateway or thread is caught here instead of hidden by
+    fresh fixtures per turn. The tracker is still fresh per turn: the
+    gateway builds a new one on every stream_events call.
+    """
+    stream = FakeLangGraphThreadStream("abc12345", events=turn_1_events)
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    turn_1 = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+    stream.queued_events = list(turn_2_events)
+    turn_2 = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+    return turn_1, turn_2
 
 
 def test_an_async_launch_is_named_from_the_tool_finished_result():
@@ -694,7 +742,10 @@ def test_same_name_concurrent_launches_keep_their_own_triggers():
     events += tracker.process(_tool_finished("call-1", "async-thread-1", "code-agent"))
 
     assert _starts(events) == ["code-agent", "code-agent"], events
-    assert _start_triggers(events) == ["call-2", "call-1"], events
+    assert _start_pairs(events) == [
+        ("async:async-thread-2", "call-2"),
+        ("async:async-thread-1", "call-1"),
+    ], events
 
     ends = tracker.process(
         _record_update("async-thread-1", "code-agent", status="success")
@@ -1477,12 +1528,14 @@ async def test_the_gateway_yields_the_start_then_the_end_across_turns():
     """Cross-turn contract: turn 1 launches, turn 2 observes the completion.
 
     The gateway builds a fresh tracker per turn, so turn 2's tracker never
-    saw the launch and emits only the end. No completion listener runs
+    saw the launch and emits only the end. Both turns run on ONE gateway
+    and parent thread, so the second turn's end must carry the same
+    instance_id as the first turn's start. No completion listener runs
     between turns: the end is shown when a later turn's live stream
     observes the terminal record (the CLI notifier is the user-facing
     completion surface between turns).
     """
-    turn_1 = await _gateway_run(
+    turn_1, turn_2 = await _gateway_two_turns(
         [
             _tool_started(
                 "call-1",
@@ -1492,23 +1545,24 @@ async def test_the_gateway_yields_the_start_then_the_end_across_turns():
                 },
             ),
             _tool_finished("call-1", "async-thread-1", "code-agent"),
-        ]
+        ],
+        [
+            _notification_update("async-thread-1", "code-agent", "success"),
+            _record_update("async-thread-1", "code-agent", status="success"),
+        ],
     )
     assert [e["name"] for e in turn_1 if e.get("type") == "subagent_start"] == [
         "code-agent"
     ]
     assert [e["name"] for e in turn_1 if e.get("type") == "subagent_end"] == []
 
-    turn_2 = await _gateway_run(
-        [
-            _notification_update("async-thread-1", "code-agent", "success"),
-            _record_update("async-thread-1", "code-agent", status="success"),
-        ]
-    )
     assert [e["name"] for e in turn_2 if e.get("type") == "subagent_end"] == [
         "code-agent"
     ]
     assert [e["name"] for e in turn_2 if e.get("type") == "subagent_start"] == []
+    assert [e["instance_id"] for e in turn_2 if e.get("type") == "subagent_end"] == [
+        e["instance_id"] for e in turn_1 if e.get("type") == "subagent_start"
+    ]
 
 
 async def test_the_gateway_announces_nothing_for_a_failed_launch():
