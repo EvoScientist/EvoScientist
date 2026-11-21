@@ -111,6 +111,26 @@ def which_in(name: str, directory: str | Path) -> str | None:
     return None
 
 
+def _is_absolute_entry(directory: str) -> bool:
+    """True when ``directory`` is an absolute, fully-qualified path that does
+    not resolve against the current working directory or current drive."""
+    if not directory:
+        return False
+    if not _WINDOWS:
+        return directory.startswith("/")
+    if directory.startswith(("\\\\", "//")):
+        return len(directory) > 2
+    if (
+        len(directory) >= 3
+        and directory[0].isalpha()
+        and directory[1] == ":"
+        and directory[2] in ("\\", "/")
+    ):
+        return True
+    # Allow host POSIX paths (e.g. pytest tmp_path) when _WINDOWS is faked on POSIX.
+    return os.name != "nt" and directory.startswith("/")
+
+
 def which_on_path(
     name: str, *, outside: Path | None = None, path: str | None = None
 ) -> str | None:
@@ -125,7 +145,7 @@ def which_on_path(
         path = os.environ.get("PATH", "")
     for entry in path.split(os.pathsep):
         directory = clean_path_entry(entry)
-        if not directory or not os.path.isabs(directory):
+        if not _is_absolute_entry(directory):
             continue
         if outside is not None and is_under(Path(directory), outside):
             continue
@@ -133,6 +153,24 @@ def which_on_path(
         if found is not None:
             return found
     return None
+
+
+def clean_path(path: str | None = None) -> str:
+    """``PATH`` (or ``path``) without empty or relative entries, so a child's
+    ``#!/usr/bin/env node`` never searches the current directory. Other entries
+    are kept as written and in order. When no absolute entry remains, returns
+    ``/dev/null`` on POSIX so an empty PATH never resolves against the current
+    directory."""
+    if path is None:
+        path = os.environ.get("PATH", "")
+    parts = [
+        entry
+        for entry in path.split(os.pathsep)
+        if _is_absolute_entry(clean_path_entry(entry))
+    ]
+    if not parts and not _WINDOWS:
+        return "/dev/null"
+    return os.pathsep.join(parts)
 
 
 # Pauses between attempts to move an unpacked tool into place (about 4 s).

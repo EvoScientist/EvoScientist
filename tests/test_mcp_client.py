@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 import sys
 import textwrap
 import threading
@@ -251,6 +252,7 @@ class TestBuildConnections:
         ):
             monkeypatch.delenv(var, raising=False)
         # An npx server also gets the host's npm network settings.
+        from EvoScientist.setup import _install
         from EvoScientist.setup.node import NPM_NETWORK_VARS
 
         for var in NPM_NETWORK_VARS:
@@ -265,7 +267,7 @@ class TestBuildConnections:
             }
         }
         conns = _build_connections(config)
-        assert conns["fs"]["env"] == {"FOO": "bar"}
+        assert conns["fs"]["env"] == {"FOO": "bar", "PATH": _install.clean_path()}
 
     def test_stdio_forwards_proxy_and_cert_env(self, monkeypatch):
         """Proxy and CA bundle env vars are forwarded to stdio subprocesses."""
@@ -488,6 +490,85 @@ class TestBuildConnections:
         env = _build_connections(config)["py"].get("env", {})
         assert "npm_config_registry" not in env
         assert "npm_config_cafile" not in env
+        assert "PATH" not in env
+
+    @pytest.mark.parametrize("command", ["node", "npx", "npm"])
+    def test_node_server_gets_path_without_empty_or_relative_entries(
+        self, monkeypatch, node_rules, tmp_path, command
+    ):
+        """Node stdio servers get a cleaned PATH where relative entries are dropped."""
+        first = str(tmp_path / "opt" / "node24" / "bin")
+        second = str(tmp_path / "usr" / "bin")
+        monkeypatch.setenv(
+            "PATH",
+            os.pathsep.join(["", ".", "bin", "./node_modules/.bin", first, second]),
+        )
+        config = {"fs": {"transport": "stdio", "command": command, "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["PATH"] == os.pathsep.join([first, second])
+
+    def test_clean_path_reaches_node_server_unchanged(
+        self, monkeypatch, node_rules, tmp_path
+    ):
+        """An already-clean PATH with absolute entries reaches the server unchanged."""
+        clean = os.pathsep.join(
+            [str(tmp_path / "opt" / "node24" / "bin"), str(tmp_path / "usr" / "bin")]
+        )
+        monkeypatch.setenv("PATH", clean)
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["PATH"] == clean
+
+    @pytest.mark.parametrize("path_key", ["PATH", "Path"])
+    def test_node_server_keeps_its_own_path_from_mcp_yaml(
+        self, monkeypatch, node_rules, tmp_path, path_key
+    ):
+        """A configured PATH in mcp.yaml env is preserved as written."""
+        monkeypatch.setenv(
+            "PATH", os.pathsep.join([".", str(tmp_path / "usr" / "bin")])
+        )
+        own = os.pathsep.join(["", ".", "./node_modules/.bin", str(tmp_path / "own")])
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {path_key: own},
+            }
+        }
+        env = _build_connections(config)["fs"]["env"]
+        assert env[path_key] == own
+        if os.name == "nt":
+            assert [k for k in env if k.upper() == "PATH"] == [path_key]
+        elif path_key == "Path":
+            # On POSIX, Path does not mask PATH, so PATH is cleaned from host
+            assert env["PATH"] == str(tmp_path / "usr" / "bin")
+        else:
+            assert env["PATH"] == own
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry searches cwd")
+    def test_env_node_shebang_with_cleaned_path_skips_fake_node_in_cwd(
+        self, monkeypatch, node_rules, tmp_path
+    ):
+        """Looking up node on the cleaned PATH does not resolve to a fake node in cwd."""
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        fake_node = cwd / "node"
+        fake_node.write_text("#!/bin/sh\necho FAKE_NODE\nexit 1\n")
+        fake_node.chmod(0o755)
+
+        real_bin = tmp_path / "real_bin"
+        real_bin.mkdir()
+        real_node = real_bin / "node"
+        real_node.write_text("#!/bin/sh\necho REAL_NODE\n")
+        real_node.chmod(0o755)
+
+        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(real_bin)]))
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        conn_env = _build_connections(config)["fs"]["env"]
+
+        monkeypatch.chdir(cwd)
+        assert shutil.which("node", path=conn_env["PATH"]) == str(real_bin / "node")
 
     def test_http_connection(self):
         config = {
