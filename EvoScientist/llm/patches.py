@@ -9,9 +9,6 @@ Patches:
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
-      ChatGPT Codex backend sends only in ``function_call_arguments.done``
-      (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
     - _patch_deepagents_bound_reasoning_claude_only: after a summary, drop
@@ -956,7 +953,32 @@ def _note_refused_replay(exc: BaseException, refused: str) -> None:
     exc.add_note(f"Raised while resending a request refused with: {refused}")
 
 
+def _check_api_key(model: Any) -> None:
+    """Fail at once when an Anthropic model has no API key.
+
+    Without a key ``ChatAnthropic`` hands the SDK an empty one, which sends a
+    bare ``Authorization: Bearer`` header; the HTTP layer refuses it and the
+    SDK reports "Connection error." after its retries (#782). The check runs
+    at call time, not in ``get_chat_model``, so the model still builds before
+    a key is saved. Claude sign-in through ccproxy sets a placeholder key and
+    routed providers resolve their own, so neither is empty here.
+    """
+    key = getattr(model, "anthropic_api_key", None)
+    value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+    if value:
+        return
+    from ..middleware.error_normalization import MissingApiKeyError
+
+    raise MissingApiKeyError(
+        "No Anthropic API key is set. Save it with "
+        "`EvoSci config set anthropic_api_key <key>`, set the "
+        "ANTHROPIC_API_KEY environment variable, or run `EvoSci onboard`."
+    )
+
+
 def _patch_anthropic_thinking_binding() -> None:
+    """Wrap ``ChatAnthropic._create`` / ``_acreate``: refuse a call with no API
+    key, and resend a request refused for a stale thinking block."""
     global _anthropic_thinking_binding_patched
     if _anthropic_thinking_binding_patched:
         return
@@ -967,6 +989,7 @@ def _patch_anthropic_thinking_binding() -> None:
         _orig_acreate = ChatAnthropic._acreate
 
         def _create(self: Any, payload: dict) -> Any:
+            _check_api_key(self)
             payload = _with_known_thinking_setting(self, payload)
             try:
                 return _orig_create(self, payload)
@@ -1001,6 +1024,7 @@ def _patch_anthropic_thinking_binding() -> None:
                 raise
 
         async def _acreate(self: Any, payload: dict) -> Any:
+            _check_api_key(self)
             payload = _with_known_thinking_setting(self, payload)
             try:
                 return await _orig_acreate(self, payload)
@@ -1131,12 +1155,19 @@ def _merge_runs_config_kwargs(
        sub-agent launched (or continued) while the caller runs on, say, a free
        model does not silently fall back to a billed config-default.
 
+    ``model`` and ``model_provider`` travel as one pair, never as two
+    independently-merged keys: a model name only means something to the
+    provider that serves it. A caller's model without a provider goes out
+    with ``model_provider: None``, so the sub-agent picks its provider the
+    way the main run does.
+
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
+    caller = _caller_configurable.get() or {}
     overrides = {
         **(folders or {}),
         **_read_cfg_configurable(),
-        **(_caller_configurable.get() or {}),
+        **caller,
     }
     if not overrides:
         return kwargs
@@ -1155,6 +1186,10 @@ def _merge_runs_config_kwargs(
             if key not in ("workspace_dir", "run_dir")
         }
     merged_configurable = {**existing_configurable, **overrides}
+    if "model" in caller and "model_provider" not in caller:
+        # None rather than a missing key, so a provider saved on the run's
+        # assistant cannot pair with this model either.
+        merged_configurable["model_provider"] = None
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     if isinstance(kwargs.get("assistant_id"), str):
@@ -1457,80 +1492,3 @@ def _patch_deepagents_bound_reasoning_claude_only() -> None:
 
     _patched._evosci_claude_only = True  # type: ignore[attr-defined]
     _summ_mod._bound_reasoning_types = _patched
-
-
-# ---------------------------------------------------------------------------
-# Patch: the ChatGPT Codex backend usually sends parallel tool calls whole
-# (only ``response.function_call_arguments.done``), while langchain-openai
-# builds tool-call arguments from ``.delta`` events alone, leaving them empty.
-# Hand the full arguments through as a single delta when none was streamed.
-# ---------------------------------------------------------------------------
-# Calls whose delivered arguments are remembered at once (across all streams).
-_WHOLE_TOOL_ARGS_RECORD = 256
-
-
-def _patch_openai_responses_whole_tool_args() -> None:
-    """Keep tool-call arguments that arrive only in the ``done`` event.
-
-    Process-wide: every ``ChatOpenAI`` Responses stream passes through it, so it
-    changes nothing unless a call's arguments would otherwise be lost.
-    """
-    try:
-        import langchain_openai.chat_models.base as _base
-        from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
-
-        _orig = _base._convert_responses_chunk_to_generation_chunk
-    except (ImportError, AttributeError):
-        return
-    if hasattr(_orig, "_evosci_whole_tool_args"):
-        return
-    # Arguments delivered so far per call; insertion-ordered so a stream cut
-    # before ``done`` cannot grow it forever. A call pushed out is left to upstream;
-    # only with more than twice the record's calls open at once is one forgotten.
-    delivered: dict[str, str] = {}
-    dropped: dict[str, None] = {}
-
-    def _add(item_id: str, text: str) -> None:
-        if item_id in dropped:
-            return
-        delivered[item_id] = delivered.get(item_id, "") + text
-        if len(delivered) > _WHOLE_TOOL_ARGS_RECORD:
-            oldest = next(iter(delivered))
-            del delivered[oldest]
-            dropped[oldest] = None
-            if len(dropped) > _WHOLE_TOOL_ARGS_RECORD:
-                del dropped[next(iter(dropped))]
-
-    @functools.wraps(_orig)
-    def _convert(chunk: Any, *args: Any, **kwargs: Any) -> Any:
-        kind = getattr(chunk, "type", None)
-        if kind == "response.output_item.added":
-            item = getattr(chunk, "item", None)
-            # Some servers open the call with (part of) its arguments filled in.
-            if getattr(item, "type", None) == "function_call":
-                # A new call: whatever an earlier, cut stream left under this id is stale.
-                delivered.pop(item.id, None)
-                dropped.pop(item.id, None)
-                if item.arguments:
-                    _add(item.id, item.arguments)
-        elif kind == "response.function_call_arguments.delta":
-            _add(chunk.item_id, chunk.delta)
-        elif kind == "response.function_call_arguments.done":
-            sent = delivered.pop(chunk.item_id, "")
-            full = chunk.arguments or ""
-            missing = full[len(sent) :] if full.startswith(sent) else ""
-            if chunk.item_id in dropped:
-                del dropped[chunk.item_id]
-                missing = ""
-            if missing:
-                chunk = ResponseFunctionCallArgumentsDeltaEvent.construct(
-                    type="response.function_call_arguments.delta",
-                    delta=missing,
-                    item_id=chunk.item_id,
-                    output_index=chunk.output_index,
-                    sequence_number=chunk.sequence_number,
-                )
-        return _orig(chunk, *args, **kwargs)
-
-    _convert._evosci_whole_tool_args = True  # type: ignore[attr-defined]
-    _base._convert_responses_chunk_to_generation_chunk = _convert

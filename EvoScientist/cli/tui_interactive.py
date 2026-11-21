@@ -2671,11 +2671,11 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_ask_user_resume
 
-                                _stream_input = Command(resume=result)
+                                _stream_input = build_ask_user_resume(
+                                    event.get("interrupt_id"), result
+                                )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
                                 )
@@ -3281,17 +3281,6 @@ def run_textual_interactive(
                     on_request_sent=on_request_sent,
                 )
             except asyncio.CancelledError:
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup after cancellation failed",
-                        exc_info=True,
-                    )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._status_phase = ResearchPhase.IDLE
@@ -4594,18 +4583,6 @@ def run_textual_interactive(
                     await app.run_async()
             finally:
                 from .resume_hint import print_resume_hint
-
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup failed",
-                        exc_info=True,
-                    )
 
                 # Best-effort resume hint — guarded so failures here (e.g.
                 # DB teardown race during abnormal shutdown) cannot shadow

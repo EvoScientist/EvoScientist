@@ -19,7 +19,7 @@ from .context_editing import (
     create_context_editing_middleware,
 )
 from .context_overflow import ContextOverflowMapperMiddleware
-from .error_normalization import ErrorNormalizationMiddleware, MissingApiKeyMiddleware
+from .error_normalization import ErrorNormalizationMiddleware
 from .memory import (
     EvoMemoryMiddleware,
     create_memory_middleware,
@@ -28,6 +28,10 @@ from .memory_lifecycle import (
     EvoMemoryLifecycleMiddleware,
     create_memory_lifecycle_middleware,
     default_memory_scheduler,
+)
+from .message_timestamp import (
+    MessageTimestampMiddleware,
+    SubagentMessageTimestampMiddleware,
 )
 from .model_fallback import ModelFallbackMiddleware
 from .proactive_mode import ProactiveModeMiddleware, create_proactive_mode_middleware
@@ -56,7 +60,7 @@ __all__ = [
     "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
-    "MissingApiKeyMiddleware",
+    "MessageTimestampMiddleware",
     "ModelFallbackMiddleware",
     "ProactiveModeMiddleware",
     "Question",
@@ -64,6 +68,7 @@ __all__ = [
     "SchedulerMiddleware",
     "SkillPinMiddleware",
     "SkillsReloadMiddleware",
+    "SubagentMessageTimestampMiddleware",
     "ToolErrorHandlerMiddleware",
     "ToolHistoryRepairMiddleware",
     "WindowsFilePathMiddleware",

@@ -23,7 +23,7 @@ import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
@@ -33,6 +33,12 @@ from rich.text import Text
 
 from ..cli._app import app
 from ..stream.console import console
+from .stop_signals import (
+    ignore_stop_signal,
+    interrupt_on_stop_signals,
+    say,
+    stop_signals,
+)
 
 
 @app.command()
@@ -124,74 +130,13 @@ def deploy(
     # 4 to 10: the server, started here and owned by this command (never
     # one already running for this data folder), and stopped here, whatever
     # ends the command.
-    with _stop_signals_interrupt():
+    with interrupt_on_stop_signals():
         proc: subprocess.Popen | None = None
         try:
             proc = _start_server(config, effective_port, effective_host, tunnel, ws)
             _serve(ws, effective_port, effective_host, tunnel)
         finally:
             _stop_own_server(proc)
-
-
-def _stop_signals() -> list[signal.Signals]:
-    """The signals that end ``EvoSci deploy``. On macOS and Linux that
-    includes SIGHUP: the terminal closed or the SSH session dropped. (On
-    Windows the server shares the terminal's console, so closing it ends the
-    server too.)"""
-    stops = [signal.SIGINT, signal.SIGTERM]
-    hangup = getattr(signal, "SIGHUP", None)
-    if hangup is not None:
-        stops.append(hangup)
-    return stops
-
-
-def _say(markup: str) -> None:
-    """Print a stop message; after a hang-up the terminal is gone, and
-    writing to it fails without stopping the stop."""
-    with contextlib.suppress(OSError):
-        console.print(markup)
-
-
-def _ignore(signum: int, frame: Any) -> None:
-    """A stop signal after the first: the stop is already under way."""
-
-
-def _interrupt(signum: int, frame: Any) -> None:
-    """End deploy as Ctrl+C does, with the signals that end it ignored from
-    now on, so a second one cannot cut the stop short. Ignored by a no-op:
-    with ``SIG_IGN``, a second signal already pending prints an error."""
-    for sig in _stop_signals():
-        if signal.getsignal(sig) is _interrupt:
-            signal.signal(sig, _ignore)
-    signal.default_int_handler(signum, frame)
-
-
-@contextlib.contextmanager
-def _stop_signals_interrupt() -> Iterator[None]:
-    """Each signal that ends deploy raises ``KeyboardInterrupt``, as Ctrl+C
-    does, so the stop in deploy's ``finally`` runs: SIGTERM and SIGHUP would
-    otherwise end the process without it, and leave the server, which runs
-    in its own session or process group, running. Installed before the
-    start, so a signal while the server starts stops it too. A SIGHUP this
-    process started with ignored stays ignored: ``nohup EvoSci deploy &``
-    keeps deploy and its server up after a logout. (SIGINT is taken over
-    even when ignored, as a shell ignores it for ``EvoSci deploy &`` and a
-    later ``kill -INT`` stops deploy.)
-
-    The first such signal also ignores the rest from then on: every stop
-    that follows it, the one ``ensure_server`` makes of a server it was
-    starting as well as deploy's own, runs to the end."""
-    hangup = getattr(signal, "SIGHUP", None)
-    previous = {
-        sig: signal.signal(sig, _interrupt)
-        for sig in _stop_signals()
-        if sig != hangup or signal.getsignal(sig) is not signal.SIG_IGN
-    }
-    try:
-        yield
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
 
 
 def _stop_own_server(proc: subprocess.Popen | None) -> None:
@@ -205,17 +150,17 @@ def _stop_own_server(proc: subprocess.Popen | None) -> None:
     server = proc if proc is not None else lgm._PROCESS
     if server is None:
         return
-    previous = {sig: signal.signal(sig, _ignore) for sig in _stop_signals()}
+    previous = {sig: signal.signal(sig, ignore_stop_signal) for sig in stop_signals()}
     try:
         # Piped to a program that has exited, rich ends the print with
         # ``SystemExit``: the stop runs before deploy exits with it.
         try:
-            _say("\n[dim]Stopping langgraph dev...[/dim]")
+            say("\n[dim]Stopping langgraph dev...[/dim]", to=console)
         finally:
             # A server that never became ready has no run to put back in the
             # queue, and on Windows would only finish loading first.
             lgm.stop_langgraph_dev(server, clean=proc is not None)
-        _say("[dim]Stopped.[/dim]")
+        say("[dim]Stopped.[/dim]", to=console)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
