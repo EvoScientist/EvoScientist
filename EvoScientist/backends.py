@@ -1011,9 +1011,22 @@ _GLUED_VALUE_PREFIX_RE = re.compile(
 )
 
 
-def _has_traversal_component(command: str) -> bool:
+def _has_traversal_component(
+    command: str,
+    *,
+    _seen: set[str] | None = None,
+    _walked: set[str] | None = None,
+) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
+
+    if _seen is None:
+        _seen = set()
+    if _walked is None:
+        _walked = set()
+    if command in _seen:
+        return False
+    _seen.add(command)
 
     parsed = shell_syntax.parse(command)
     tokens = parsed.tokens
@@ -1035,10 +1048,20 @@ def _has_traversal_component(command: str) -> bool:
             if any(".." in PurePosixPath(entry).parts for entry in entries):
                 return True
 
+    # A shell also reads code from stdin: a here-document body on a shell
+    # command runs, while the same body on `cat` is data. Read the nested
+    # code the way simple_commands does, so quoted and escaped spellings and
+    # assignment prefixes are checked as commands rather than as raw text.
+    # Recording every walked text in _walked keeps nested heredocs linear.
+    if command not in _walked:
+        for command_text in shell_syntax.shell_code_bodies(command, _walked=_walked):
+            if _has_traversal_component(command_text, _seen=_seen, _walked=_walked):
+                return True
+
     # The substitution helper reads shell words, not whole commands: comments
     # and literal heredoc bodies must not affect its quote tracking.
     def check_substitution(inner: str) -> tuple[str, bool]:
-        return inner, _has_traversal_component(inner)
+        return inner, _has_traversal_component(inner, _seen=_seen, _walked=_walked)
 
     for token in tokens:
         if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
@@ -1059,7 +1082,9 @@ def _has_traversal_component(command: str) -> bool:
     scripts = shell_syntax.shell_script_words(tokens)
     for token in tokens:
         if token["type"] == "word" and int(token["start"]) in scripts:
-            if _has_traversal_component(str(token["value"])):
+            if _has_traversal_component(
+                str(token["value"]), _seen=_seen, _walked=_walked
+            ):
                 return True
     return False
 

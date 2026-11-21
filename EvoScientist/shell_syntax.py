@@ -531,14 +531,16 @@ def _command_word_end(
 
 def _command_arguments(
     command: str, words: ShellWords, index: int, in_backtick: bool
-) -> tuple[list[tuple[str, dict[str, object] | None]], list[int]]:
-    """The arguments of the command whose name is token *index*, and the
-    here-document bodies it reads; inside a backtick substitution the
-    closing backtick ends them."""
+) -> tuple[list[tuple[str, dict[str, object] | None]], list[int], bool]:
+    """The arguments of the command whose name is token *index*, the stdin
+    here-document bodies it reads, and whether it redirects stdin (fd 0);
+    inside a backtick substitution the closing backtick ends them."""
     tokens = words.tokens
     args: list[tuple[str, dict[str, object] | None]] = []
     heredocs: list[int] = []
     redirect_target = False
+    stdin_redirect = False
+    redirects_stdin = False
     previous_end = int(tokens[index]["end"])
     index += 1
     while index < len(tokens):
@@ -550,26 +552,95 @@ def _command_arguments(
             if "<" not in value and ">" not in value:
                 break
             redirect_target = True
+            stdin_redirect = _redirects_stdin(value)
+            if stdin_redirect:
+                redirects_stdin = True
+            previous_end = int(token["end"])
+            index += 1
+            continue
+        start = int(token["start"])
+        if redirect_target and token.get("raw") == "-" and start == previous_end:
             previous_end = int(token["end"])
             index += 1
             continue
         end = _command_word_end(tokens, index, in_backtick)
-        start = int(token["start"])
         if start in words.delimiters:
-            if start in words.body_delimiters:
+            if start in words.body_delimiters and stdin_redirect:
                 heredocs.append(words.body_delimiters.index(start))
         elif not redirect_target:
             single = token if end == index + 1 and token["type"] == "word" else None
             args.append((command[start : int(tokens[end - 1]["end"])], single))
         redirect_target = False
+        stdin_redirect = False
         previous_end = int(tokens[end - 1]["end"])
         index = end
-    return args, heredocs
+    return args, heredocs, redirects_stdin
 
 
 def _word_value(arg: str, token: dict[str, object] | None) -> str:
     """A word as the shell reads it: its decoded token, else as written."""
     return str(token["value"]) if token is not None else arg
+
+
+def _xargs_items(text: str, *, line_mode: bool = False) -> list[str]:
+    """Decode input items the way ``xargs`` reads them: single quotes, double
+    quotes and unquoted backslashes quote characters without treating ``#`` as
+    a comment. In *line_mode* (``-I`` / ``-i`` / ``--replace``) only unquoted
+    newlines split items; otherwise any unquoted whitespace does."""
+    items: list[str] = []
+    current: list[str] = []
+    has_item = False
+    quote: str | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+                i += 1
+            elif ch == "\n":
+                # In xargs, an unclosed quote ends at newline.
+                quote = None
+                if has_item:
+                    items.append("".join(current))
+                    current = []
+                    has_item = False
+                i += 1
+            else:
+                current.append(ch)
+                i += 1
+            continue
+        if ch == "\\":
+            if i + 1 < n:
+                current.append(text[i + 1])
+                has_item = True
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            has_item = True
+            i += 1
+            continue
+        if (ch == "\n") if line_mode else ch.isspace():
+            if has_item:
+                items.append("".join(current))
+                current = []
+                has_item = False
+            i += 1
+            continue
+        if line_mode and not has_item and ch.isspace():
+            # Leading unquoted blanks on a line are ignored by xargs -I.
+            i += 1
+            continue
+        current.append(ch)
+        has_item = True
+        i += 1
+    if has_item:
+        items.append("".join(current))
+    return items
 
 
 # Short options of GNU and BSD env, other than `-S`, whose value is the rest
@@ -827,6 +898,334 @@ def _shell_operand(shell: str, values: Sequence[str]) -> tuple[int | None, str]:
     return None, letters
 
 
+def _redirects_stdin(op: str) -> bool:
+    """Whether redirection operator *op* redirects standard input (fd 0)."""
+    return op.startswith(("<", "0<"))
+
+
+def _heredoc_body_text(command: str, words: ShellWords, body: int) -> str:
+    """The lines inside here-document *body*, without its closing delimiter line."""
+    start, end, _expands = words.bodies[body]
+    text = command[start:end].rstrip("\n")
+    return text[: text.rfind("\n") + 1]
+
+
+def _is_pipe_end(tokens: Sequence[dict[str, object]], position: int) -> int | None:
+    """If token *position* ends a ``|`` or ``|&`` pipe operator, return the
+    index of its ``|`` token; else ``None``."""
+    token = tokens[position]
+    if token["type"] != "op":
+        return None
+    value = str(token["value"])
+    if value == "|":
+        return position
+    if (
+        value == "&"
+        and position > 0
+        and tokens[position - 1]["type"] == "op"
+        and str(tokens[position - 1]["value"]) == "|"
+        and int(tokens[position - 1]["end"]) == int(token["start"])
+    ):
+        return position - 1
+    return None
+
+
+def _trailing_redirections(
+    command: str, words: ShellWords, close_index: int
+) -> tuple[list[int], bool]:
+    """Stdin here-documents and whether stdin is redirected immediately after a
+    closing ``}`` or ``)`` at *close_index*."""
+    tokens = words.tokens
+    heredocs: list[int] = []
+    redirects_stdin = False
+    redirect_target = False
+    stdin_redirect = False
+    previous_end = int(tokens[close_index]["end"])
+    pos = close_index + 1
+    while pos < len(tokens):
+        token = tokens[pos]
+        if command_newline(command, previous_end, int(token["start"])) is not None:
+            break
+        value = str(token["value"])
+        if token["type"] == "op":
+            if "<" not in value and ">" not in value:
+                break
+            redirect_target = True
+            stdin_redirect = _redirects_stdin(value)
+            if stdin_redirect:
+                redirects_stdin = True
+            previous_end = int(token["end"])
+            pos += 1
+            continue
+        if not redirect_target:
+            break
+        start = int(token["start"])
+        if token.get("raw") == "-" and start == previous_end:
+            previous_end = int(token["end"])
+            pos += 1
+            continue
+        end = _command_word_end(tokens, pos, False)
+        if (
+            start in words.delimiters
+            and start in words.body_delimiters
+            and stdin_redirect
+        ):
+            heredocs.append(words.body_delimiters.index(start))
+        redirect_target = False
+        stdin_redirect = False
+        previous_end = int(tokens[end - 1]["end"])
+        pos = end
+    return heredocs, redirects_stdin
+
+
+def _walk_pipeline_heredocs(
+    command: str, words: ShellWords, position: int
+) -> list[int]:
+    """Here-document bodies in the pipeline stages ending at *position*,
+    following upstream ``|`` / ``|&`` stages until a stage overrides its own
+    stdin or the pipeline ends."""
+    tokens = words.tokens
+
+    def newline_before(pos: int, groups: bool = False) -> bool:
+        if pos + 1 >= len(tokens):
+            return False
+        return (
+            command_newline(
+                command,
+                int(tokens[pos]["end"]),
+                int(tokens[pos + 1]["start"]),
+            )
+            is not None
+            and not groups
+        )
+
+    found: list[int] = []
+    while position >= 0:
+        stage_heredocs: list[int] = []
+        stage_redirects_stdin = False
+        braces = parens = 0
+        next_pipe: int | None = None
+        while position >= 0:
+            token = tokens[position]
+            value = str(token["value"])
+            groups = braces > 0 or parens > 0
+            if not groups:
+                pipe_at = _is_pipe_end(tokens, position)
+                if pipe_at is not None:
+                    next_pipe = pipe_at
+                    break
+            if newline_before(position, groups):
+                break
+            if (
+                token["type"] == "word"
+                and words.name_flags[position]
+                and token.get("raw") == "}"
+            ):
+                braces += 1
+                position -= 1
+                continue
+            if (
+                token["type"] == "word"
+                and words.name_flags[position]
+                and token.get("raw") == "{"
+            ):
+                if braces == 0:
+                    break
+                braces -= 1
+                position -= 1
+                continue
+            if token["type"] == "op" and value == ")":
+                parens += 1
+                position -= 1
+                continue
+            if token["type"] == "op" and value == "(":
+                if parens == 0:
+                    break
+                parens -= 1
+                position -= 1
+                continue
+            if token["type"] == "op":
+                if not groups:
+                    if value in COMMAND_START_OPS:
+                        break
+                    if _redirects_stdin(value):
+                        stage_redirects_stdin = True
+                position -= 1
+                continue
+            start = int(token["start"])
+            if start in words.delimiters and start in words.body_delimiters:
+                stage_heredocs.append(words.body_delimiters.index(start))
+            position -= 1
+        found.extend(stage_heredocs)
+        if next_pipe is None or stage_redirects_stdin:
+            break
+        position = next_pipe - 1
+    return found
+
+
+def _leading_stdin(
+    command: str, words: ShellWords, name_index: int
+) -> tuple[list[int], bool]:
+    """Stdin here-documents supplied to token *name_index* by leading
+    redirections (``<<EOF bash``, ``< /dev/null bash``) or a leading ``|`` /
+    ``|&`` pipeline, and whether stdin was resolved before *name_index*."""
+    tokens = words.tokens
+    leading_heredocs: list[int] = []
+    leading_redirects_stdin = False
+    position = name_index - 1
+    while position >= 0:
+        token = tokens[position]
+        value = str(token["value"])
+        pipe_at = _is_pipe_end(tokens, position)
+        if pipe_at is not None:
+            if leading_redirects_stdin:
+                return leading_heredocs, True
+            return _walk_pipeline_heredocs(command, words, pipe_at - 1), True
+        if position + 1 < len(tokens) and (
+            command_newline(
+                command,
+                int(tokens[position]["end"]),
+                int(tokens[position + 1]["start"]),
+            )
+            is not None
+        ):
+            break
+        if token["type"] == "op":
+            if value in COMMAND_START_OPS:
+                break
+            if "<" in value or ">" in value:
+                if _redirects_stdin(value):
+                    leading_redirects_stdin = True
+                position -= 1
+                continue
+            break
+        if words.name_flags[position] and token.get("raw") in ("{", "}"):
+            break
+        start = int(token["start"])
+        if start in words.delimiters and start in words.body_delimiters:
+            leading_heredocs.append(words.body_delimiters.index(start))
+        position -= 1
+    if leading_redirects_stdin:
+        return leading_heredocs, True
+    return [], False
+
+
+def _enclosing_groups(words: ShellWords, name_index: int) -> list[tuple[int, int]]:
+    """``(open_index, close_index)`` of each ``{ ... }`` group or ``( ... )``
+    subshell enclosing token *name_index*, innermost first. Command
+    substitutions ``$(...)`` and arithmetic ``((...))`` are excluded."""
+    tokens = words.tokens
+    stack: list[tuple[str, int, bool]] = []
+    groups: list[tuple[int, int]] = []
+    for i, token in enumerate(tokens):
+        value = str(token["value"])
+        if token["type"] == "word" and words.name_flags[i] and token.get("raw") == "{":
+            stack.append(("{", i, False))
+        elif (
+            token["type"] == "word" and words.name_flags[i] and token.get("raw") == "}"
+        ):
+            for j in range(len(stack) - 1, -1, -1):
+                if stack[j][0] == "{":
+                    _, open_idx, _ = stack.pop(j)
+                    if open_idx < name_index < i:
+                        groups.append((open_idx, i))
+                    break
+        elif token["type"] == "op" and value == "(":
+            prev = tokens[i - 1] if i > 0 else None
+            is_non_subshell = (
+                prev is not None
+                and int(prev["end"]) == int(token["start"])
+                and (
+                    (prev["type"] == "word" and str(prev.get("raw", "")).endswith("$"))
+                    or (prev["type"] == "op" and str(prev["value"]) == "(")
+                )
+            )
+            stack.append(("(", i, is_non_subshell))
+        elif token["type"] == "op" and value == ")":
+            for j in range(len(stack) - 1, -1, -1):
+                if stack[j][0] == "(":
+                    _, open_idx, is_non_subshell = stack.pop(j)
+                    if not is_non_subshell and open_idx < name_index < i:
+                        groups.append((open_idx, i))
+                    break
+    groups.sort(key=lambda pair: pair[0], reverse=True)
+    return groups
+
+
+def _stdin_bodies(
+    command: str,
+    words: ShellWords,
+    name_index: int,
+    heredocs: list[int],
+    redirects_stdin: bool,
+    inherited_stdin: tuple[str, ...],
+) -> tuple[list[int], list[str]]:
+    """Resolve the effective stdin here-document bodies for the command at
+    *name_index*: its own stdin redirections win over a leading pipe, which
+    wins over enclosing ``{ ... }`` / ``( ... )`` groups, which win over
+    *inherited_stdin* from an enclosing ``bash -c`` shell."""
+    if redirects_stdin:
+        return list(heredocs), []
+    leading, resolved = _leading_stdin(command, words, name_index)
+    if resolved:
+        return leading, []
+    for open_idx, close_idx in _enclosing_groups(words, name_index):
+        group_heredocs, group_redirects = _trailing_redirections(
+            command, words, close_idx
+        )
+        if group_redirects:
+            return group_heredocs, []
+        group_leading, group_resolved = _leading_stdin(command, words, open_idx)
+        if group_resolved:
+            return group_leading, []
+    return [], list(inherited_stdin)
+
+
+# Long ``xargs`` options that consume the next argument word when written
+# without ``=``.
+_XARGS_LONG_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "--arg-file",
+        "--delimiter",
+        "--eof",
+        "--max-args",
+        "--max-chars",
+        "--max-lines",
+        "--max-procs",
+    }
+)
+# Short ``xargs`` option letters (other than ``-I`` / ``-i``) that take a value.
+_XARGS_VALUE_LETTERS = frozenset("nPLsdEaJ")
+
+
+def _xargs_replaces(xargs_cmd: SimpleCommand) -> bool:
+    """Whether *xargs_cmd* has a replace option (``-I``, ``-i``, ``--replace``)
+    that substitutes each input line into the command's arguments."""
+    skip = False
+    for arg, token in zip(xargs_cmd.args, xargs_cmd.tokens, strict=True):
+        value = _word_value(arg, token)
+        if skip:
+            skip = False
+            continue
+        if value == "--":
+            break
+        if value == "--replace" or value.startswith("--replace="):
+            return True
+        if value.startswith("--"):
+            skip = value in _XARGS_LONG_OPTIONS_WITH_VALUE
+            continue
+        if value.startswith("-") and len(value) > 1:
+            for pos, letter in enumerate(value[1:], start=1):
+                if letter in ("I", "i"):
+                    return True
+                if letter in _XARGS_VALUE_LETTERS:
+                    skip = pos == len(value) - 1
+                    break
+            continue
+        break
+    return False
+
+
 def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
     """The argument index of the script a shell runs from ``-c``, and whether
     it runs code from stdin (no ``-c`` and no script file, or ``-s``). Only
@@ -844,6 +1243,37 @@ def _shell_code(shell: SimpleCommand) -> tuple[int | None, bool]:
     if "c" in letters:
         return first, False
     return None, first is None or "s" in letters
+
+
+def _shell_reads_heredoc_as_code(
+    shell: SimpleCommand,
+    script: int | None,
+    reads_stdin: bool,
+    *,
+    xargs_replaces: bool = False,
+) -> bool:
+    """Whether *shell* reads a here-document body as code rather than data.
+
+    True when the shell reads code from stdin, when ``xargs`` supplies a
+    missing ``-c`` script from stdin (``xargs bash -c <<EOF``), or when
+    ``xargs`` uses a replace option (``-I`` / ``-i`` / ``--replace``) to
+    substitute input lines into a ``-c`` script. Otherwise, when a script word
+    is already written, the body only supplies positional arguments (data).
+    """
+    if reads_stdin:
+        return True
+    if "xargs" not in shell.via:
+        return False
+    if script is not None and not xargs_replaces:
+        return False
+    _first, letters = _shell_operand(
+        shell.name,
+        [
+            _word_value(arg, token)
+            for arg, token in zip(shell.args, shell.tokens, strict=True)
+        ],
+    )
+    return "c" in letters and "n" not in letters
 
 
 def simple_commands(command: str) -> list[SimpleCommand]:
@@ -1418,19 +1848,26 @@ def _keeps_prefix(
 
 def _simple_commands(
     command: str,
-    seen: set[tuple[str, tuple[str, ...], tuple[str, ...], bool]],
+    seen: set[tuple[str, tuple[str, ...], tuple[str, ...], bool, tuple[str, ...]]],
     outer: tuple[str, ...],
     assigned: list[tuple[str, str]] | None = None,
     outer_folders: tuple[str, ...] = (),
     outer_repeats: bool = False,
     root: str | None = None,
+    codes: list[str] | None = None,
+    inherited_stdin: tuple[str, ...] = (),
+    walked: set[str] | None = None,
 ) -> list[SimpleCommand]:
     """:func:`simple_commands`; *seen* holds the nested texts already read, by
     the wrappers and ``env -C`` folders they run under (*outer* and
-    *outer_folders* for this one) and whether they repeat (*outer_repeats*,
-    see :class:`SimpleCommand`); *root* is the outermost command, where a
-    function a nested text calls may be defined. Assignments in command-name position go to
-    *assigned* (see :func:`assignments`)."""
+    *outer_folders* for this one), whether they repeat (*outer_repeats*, see
+    :class:`SimpleCommand`), and any stdin bodies inherited from an enclosing
+    shell (*inherited_stdin*); *root* is the outermost command, where a
+    function a nested text calls may be defined. Assignments in command-name
+    position go to *assigned* (see :func:`assignments`); here-document bodies
+    read as shell code go to *codes* (see :func:`shell_code_bodies`)."""
+    if walked is not None:
+        walked.add(command)
     root = command if root is None else root  # the whole command, for definitions
     words = parse(command)
     tokens = words.tokens
@@ -1448,6 +1885,7 @@ def _simple_commands(
     blocks: list[str] = []
     function_next = False
     repeating: set[int] = set()  # indexes in *nested* of texts that repeat
+    inherited_by_index: dict[int, tuple[str, ...]] = {}
     in_backtick = False
     for index, (token, is_name) in enumerate(
         zip(tokens, words.name_flags, strict=True)
@@ -1509,7 +1947,9 @@ def _simple_commands(
                     assigned.extend(chain)  # alone, not before a command
             continue
         name = re.split(r"[\\/]", value)[-1]
-        args, heredocs = _command_arguments(command, words, index, in_backtick)
+        args, heredocs, redirects_stdin = _command_arguments(
+            command, words, index, in_backtick
+        )
         before = prefix.pop(index, [])
         # A function definition, `function NAME` or `NAME ( )`, is reported
         # as a command named `function`, as its body may run any number of
@@ -1578,12 +2018,38 @@ def _simple_commands(
             )
         ):
             assigned.extend(before)
+        xargs_replaces = any(
+            cmd.name == "xargs" and _xargs_replaces(cmd) for cmd in unwrapped
+        )
         for each in unwrapped:
             found.append(each)
             if each.name not in SHELL_NAMES:
                 continue
             script, reads_stdin = _shell_code(each)
+            reads_code = _shell_reads_heredoc_as_code(
+                each, script, reads_stdin, xargs_replaces=xargs_replaces
+            )
+            stdin_bodies, stdin_extra = (
+                _stdin_bodies(
+                    command,
+                    words,
+                    index,
+                    heredocs,
+                    redirects_stdin,
+                    inherited_stdin,
+                )
+                if reads_code or script is not None
+                else ([], [])
+            )
             if script is not None:
+                if not reads_code and (stdin_bodies or stdin_extra):
+                    inherited_by_index[len(nested)] = (
+                        *(
+                            _heredoc_body_text(command, words, body)
+                            for body in stdin_bodies
+                        ),
+                        *stdin_extra,
+                    )
                 nested.append(
                     (
                         _word_value(each.args[script], each.tokens[script]),
@@ -1593,15 +2059,28 @@ def _simple_commands(
                 )
                 if each.tokens[script] is not None:
                     script_tokens.add(id(each.tokens[script]))
-            if reads_stdin:
-                code_bodies.update(heredocs)
-                for body in heredocs:
-                    start, end, _expands = words.bodies[body]
-                    text = command[start:end].rstrip("\n")
-                    # Without the end line.
-                    nested.append(
-                        (text[: text.rfind("\n") + 1], each.via, each.folders)
-                    )
+            if reads_code:
+                code_bodies.update(stdin_bodies)
+                xargs_supplies = "xargs" in each.via and not reads_stdin
+                for body_text in (
+                    *(
+                        _heredoc_body_text(command, words, body)
+                        for body in stdin_bodies
+                    ),
+                    *stdin_extra,
+                ):
+                    if xargs_supplies:
+                        # When xargs supplies the ``-c`` script (or replaces into
+                        # it with ``-I`` / ``-i`` / ``--replace``), xargs splits
+                        # input without shell comment rules, stripping quotes.
+                        for item in _xargs_items(body_text, line_mode=xargs_replaces):
+                            nested.append((item, each.via, each.folders))
+                            if codes is not None:
+                                codes.append(item)
+                    else:
+                        nested.append((body_text, each.via, each.folders))
+                        if codes is not None:
+                            codes.append(body_text)
         if repeats:
             repeating.update(range(scripts_before, len(nested)))
 
@@ -1627,16 +2106,39 @@ def _simple_commands(
         chain = (*outer, *via)
         folder_chain = (*outer_folders, *folders)
         repeats = outer_repeats or at in repeating
-        if (text, chain, folder_chain, repeats) in seen:
+        child_stdin = inherited_by_index.get(at, ())
+        if (text, chain, folder_chain, repeats, child_stdin) in seen:
             continue  # the same code reached through another nesting
-        seen.add((text, chain, folder_chain, repeats))
+        seen.add((text, chain, folder_chain, repeats, child_stdin))
         found.extend(
             inner._replace(via=(*via, *inner.via), folders=(*folders, *inner.folders))
             for inner in _simple_commands(
-                text, seen, chain, assigned, folder_chain, repeats, root
+                text,
+                seen,
+                chain,
+                assigned,
+                folder_chain,
+                repeats,
+                root,
+                codes,
+                child_stdin,
+                walked,
             )
         )
     return found
+
+
+def shell_code_bodies(command: str, *, _walked: set[str] | None = None) -> list[str]:
+    """Here-document bodies that shells in *command* read as code.
+
+    A here-document on a shell command is a script, not data. Scripts nested
+    in a shell's ``-c`` argument or in a here-document it reads are included
+    too; a here-document on another command, such as ``cat``, is data and is
+    left out.
+    """
+    codes: list[str] = []
+    _simple_commands(command, set(), (), codes=codes, walked=_walked)
+    return codes
 
 
 def command_names(command: str) -> list[str]:
