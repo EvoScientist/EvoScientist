@@ -14,7 +14,6 @@ import gzip
 import json
 import logging
 import threading
-import time
 from unittest.mock import Mock, patch
 
 import httpx
@@ -138,24 +137,31 @@ class TestListCustomOpenaiModels:
         assert seen["url"] == "https://llm.test/v1/models"
 
     def test_a_timed_out_probe_leaves_nothing_running(self):
-        """An endpoint that never answers leaves no probe behind.
+        """An endpoint that never answers leaves no work behind.
 
-        The deadline cancels the request, so the probe ends with it. A probe
-        that only stopped waiting would leave its work and its connection
-        behind, and every further probe would leave another one.
+        The deadline cancels the request, so the probe's work ends with it:
+        the thread that ran the request is not still waiting on the socket
+        once the call has returned. A probe that only stopped waiting would
+        leave that thread behind, and every further probe would leave
+        another one.
+
+        The thread the request runs on is the only place a leak shows up
+        that a test can see on its own: a process-wide thread count moves
+        with every other test's timers, and under ``-n 4`` it moves with
+        another worker's too.
         """
-        before = threading.active_count()
+        probe_thread: list[threading.Thread] = []
 
         async def never_answers(request):
+            probe_thread.append(threading.current_thread())
             await asyncio.sleep(3600)
 
         with _patch_transport(never_answers):
             assert list_custom_openai_models("https://llm.test/v1", timeout=0.2) == []
 
-        deadline = time.monotonic() + 2.0
-        while threading.active_count() > before and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert threading.active_count() == before
+        assert probe_thread, "the request never ran"
+        probe_thread[-1].join(timeout=1)
+        assert not probe_thread[-1].is_alive(), "the probe is still waiting"
 
 
 class TestDiscoverCustomOpenaiModels:
