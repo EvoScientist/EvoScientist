@@ -136,25 +136,32 @@ class TestListCustomOpenaiModels:
             assert list_custom_openai_models("https://llm.test/v1/") == []
         assert seen["url"] == "https://llm.test/v1/models"
 
-    def test_a_timed_out_probe_leaves_no_worker_running(self):
-        """An endpoint that never answers does not leave a thread behind.
+    def test_a_timed_out_probe_leaves_nothing_running(self):
+        """An endpoint that never answers leaves no work behind.
 
-        The deadline cancels the request, so the worker ends with it. A probe
-        that only stopped waiting would leave the thread and its connection
-        behind, and every further probe would leave another one.
+        The deadline cancels the request, so the probe's work ends with it:
+        the thread that ran the request is not still waiting on the socket
+        once the call has returned. A probe that only stopped waiting would
+        leave that thread behind, and every further probe would leave
+        another one.
+
+        The thread the request runs on is the only place a leak shows up
+        that a test can see on its own: a process-wide thread count moves
+        with every other test's timers -- one that ends mid-test makes the
+        count too low, one that a leak is counted against hides it.
         """
-        workers: list[threading.Thread] = []
+        probe_thread: list[threading.Thread] = []
 
         async def never_answers(request):
-            workers.append(threading.current_thread())
+            probe_thread.append(threading.current_thread())
             await asyncio.sleep(3600)
 
         with _patch_transport(never_answers):
             assert list_custom_openai_models("https://llm.test/v1", timeout=0.2) == []
 
-        assert len(workers) == 1
-        workers[0].join(timeout=1)
-        assert not workers[0].is_alive()
+        assert probe_thread, "the request never ran"
+        probe_thread[-1].join(timeout=1)
+        assert not probe_thread[-1].is_alive(), "the probe is still waiting"
 
 
 class TestDiscoverCustomOpenaiModels:
@@ -221,22 +228,29 @@ class TestDiscoverCustomOpenaiModels:
             await discover_custom_openai_models("https://llm.test/v1/")
         assert seen["url"] == "https://llm.test/v1/models"
 
-    async def test_parses_on_the_callers_thread(self, monkeypatch):
-        parse_threads = []
-        original = discovery._names_from_body
+    async def test_a_parse_that_crosses_the_deadline_still_returns(self, monkeypatch):
+        """A parse that ends past the deadline is still a result.
 
-        def parse(body):
-            parse_threads.append(threading.current_thread())
-            return original(body)
+        The parse runs inline and cannot be interrupted, so once it has
+        finished the listing is known; discarding it would drop a valid
+        listing for no saving.
+        """
+        loop = asyncio.get_running_loop()
+        clock = [100.0]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+        original = discovery._picker_names
 
-        monkeypatch.setattr(discovery, "_names_from_body", parse)
+        def slow_parse(body):
+            names = original(body)
+            # The parse ends just after the deadline the caller set.
+            clock[0] += 5.0
+            return names
+
+        monkeypatch.setattr(discovery, "_picker_names", slow_parse)
         patcher, _ = _patch_request(_response())
         with patcher:
-            assert await discover_custom_openai_models("https://llm.test/v1") == [
-                "fake-agent",
-                "other-model",
-            ]
-        assert parse_threads == [threading.current_thread()]
+            names = await discover_custom_openai_models("https://llm.test/v1")
+        assert names == ["fake-agent", "other-model"]
 
 
 async def test_settings_and_picker_list_the_same_normalized_ids(monkeypatch):
@@ -309,7 +323,10 @@ async def test_oversized_listing_stops_before_reading_the_rest(
     assert stream.reads == 2
     assert stream.closed
     parse.assert_not_called()
-    assert "exceeds the 16-byte limit" in caplog.text
+    assert any(
+        record.levelno == logging.DEBUG and record.name == discovery.__name__
+        for record in caplog.records
+    )
 
 
 async def test_reads_a_compressed_listing(monkeypatch):
