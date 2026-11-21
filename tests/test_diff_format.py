@@ -140,6 +140,30 @@ class TestFormatDiffRich:
         # Should NOT have truncation marker
         assert "more lines" not in result
 
+    def test_removed_dash_comment_line_is_shown_and_counted(self):
+        old = ["SELECT 1;", "-- old note", "SELECT 2;"]
+        new = ["SELECT 1;", "SELECT 2;"]
+        diff = "\n".join(difflib.unified_diff(old, new, "q.sql", "q.sql", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "[red]-1[/red]" in result
+        assert "[on #2d1515]-- old note[/on #2d1515]" in result
+
+    def test_added_plus_plus_line_is_shown_and_counted(self):
+        old = ["i = 0"]
+        new = ["i = 0", "++i;"]
+        diff = "\n".join(difflib.unified_diff(old, new, "a.c", "a.c", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "[green]+1[/green]" in result
+        assert "[on #152d15]++i;[/on #152d15]" in result
+
+    def test_file_headers_are_still_hidden(self):
+        old = ["a"]
+        new = ["b"]
+        diff = "\n".join(difflib.unified_diff(old, new, "x.py", "x.py", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "x.py" not in result
+        assert "[green]+1[/green] [red]-1[/red]" in result
+
 
 # ---------------------------------------------------------------------------
 # build_edit_diff
