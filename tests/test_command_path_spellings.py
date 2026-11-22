@@ -773,6 +773,7 @@ def test_windows_spaced_root_normalizes_case_and_separators(
         "cd sub && D=/tmp/build; rm -rf $D",
         'cd sub && D="/tmp/build"; mkdir -p $D',
         "cd sub && export D=/tmp/build; ls $D",
+        "cd sub && declare -x D=/tmp/build; ls $D",
     ],
 )
 def test_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
@@ -793,6 +794,9 @@ def test_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
         "cd sub && mkdir -p /tmp/build",
         "D=/tmp/build; cd sub",
         "cd sub && D=build; mkdir -p $D",
+        "cd sub && make OUT=/tmp/build",
+        "OUT=build; cd sub && make OUT=/tmp/build",
+        "cd sub && OUT=/tmp/build make",
     ],
 )
 def test_spaced_workspace_paths_outside_assignments_after_cd_still_map(
@@ -803,6 +807,28 @@ def test_spaced_workspace_paths_outside_assignments_after_cd_still_map(
     workspace = tmp_path / "My Drive"
     (workspace / "sub").mkdir(parents=True)
     assert prepare_sandbox_command(command, str(workspace))[1] is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && D=/skills/demo; mkdir -p $D",
+        'cd sub && D="/skills/demo"; mkdir -p $D',
+    ],
+)
+def test_skills_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
+    """The skill's host path has the workspace's space in it too."""
+    from EvoScientist.backends import prepare_sandbox_command
+
+    workspace = tmp_path / "My Drive"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "skills" / "demo").mkdir(parents=True)
+    converted, error = prepare_sandbox_command(
+        command, str(workspace), skills_dir=workspace / "skills"
+    )
+    assert error is not None
+    assert "after a cd" in error
+    assert converted == command
 
 
 def test_assignment_after_cd_in_plain_workspace_maps_to_root(tmp_path):

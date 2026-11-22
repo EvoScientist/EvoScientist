@@ -2462,6 +2462,56 @@ class _SplitAssignment(Exception):
     that needs quoting, so an unquoted ``$VAR`` would split there."""
 
 
+def _sets_shell_variable(
+    command: str, words: shell_syntax.ShellWords, start: int, end: int
+) -> bool:
+    """Whether the ``NAME=value`` word at *start*..*end* sets a variable of
+    the shell, as :func:`shell_syntax.assignments` reads it: alone, not
+    before a command, or as an argument of ``export`` / ``local`` /
+    ``declare``. Not an argument such as ``make OUT=x``."""
+    tokens = words.tokens
+    index = next(
+        (at for at, token in enumerate(tokens) if int(token["start"]) == start), None
+    )
+    if index is None:
+        return False
+    if words.name_flags[index]:
+        following = next(
+            (at for at, token in enumerate(tokens) if int(token["start"]) >= end),
+            None,
+        )
+        return not (
+            following is not None
+            and words.name_flags[following]
+            and tokens[following]["type"] == "word"
+            and shell_syntax.command_newline(
+                command, end, int(tokens[following]["start"])
+            )
+            is None
+        )
+    name = next(
+        (
+            str(token["value"])
+            for token, is_name in zip(
+                reversed(tokens[:index]),
+                reversed(words.name_flags[:index]),
+                strict=True,
+            )
+            if is_name and not shell_syntax.ASSIGNMENT_RE.match(str(token["raw"]))
+        ),
+        None,
+    )
+    return name in shell_syntax.DECLARATION_NAMES
+
+
+def _adds_whitespace(path: str, rewritten: str | None) -> bool:
+    """Whether *rewritten* names *path* through a folder with whitespace,
+    as a mapped ``/skills`` path does in a spaced workspace."""
+    return rewritten is not None and bool(
+        re.search(r"\s", rewritten) and not re.search(r"\s", path)
+    )
+
+
 def _convert_command_paths(
     command: str,
     workspace_name: str | None = None,
@@ -2492,7 +2542,6 @@ def _convert_command_paths(
     )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
-    assigned_names: set[str] | None = None
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
         if start in words.delimiters or start in words.arithmetic:
             continue
@@ -2501,11 +2550,13 @@ def _convert_command_paths(
         is_assignment = bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
         value_absolute = absolute or (anchor_values and is_assignment)
         # The quoted root would split where the variable is read unquoted.
-        split_value = False
-        if absolute and is_assignment and workspace_root and not anchor_values:
-            if assigned_names is None:
-                assigned_names = {name for name, _ in shell_syntax.assignments(command)}
-            split_value = re.split(r"[\[+=]", raw.lstrip("'\""))[0] in assigned_names
+        split_value = (
+            absolute
+            and is_assignment
+            and bool(workspace_root)
+            and not anchor_values
+            and _sets_shell_variable(command, words, start, end)
+        )
         script = raw[1:-1]
         if (
             start in scripts
@@ -2563,8 +2614,17 @@ def _convert_command_paths(
                     anchor,
                     workspace_root,
                 )
-                if split_value and result != _rewrite_quoted_path(
-                    path, workspace_name, skills_dir, media_dirs, None, workspace_root
+                if split_value and (
+                    _adds_whitespace(path, result)
+                    or result
+                    != _rewrite_quoted_path(
+                        path,
+                        workspace_name,
+                        skills_dir,
+                        media_dirs,
+                        None,
+                        workspace_root,
+                    )
                 ):
                     raise _SplitAssignment(raw)
                 if (
@@ -2599,7 +2659,8 @@ def _convert_command_paths(
                     attached=attached is not None,
                 )
                 if split_value and (
-                    rewritten
+                    _adds_whitespace(head.group(0), rewritten)
+                    or rewritten
                     != _rewrite_path_word(
                         head.group(0),
                         **rules,
@@ -2628,7 +2689,8 @@ def _convert_command_paths(
                 path, **rules, absolute=value_absolute, attached=True
             )
             if split_value and (
-                rewritten
+                _adds_whitespace(path, rewritten)
+                or rewritten
                 != _rewrite_path_word(path, **rules, absolute=False, attached=True)[0]
             ):
                 raise _SplitAssignment(raw)
