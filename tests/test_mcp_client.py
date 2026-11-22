@@ -521,13 +521,18 @@ class TestBuildConnections:
 
     @pytest.mark.parametrize("path_key", ["PATH", "Path"])
     def test_node_server_keeps_its_own_path_from_mcp_yaml(
-        self, monkeypatch, node_rules, tmp_path, path_key
+        self, monkeypatch, tmp_path, path_key
     ):
         """A configured PATH in mcp.yaml env is preserved as written."""
-        monkeypatch.setenv(
-            "PATH", os.pathsep.join([".", str(tmp_path / "usr" / "bin")])
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
         )
-        own = os.pathsep.join(["", ".", "./node_modules/.bin", str(tmp_path / "own")])
+        host_bin = _fake_npx(tmp_path / "usr" / "bin")
+        own_bin = _fake_npx(tmp_path / "own")
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(host_bin)]))
+        own = os.pathsep.join(["", ".", "./node_modules/.bin", str(own_bin)])
         config = {
             "fs": {
                 "transport": "stdio",
@@ -536,15 +541,20 @@ class TestBuildConnections:
                 "env": {path_key: own},
             }
         }
-        env = _build_connections(config)["fs"]["env"]
+        conns = _build_connections(config)
+        env = conns["fs"]["env"]
         assert env[path_key] == own
         if os.name == "nt":
             assert [k for k in env if k.upper() == "PATH"] == [path_key]
+            assert Path(conns["fs"]["command"]).parent == own_bin
         elif path_key == "Path":
             # On POSIX, Path does not mask PATH, so PATH is cleaned from host
-            assert env["PATH"] == str(tmp_path / "usr" / "bin")
+            # and command lookup ignores Path in favor of host PATH.
+            assert env["PATH"] == str(host_bin)
+            assert Path(conns["fs"]["command"]).parent == host_bin
         else:
             assert env["PATH"] == own
+            assert Path(conns["fs"]["command"]).parent == own_bin
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry searches cwd")
     def test_env_node_shebang_with_cleaned_path_skips_fake_node_in_cwd(

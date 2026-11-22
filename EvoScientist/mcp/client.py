@@ -895,6 +895,11 @@ def load_mcp_config() -> dict[str, Any]:
     return _interpolate_value(data)
 
 
+def _is_path_key(key: str) -> bool:
+    """True when ``key`` names the PATH variable on this OS."""
+    return key.upper() == "PATH" if os.name == "nt" else key == "PATH"
+
+
 def _server_path(server: dict[str, Any]) -> str | None:
     """The ``PATH`` a stdio server sets in its ``mcp.yaml`` env, or None. On
     POSIX the server's bare command is searched there when it starts."""
@@ -902,10 +907,7 @@ def _server_path(server: dict[str, Any]) -> str | None:
     if not isinstance(env, dict):
         return None
     for key, value in env.items():
-        if not isinstance(key, str) or not isinstance(value, str):
-            continue
-        match = key.upper() == "PATH" if os.name == "nt" else key == "PATH"
-        if match:
+        if isinstance(key, str) and isinstance(value, str) and _is_path_key(key):
             return value
     return None
 
@@ -1044,10 +1046,7 @@ def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
 
     env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
     extra = npm_network_env(os.environ)
-    has_path = any(
-        (k.upper() == "PATH" if os.name == "nt" else k == "PATH") for k in env
-    )
-    if not has_path:
+    if not any(_is_path_key(k) for k in env):
         extra["PATH"] = clean_path()
     # An unresolved command (no npx found) has no folder to read npm from; a
     # bare name would make the lookup try the current directory. npm reads the

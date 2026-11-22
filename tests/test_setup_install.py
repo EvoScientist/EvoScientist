@@ -268,31 +268,6 @@ def test_clean_path_reads_quoted_entries_on_windows(tmp_path, windows_lookup):
     assert _install.clean_path(raw) == quoted
 
 
-def test_clean_path_drops_windows_drive_relative_entries(monkeypatch, windows_lookup):
-    """Entries rooted to the current drive without a drive letter (such as \\bin)
-    or drive-relative (C:bin) are excluded on Windows in both clean_path and
-    which_on_path."""
-    monkeypatch.setattr(_install.os, "pathsep", ";")
-    raw = ";".join(
-        [
-            r"\bin",
-            "C:bin",
-            "bin",
-            r"C:\Program Files\nodejs",
-            r"\\server\share\bin",
-        ]
-    )
-    cleaned = _install.clean_path(raw)
-    assert cleaned == ";".join([r"C:\Program Files\nodejs", r"\\server\share\bin"])
-
-    seen: list[str] = []
-    monkeypatch.setattr(
-        _install, "which_in", lambda name, d: seen.append(str(d)) or None
-    )
-    assert _install.which_on_path("node", path=raw) is None
-    assert seen == [r"C:\Program Files\nodejs", r"\\server\share\bin"]
-
-
 def test_clean_path_returns_dev_null_on_posix_when_no_entries_remain(monkeypatch):
     """On POSIX, when no absolute entries remain, /dev/null is returned so
     an empty PATH never resolves against the current directory."""

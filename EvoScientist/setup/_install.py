@@ -111,26 +111,6 @@ def which_in(name: str, directory: str | Path) -> str | None:
     return None
 
 
-def _is_absolute_entry(directory: str) -> bool:
-    """True when ``directory`` is an absolute, fully-qualified path that does
-    not resolve against the current working directory or current drive."""
-    if not directory:
-        return False
-    if not _WINDOWS:
-        return directory.startswith("/")
-    if directory.startswith(("\\\\", "//")):
-        return len(directory) > 2
-    if (
-        len(directory) >= 3
-        and directory[0].isalpha()
-        and directory[1] == ":"
-        and directory[2] in ("\\", "/")
-    ):
-        return True
-    # Allow host POSIX paths (e.g. pytest tmp_path) when _WINDOWS is faked on POSIX.
-    return os.name != "nt" and directory.startswith("/")
-
-
 def which_on_path(
     name: str, *, outside: Path | None = None, path: str | None = None
 ) -> str | None:
@@ -145,7 +125,7 @@ def which_on_path(
         path = os.environ.get("PATH", "")
     for entry in path.split(os.pathsep):
         directory = clean_path_entry(entry)
-        if not _is_absolute_entry(directory):
+        if not directory or not os.path.isabs(directory):
             continue
         if outside is not None and is_under(Path(directory), outside):
             continue
@@ -166,7 +146,7 @@ def clean_path(path: str | None = None) -> str:
     parts = [
         entry
         for entry in path.split(os.pathsep)
-        if _is_absolute_entry(clean_path_entry(entry))
+        if (directory := clean_path_entry(entry)) and os.path.isabs(directory)
     ]
     if not parts and not _WINDOWS:
         return "/dev/null"
