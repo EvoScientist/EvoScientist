@@ -764,3 +764,57 @@ def test_windows_spaced_root_normalizes_case_and_separators(
     root = r"C:\Users\me\my project"
     command = f'cat {prefix}"c:/users/ME/my project"/tmp/x'
     assert backends.validate_command(command, (root,), workspace_root=root) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && D=/tmp/build; mkdir -p $D",
+        "cd sub && D=/tmp/build; rm -rf $D",
+        'cd sub && D="/tmp/build"; mkdir -p $D',
+        "cd sub && export D=/tmp/build; ls $D",
+    ],
+)
+def test_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
+    """`'<root>'/tmp/build` would split at the space where `$D` is unquoted."""
+    from EvoScientist.backends import prepare_sandbox_command
+
+    workspace = tmp_path / "My Drive"
+    (workspace / "sub").mkdir(parents=True)
+    converted, error = prepare_sandbox_command(command, str(workspace))
+    assert error is not None
+    assert "after a cd" in error
+    assert "My Drive" not in converted
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd sub && mkdir -p /tmp/build",
+        "D=/tmp/build; cd sub",
+        "cd sub && D=build; mkdir -p $D",
+    ],
+)
+def test_spaced_workspace_paths_outside_assignments_after_cd_still_map(
+    tmp_path, command
+):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    workspace = tmp_path / "My Drive"
+    (workspace / "sub").mkdir(parents=True)
+    assert prepare_sandbox_command(command, str(workspace))[1] is None
+
+
+def test_assignment_after_cd_in_plain_workspace_maps_to_root(tmp_path):
+    from EvoScientist.backends import _platform_quote, prepare_sandbox_command
+
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    root = _platform_quote(str(workspace))
+    if root[0] in "'\"":
+        pytest.skip("a temp folder that needs quoting is refused")
+    command, error = prepare_sandbox_command(
+        "cd sub && D=/tmp/build; mkdir -p $D", str(workspace)
+    )
+    assert error is None
+    assert command == f"cd sub && D={root}/tmp/build; mkdir -p $D"

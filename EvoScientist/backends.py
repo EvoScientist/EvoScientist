@@ -2457,6 +2457,11 @@ def _rewrite_path_word(
     return in_workspace("" if path == "/" else path), False
 
 
+class _SplitAssignment(Exception):
+    """An assignment after a ``cd`` would name the workspace through a root
+    that needs quoting, so an unquoted ``$VAR`` would split there."""
+
+
 def _convert_command_paths(
     command: str,
     workspace_name: str | None = None,
@@ -2487,14 +2492,20 @@ def _convert_command_paths(
     )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
+    assigned_names: set[str] | None = None
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
         if start in words.delimiters or start in words.arithmetic:
             continue
         raw = command[start:end]
         absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
-        value_absolute = absolute or (
-            anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
-        )
+        is_assignment = bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
+        value_absolute = absolute or (anchor_values and is_assignment)
+        # The quoted root would split where the variable is read unquoted.
+        split_value = False
+        if absolute and is_assignment and workspace_root and not anchor_values:
+            if assigned_names is None:
+                assigned_names = {name for name, _ in shell_syntax.assignments(command)}
+            split_value = re.split(r"[\[+=]", raw.lstrip("'\""))[0] in assigned_names
         script = raw[1:-1]
         if (
             start in scripts
@@ -2525,7 +2536,10 @@ def _convert_command_paths(
             anchor = workspace_root if value_absolute else None
 
             def replace_quoted(
-                match: re.Match[str], anchor: str | None = anchor
+                match: re.Match[str],
+                anchor: str | None = anchor,
+                split_value: bool = split_value,
+                raw: str = raw,
             ) -> str:
                 nonlocal uses_tmp
                 # Expansion can introduce traversal not visible to validation.
@@ -2549,6 +2563,10 @@ def _convert_command_paths(
                     anchor,
                     workspace_root,
                 )
+                if split_value and result != _rewrite_quoted_path(
+                    path, workspace_name, skills_dir, media_dirs, None, workspace_root
+                ):
+                    raise _SplitAssignment(raw)
                 if (
                     result is not None
                     and (path == "/tmp" or path.startswith("/tmp/"))
@@ -2580,6 +2598,16 @@ def _convert_command_paths(
                     absolute=value_absolute,
                     attached=attached is not None,
                 )
+                if split_value and (
+                    rewritten
+                    != _rewrite_path_word(
+                        head.group(0),
+                        **rules,
+                        absolute=False,
+                        attached=attached is not None,
+                    )[0]
+                ):
+                    raise _SplitAssignment(raw)
                 if rewritten is not None:
                     if head.group(0).endswith("/") and not rewritten.endswith("/"):
                         rewritten += "/"
@@ -2599,6 +2627,11 @@ def _convert_command_paths(
             rewritten, tmp = _rewrite_path_word(
                 path, **rules, absolute=value_absolute, attached=True
             )
+            if split_value and (
+                rewritten
+                != _rewrite_path_word(path, **rules, absolute=False, attached=True)[0]
+            ):
+                raise _SplitAssignment(raw)
             uses_tmp = uses_tmp or tmp
             replacement = prefix + rewritten if rewritten is not None else None
         if replacement is not None and replacement != raw:
@@ -3031,13 +3064,21 @@ def prepare_sandbox_command(
     uses_tmp = False
     if virtual_mode:
         # After SSH masking, so remote paths are never rewritten.
-        command, uses_tmp = _convert_command_paths(
-            command,
-            workspace_name=Path(cwd_str).name,
-            skills_dir=skills_dir,
-            media_dirs=media_dirs,
-            workspace_root=cwd_str,
-        )
+        try:
+            command, uses_tmp = _convert_command_paths(
+                command,
+                workspace_name=Path(cwd_str).name,
+                skills_dir=skills_dir,
+                media_dirs=media_dirs,
+                workspace_root=cwd_str,
+            )
+        except _SplitAssignment as split:
+            return original_command, (
+                f"Command blocked: after a cd, '{split}' would set a variable to "
+                "a workspace path with spaces or quotes, which splits where the "
+                "variable is used unquoted. Write the path where it is used, or "
+                "run the command from the workspace root without the cd."
+            )
     # The rewrite injects absolute paths under these, and host paths under the
     # workspace are real paths inside the sandbox.
     allow_prefixes = tuple(
