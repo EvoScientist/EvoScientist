@@ -1219,10 +1219,15 @@ def _extract_all_paths(
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
-            # A quoted span that starts a path of its own is not exempt
-            # unless it is allowed too (X=<root>/a:"/tmp/b").
+            # A quoted span that starts a list entry of its own is not exempt
+            # unless it is allowed too (X=<root>/a:"/tmp/b"). A span that
+            # continues the path ('<root>'"/x") stays part of it.
             for span in _QUOTED_SPAN_RE.finditer(raw):
-                if span[2].startswith("/") and not _under_any(span[2], allow_prefixes):
+                if (
+                    raw[span.start() - 1 : span.start()] in (":", ",")
+                    and span[2].startswith("/")
+                    and not _under_any(span[2], allow_prefixes)
+                ):
                     foreign_spans.add(int(token["start"]) + span.start(2))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
