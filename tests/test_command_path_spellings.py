@@ -463,6 +463,31 @@ def test_assigned_value_spellings_name_the_workspace(tmp_path, command, expected
     assert converted == expected.format(root=_assignment_root(tmp_path))
 
 
+@pytest.mark.parametrize("cd", ["", "cd sub && "])
+def test_assigned_value_mixing_unquoted_and_quoted_paths_maps_both(tmp_path, cd):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = _assignment_root(tmp_path)
+    assert prepare_sandbox_command(
+        f'{cd}X=/tmp/a,"/tmp/b" python s.py', str(tmp_path)
+    ) == (f"{cd}X={root}/tmp/a,{root}/tmp/b python s.py", None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
+@pytest.mark.parametrize("folder", ["ws", "my ws"])
+@pytest.mark.parametrize("cd", ["", "cd sub && "])
+def test_quoted_host_path_after_a_workspace_value_is_refused(tmp_path, folder, cd):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / folder
+    root.mkdir()
+    _, error = prepare_sandbox_command(
+        f'{cd}DIRS=/tmp/a:"/tmp/b" python s.py', str(root)
+    )
+    assert error is not None
+    assert "'/tmp/b'" in error
+
+
 def test_assigned_tmp_stays_relative_when_the_root_needs_quoting(tmp_path):
     # An unquoted $OUT would split at the space in the root.
     root = tmp_path / "my ws"

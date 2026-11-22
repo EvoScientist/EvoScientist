@@ -1192,6 +1192,7 @@ def _extract_all_paths(
     )
     path_assignments: list[tuple[int, int]] = []
     allowed_path_words: list[tuple[int, int]] = []
+    foreign_spans: set[int] = set()
     tokens = shell_syntax.parse(command).tokens
     scripts = shell_syntax.shell_script_words(tokens)
     for token in tokens:
@@ -1218,6 +1219,11 @@ def _extract_all_paths(
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
+            # A quoted span that starts a path of its own is not exempt
+            # unless it is allowed too (X=<root>/a:"/tmp/b").
+            for span in _QUOTED_SPAN_RE.finditer(raw):
+                if span[2].startswith("/") and not _under_any(span[2], allow_prefixes):
+                    foreign_spans.add(int(token["start"]) + span.start(2))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))
@@ -1230,7 +1236,9 @@ def _extract_all_paths(
 
         shell_syntax.rewrite_substitutions(str(token["raw"]), collect_substitution)
     for m in path_re.finditer(command):
-        if any(start <= m.start(1) < end for start, end in allowed_path_words):
+        if m.start(1) not in foreign_spans and any(
+            start <= m.start(1) < end for start, end in allowed_path_words
+        ):
             continue
         if any(start <= m.start() < end for start, end in path_assignments):
             continue
@@ -2572,7 +2580,16 @@ def _convert_command_paths(
             # path head, e.g. --output=/tmp/"out file".
             attached = _attached_path_word(replacement)
             prefix, path_word = attached or ("", replacement)
-            head = re.match(r"/[^'\"]*", path_word)
+            # The head ends where the first quote was written, as a span can
+            # map to a path without quotes (X=/a,"/b" -> X=/a,<root>/b).
+            written = re.match(r"[^'\"]*", raw).group(0)
+            head = re.compile(r"/[^'\"]*").match(
+                path_word,
+                0,
+                len(written) - len(prefix)
+                if replacement.startswith(written)
+                else len(path_word),
+            )
             if head is not None:
                 rewritten, tmp = _rewrite_path_word(
                     head.group(0),
