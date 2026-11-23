@@ -48,8 +48,23 @@ class TestEscapeMarkup:
 
     def test_trailing_backslash_keeps_closing_tag(self):
         assert _render(
-            f"[on #152d15]{_escape_markup('end' + chr(92))}[/on #152d15]"
+            f"[on #152d15]{_escape_markup('end' + chr(92), before_tag=True)}[/on #152d15]"
         ) == "end" + chr(92)
+
+    def test_trailing_backslash_runs_before_closing_tag(self):
+        for count in (1, 2, 3):
+            text = "end" + chr(92) * count
+            markup = _escape_markup(text, before_tag=True)
+            assert _render(f"[on #152d15]{markup}[/on #152d15]") == text
+
+    def test_trailing_backslash_without_closing_tag(self):
+        for count in (1, 2, 3):
+            text = "end" + chr(92) * count
+            assert _render(f"{_escape_markup(text)} ===") == text + " ==="
+
+    def test_backslash_before_brackets(self):
+        for text in (chr(92) + "[b]", "a" + chr(92) + "[1]", chr(92) * 2 + "[x]y"):
+            assert _render(_escape_markup(text)) == text
 
 
 # ---------------------------------------------------------------------------

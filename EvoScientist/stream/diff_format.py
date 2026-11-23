@@ -42,15 +42,27 @@ BOX_DOUBLE_HORIZ = "\u2550" if _UNICODE else "="  # ═ or =
 # ---------------------------------------------------------------------------
 
 
-def _escape_markup(text: str) -> str:
+# Backslashes before a "[" that Rich would not read as the start of a tag.
+_BACKSLASH_BEFORE_PLAIN_BRACKET = re.compile(r"(\\+)(?=\[(?![a-z#/@][^[]*?\]))")
+
+
+def _escape_markup(text: str, before_tag: bool = False) -> str:
     """Escape Rich markup characters in text.
 
     Prevents ``[...]`` from being read as a Rich tag. Rich only needs the
     opening ``[`` escaped, so a backslash before ``]`` would show up in the
-    output, and a trailing backslash would escape the closing tag that
-    follows it.
+    output.
+
+    Rich drops one backslash before a ``[`` that does not start a tag, so
+    one is added there. It also renders a run of N backslashes right before
+    a tag as N // 2 backslashes, so when ``before_tag`` is true (the text is
+    followed by a closing tag) the trailing run is doubled. Otherwise it is
+    kept as is.
     """
-    return escape(text)
+    body = text.rstrip("\\")
+    trailing = len(text) - len(body)
+    body = _BACKSLASH_BEFORE_PLAIN_BRACKET.sub(r"\1\\", escape(body))
+    return body + "\\" * (trailing * 2 if before_tag else trailing)
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +149,8 @@ def format_diff_rich(
             continue
 
         content = line[1:] if line else ""
-        escaped = _escape_markup(content)
-
         if line.startswith("-"):
+            escaped = _escape_markup(content, before_tag=True)
             gutter = f"[red bold]{GUTTER_BAR}[/red bold]"
             ln = f"[dim]{old_num:>{width}}[/dim]"
             body = f"[on #2d1515]{escaped}[/on #2d1515]"
@@ -147,6 +158,7 @@ def format_diff_rich(
             old_num += 1
             line_count += 1
         elif line.startswith("+"):
+            escaped = _escape_markup(content, before_tag=True)
             gutter = f"[green bold]{GUTTER_BAR}[/green bold]"
             ln = f"[dim]{new_num:>{width}}[/dim]"
             body = f"[on #152d15]{escaped}[/on #152d15]"
@@ -154,6 +166,7 @@ def format_diff_rich(
             new_num += 1
             line_count += 1
         elif line.startswith(" "):
+            escaped = _escape_markup(content)
             formatted.append(f"[dim]{BOX_VERTICAL}{old_num:>{width}}[/dim]  {escaped}")
             old_num += 1
             new_num += 1
