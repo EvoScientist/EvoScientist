@@ -601,6 +601,8 @@ class FakeLangGraphRunModule:
         self.runs: list[dict[str, Any]] = []
         # Set to an error envelope to refuse the next ``input.respond``.
         self.respond_reply: dict[str, Any] | None = None
+        # The status ``runs.get`` and ``runs.list`` report for a new run.
+        self.status = "success"
         self.started = asyncio.Event()
 
     @property
@@ -612,7 +614,7 @@ class FakeLangGraphRunModule:
         self.runs.append(
             {
                 "run_id": f"run-{len(self.runs) + 1}",
-                "status": "success",
+                "status": self.status,
                 "metadata": metadata or {},
             }
         )
@@ -677,6 +679,8 @@ class FakeLangGraphThreadStream:
         interrupted: bool = False,
         replay: Iterable[dict[str, Any]] | None = None,
         stay_open: bool = False,
+        live_limit: int | None = None,
+        read_back_limit: int | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.queued_events = list(events or [])
@@ -691,6 +695,13 @@ class FakeLangGraphThreadStream:
         self.stay_open = stay_open
         self.event_streams_opened = 0
         self.lost_live_events = False
+        # ``live_limit``: the connection that reads the run live delivers only
+        # this many of its envelopes and then stays silent. Setting it (or
+        # ``read_back_limit``) also makes a connection opened after the run
+        # started replay the run, as the server does for a finished run:
+        # all of it, or its first ``read_back_limit`` envelopes.
+        self.live_limit = live_limit
+        self.read_back_limit = read_back_limit
 
     async def __aenter__(self) -> FakeLangGraphThreadStream:
         self.entered = True
@@ -712,7 +723,24 @@ class FakeLangGraphThreadStream:
         envelopes (and, with ``stay_open``, the stream never ends).
         """
         self.event_streams_opened += 1
+        if self.live_limit is not None or self.read_back_limit is not None:
+            return self._lossy_events(self.run.started.is_set())
         return self._thread_events()
+
+    async def _lossy_events(self, run_started: bool) -> AsyncIterator[dict[str, Any]]:
+        """A connection that loses the run live, or replays it once it has started."""
+        for event in self.replay:
+            yield event
+        if run_started:
+            # A finished run is part of what a new connection replays.
+            for event in self.queued_events[: self.read_back_limit]:
+                yield event
+        else:
+            await self.run.started.wait()
+            for event in self.queued_events[: self.live_limit]:
+                yield event
+            self.lost_live_events = True
+        await asyncio.Event().wait()
 
     async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
         for event in self.replay:
@@ -918,6 +946,17 @@ class _FakeLangGraphRunsClient:
     def __init__(self, threads: FakeLangGraphThreadsClient) -> None:
         self.threads = threads
         self.cancelled: list[tuple[str, list[str]]] = []
+        self.gets: list[tuple[str, str]] = []
+
+    async def get(self, thread_id: str, run_id: str) -> dict[str, Any]:
+        from langgraph_sdk.errors import NotFoundError
+
+        self.gets.append((thread_id, run_id))
+        stream = self.threads.streams.get(thread_id)
+        for run in stream.run.runs if stream is not None else []:
+            if run["run_id"] == run_id:
+                return run
+        raise NotFoundError("not found", response=_not_found_response(), body=None)
 
     async def cancel_many(self, *, thread_id: str, run_ids: list[str]) -> None:
         self.cancelled.append((thread_id, list(run_ids)))
