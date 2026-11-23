@@ -64,6 +64,9 @@ _READ_BACK_FIRST_EVENT_SECONDS = 5.0
 _QUIET_POLL_SECONDS = 5.0
 # How long a run that has finished gets to deliver its last live envelopes.
 _FINISHED_GRACE_SECONDS = 2.0
+# Status requests in a row that may fail after the turn's event stream ended,
+# before the turn ends with the stream's error.
+_CLOSED_STATUS_ATTEMPTS = 3
 _FINISHED_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _ROOT_END_PHASES = frozenset({"completed", "failed", "interrupted"})
 _LOST_LIVE_EVENTS_ERROR = "Lost the run's live events"
@@ -1788,18 +1791,40 @@ class LangGraphServerGateway:
                 loop = asyncio.get_running_loop()
                 finished_status: str | None = None
                 status_failures = 0
+                # A stream that ends or fails before the run's end does not
+                # end the run (#711): wait for it by its status instead.
+                stream_closed = False
+                stream_error: Exception | None = None
+                closed_status_failures = 0
                 quiet_deadline = loop.time() + _QUIET_POLL_SECONDS
                 while end_event is None:
-                    event = await events.next_within(
-                        max(0.0, quiet_deadline - loop.time())
-                    )
+                    wait = max(0.0, quiet_deadline - loop.time())
+                    if stream_closed:
+                        await asyncio.sleep(wait)
+                        event = _QUIET
+                    else:
+                        try:
+                            event = await events.next_within(wait)
+                        except Exception as exc:
+                            logger.warning(
+                                "Reading the event stream of run %s on thread "
+                                "%s failed",
+                                run_id,
+                                request.thread_id,
+                                exc_info=True,
+                            )
+                            stream_error = exc
+                            event = None
                     if event is None:
-                        if finished_status is not None:
-                            # The run has finished: read it back.
-                            break
-                        raise RuntimeError(
-                            "Thread event stream ended before the run finished"
+                        logger.warning(
+                            "The event stream of run %s on thread %s ended "
+                            "before the run did; waiting for the run to finish",
+                            run_id,
+                            request.thread_id,
                         )
+                        stream_closed = True
+                        quiet_deadline = loop.time()
+                        continue
                     if event is _QUIET:
                         if finished_status is not None:
                             break
@@ -1825,7 +1850,24 @@ class LangGraphServerGateway:
                                 exc_info=status_failures == 1,
                             )
                             finished_status = None
+                            if stream_closed:
+                                closed_status_failures += 1
+                                if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
+                                    # The run cannot be followed any more:
+                                    # end the turn with the stream's own
+                                    # error, as before #711.
+                                    if stream_error is not None:
+                                        raise stream_error from None
+                                    raise RuntimeError(
+                                        "Thread event stream ended before the "
+                                        "run finished"
+                                    ) from None
+                        else:
+                            closed_status_failures = 0
                         run_ended = finished_status is not None
+                        if run_ended and stream_closed:
+                            # No live envelope can come any more.
+                            break
                         quiet_deadline = loop.time() + (
                             _FINISHED_GRACE_SECONDS
                             if run_ended
