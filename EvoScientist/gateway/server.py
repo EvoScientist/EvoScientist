@@ -1782,6 +1782,7 @@ class LangGraphServerGateway:
                         yield turn_event
                     if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
                         end_event = event_map
+                recovered: list[GraphEvent] = []
                 if end_event is None:
                     # The run finished and its live envelopes stopped coming:
                     # read it back from a new connection, which replays it.
@@ -1792,8 +1793,9 @@ class LangGraphServerGateway:
                         request.thread_id,
                         finished_status,
                     )
-                    self._notify_recovered_turn()
-                    # The new connection replays earlier runs first.
+                    # The new connection replays earlier runs first. Its
+                    # events are held until the turn knows it can end with
+                    # a result, so the notice is never followed by a loss.
                     accepting_run = False
                     async with aclosing(
                         self._finished_run_envelopes(request)
@@ -1803,11 +1805,14 @@ class LangGraphServerGateway:
                             if fed is None:
                                 continue
                             turn_events, event_map = fed
-                            for turn_event in turn_events:
-                                yield turn_event
+                            recovered.extend(turn_events)
                             if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
                                 end_event = event_map
                                 break
+                    if end_event is not None:
+                        self._notify_recovered_turn()
+                        for turn_event in recovered:
+                            yield turn_event
                 if end_event is None:
                     # The read-back did not reach the run's end: thread state
                     # still has the reply, or the prompts of a pause.
@@ -1843,7 +1848,8 @@ class LangGraphServerGateway:
                         )
                     if answer_events is None and not state_events:
                         raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
-                    for turn_event in state_events:
+                    self._notify_recovered_turn()
+                    for turn_event in [*recovered, *state_events]:
                         emitted_interrupt = emitted_interrupt or _is_interrupt_event(
                             turn_event
                         )

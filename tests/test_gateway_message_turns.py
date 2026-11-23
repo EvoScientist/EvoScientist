@@ -1543,10 +1543,14 @@ async def test_turn_raises_when_read_back_and_state_both_fail(
             ):
                 events.append(event)
 
+    gateway.events = _Notices()
+
     with pytest.raises(RuntimeError, match=f"Lost the run's live events.*{message}"):
         await collect()
 
     assert events[-1]["type"] == "error"
+    # No "the result is shown now" for a turn that ends without one.
+    assert gateway.events.lines == []
     # The run has finished: the cleanup has nothing to cancel.
     assert gateway.thread_store.client.runs.cancelled == []
 
