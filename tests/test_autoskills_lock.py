@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 import threading
@@ -354,16 +353,19 @@ def test_approval_refuses_a_workspace_move_between_lookup_and_lock(
     assert not (skills_dir / name).exists()
 
 
-def test_approvals_cannot_interleave_installs_of_two_draft_versions(
-    tmp_path, monkeypatch
-):
+def test_a_resubmit_waits_for_an_approval_that_is_installing(tmp_path, monkeypatch):
+    """The draft's lock is held until the approval has committed.
+
+    A resubmit that arrives while the skill is being installed used to land
+    before the approval's manifest write, which then overwrote it. It now
+    waits, and starts from the approval the first writer committed.
+    """
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     name = "focused-validation"
     installed = skills_dir / name
     installed.mkdir(parents=True)
     base = f"---\nname: {name}\ndescription: Use when testing updates.\n---\n\nBase.\n"
-    skill_md = installed / "SKILL.md"
-    skill_md.write_text(base, encoding="utf-8")
+    (installed / "SKILL.md").write_text(base, encoding="utf-8")
 
     def submit(body, cluster):
         _write_draft(memory_dir, name, body)
@@ -379,85 +381,105 @@ def test_approvals_cannot_interleave_installs_of_two_draft_versions(
             target_skill_name=name,
         )
         assert result["submitted"] is True, result
+        return result
 
     submit("First version.", "cluster-first")
     monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
-    monkeypatch.setattr(module, "_DRAFT_LOCK_TIMEOUT", 0)
+    entered = threading.Event()
+    release = threading.Event()
+    second_attempted = threading.Event()
+    approved = threading.Event()
+    resubmitted = threading.Event()
     real_copy = module._copy_proposed_skill
-    competing = None
-    interleaved = False
+    real_lock = module._draft_lock
 
-    def approve():
-        return approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
-
-    def copy_with_competing_approval(source, destination):
-        nonlocal competing, interleaved
-        if destination == installed and not interleaved:
-            interleaved = True
-            # Force the newer approval into the gap before the old snapshot writes.
-            submit("Second version.", "cluster-second")
-            competing = approve()
+    def pause_the_install(source, destination):
+        if threading.current_thread().name == "approver":
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("the test did not release the approval")
         return real_copy(source, destination)
 
-    monkeypatch.setattr(module, "_copy_proposed_skill", copy_with_competing_approval)
-    first = approve()
-    assert first["approved"] is False, first
-    assert "changed while it was being approved" in first["error"]
-    assert competing is not None
+    def observed_lock(proposal_dir):
+        if threading.current_thread().name == "resubmitter":
+            second_attempted.set()
+        return real_lock(proposal_dir)
 
-    # Without serialization, the second approval commits before the first overwrites it.
-    manifest = _manifest(memory_dir, name)
-    if competing["approved"]:
-        assert (
-            manifest["approved_content_digests"]["SKILL.md"]
-            == hashlib.sha256(skill_md.read_bytes()).hexdigest()
-        )
-    assert competing["approved"] is False, competing
-    assert "waiting for another installer" in competing["error"]
-    assert manifest["status"] == "pending"
-
-    retry = approve()
-    assert retry["approved"] is True, retry
-    assert "Second version." in skill_md.read_text(encoding="utf-8")
-    manifest = _manifest(memory_dir, name)
-    assert manifest["status"] == "approved"
-    assert manifest["cluster_hash"] == "cluster-second"
-    assert (
-        manifest["approved_content_digests"]["SKILL.md"]
-        == hashlib.sha256(skill_md.read_bytes()).hexdigest()
+    monkeypatch.setattr(module, "_copy_proposed_skill", pause_the_install)
+    monkeypatch.setattr(module, "_draft_lock", observed_lock)
+    results = {}
+    approver = threading.Thread(
+        target=_call,
+        args=(
+            results,
+            "approve",
+            approved,
+            lambda: approve_skill_proposal(memory_dir, name, skills_dir=skills_dir),
+        ),
+        name="approver",
     )
+    resubmitter = threading.Thread(
+        target=_call,
+        args=(
+            results,
+            "resubmit",
+            resubmitted,
+            lambda: submit("Second version.", "cluster-second"),
+        ),
+        name="resubmitter",
+    )
+    approver.start()
+    resubmitter_started = False
+    try:
+        assert entered.wait(10)
+        resubmitter.start()
+        resubmitter_started = True
+        assert second_attempted.wait(10)
+        # The approval still holds the lock, so the resubmit cannot have finished.
+        resubmitter.join(0.3)
+        assert resubmitter.is_alive()
+    finally:
+        release.set()
+        approver.join(15)
+        if resubmitter_started:
+            resubmitter.join(15)
+
+    assert not approver.is_alive()
+    assert not resubmitter.is_alive()
+    assert not isinstance(results["approve"], BaseException), results["approve"]
+    assert results["approve"]["approved"] is True, results["approve"]
+    skill_md = installed / "SKILL.md"
+    assert "First version." in skill_md.read_text(encoding="utf-8")
+    assert results["resubmit"]["submitted"] is True, results["resubmit"]
+    # The resubmission came last, so it is what the draft now holds.
+    manifest = _manifest(memory_dir, name)
+    assert manifest["status"] == "pending"
+    assert manifest["cluster_hash"] == "cluster-second"
 
 
-def test_approval_rolls_back_a_created_skill_on_commit_lock_timeout(
-    tmp_path, monkeypatch
-):
+def test_the_skill_index_is_told_once_the_draft_lock_is_released(tmp_path, monkeypatch):
+    """A callback that reads the draft must not wait on the approval's own lock.
+
+    The skill index is told after every approval. Had the approval still held
+    the draft's lock then, a callback that took it would wait out the timeout.
+    """
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     name = "focused-validation"
-    _write_draft(memory_dir, name)
+    folder = _write_draft(memory_dir, name)
     _submit(memory_dir, skills_dir, name, "cluster-original")
-    installed = skills_dir / name
-    real_lock = module._draft_lock
-    timed_out = False
-    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    monkeypatch.setattr(module, "_DRAFT_LOCK_TIMEOUT", 0.01)
+    told = []
 
-    def lock(proposal_dir):
-        nonlocal timed_out
-        draft_lock = real_lock(proposal_dir)
-        if (installed / "SKILL.md").is_file() and not timed_out:
-            timed_out = True
-            raise Timeout(draft_lock.lock_file)
-        return draft_lock
+    def notify():
+        with _draft_lock(folder):
+            told.append(True)
 
-    monkeypatch.setattr(module, "_draft_lock", lock)
+    monkeypatch.setattr(module, "_notify_approved_skill", notify)
+
     result = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
 
-    assert timed_out
-    assert result["approved"] is False
-    assert "Could not finish approval: timed out" in result["error"]
-    assert _manifest(memory_dir, name)["status"] == "pending"
-    assert not installed.exists()
-    retry = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
-    assert retry["approved"] is True, retry
+    assert result["approved"] is True, result
+    assert told == [True]
 
 
 def test_rejection_sticks_to_the_draft_selected_before_locking(tmp_path, monkeypatch):

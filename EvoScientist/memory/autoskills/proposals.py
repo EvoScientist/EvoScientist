@@ -121,16 +121,12 @@ def _draft_lock(proposal_dir: Path) -> FileLock:
     return FileLock(str(lock_path), timeout=_DRAFT_LOCK_TIMEOUT)
 
 
-def _install_lock(destination: Path) -> FileLock:
-    """Serialize approvals across drafts that write the same installed skill."""
-    resolved = destination.resolve()
-    lock_root = resolved.parent / ".autoskills-locks"
-    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    key = os.fsencode(os.path.normcase(str(resolved)))
-    return FileLock(
-        str(lock_root / f"{hashlib.sha256(key).hexdigest()}.lock"),
-        timeout=_DRAFT_LOCK_TIMEOUT,
-    )
+def _snapshots_root(memory_dir: str | Path) -> Path:
+    """Where an approval keeps the copies it makes: of the draft it installs,
+    and of the skill it is about to overwrite."""
+    root = Path(memory_dir).expanduser().resolve() / AUTOSKILL_SNAPSHOTS_DIR
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root
 
 
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
@@ -906,10 +902,16 @@ def _content_digest(source: Path | Mapping[str, bytes]) -> str:
     return digest.hexdigest()
 
 
-def _backup_destination(destination: Path) -> Path:
-    """Copy an existing install before an update can overwrite it."""
+def _backup_destination(memory_dir: str | Path, destination: Path) -> Path:
+    """Copy an existing install before an update can overwrite it.
+
+    The copy lives under the memory folder, not beside the skill: one left
+    behind by a crash or a failed restore must not show up among the skills.
+    """
     backup_parent = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}.backup-", dir=destination.parent)
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.backup-", dir=_snapshots_root(memory_dir)
+        )
     )
     backup = backup_parent / destination.name
     try:
@@ -1712,9 +1714,11 @@ def _snapshot_proposal(
     memory_dir: str | Path, proposal_dir: Path
 ) -> tuple[Path, str, dict[str, str]]:
     """Copy a draft and return its snapshot digest and per-file digests."""
-    snapshot_root = Path(memory_dir).expanduser().resolve() / AUTOSKILL_SNAPSHOTS_DIR
-    snapshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    snapshot = Path(tempfile.mkdtemp(prefix=f"{proposal_dir.name}-", dir=snapshot_root))
+    snapshot = Path(
+        tempfile.mkdtemp(
+            prefix=f"{proposal_dir.name}-", dir=_snapshots_root(memory_dir)
+        )
+    )
     try:
         _copy_draft_snapshot(proposal_dir, snapshot)
         contents = _copied_contents(snapshot)
@@ -1791,209 +1795,159 @@ def approve_skill_proposal(
     destination_backup: Path | None = None
     wanted_workspace = _normalize_workspace_dir(workspace_dir)
     try:
-        try:
-            with _draft_lock(proposal_dir):
-                manifest = _read_manifest(manifest_path)
-                if manifest is None:
-                    return {
-                        "approved": False,
-                        "error": "Proposal manifest is missing or invalid",
-                    }
-                decision_workspace = _normalize_workspace_dir(
-                    manifest.get("workspace_dir")
-                )
-                if (
-                    wanted_workspace is not None
-                    and decision_workspace != wanted_workspace
-                ):
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "error": "Proposal moved to a different workspace; reopen it there",
-                    }
-                if (
-                    expected_updated_at is not None
-                    and manifest.get("status") == "pending"
-                    and manifest.get("updated_at") != expected_updated_at
-                ):
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "updated_at": manifest.get("updated_at"),
-                        "error": "Proposal changed since it was read",
-                    }
-                try:
-                    target, failure = _resolve_install(
-                        memory_dir,
-                        proposal_dir,
-                        manifest,
-                        skills_dir=skills_dir,
-                        scope=scope,
-                    )
-                except (OSError, ValueError, RecursionError) as exc:
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "error": f"Could not read the skill folders: {exc}",
-                    }
-                if failure is not None:
-                    return failure
-                recorded_digest = manifest.get("content_digest")
-                if not isinstance(recorded_digest, str) or not _DIGEST_RE.fullmatch(
-                    recorded_digest
-                ):
-                    # A draft submitted before the digest was recorded has none.
-                    recorded_digest = None
-                if approved_by == "auto" and recorded_digest is None:
-                    # A preview cannot substitute for the submission in AUTO mode.
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
-                    }
-                # A draft submitted before the digest was recorded has nothing to
-                # compare against.
-                compared: str | None = None
-                changed = ""
-                if approved_by == "auto" or expected_content_digest is None:
-                    # The comparison point is the submission, as in AUTO mode: a
-                    # draft rewritten in place since then has to be resubmitted.
-                    compared = recorded_digest
-                    changed = "Proposal changed since it was submitted; resubmit it"
-                else:
-                    # The client's digest is of what it was shown.
-                    compared = expected_content_digest
-                    changed = "Proposal changed since it was shown"
-                try:
-                    snapshot, snapshot_digest, approved_digests = _snapshot_proposal(
-                        memory_dir, proposal_dir
-                    )
-                except (OSError, ValueError, RecursionError) as exc:
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "error": f"Could not snapshot the skill: {exc}",
-                    }
-                if compared is not None and compared != snapshot_digest:
-                    return {
-                        "approved": False,
-                        "proposal_id": manifest.get("proposal_id"),
-                        "content_digest": snapshot_digest,
-                        "error": changed,
-                    }
-                decision_updated_at = manifest["updated_at"]
-        except FileLockTimeout:
-            return {
-                "approved": False,
-                "proposal_id": proposal_id,
-                "error": "Proposal is busy; timed out waiting for another writer",
-            }
-        except OSError as exc:
-            return {
-                "approved": False,
-                "proposal_id": proposal_id,
-                "error": f"Could not lock the proposal: {exc}",
-            }
-
-        assert snapshot is not None
-        assert target.path is not None
-        assert target.scope is not None
-        skill_name = str(manifest["skill_name"]).strip()
-        recorded_proposal_id = str(manifest["proposal_id"])
-        operation = _normalize_operation(manifest.get("operation")) or "create"
-        destination = target.path
-        target_scope = target.scope
-        workspace_shadow = target.workspace_shadow
-        # A fork copies the global skill first; an in-place update starts from itself.
-        base_skill_dir = target.base_path if target.base_path != destination else None
-
-        def install_failed(
-            error: str,
-            *,
-            changed: bool,
-            leftover: Path | None,
-            mark_left: bool = False,
-            updated_at: str | None = None,
-        ) -> dict[str, Any]:
-            nonlocal destination_backup
-            if changed and destination_backup is not None:
-                try:
-                    _restore_destination(
-                        destination, destination_backup, approved_digests
-                    )
-                    shutil.rmtree(destination_backup.parent, ignore_errors=True)
-                    destination_backup = None
-                    changed = False
-                except OSError as exc:
-                    error += (
-                        f" (could not restore the installed skill: {exc}; "
-                        f"backup retained at {destination_backup})"
-                    )
-            if destination_backup is not None and not changed:
-                shutil.rmtree(destination_backup.parent, ignore_errors=True)
-                destination_backup = None
-            if changed:
-                error += " (the installed skill may already be changed)"
-            if leftover is not None:
-                error += (
-                    f"; the partly installed folder {leftover} could not be removed"
-                )
-            if mark_left:
-                error += "; the processed mark could not be removed"
-            return {
-                "approved": False,
-                "proposal_id": recorded_proposal_id,
-                "error": error,
-                "scope": target_scope,
-                **({"updated_at": updated_at} if updated_at is not None else {}),
-            }
-
-        def still_pending(latest: dict[str, Any]) -> bool:
-            return (
-                latest.get("status") == "pending"
-                and latest.get("updated_at") == decision_updated_at
-                and _normalize_workspace_dir(latest.get("workspace_dir"))
-                == decision_workspace
-            )
-
         with contextlib.ExitStack() as locks:
             try:
-                locks.enter_context(_install_lock(destination))
+                locks.enter_context(_draft_lock(proposal_dir))
             except FileLockTimeout:
-                return install_failed(
-                    "Could not install the skill: timed out waiting for another installer",
-                    changed=False,
-                    leftover=None,
+                return {
+                    "approved": False,
+                    "proposal_id": proposal_id,
+                    "error": "Proposal is busy; timed out waiting for another writer",
+                }
+            except OSError as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": proposal_id,
+                    "error": f"Could not lock the proposal: {exc}",
+                }
+            # Held from the read to the commit, so nothing can change the draft
+            # between the snapshot that is hashed and the manifest that records it.
+            manifest = _read_manifest(manifest_path)
+            if manifest is None:
+                return {
+                    "approved": False,
+                    "error": "Proposal manifest is missing or invalid",
+                }
+            decision_workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
+            if wanted_workspace is not None and decision_workspace != wanted_workspace:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": "Proposal moved to a different workspace; reopen it there",
+                }
+            if (
+                expected_updated_at is not None
+                and manifest.get("status") == "pending"
+                and manifest.get("updated_at") != expected_updated_at
+            ):
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "updated_at": manifest.get("updated_at"),
+                    "error": "Proposal changed since it was read",
+                }
+            try:
+                target, failure = _resolve_install(
+                    memory_dir,
+                    proposal_dir,
+                    manifest,
+                    skills_dir=skills_dir,
+                    scope=scope,
                 )
-            except (OSError, ValueError, RuntimeError) as exc:
-                return install_failed(
-                    f"Could not lock the install destination: {exc}",
-                    changed=False,
-                    leftover=None,
+            except (OSError, ValueError, RecursionError) as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": f"Could not read the skill folders: {exc}",
+                }
+            if failure is not None:
+                return failure
+            recorded_digest = manifest.get("content_digest")
+            if not isinstance(recorded_digest, str) or not _DIGEST_RE.fullmatch(
+                recorded_digest
+            ):
+                # A draft submitted before the digest was recorded has none.
+                recorded_digest = None
+            if approved_by == "auto" and recorded_digest is None:
+                # A preview cannot substitute for the submission in AUTO mode.
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
+                }
+            # A draft submitted before the digest was recorded has nothing to
+            # compare against.
+            compared: str | None = None
+            changed = ""
+            if approved_by == "auto" or expected_content_digest is None:
+                # The comparison point is the submission, as in AUTO mode: a
+                # draft rewritten in place since then has to be resubmitted.
+                compared = recorded_digest
+                changed = "Proposal changed since it was submitted; resubmit it"
+            else:
+                # The client's digest is of what it was shown.
+                compared = expected_content_digest
+                changed = "Proposal changed since it was shown"
+            try:
+                snapshot, snapshot_digest, approved_digests = _snapshot_proposal(
+                    memory_dir, proposal_dir
                 )
-            # A waiting approval may already be stale; don't touch the install
-            # in that case. The locked read below still guards the commit.
-            latest = _read_manifest(manifest_path)
-            if latest is None:
-                return install_failed(
-                    "Proposal manifest is missing or invalid",
-                    changed=False,
-                    leftover=None,
-                )
-            if latest.get("status") != "pending":
+            except (OSError, ValueError, RecursionError) as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": f"Could not snapshot the skill: {exc}",
+                }
+            if compared is not None and compared != snapshot_digest:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "content_digest": snapshot_digest,
+                    "error": changed,
+                }
+            assert snapshot is not None
+            assert target.path is not None
+            assert target.scope is not None
+            skill_name = str(manifest["skill_name"]).strip()
+            recorded_proposal_id = str(manifest["proposal_id"])
+            operation = _normalize_operation(manifest.get("operation")) or "create"
+            destination = target.path
+            target_scope = target.scope
+            workspace_shadow = target.workspace_shadow
+            # A fork copies the global skill first; an in-place update starts from itself.
+            base_skill_dir = (
+                target.base_path if target.base_path != destination else None
+            )
+
+            def install_failed(
+                error: str,
+                *,
+                changed: bool,
+                leftover: Path | None,
+                mark_left: bool = False,
+            ) -> dict[str, Any]:
+                nonlocal destination_backup
+                if changed and destination_backup is not None:
+                    try:
+                        _restore_destination(
+                            destination, destination_backup, approved_digests
+                        )
+                        shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                        destination_backup = None
+                        changed = False
+                    except OSError as exc:
+                        error += (
+                            f" (could not restore the installed skill: {exc}; "
+                            f"backup retained at {destination_backup})"
+                        )
+                if destination_backup is not None and not changed:
+                    shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                    destination_backup = None
+                if changed:
+                    error += " (the installed skill may already be changed)"
+                if leftover is not None:
+                    error += (
+                        f"; the partly installed folder {leftover} could not be removed"
+                    )
+                if mark_left:
+                    error += "; the processed mark could not be removed"
                 return {
                     "approved": False,
                     "proposal_id": recorded_proposal_id,
-                    "status": latest.get("status"),
-                    "error": "Only pending proposals can be approved",
+                    "error": error,
+                    "scope": target_scope,
                 }
-            if not still_pending(latest):
-                return install_failed(
-                    "Proposal changed since it was read",
-                    changed=False,
-                    leftover=None,
-                    updated_at=latest.get("updated_at"),
-                )
+
             provenance_path = (
                 destination
                 if operation == "update" and base_skill_dir is None
@@ -2006,7 +1960,7 @@ def approve_skill_proposal(
                     destination, must_create=target.base_path != destination
                 )
                 if not created:
-                    destination_backup = _backup_destination(destination)
+                    destination_backup = _backup_destination(memory_dir, destination)
             except (OSError, ValueError, RecursionError) as exc:
                 return install_failed(
                     f"Could not install the skill: {exc}",
@@ -2016,61 +1970,32 @@ def approve_skill_proposal(
             try:
                 if created and base_skill_dir is not None:
                     shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
-                # The live draft may change now; only the verified snapshot is installed.
+                # Only the snapshot that was hashed is installed: the agent's
+                # file writes take no lock, so the live draft was never verified.
                 blocked_path = _copy_proposed_skill(snapshot, destination)
                 if blocked_path is None:
-                    with _draft_lock(proposal_dir):
-                        latest = _read_manifest(manifest_path)
-                        if latest is None:
-                            raise ValueError("Proposal manifest is missing or invalid")
-                        if not still_pending(latest):
-                            leftover = destination if created else None
-                            if created:
-                                with contextlib.suppress(OSError):
-                                    if _remove_unchanged_copy(
-                                        destination, approved_digests
-                                    ):
-                                        leftover = None
-                            return install_failed(
-                                "Proposal changed while it was being approved",
-                                changed=not created,
-                                leftover=leftover,
-                                updated_at=latest.get("updated_at"),
-                            )
-                        manifest = latest
-                        cluster_hash = str(manifest["cluster_hash"])
-                        _record_approval(
-                            manifest,
-                            approved_by=approved_by,
-                            destination=destination,
-                            scope=target_scope,
-                            workspace_shadow=workspace_shadow,
-                            provenance=upstream_provenance,
-                            approved_digests=approved_digests,
-                        )
-                        had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
-                        mark_cluster_processed(memory_dir, cluster_hash)
-                        try:
-                            # The manifest is the commit point, so it is written last.
-                            _write_manifest(manifest_path, manifest)
-                        except (OSError, ValueError):
-                            if not had_mark:
-                                try:
-                                    unmark_cluster_processed(memory_dir, cluster_hash)
-                                except OSError:
-                                    mark_left = True
-                            raise
-            except FileLockTimeout:
-                leftover = (
-                    destination
-                    if created and not _remove_created(destination)
-                    else None
-                )
-                return install_failed(
-                    "Could not finish approval: timed out waiting for another writer",
-                    changed=not created,
-                    leftover=leftover,
-                )
+                    cluster_hash = str(manifest["cluster_hash"])
+                    _record_approval(
+                        manifest,
+                        approved_by=approved_by,
+                        destination=destination,
+                        scope=target_scope,
+                        workspace_shadow=workspace_shadow,
+                        provenance=upstream_provenance,
+                        approved_digests=approved_digests,
+                    )
+                    had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
+                    mark_cluster_processed(memory_dir, cluster_hash)
+                    try:
+                        # The manifest is the commit point, so it is written last.
+                        _write_manifest(manifest_path, manifest)
+                    except (OSError, ValueError):
+                        if not had_mark:
+                            try:
+                                unmark_cluster_processed(memory_dir, cluster_hash)
+                            except OSError:
+                                mark_left = True
+                        raise
             except (OSError, ValueError) as exc:
                 leftover = (
                     destination
@@ -2094,26 +2019,27 @@ def approve_skill_proposal(
                     changed=not created,
                     leftover=leftover,
                 )
-        if destination_backup is not None:
-            shutil.rmtree(destination_backup.parent, ignore_errors=True)
-            destination_backup = None
+            if destination_backup is not None:
+                shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                destination_backup = None
+            result = {
+                "approved": True,
+                "proposal_id": manifest["proposal_id"],
+                "skill_name": skill_name,
+                "operation": operation,
+                "path": str(destination),
+                "scope": target_scope,
+                "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
+                "upstream_source": (
+                    upstream_provenance.get("source") if upstream_provenance else None
+                ),
+                "upstream_commit": (
+                    upstream_provenance.get("commit") if upstream_provenance else None
+                ),
+                "updated_at": manifest["updated_at"],
+            }
         _notify_approved_skill()
-        return {
-            "approved": True,
-            "proposal_id": manifest["proposal_id"],
-            "skill_name": skill_name,
-            "operation": operation,
-            "path": str(destination),
-            "scope": target_scope,
-            "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
-            "upstream_source": (
-                upstream_provenance.get("source") if upstream_provenance else None
-            ),
-            "upstream_commit": (
-                upstream_provenance.get("commit") if upstream_provenance else None
-            ),
-            "updated_at": manifest["updated_at"],
-        }
+        return result
     finally:
         if snapshot is not None:
             _remove_created(snapshot)

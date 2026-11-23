@@ -765,9 +765,22 @@ def _submit_update(memory_dir, skills_dir, skill_name):
     return result
 
 
-def test_update_refusal_restores_installed_skill_after_resubmit(tmp_path, monkeypatch):
+def _fail_the_commit(monkeypatch):
+    """Make an approval fail at its last step, after the skill is installed:
+    the manifest that records the approval cannot be written."""
     from EvoScientist.memory.autoskills import proposals as module
 
+    real_write = module._write_manifest
+
+    def write(path, payload):
+        if payload.get("status") == "approved":
+            raise OSError("disk full")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", write)
+
+
+def test_update_refusal_restores_the_installed_skill(tmp_path, monkeypatch):
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     installed = _write_installed_skill(
         skills_dir, "refusal-update", "Installed version", "Original installed body."
@@ -779,38 +792,14 @@ def test_update_refusal_restores_installed_skill_after_resubmit(tmp_path, monkey
         if path.is_file()
     }
     _submit_update(memory_dir, skills_dir, "refusal-update")
-    draft = autoskill_proposals_dir(memory_dir) / "refusal-update" / "SKILL.md"
-    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
-    real_copy = module._copy_proposed_skill
+    _fail_the_commit(monkeypatch)
 
-    def copy_then_resubmit(snapshot, destination):
-        outcome = real_copy(snapshot, destination)
-        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
-            return outcome
-        draft.write_text(
-            "---\nname: refusal-update\ndescription: Resubmitted.\n---\n\n"
-            "New pending body.\n",
-            encoding="utf-8",
-        )
-        result = submit_autoskill_proposal(
-            memory_dir=memory_dir,
-            skill_name="refusal-update",
-            cluster_hash="cluster-update-refusal-update",
-            source_observation_ids=["O-1", "O-2", "O-3"],
-            rationale="Resubmitted update.",
-            operation="update",
-            target_skill_name="refusal-update",
-            skills_dir=skills_dir,
-        )
-        assert result["submitted"] is True, result
-        return outcome
-
-    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_resubmit)
     result = approve_skill_proposal(
         memory_dir, "refusal-update", skills_dir=skills_dir, exact=True
     )
 
     assert result["approved"] is False
+    assert result["error"] == "Could not install the skill: disk full"
     assert _manifest(memory_dir, "refusal-update")["status"] == "pending"
     assert {
         path.relative_to(installed).as_posix(): path.read_bytes()
@@ -826,8 +815,6 @@ def test_update_refusal_removes_the_folders_the_install_added(tmp_path, monkeypa
     behind when the approval is refused, so the refusal has to take it with
     the file.
     """
-    from EvoScientist.memory.autoskills import proposals as module
-
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     installed = _write_installed_skill(
         skills_dir, "folder-update", "Installed version", "Original installed body."
@@ -839,32 +826,16 @@ def test_update_refusal_removes_the_folders_the_install_added(tmp_path, monkeypa
     draft = autoskill_proposals_dir(memory_dir) / "folder-update"
     (draft / "nested" / "new").mkdir(parents=True)
     (draft / "nested" / "new" / "extra.txt").write_text("added\n", encoding="utf-8")
-    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
-    real_copy = module._copy_proposed_skill
+    # The digest is recorded at submit, so the added file is submitted with the rest.
+    _submit_update(memory_dir, skills_dir, "folder-update")
+    _fail_the_commit(monkeypatch)
 
-    def copy_then_resubmit(snapshot, destination):
-        outcome = real_copy(snapshot, destination)
-        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
-            return outcome
-        result = submit_autoskill_proposal(
-            memory_dir=memory_dir,
-            skill_name="folder-update",
-            cluster_hash="cluster-update-folder-update",
-            source_observation_ids=["O-1", "O-2", "O-3"],
-            rationale="Resubmitted update.",
-            operation="update",
-            target_skill_name="folder-update",
-            skills_dir=skills_dir,
-        )
-        assert result["submitted"] is True, result
-        return outcome
-
-    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_resubmit)
     result = approve_skill_proposal(
         memory_dir, "folder-update", skills_dir=skills_dir, exact=True
     )
 
     assert result["approved"] is False
+    assert result["error"] == "Could not install the skill: disk full"
     assert (
         sorted(path.relative_to(installed).as_posix() for path in installed.rglob("*"))
         == original
@@ -886,38 +857,19 @@ def test_update_refusal_keeps_an_edit_the_user_made_during_the_approval(
         skills_dir, "edited-update", "Installed version", "Original installed body."
     )
     _submit_update(memory_dir, skills_dir, "edited-update")
-    draft = autoskill_proposals_dir(memory_dir) / "edited-update" / "SKILL.md"
-    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
     real_copy = module._copy_proposed_skill
 
-    def copy_then_edit(snapshot, destination):
+    def copy_then_user_edits(snapshot, destination):
         outcome = real_copy(snapshot, destination)
-        if not Path(snapshot).resolve().is_relative_to(snapshot_root):
-            return outcome
         (installed / "SKILL.md").write_text(
             "---\nname: edited-update\ndescription: The user's own edit.\n---\n\n"
             "Edited by the user.\n",
             encoding="utf-8",
         )
-        draft.write_text(
-            "---\nname: edited-update\ndescription: Resubmitted.\n---\n\n"
-            "New pending body.\n",
-            encoding="utf-8",
-        )
-        result = submit_autoskill_proposal(
-            memory_dir=memory_dir,
-            skill_name="edited-update",
-            cluster_hash="cluster-update-edited-update",
-            source_observation_ids=["O-1", "O-2", "O-3"],
-            rationale="Resubmitted update.",
-            operation="update",
-            target_skill_name="edited-update",
-            skills_dir=skills_dir,
-        )
-        assert result["submitted"] is True, result
         return outcome
 
-    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_edit)
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_user_edits)
+    _fail_the_commit(monkeypatch)
     result = approve_skill_proposal(
         memory_dir, "edited-update", skills_dir=skills_dir, exact=True
     )

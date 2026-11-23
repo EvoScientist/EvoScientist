@@ -382,12 +382,6 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         ("Proposal changed since it was read", "Proposal changed since it was shown")
     ):
         return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
-    if error.startswith("Proposal changed while it was being approved"):
-        return 409, {
-            "error": "draft_changed",
-            "updated_at": result.get("updated_at"),
-            "detail": _failure_text(result),
-        }
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
 

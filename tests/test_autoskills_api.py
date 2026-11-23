@@ -1146,42 +1146,6 @@ def test_approve_route_stale_digest_is_refused_as_draft_changed(
     assert _only_draft(server)["status"] == "pending"
 
 
-def test_approve_route_reports_post_install_staleness_with_cleanup_detail(
-    server, served, secret, monkeypatch
-):
-    from EvoScientist.memory.autoskills import proposals
-
-    name = "focused-validation"
-    _draft(served, name)
-    shown = _only_draft(server)
-    installed = served.skills_dir / name
-    newer_version = proposals._version_stamp(shown["updated_at"])
-    real_copy = proposals._copy_proposed_skill
-
-    def change_after_install(source, destination):
-        blocked = real_copy(source, destination)
-        if destination == installed:
-            assert (installed / "SKILL.md").is_file()
-            _edit_manifest(name, updated_at=newer_version)
-        return blocked
-
-    monkeypatch.setattr(proposals, "_copy_proposed_skill", change_after_install)
-    # The recovery path matters when a stale install could not be rolled back.
-    monkeypatch.setattr(proposals, "_remove_unchanged_copy", lambda *_: False)
-    response = _decide(
-        server, name, "approve", secret, expected_updated_at=shown["updated_at"]
-    )
-
-    assert response.status_code == 409
-    body = response.json()
-    assert body["error"] == "draft_changed", body
-    assert body["updated_at"] == newer_version
-    assert "could not be removed" in body["detail"]
-    assert str(installed) in body["detail"]
-    assert (installed / "SKILL.md").is_file()
-    assert _only_draft(server)["status"] == "pending"
-
-
 def test_approve_route_without_client_digest_refuses_a_draft_rewritten_since_submit(
     server, served, secret, quiet_skill_index
 ):
