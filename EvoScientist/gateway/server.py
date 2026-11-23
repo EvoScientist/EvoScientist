@@ -76,6 +76,10 @@ _STREAM_CLOSED_NOTICE = (
     "Lost the live connection to this run; "
     "the result is shown when the run has finished."
 )
+_REPLAY_CAP_NOTICE = (
+    "This thread's history is too long to follow live; "
+    "the result is shown when the run has finished."
+)
 _RECOVERED_TURN_NOTICE = (
     "The live events of this turn were lost; "
     "the result is shown now that the run has finished."
@@ -308,7 +312,8 @@ class _ThreadEvents:
 
     A fresh thread SSE replays every earlier run first, and the server sends a
     run's envelopes only to connections that finished the replay before the
-    run published them, so a turn starts its run after the replay.
+    run published them, so a turn starts its run after the replay. Past the
+    replay cap a turn starts it anyway and reads it back later (#710).
     """
 
     def __init__(
@@ -335,11 +340,17 @@ class _ThreadEvents:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop reading the stream and drop what is queued."""
         self._reader.cancel()
         try:
             await self._reader
         except asyncio.CancelledError:
             pass
+        while not self._queue.empty():
+            self._queue.get_nowait()
 
     async def _read(self, events: AsyncIterator[Any]) -> None:
         try:
@@ -1750,9 +1761,10 @@ class LangGraphServerGateway:
             # SDK's ``interrupted`` flag, so ``subscribe`` would never end at
             # the resumed run's next pause (#738).
             paused = False
-            # Past the replay cap the queue holds a busy run's live envelopes.
+            # An answer to a busy thread past the replay cap: the queue holds
+            # that run's live envelopes.
             behind_busy_run = False
-            # A new message past the replay cap: the run starts anyway and is
+            # Any other turn past the replay cap: its run starts anyway and is
             # read back when it has finished (#710).
             past_replay_cap: _ReplayCapError | None = None
             async with stream, _ThreadEvents(stream.events) as events:
@@ -1764,19 +1776,9 @@ class LangGraphServerGateway:
                     try:
                         await events.skip_replay()
                     except _ReplayCapError as exc:
-                        if not isinstance(request.message, Command):
-                            # A connection still replaying gets none of a
-                            # new run's envelopes, and on a long thread no
-                            # cursor skips the replay: start the run, wait
-                            # for it by its status and read it back.
-                            logger.warning(
-                                "%s on thread %s; starting the run without "
-                                "reading it live",
-                                exc,
-                                request.thread_id,
-                            )
-                            past_replay_cap = exc
-                        elif await self._thread_is_busy(request.thread_id):
+                        if isinstance(
+                            request.message, Command
+                        ) and await self._thread_is_busy(request.thread_id):
                             # Another task of the paused run can keep the
                             # SSE from going quiet. The answer queues behind
                             # that run, whose live envelopes mean this
@@ -1784,7 +1786,20 @@ class LangGraphServerGateway:
                             # the answer's run starts.
                             behind_busy_run = True
                         else:
-                            raise
+                            # A connection still replaying gets none of a
+                            # new run's envelopes, and on a long thread no
+                            # cursor skips the replay: start the run, wait
+                            # for it by its status and read it back. An
+                            # answer on an idle thread too, or a prompt
+                            # shown past the cap could never be answered.
+                            logger.warning(
+                                "%s on thread %s; starting the run without "
+                                "reading it live",
+                                exc,
+                                request.thread_id,
+                            )
+                            past_replay_cap = exc
+                            self._notify(_REPLAY_CAP_NOTICE)
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1799,6 +1814,11 @@ class LangGraphServerGateway:
                     raise RuntimeError(
                         f"Could not identify the run for thread {request.thread_id}"
                     )
+                if past_replay_cap is not None:
+                    # Nothing reads this connection any more: stop it from
+                    # buffering the rest of the replay while the run works.
+                    # Closing it does not stop the run.
+                    await events.aclose()
                 # Envelopes without a run id (model tokens) belong to the run
                 # of the last tagged one: behind a busy run, wait for this
                 # run's own.
@@ -1815,13 +1835,15 @@ class LangGraphServerGateway:
                 status_failures = 0
                 # A stream that ends or fails before the run's end does not
                 # end the run (#711): wait for it by its status instead.
-                # Past the replay cap the turn waits as for a closed stream,
-                # and gives up with the cap's error.
+                # Past the replay cap the live connection is closed: the turn
+                # waits as for a closed stream, and gives up with the cap's
+                # error.
                 stream_closed = past_replay_cap is not None
                 stream_error: Exception | None = past_replay_cap
                 closed_status_failures = 0
-                # The turn already said its result comes when the run finishes.
-                told_late = False
+                # The turn already said its result comes when the run finishes
+                # (past the cap: the cap's line).
+                told_late = past_replay_cap is not None
                 quiet_deadline = loop.time() + (
                     0.0 if stream_closed else _QUIET_POLL_SECONDS
                 )
@@ -1899,7 +1921,8 @@ class LangGraphServerGateway:
                                 if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
                                     # The run cannot be followed any more:
                                     # end the turn with the stream's read
-                                    # error, or with "ended before the run
+                                    # error (past the replay cap, the cap's
+                                    # error), or with "ended before the run
                                     # finished", caused by the status request
                                     # that failed last (a server that died
                                     # answers neither).
@@ -1939,8 +1962,11 @@ class LangGraphServerGateway:
                 # The run finished and its live envelopes stopped coming:
                 # read it back from a new connection, which replays it.
                 logger.warning(
-                    "Lost the live events of run %s on thread %s "
-                    "(status %s); reading the finished run back",
+                    "%s of run %s on thread %s (status %s); reading the "
+                    "finished run back",
+                    "Did not read the live events"
+                    if past_replay_cap is not None
+                    else "Lost the live events",
                     run_id,
                     request.thread_id,
                     finished_status,
@@ -1985,10 +2011,13 @@ class LangGraphServerGateway:
                     request.thread_id,
                 )
                 if finished_status != "success":
+                    # Past the replay cap the read-back usually hits the cap
+                    # too: say so, the run's own error is not reachable.
                     raise RuntimeError(
                         f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
                         f"status {finished_status}"
-                    )
+                        + (f" ({past_replay_cap})" if past_replay_cap else "")
+                    ) from stream_error
                 # The run's last checkpoint, not the thread's latest state: a
                 # later run on the thread may already have added its own.
                 try:
