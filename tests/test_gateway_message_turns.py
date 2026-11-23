@@ -1229,6 +1229,9 @@ class _Notices:
         self.lines: list[str] = []
 
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        self.lines.append(f"fallback: {text}")
+
+    def emit_notice(self, text: str, style: str = "yellow") -> None:
         self.lines.append(text)
 
 
@@ -1266,8 +1269,8 @@ async def test_finished_run_with_lost_live_events_is_read_back(
     assert stream.event_streams_opened == 2
     assert gateway.thread_store.client.runs.cancelled == []
     assert "Lost the live events of run run-1" in caplog.text
-    recovered = [line for line in gateway.events.lines if "live events" in line]
-    assert recovered == [server_mod._RECOVERED_TURN_NOTICE]
+    notices = [line for line in gateway.events.lines if "fallback" not in line]
+    assert notices == [server_mod._RECOVERED_TURN_NOTICE]
 
 
 async def test_read_back_drops_the_earlier_runs_it_replays(quiet_poll):
@@ -1504,6 +1507,22 @@ async def test_another_runs_envelopes_do_not_count_as_this_runs(quiet_poll):
     events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello", " world"]
+
+
+async def test_recovered_turn_shows_one_line_through_the_session_sink(quiet_poll):
+    """The TUI and the Rich CLI render the session sink's lines in the turn."""
+    from EvoScientist.stream.sink import SessionEventSink
+
+    shown: list[tuple[str, str]] = []
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    gateway.events = SessionEventSink(
+        fallback_display=lambda text, style: shown.append((text, style))
+    )
+
+    await _turn(gateway, "hi")
+
+    assert shown == [(server_mod._RECOVERED_TURN_NOTICE, "yellow")]
 
 
 async def test_recovered_turn_without_a_frontend_sink_only_logs(quiet_poll):

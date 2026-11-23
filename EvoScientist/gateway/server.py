@@ -1453,7 +1453,7 @@ class LangGraphServerGateway:
         if self.events is None:
             return
         try:
-            self.events.emit_fallback_notice(_RECOVERED_TURN_NOTICE, "yellow")
+            self.events.emit_notice(_RECOVERED_TURN_NOTICE)
         except Exception:
             logger.debug("recovered-turn notice failed", exc_info=True)
 
