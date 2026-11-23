@@ -475,7 +475,7 @@ def test_assigned_value_mixing_unquoted_and_quoted_paths_maps_both(
     if cd:
         # After a cd the value names the workspace by its absolute path.
         first = _platform_quote(str(root)) + "/tmp/a"
-        second = _platform_quote(str(root / "tmp" / "b"))
+        second = _platform_quote(str(root) + "/tmp/b")
     else:
         first = f"{_assignment_root(root)}/tmp/a"
         second = f"{_assignment_root(root)}/tmp/b"
