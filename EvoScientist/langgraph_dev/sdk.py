@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import weakref
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -105,15 +104,15 @@ class _PerLoopTransport(httpx.AsyncBaseTransport):
     ``asyncio.Event`` created on that loop, so a request from another loop that
     reuses the connection fails with "... is bound to a different event loop".
     The Rich CLI uses one client on its main loop and on the async runtime's
-    loop (#880). A loop's pool is dropped with the loop.
+    loop (#880). A pool lives until it is closed on its own loop or the
+    client is closed: its idle connections hold their loop, so it is not
+    dropped when the loop ends.
     """
 
     def __init__(self, **transport_kwargs: Any) -> None:
         self._transport_kwargs = transport_kwargs
         self._lock = threading.Lock()
-        self._pools: weakref.WeakKeyDictionary[
-            asyncio.AbstractEventLoop, httpx.AsyncHTTPTransport
-        ] = weakref.WeakKeyDictionary()
+        self._pools: dict[asyncio.AbstractEventLoop, httpx.AsyncHTTPTransport] = {}
 
     def _pool(self) -> httpx.AsyncHTTPTransport:
         loop = asyncio.get_running_loop()
