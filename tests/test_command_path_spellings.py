@@ -502,6 +502,34 @@ def test_quoted_host_path_after_a_workspace_value_is_refused(tmp_path, folder, c
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
+@pytest.mark.parametrize("cd", ["", "cd sub && "])
+def test_host_path_later_in_a_quoted_list_entry_is_refused(tmp_path, cd):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    _, error = prepare_sandbox_command(
+        f'{cd}X={root}/a:"{root}/b:/etc/passwd" python s.py', str(root)
+    )
+    assert error is not None
+    assert "'/etc/passwd'" in error
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
+@pytest.mark.parametrize("cd", ["", "cd sub && "])
+def test_split_quoted_workspace_list_entry_is_allowed(tmp_path, cd):
+    from EvoScientist.backends import prepare_sandbox_command
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    # "<parent>/""ws/b" is <root>/b.
+    _, error = prepare_sandbox_command(
+        f'{cd}DIRS={root}/a:"{tmp_path}/""ws/b" python s.py', str(root)
+    )
+    assert error is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX host-path quoting")
 @pytest.mark.parametrize("folder", ["ws", "my ws"])
 def test_quoted_suffix_continuing_the_workspace_path_is_allowed(tmp_path, folder):
     from EvoScientist.backends import prepare_sandbox_command

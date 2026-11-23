@@ -1219,16 +1219,21 @@ def _extract_all_paths(
             # concatenations. Keep a literal allowed path together, but do
             # not exempt code or substitutions that can name other paths.
             allowed_path_words.append((int(token["start"]), int(token["end"])))
-            # A quoted span that starts a list entry of its own is not exempt
-            # unless it is allowed too (X=<root>/a:"/tmp/b"). A span that
-            # continues the path ('<root>'"/x") stays part of it.
-            for span in _QUOTED_SPAN_RE.finditer(raw):
-                if (
-                    raw[span.start() - 1 : span.start()] in (":", ",")
-                    and span[2].startswith("/")
-                    and not _under_any(span[2], allow_prefixes)
-                ):
-                    foreign_spans.add(int(token["start"]) + span.start(2))
+            # A later list entry is not exempt unless its decoded path is
+            # allowed too (X=<root>/a:"<root>/b:/tmp/c"). A quoted piece that
+            # continues an entry ('<root>'"/x", "<parent>/""ws/b") stays part
+            # of it. The literal scan does not start a path after a ":", so a
+            # quoted entry is checked here as decoded.
+            for entry, offsets, quoted in _list_entries(raw)[1:]:
+                if not entry.startswith("/") or _under_any(entry, allow_prefixes):
+                    continue
+                if not quoted:
+                    foreign_spans.update(int(token["start"]) + i for i in offsets)
+                    continue
+                m = path_re.match(entry)
+                if m is not None and m.group(1) not in _PASSTHROUGH_DEVICE_PATHS:
+                    if not _is_under_allowed_prefix(m.group(1), allow_prefixes):
+                        paths.append(m.group(1))
         if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
             continue
         path_assignments.append((int(token["start"]), int(token["end"])))
@@ -1286,6 +1291,46 @@ def _removal_target(token: dict[str, object]) -> str:
             # program such as MSYS rm may still strip.
             return re.sub("[\"']", "", str(token["raw"])).replace("\\", "/")
     return str(token["value"]).replace("\\", "/")
+
+
+def _list_entries(raw: str) -> list[tuple[str, list[int], bool]]:
+    """The ``:``- or ``,``-separated entries of word *raw* after quote removal,
+    each with the offsets in *raw* of its characters and whether any of them
+    was quoted."""
+    entries: list[tuple[str, list[int], bool]] = []
+    chars: list[str] = []
+    offsets: list[int] = []
+    quote = ""
+    quoted = False
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char == quote or (not quote and char in "'\""):
+            quote = "" if quote else char
+            i += 1
+            continue
+        if char == "\\" and quote != "'" and i + 1 < len(raw):
+            if quote != '"' or raw[i + 1] in '$`"\\\n':
+                i += 1
+                char = raw[i]
+        # A Windows drive colon (C:/x) does not end an entry.
+        drive = (
+            char == ":"
+            and _is_windows()
+            and bool(chars)
+            and chars[-1].isalpha()
+            and raw[i + 1 :].lstrip("'\"")[:1] in ("/", "\\")
+        )
+        if char in ":," and not drive:
+            entries.append(("".join(chars), offsets, quoted))
+            chars, offsets, quoted = [], [], False
+        else:
+            chars.append(char)
+            offsets.append(i)
+            quoted = quoted or bool(quote)
+        i += 1
+    entries.append(("".join(chars), offsets, quoted))
+    return entries
 
 
 def _under_any(path: str, folders: tuple[str, ...]) -> bool:
