@@ -971,16 +971,19 @@ class _V3EventProcessor:
     ) -> list[dict[str, Any]] | None:
         """Emit what the turn has not shown, from the thread's final messages.
 
-        The turn's messages start at the first assistant message that was not
-        there before it. Their text is matched against the text shown so far,
-        message by message. The message the shown text stops in gets its tail;
-        every later one is emitted whole (thinking, text, tool calls), and
-        each tool result not shown yet is emitted in its place. Sub-agent
-        activity is not in these messages and stays unshown.
+        The turn's messages start after the last message the thread had
+        before it, so a resumed tool call's result is part of them. Their text
+        is matched against the text shown so far, message by message. The
+        message the shown text stops in gets its tail; every later one is
+        emitted whole (thinking, text, tool calls, usage), except the thinking
+        of a message the live stream had begun. Each tool result not shown
+        yet is emitted in its place, and a message whose end did not arrive
+        live gets its usage. Sub-agent activity is not in these messages and
+        stays unshown.
 
-        Returns ``None`` when the turn's messages cannot be told apart from
-        earlier ones (no pre-run state) or when the shown text is not the
-        start of theirs.
+        Returns ``None`` when the pre-run state read failed (the turn's
+        messages cannot be told apart from earlier ones) or when the shown
+        text is not the start of theirs.
         """
         if not self._value_recovery or not isinstance(messages, list):
             return None

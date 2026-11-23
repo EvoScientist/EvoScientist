@@ -1636,8 +1636,9 @@ class LangGraphServerGateway:
         run_attempted = False
         run_id: str | None = None
         run_completed = False
-        # The server reported the run's end (a root lifecycle end or a
-        # finished status): nothing is left to cancel.
+        # The server reported the run as over (a finished status, or a root
+        # ``failed``): the cleanup has nothing to cancel. A root ``completed``
+        # or ``interrupted`` sets ``run_completed`` instead.
         run_ended = False
         emitted_interrupt = False
         run_cleaned_up = False
@@ -1901,8 +1902,9 @@ class LangGraphServerGateway:
             # a consumer that stops iterating after the error event (aclose /
             # abandon) triggers GeneratorExit at the yield, so nothing after it
             # runs and the thread keeps its non-empty ``next`` — the failed step
-            # would replay on the next request. A run the server reported as
-            # failed has already ended, so only the repair is left.
+            # would replay on the next request. A run that is over (see
+            # ``run_ended``) or that the server no longer has needs no cancel,
+            # so only the repair is left.
             cancelled_run_id = None
             if not run_ended and not isinstance(exc, _RunGoneError):
                 cancelled_run_id = await self._cancel_incomplete_run(
