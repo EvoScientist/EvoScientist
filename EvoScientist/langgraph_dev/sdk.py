@@ -217,9 +217,8 @@ async def langgraph_async_client_scoped(
     """An async SDK client for one read, closed on exit.
 
     Built here instead of through ``get_client`` so the transport makes no
-    retries: a single read (for example from the graph's own loop in the
-    Rich CLI) must not spend 7.5 s retrying a connection the caller already
-    knows is down.
+    retries: a single read must not spend 7.5 s retrying a connection the
+    caller already knows is down.
     """
     import httpx
     from langgraph_sdk.client import LangGraphClient
