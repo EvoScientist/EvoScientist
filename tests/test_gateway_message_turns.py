@@ -538,7 +538,7 @@ async def test_events_stream_ending_early_while_status_is_unreadable_raises(
     with pytest.raises(RuntimeError, match="ended before the run finished"):
         await _turn(gateway, "hi")
 
-    assert len(runs.gets) == server_mod._CLOSED_STATUS_ATTEMPTS
+    assert len(runs.gets) == 3
     # Today's error path: the run that could not be followed is cancelled.
     assert runs.cancelled == [(THREAD_ID, ["run-1"])]
 
@@ -572,11 +572,13 @@ async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
         patch.object(
             FakeLangGraphThreadStream, "events", property(lambda self: lost())
         ),
-        pytest.raises((ConnectionError, RuntimeError)),
+        pytest.raises(RuntimeError, match=r"^Lost the run's live events$"),
     ):
         await collect()
 
     assert [e["type"] for e in events] == ["interrupt", "error"]
+    # It waited for the run by its status, then read the run back.
+    assert gateway.thread_store.client.runs.gets == [(THREAD_ID, "run-1")]
     assert gateway.thread_store.client.runs.cancelled == []
     assert threads.state_updates == []
 
@@ -2920,7 +2922,9 @@ async def test_state_completion_keeps_the_result_of_a_reused_call_id(
 
 class _StatusAfter:
     """``runs.get`` answering ``running`` for the first *n* requests, then the
-    run's own status; records whether nothing was read back meanwhile."""
+    run's own status. ``read_back_early`` records a read-back opened while the
+    run still ran (an assert here would be swallowed: the gateway counts any
+    exception from ``runs.get`` as a failed status request)."""
 
     def __init__(self, gateway, stream, n: int, fail_first: int = 0) -> None:
         self.runs = gateway.thread_store.client.runs
@@ -2928,13 +2932,14 @@ class _StatusAfter:
         self.n = n
         self.fail_first = fail_first
         self.calls = 0
+        self.read_back_early = False
         self.real = self.runs.get
         self.runs.get = self
 
     async def __call__(self, thread_id: str, run_id: str) -> dict[str, Any]:
         self.calls += 1
         # The read-back waits until the run has finished.
-        assert self.stream.event_streams_opened == 1
+        self.read_back_early |= self.stream.event_streams_opened != 1
         if self.calls <= self.fail_first:
             raise ConnectionError("server busy")
         if self.calls <= self.n:
@@ -2974,6 +2979,7 @@ async def test_run_outlives_its_event_stream_and_is_read_back(
 
     assert events == expected
     assert status.calls == 3
+    assert not status.read_back_early
     assert gateway.thread_store.client.runs.cancelled == []
     how = "failed" if isinstance(live_end, Exception) else "ended"
     assert (
@@ -3013,7 +3019,7 @@ async def test_run_failing_after_its_stream_ended_raises_its_own_error(quiet_pol
     assert gateway.thread_store.client.runs.cancelled == []
 
 
-async def test_one_failed_status_request_after_the_stream_ended_is_retried(
+async def test_failed_status_requests_after_the_stream_ended_are_retried(
     quiet_poll,
 ):
     stream = FakeLangGraphThreadStream(
@@ -3092,3 +3098,60 @@ async def test_resume_turn_outlives_its_event_stream(quiet_poll):
 
     assert _texts(events) == ["Hello", " world"]
     assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_run_the_server_no_longer_has_after_the_stream_ended(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    start = stream.run.start
+
+    async def start_and_forget(**kwargs: Any) -> dict[str, Any]:
+        reply = await start(**kwargs)
+        stream.run.runs.clear()
+        return reply
+
+    stream.run.start = start_and_forget
+
+    with pytest.raises(RuntimeError, match="Run run-1 no longer exists"):
+        await _turn(gateway, "hi")
+
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_status_is_asked_as_soon_as_the_stream_ends(monkeypatch):
+    """No wait before the first status request, and none after a finished
+    status once the stream is closed: with long windows the turn still ends
+    at once."""
+    monkeypatch.setattr(server_mod, "_QUIET_POLL_SECONDS", 30.0)
+    monkeypatch.setattr(server_mod, "_FINISHED_GRACE_SECONDS", 30.0)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=1, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+
+    async with asyncio.timeout(5):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+
+
+async def test_giving_up_keeps_the_last_status_error_as_the_cause(quiet_poll):
+    """A server that died answers neither the stream nor the status: the
+    turn's error carries the status request's error as its cause."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+
+    async def dead(thread_id: str, run_id: str) -> dict[str, Any]:
+        raise ConnectionError("All connection attempts failed")
+
+    runs.get = dead
+
+    with pytest.raises(RuntimeError, match="ended before the run finished") as caught:
+        await _turn(gateway, "hi")
+
+    assert isinstance(caught.value.__cause__, ConnectionError)
