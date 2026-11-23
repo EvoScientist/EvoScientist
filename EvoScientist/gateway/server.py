@@ -1752,6 +1752,9 @@ class LangGraphServerGateway:
             paused = False
             # Past the replay cap the queue holds a busy run's live envelopes.
             behind_busy_run = False
+            # A new message past the replay cap: the run starts anyway and is
+            # read back when it has finished (#710).
+            past_replay_cap: _ReplayCapError | None = None
             async with stream, _ThreadEvents(stream.events) as events:
                 # A thread without state has no earlier runs to replay.
                 # Skip also when the state read failed: an empty baseline
@@ -1760,18 +1763,28 @@ class LangGraphServerGateway:
                 if state_values or not process_value_messages:
                     try:
                         await events.skip_replay()
-                    except _ReplayCapError:
-                        # Another task of the paused run can keep the SSE
-                        # from going quiet. The answer queues behind that
-                        # run, whose live envelopes mean this connection is
-                        # normally past the replay when the answer's run
-                        # starts.
-                        if not (
-                            isinstance(request.message, Command)
-                            and await self._thread_is_busy(request.thread_id)
-                        ):
+                    except _ReplayCapError as exc:
+                        if not isinstance(request.message, Command):
+                            # A connection still replaying gets none of a
+                            # new run's envelopes, and on a long thread no
+                            # cursor skips the replay: start the run, wait
+                            # for it by its status and read it back.
+                            logger.warning(
+                                "%s on thread %s; starting the run without "
+                                "reading it live",
+                                exc,
+                                request.thread_id,
+                            )
+                            past_replay_cap = exc
+                        elif await self._thread_is_busy(request.thread_id):
+                            # Another task of the paused run can keep the
+                            # SSE from going quiet. The answer queues behind
+                            # that run, whose live envelopes mean this
+                            # connection is normally past the replay when
+                            # the answer's run starts.
+                            behind_busy_run = True
+                        else:
                             raise
-                        behind_busy_run = True
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1802,12 +1815,16 @@ class LangGraphServerGateway:
                 status_failures = 0
                 # A stream that ends or fails before the run's end does not
                 # end the run (#711): wait for it by its status instead.
-                stream_closed = False
-                stream_error: Exception | None = None
+                # Past the replay cap the turn waits as for a closed stream,
+                # and gives up with the cap's error.
+                stream_closed = past_replay_cap is not None
+                stream_error: Exception | None = past_replay_cap
                 closed_status_failures = 0
                 # The turn already said its result comes when the run finishes.
                 told_late = False
-                quiet_deadline = loop.time() + _QUIET_POLL_SECONDS
+                quiet_deadline = loop.time() + (
+                    0.0 if stream_closed else _QUIET_POLL_SECONDS
+                )
                 while end_event is None:
                     wait = max(0.0, quiet_deadline - loop.time())
                     if stream_closed:

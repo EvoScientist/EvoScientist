@@ -734,15 +734,15 @@ class _BusyThreadStream(FakeLangGraphThreadStream):
             False,
             id="resume-idle",
         ),
-        pytest.param("hi", True, False, id="new-message-busy"),
     ],
 )
 async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
     message, busy, answered, monkeypatch
 ):
     """A sibling task's envelopes keep the SSE from going quiet; a resume on a
-    busy thread is sent at the cap and queues behind that run. Anything else
-    still fails at the cap."""
+    busy thread is sent at the cap and queues behind that run. A resume on an
+    idle thread still fails at the cap (a new message past the cap: #710's
+    tests below)."""
     # The sibling's gaps must stay under the quiet window on a ~15 ms timer
     # (Windows).
     monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
@@ -3300,3 +3300,110 @@ async def test_closed_stream_completed_from_the_state_says_it_once(quiet_poll):
 
     assert events[-1]["response"] == "Hello world"
     assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]
+
+
+# --- #710: a new message past the replay cap ---------------------------------
+
+
+@pytest.mark.parametrize("busy", [True, False], ids=["busy", "idle"])
+async def test_new_message_past_the_replay_cap_starts_its_run_and_reads_it_back(
+    busy, monkeypatch, quiet_poll, caplog
+):
+    """The thread's SSE does not go quiet within the cap: the run is started
+    anyway, not read live, waited for by its status and read back."""
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("answer"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    if busy:
+        threads.threads[0]["status"] = "busy"
+    gateway.events = _Notices()
+
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["answer"]
+    assert len(stream.run.starts) == 1
+    assert stream.event_streams_opened == 2
+    assert gateway.thread_store.client.runs.cancelled == []
+    assert "starting the run without reading it live" in caplog.text
+    assert gateway.events.lines == [server_mod._RECOVERED_TURN_NOTICE]
+
+
+async def test_past_the_replay_cap_a_failed_run_raises_its_own_error(
+    monkeypatch, quiet_poll
+):
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    failed = _lifecycle("run-1", "failed")
+    failed["params"]["data"]["error"] = "boom"
+    stream = _BusyThreadStream(
+        THREAD_ID, events=[_lifecycle("run-1", "running"), failed]
+    )
+    stream.run.status = "error"
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    with pytest.raises(RuntimeError, match="Run failed: boom"):
+        await _turn(gateway, "hi")
+
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_past_the_replay_cap_a_pause_shows_its_prompt(monkeypatch, quiet_poll):
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    stream = _BusyThreadStream(THREAD_ID, events=_PAUSE_RUN)
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE, interrupts=[])
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] == "interrupt"] == [_INTERRUPT_EVENT]
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+class _EndlessReplayStream(FakeLangGraphThreadStream):
+    """Every connection replays without end: the read-back also hits the cap."""
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        while True:
+            yield _text("old token", "0-1")
+            await asyncio.sleep(0.005)
+
+
+async def test_past_the_replay_cap_a_read_back_that_hits_the_cap_uses_the_state(
+    monkeypatch, quiet_poll
+):
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+    assert events[-1]["response"] == "Hello world"
+
+
+async def test_past_the_replay_cap_an_unreadable_status_ends_with_the_cap_error(
+    monkeypatch, quiet_poll
+):
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    async def unreadable(thread_id: str, run_id: str) -> dict[str, Any]:
+        raise ConnectionError("server busy")
+
+    gateway.thread_store.client.runs.get = unreadable
+
+    with pytest.raises(server_mod._ReplayCapError, match="replay did not finish"):
+        await _turn(gateway, "hi")
