@@ -142,8 +142,6 @@ async def discover_custom_openai_models(
         )
         if content is None or loop.time() >= deadline:
             return []
-        # The parse is synchronous and cannot be interrupted, so a listing that
-        # finished parsing is a result even when the parse crossed the deadline.
         return _picker_names(json.loads(content))
     except Exception:
         return []
