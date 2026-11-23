@@ -128,11 +128,16 @@ class _PerLoopTransport(httpx.AsyncBaseTransport):
         return await self._pool().handle_async_request(request)
 
     async def aclose(self) -> None:
-        """Close the calling loop's pool; another loop's pool can only be
-        closed on that loop."""
+        """Close the calling loop's pool and forget the others.
+
+        Another loop's pool cannot be closed from here: once that loop is
+        gone its close fails with "Event loop is closed", and while it runs
+        its sockets would be closed from the wrong thread.
+        """
         loop = asyncio.get_running_loop()
         with self._lock:
             pool = self._pools.pop(loop, None)
+            self._pools.clear()
         if pool is not None:
             await pool.aclose()
 
@@ -183,9 +188,7 @@ def cached_langgraph_async_client(
 ):
     """Return a cached async SDK client, keyed on URL and normalized headers.
 
-    The async client wraps an ``httpx.AsyncClient`` bound to the event loop it
-    is first used on; caching avoids leaking a new connection pool on every
-    call. The key includes the *normalized* headers, so ``headers=None``
+    Caching avoids a new connection pool on every call. The key includes the *normalized* headers, so ``headers=None``
     (defaults) and an explicit copy of the default headers share one client,
     while genuinely different header sets get their own — a caller passing
     different headers must never silently receive a client built for
@@ -215,9 +218,9 @@ async def langgraph_async_client_scoped(
     """An async SDK client for one read, closed on exit.
 
     Built here instead of through ``get_client`` so the transport makes no
-    retries: the shared client is bound to the first loop that used it, and
-    a read from another loop (the graph's own loop in the Rich CLI) must not
-    spend 7.5 s retrying a connection the caller already knows is down.
+    retries: a single read (for example from the graph's own loop in the
+    Rich CLI) must not spend 7.5 s retrying a connection the caller already
+    knows is down.
     """
     import httpx
     from langgraph_sdk.client import LangGraphClient
