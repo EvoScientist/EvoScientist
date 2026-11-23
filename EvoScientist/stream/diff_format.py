@@ -14,6 +14,8 @@ import os
 import re
 import sys
 
+from rich.markup import escape
+
 # ---------------------------------------------------------------------------
 # Charset detection (simplified from upstream config.py)
 # ---------------------------------------------------------------------------
@@ -43,9 +45,12 @@ BOX_DOUBLE_HORIZ = "\u2550" if _UNICODE else "="  # ═ or =
 def _escape_markup(text: str) -> str:
     """Escape Rich markup characters in text.
 
-    Prevents ``[`` and ``]`` from being interpreted as Rich tags.
+    Prevents ``[...]`` from being read as a Rich tag. Rich only needs the
+    opening ``[`` escaped, so a backslash before ``]`` would show up in the
+    output, and a trailing backslash would escape the closing tag that
+    follows it.
     """
-    return text.replace("[", r"\[").replace("]", r"\]")
+    return escape(text)
 
 
 # ---------------------------------------------------------------------------

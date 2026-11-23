@@ -5,6 +5,8 @@ from __future__ import annotations
 import difflib
 from unittest import mock
 
+from rich.console import Console
+
 from EvoScientist.stream.diff_format import (
     _detect_unicode_support,
     _escape_markup,
@@ -17,9 +19,17 @@ from EvoScientist.stream.diff_format import (
 # ---------------------------------------------------------------------------
 
 
+def _render(markup: str) -> str:
+    console = Console(width=200, color_system=None)
+    with console.capture() as capture:
+        console.print(markup, end="")
+    return capture.get()
+
+
 class TestEscapeMarkup:
-    def test_escapes_brackets(self):
-        assert _escape_markup("[bold]text[/bold]") == r"\[bold\]text\[/bold\]"
+    def test_tags_render_as_text(self):
+        text = "[bold]text[/bold]"
+        assert _render(_escape_markup(text)) == text
 
     def test_plain_text_unchanged(self):
         assert _escape_markup("hello world") == "hello world"
@@ -28,7 +38,18 @@ class TestEscapeMarkup:
         assert _escape_markup("") == ""
 
     def test_nested_brackets(self):
-        assert _escape_markup("a[b[c]]d") == r"a\[b\[c\]\]d"
+        assert _render(_escape_markup("a[b[c]]d")) == "a[b[c]]d"
+
+    def test_index_brackets_show_no_backslash(self):
+        assert (
+            _render(f"[on #152d15]{_escape_markup('++arr[0];')}[/on #152d15]")
+            == "++arr[0];"
+        )
+
+    def test_trailing_backslash_keeps_closing_tag(self):
+        assert _render(
+            f"[on #152d15]{_escape_markup('end' + chr(92))}[/on #152d15]"
+        ) == "end" + chr(92)
 
 
 # ---------------------------------------------------------------------------
