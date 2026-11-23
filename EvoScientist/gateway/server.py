@@ -1393,9 +1393,9 @@ class LangGraphServerGateway:
     async def _finished_run_status(self, thread_id: str, run_id: str) -> str | None:
         """The run's status once it has finished, else ``None``.
 
-        ``None`` also for a status this gateway does not know and for a
-        request that failed: the turn keeps waiting. A run the server no
-        longer has can never deliver, so that raises.
+        ``None`` also for a status this gateway does not know: the turn keeps
+        waiting. A run the server no longer has can never deliver, so that
+        raises ``_RunGoneError``; any other failed request raises as is.
         """
         try:
             run = await self.thread_store.client.runs.get(thread_id, run_id)
@@ -1403,14 +1403,6 @@ class LangGraphServerGateway:
             raise _RunGoneError(
                 f"Run {run_id} no longer exists on thread {thread_id}"
             ) from None
-        except Exception:
-            logger.warning(
-                "Could not read the status of run %s on thread %s",
-                run_id,
-                thread_id,
-                exc_info=True,
-            )
-            return None
         status = run.get("status")
         return status if status in _FINISHED_RUN_STATUSES else None
 
@@ -1748,6 +1740,7 @@ class LangGraphServerGateway:
                 # envelopes (#709): while none arrives, ask for its status.
                 loop = asyncio.get_running_loop()
                 finished_status: str | None = None
+                status_failures = 0
                 quiet_deadline = loop.time() + _QUIET_POLL_SECONDS
                 while end_event is None:
                     event = await events.next_within(
@@ -1760,9 +1753,28 @@ class LangGraphServerGateway:
                     if event is _QUIET:
                         if finished_status is not None:
                             break
-                        finished_status = await self._finished_run_status(
-                            request.thread_id, run_id
-                        )
+                        try:
+                            finished_status = await self._finished_run_status(
+                                request.thread_id, run_id
+                            )
+                        except _RunGoneError:
+                            raise
+                        except Exception:
+                            # Keep waiting. A long silent tool call polls
+                            # for its whole length: one traceback is enough.
+                            status_failures += 1
+                            logger.log(
+                                logging.WARNING
+                                if status_failures == 1
+                                else logging.DEBUG,
+                                "Could not read the status of run %s on "
+                                "thread %s (failure %d)",
+                                run_id,
+                                request.thread_id,
+                                status_failures,
+                                exc_info=status_failures == 1,
+                            )
+                            finished_status = None
                         run_ended = finished_status is not None
                         quiet_deadline = loop.time() + (
                             _FINISHED_GRACE_SECONDS
@@ -1782,93 +1794,92 @@ class LangGraphServerGateway:
                         yield turn_event
                     if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
                         end_event = event_map
-                recovered: list[GraphEvent] = []
-                if end_event is None:
-                    # The run finished and its live envelopes stopped coming:
-                    # read it back from a new connection, which replays it.
-                    logger.warning(
-                        "Lost the live events of run %s on thread %s "
-                        "(status %s); reading the finished run back",
-                        run_id,
-                        request.thread_id,
-                        finished_status,
-                    )
-                    # The new connection replays earlier runs first. Its
-                    # events are held until the turn knows it can end with
-                    # a result, so the notice is never followed by a loss.
-                    accepting_run = False
-                    async with aclosing(
-                        self._finished_run_envelopes(request)
-                    ) as envelopes:
-                        async for event in envelopes:
-                            fed = await feed(event, read_back=True)
-                            if fed is None:
-                                continue
-                            turn_events, event_map = fed
-                            recovered.extend(turn_events)
-                            if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
-                                end_event = event_map
-                                break
-                    if end_event is not None:
-                        self._notify_recovered_turn()
-                        for turn_event in recovered:
-                            yield turn_event
-                if end_event is None:
-                    # The read-back did not reach the run's end: thread state
-                    # still has the reply, or the prompts of a pause.
-                    logger.warning(
-                        "Read-back of run %s on thread %s did not reach its "
-                        "end; using the thread state",
-                        run_id,
-                        request.thread_id,
-                    )
-                    if finished_status != "success":
-                        raise RuntimeError(
-                            f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
-                            f"status {finished_status}"
-                        )
-                    try:
-                        state = await self.thread_store.client.threads.get_state(
-                            request.thread_id
-                        )
-                    except Exception as exc:
-                        raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
-                    # What the turn has not shown of its answer, matched
-                    # against the text shown so far.
-                    values = state.get("values")
-                    answer_events = processor.complete_turn_from_messages(
-                        values.get("messages") if isinstance(values, dict) else None
-                    )
-                    state_events = list(answer_events or [])
-                    for interrupt in _state_interrupts(state):
-                        state_events.extend(
-                            await processor.process(
-                                _input_requested_event_from_interrupt(interrupt)
-                            )
-                        )
-                    if answer_events is None and not state_events:
-                        raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
-                    self._notify_recovered_turn()
-                    for turn_event in [*recovered, *state_events]:
-                        emitted_interrupt = emitted_interrupt or _is_interrupt_event(
-                            turn_event
-                        )
-                        yield turn_event
-                phase = None if end_event is None else _root_lifecycle_phase(end_event)
-                if phase == "failed":
-                    # End the turn through the error path, like a local failure.
-                    run_ended = True
-                    raise RuntimeError(_run_failure_message(end_event))
-                paused = phase == "interrupted"
-                run_completed = True
-                for event in await self._paused_interrupt_events(
+            # The live connection is closed before any read-back opens another.
+            recovered: list[GraphEvent] = []
+            if end_event is None:
+                # The run finished and its live envelopes stopped coming:
+                # read it back from a new connection, which replays it.
+                logger.warning(
+                    "Lost the live events of run %s on thread %s "
+                    "(status %s); reading the finished run back",
+                    run_id,
                     request.thread_id,
-                    processor,
-                    paused=paused,
-                    prompted=emitted_interrupt,
-                    run_id=run_id,
-                ):
-                    yield event
+                    finished_status,
+                )
+                # The new connection replays earlier runs first. Its
+                # events are held until the turn knows it can end with
+                # a result, so the notice is never followed by a loss.
+                accepting_run = False
+                async with aclosing(self._finished_run_envelopes(request)) as envelopes:
+                    async for event in envelopes:
+                        fed = await feed(event, read_back=True)
+                        if fed is None:
+                            continue
+                        turn_events, event_map = fed
+                        recovered.extend(turn_events)
+                        if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
+                            end_event = event_map
+                            break
+                if end_event is not None:
+                    self._notify_recovered_turn()
+                    for turn_event in recovered:
+                        yield turn_event
+            if end_event is None:
+                # The read-back did not reach the run's end: thread state
+                # still has the reply, or the prompts of a pause.
+                logger.warning(
+                    "Read-back of run %s on thread %s did not reach its "
+                    "end; using the thread state",
+                    run_id,
+                    request.thread_id,
+                )
+                if finished_status != "success":
+                    raise RuntimeError(
+                        f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
+                        f"status {finished_status}"
+                    )
+                try:
+                    state = await self.thread_store.client.threads.get_state(
+                        request.thread_id
+                    )
+                except Exception as exc:
+                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
+                # What the turn has not shown of its answer, matched
+                # against the text shown so far.
+                values = state.get("values")
+                answer_events = processor.complete_turn_from_messages(
+                    values.get("messages") if isinstance(values, dict) else None
+                )
+                state_events = list(answer_events or [])
+                for interrupt in _state_interrupts(state):
+                    state_events.extend(
+                        await processor.process(
+                            _input_requested_event_from_interrupt(interrupt)
+                        )
+                    )
+                if answer_events is None and not state_events:
+                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
+                self._notify_recovered_turn()
+                for turn_event in [*recovered, *state_events]:
+                    emitted_interrupt = emitted_interrupt or _is_interrupt_event(
+                        turn_event
+                    )
+                    yield turn_event
+            phase = None if end_event is None else _root_lifecycle_phase(end_event)
+            if phase == "failed":
+                # End the turn through the error path, like a local failure.
+                run_ended = True
+                raise RuntimeError(_run_failure_message(end_event))
+            paused = phase == "interrupted"
+            run_completed = True
+            for event in await self._paused_interrupt_events(
+                request.thread_id,
+                processor,
+                paused=paused,
+                prompted=emitted_interrupt,
+                run_id=run_id,
+            ):
+                yield event
             for event in tracker.finish():
                 yield event
         except _PauseStateReadError as exc:

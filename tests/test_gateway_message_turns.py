@@ -1814,3 +1814,181 @@ async def test_state_completion_reports_the_usage_live_never_got(
         {"type": "usage_stats", "input_tokens": 10, "output_tokens": 5}
     ]
     assert events[-1]["response"] == "Hello world"
+
+
+class _TailAfterStatusStream(FakeLangGraphThreadStream):
+    """The run's first envelopes arrive, then nothing until the turn has asked
+    for the status, then the rest: the grace period must catch them live."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.status_asked = asyncio.Event()
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        await self.run.started.wait()
+        yield self.queued_events[0]
+        yield self.queued_events[1]
+        await self.status_asked.wait()
+        for event in self.queued_events[2:]:
+            yield event
+        await asyncio.Event().wait()
+
+
+async def test_envelopes_arriving_in_the_grace_period_are_read_live(quiet_poll):
+    stream = _TailAfterStatusStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    get = runs.get
+
+    async def get_and_release(thread_id: str, run_id: str) -> dict[str, Any]:
+        run = await get(thread_id, run_id)
+        stream.status_asked.set()
+        return run
+
+    runs.get = get_and_release
+    gateway.events = _Notices()
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert stream.event_streams_opened == 1
+    assert gateway.events.lines == []
+
+
+class _BrokenReadBackStream(FakeLangGraphThreadStream):
+    """The read-back's connection fails."""
+
+    @property
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        self.event_streams_opened += 1
+        if self.event_streams_opened > 1:
+            raise ConnectionError("server gone")
+        return self._lossy_events(False)
+
+
+async def test_failed_read_back_connection_falls_back_to_state(quiet_poll, caplog):
+    stream = _BrokenReadBackStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+    assert "Could not read the finished run back" in caplog.text
+
+
+async def test_a_failing_notice_sink_does_not_end_the_turn(quiet_poll):
+    class _Broken(_Notices):
+        def emit_notice(self, text: str, style: str = "yellow") -> None:
+            raise RuntimeError("display gone")
+
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    gateway.events = _Broken()
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+
+
+async def test_abandoning_a_recovered_turn_does_not_cancel_the_finished_run(
+    quiet_poll,
+):
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    turn = gateway.stream_events(RunRequest(message="hi", thread_id=THREAD_ID))
+
+    async with asyncio.timeout(GUARD_SECONDS):
+        first = await anext(turn)
+        await turn.aclose()
+
+    assert first["type"] == "text"
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_shown_text_longer_than_the_stored_answer_raises(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=3, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    short = {
+        "messages": [
+            *_EARLIER_STATE["messages"],
+            {"type": "ai", "content": "Hello", "id": "ai-1"},
+        ]
+    }
+    _state_after_start(stream, threads, {"values": short})
+
+    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+        await _turn(gateway, "hi")
+
+
+async def test_thinking_of_a_message_whose_tool_call_was_shown_is_not_repeated(
+    quiet_poll,
+):
+    """A provider that does not stream its reasoning still stores it; a
+    message whose tool call the live stream showed has begun."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _text("First", "1-0"),
+        _finish("1-1"),
+        _tool("tool-started", "1-2", tool_name="execute", input={"command": "ls"}),
+        _tool("tool-finished", "1-3", tool_name="execute", output="a.txt"),
+        _lifecycle("run-1", "completed"),
+    ]
+    state = {
+        "messages": [
+            *_EARLIER_STATE["messages"],
+            {"type": "human", "content": "hi", "id": "human-1"},
+            {"type": "ai", "content": "First", "id": "ai-1"},
+            {
+                "type": "ai",
+                "content": [{"type": "reasoning", "reasoning": "list it"}],
+                "id": "ai-2",
+                "tool_calls": [
+                    {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+                ],
+            },
+            {
+                "type": "tool",
+                "content": "a.txt",
+                "id": "tool-1",
+                "name": "execute",
+                "tool_call_id": "call-1",
+            },
+        ]
+    }
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=4, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": state})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e["type"] for e in events] == ["text", "tool_call", "tool_result", "done"]
+
+
+async def test_repeated_status_failures_log_one_traceback(quiet_poll, caplog):
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    get = runs.get
+    calls = {"n": 0}
+
+    async def flaky(thread_id: str, run_id: str) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise ConnectionError("busy")
+        return await get(thread_id, run_id)
+
+    runs.get = flaky
+
+    with caplog.at_level("DEBUG", logger="EvoScientist.gateway.server"):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    failures = [r for r in caplog.records if "Could not read the status" in r.message]
+    assert [r.levelname for r in failures] == ["WARNING", "DEBUG", "DEBUG"]
+    assert [bool(r.exc_info) for r in failures] == [True, False, False]
