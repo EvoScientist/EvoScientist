@@ -47,6 +47,9 @@ def _clean_fallback_chain():
     fallback._reset_chain_initialization()
 
 
+_STOP_DETAILS = {"category": "safety", "explanation": "Cannot continue"}
+
+
 def _message(reason="refusal", *, content=None):
     return AIMessage(
         content=content
@@ -56,7 +59,7 @@ def _message(reason="refusal", *, content=None):
             "model_provider": "anthropic",
             "output_version": "v1",
             "stop_reason": reason,
-            "stop_details": {"category": "safety", "explanation": "Cannot continue"},
+            "stop_details": _STOP_DETAILS,
         },
     )
 
@@ -78,34 +81,33 @@ async def _call(middleware, handler, use_async, request=None):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("case", ["empty", "partial", "refusal-block", "normal"])
-async def test_v1_response_detection(use_async, case):
-    content = [] if case == "empty" else [{"type": "text", "text": "Partial answer"}]
-    if case == "refusal-block":
-        content = [
-            {
-                "type": "refusal",
-                "refusal": "Cannot continue",
-                "extras": {"category": "safety"},
-            }
-        ]
-    reason = "end_turn" if case == "normal" else "refusal"
-    message = _message(reason, content=content)
+async def test_refusal_detection_passes_normal_response(use_async):
+    message = _message("end_turn")
     response = ModelResponse(result=[message])
     middleware = [errors.ModelRefusalDetectionMiddleware()]
-    if reason == "end_turn":
-        result = await _call(middleware, lambda _: response, use_async)
-        assert result is response
-        assert result.result[0] is message
-        assert message.content == [{"type": "text", "text": "Partial answer"}]
-        return
+    result = await _call(middleware, lambda _: response, use_async)
+    assert result is response
+    assert result.result[0] is message
+    assert message.content == [{"type": "text", "text": "Partial answer"}]
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize("case", ["empty", "partial", "refusal-block"])
+async def test_refusal_detection_raises_on_metadata_only_refusal(use_async, case):
+    extras = {"category": "safety"}
+    block = {"type": "refusal", "refusal": "Cannot continue", "extras": extras}
+    text = {"type": "text", "text": "Partial answer"}
+    content = {"empty": [], "partial": [text], "refusal-block": [block]}[case]
+    message = _message(content=content)
+    response = ModelResponse(result=[message])
+    middleware = [errors.ModelRefusalDetectionMiddleware()]
     with pytest.raises(ModelRefusalError, match=r"safety.*Cannot continue") as caught:
         await _call(middleware, lambda _: response, use_async)
     raw = caught.value.raw_message
     assert raw.response_metadata == message.response_metadata
     assert sum(b["type"] == "refusal" for b in raw.content_blocks) == 1
     assert message.content == content
-    if any(b["type"] == "refusal" for b in content):
+    if case == "refusal-block":
         assert raw is message
 
 
@@ -127,9 +129,9 @@ async def test_existing_refusal_error_keeps_its_type_and_single_block(use_async)
     )
 
 
-def _provider_message(reason, *, message_id="msg_test", output_tokens=0):
+def _provider_message(reason, *, output_tokens=0):
     return {
-        "id": message_id,
+        "id": "msg_test",
         "type": "message",
         "role": "assistant",
         "model": "claude-sonnet-4-6",
@@ -140,15 +142,11 @@ def _provider_message(reason, *, message_id="msg_test", output_tokens=0):
     }
 
 
-def _stop_details():
-    return {"category": "safety", "explanation": "Cannot continue"}
-
-
 def _sse(reason, *, text="Partial answer"):
     delta = {
         "stop_reason": reason,
         "stop_sequence": None,
-        "stop_details": _stop_details(),
+        "stop_details": _STOP_DETAILS,
     }
     events = [
         _event("message_start", message=_provider_message(None)),
@@ -195,7 +193,7 @@ async def anthropic_model():
 
 @pytest.mark.parametrize("reason", ["refusal", "end_turn"])
 @pytest.mark.parametrize("with_fallback", [False, True])
-async def test_real_anthropic_stream_through_local_gateway(
+async def test_local_gateway_fails_turn_on_streamed_refusal(
     anthropic_model, reason, with_fallback, workspace, monkeypatch
 ):
     model = anthropic_model(reason)
@@ -217,11 +215,9 @@ async def test_real_anthropic_stream_through_local_gateway(
         metadata = caught.value.__cause__.raw_message.response_metadata
         assert metadata["output_version"] == "v1"
     else:
-        assert await stream_json(LocalGraphGateway(), request, out=output) == (
-            "Partial answer\n\nFallback answer"
-            if reason == "refusal"
-            else "Partial answer"
-        )
+        tail = "\n\nFallback answer" if reason == "refusal" else ""
+        answer = await stream_json(LocalGraphGateway(), request, out=output)
+        assert answer == "Partial answer" + tail
     events = [json.loads(line) for line in output.getvalue().splitlines()]
     assert any(e["type"] == "text" and "Partial answer" in e["content"] for e in events)
     assert events[-1]["type"] == ("error" if failed else "done")
@@ -242,28 +238,46 @@ def test_single_shot_cli_reports_refusal(
     monkeypatch.setattr(commands, "_ensure_async_subagent_server", lambda *a, **k: None)
     monkeypatch.setattr(commands, "_load_agent", lambda **kwargs: graph)
     monkeypatch.setattr(commands, "_wait_for_memory_workers", lambda *a, **k: None)
-
     result = CliRunner().invoke(
         app,
         ["-p", "hello", "--workdir", str(tmp_path), "--output-format", output_format],
     )
-
     assert result.exit_code == (1 if reason == "refusal" else 0), result.output
     if output_format == "stream-json":
         events = [json.loads(line) for line in result.stdout.splitlines()]
         assert events[-1]["type"] == ("error" if reason == "refusal" else "done")
 
 
-def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
+def _task_graph(workspace, child):
     class Parent(FakeMessagesListChatModel):
         def bind_tools(self, tools, **kwargs):
             return self
 
+    task = {
+        "name": "task",
+        "id": "task-1",
+        "args": {"subagent_type": "researcher", "description": "hello"},
+    }
+    parent = Parent(
+        responses=[
+            AIMessage(content="", tool_calls=[task]),
+            AIMessage(content="Continue without the researcher"),
+        ]
+    )
+    subagent = {
+        "name": "researcher",
+        "description": "Research",
+        "system_prompt": "Research",
+        "model": child,
+        "middleware": _refusal_stack(workspace, child, "sync-subagent"),
+    }
+    return create_deep_agent(model=parent, subagents=[subagent])
+
+
+def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
     def respond(request):
-        payload = _provider_message(
-            "refusal", message_id="msg_refused", output_tokens=1
-        )
-        payload["stop_details"] = _stop_details()
+        payload = _provider_message("refusal", output_tokens=1)
+        payload["stop_details"] = _STOP_DETAILS
         return httpx2.Response(200, json=payload)
 
     with httpx2.Client(transport=httpx2.MockTransport(respond)) as client:
@@ -271,34 +285,35 @@ def test_sync_task_reports_before_output_refusal_as_a_notice(workspace):
         child.__dict__["_client"] = anthropic.Anthropic(
             api_key="test", max_retries=0, http_client=client
         )
-        task = {
-            "name": "task",
-            "id": "task-1",
-            "args": {"subagent_type": "researcher", "description": "hello"},
-        }
-        parent = Parent(
-            responses=[
-                AIMessage(content="", tool_calls=[task]),
-                AIMessage(content="Continue without the researcher"),
-            ]
-        )
-        subagent = {
-            "name": "researcher",
-            "description": "Research",
-            "system_prompt": "Research",
-            "model": child,
-            "middleware": _refusal_stack(workspace, child, "sync-subagent"),
-        }
-        graph = create_deep_agent(model=parent, subagents=[subagent])
+        graph = _task_graph(workspace, child)
         result = graph.invoke({"messages": [{"role": "user", "content": "hello"}]})
 
-    tasks = [m for m in result["messages"] if isinstance(m, ToolMessage)]
-    assert len(tasks) == 1
-    assert (
-        "The subagent stopped because a model refused the request" in tasks[0].content
+    messages = result["messages"]
+    (task,) = [m for m in messages if isinstance(m, ToolMessage)]
+    assert "The subagent stopped because a model refused the request" in task.content
+    assert "Cannot continue" in task.content
+    assert messages[-1].content == "Continue without the researcher"
+
+
+async def test_sync_task_reports_streamed_refusal_as_a_notice(
+    anthropic_model, workspace
+):
+    graph = _task_graph(workspace, anthropic_model("refusal"))
+    request = RunRequest(
+        message="hello", thread_id="task-refusal", target=GraphTarget(local_graph=graph)
     )
-    assert "Cannot continue" in tasks[0].content
-    assert result["messages"][-1].content == "Continue without the researcher"
+    output = io.StringIO()
+    answer = await stream_json(LocalGraphGateway(), request, out=output)
+
+    assert answer == "Continue without the researcher"
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert {"subagent": "researcher", "content": "Partial answer"}.items() <= next(
+        e for e in events if e["type"] == "subagent_text"
+    ).items()
+    (task,) = [e for e in events if e["type"] == "tool_result"]
+    assert "The subagent stopped because a model refused the request" in task["content"]
+    assert "Cannot continue" in task["content"]
+    assert events[-1]["type"] == "done"
 
 
 def test_main_refusal_keeps_its_webui_message():
@@ -306,8 +321,8 @@ def test_main_refusal_keeps_its_webui_message():
         {"type": "refusal", "refusal": "Cannot continue"}, raw_message=_message()
     )
     normalized = errors._normalize(SimpleNamespace(model=_model()), refusal)
-    payload = json.loads(json_dumpb(normalized if normalized is not None else refusal))
-
+    assert normalized is not None
+    payload = json.loads(json_dumpb(normalized))
     assert "Model refused" in payload["message"]
     assert "Cannot continue" in payload["message"]
     assert payload["provider"] == "anthropic"
@@ -335,12 +350,8 @@ def _refusal_stack(workspace, model, kind):
             for_async_subagent=kind == "async-subagent",
         )
     # Exercise the factory's error-handling order without unrelated tools or memory.
-    return [
-        m
-        for m in middleware
-        if m.name
-        in {"error_normalization", "model_fallback", "model_refusal_detection"}
-    ]
+    keep = {"error_normalization", "model_fallback", "model_refusal_detection"}
+    return [m for m in middleware if m.name in keep]
 
 
 @pytest.mark.parametrize("kind", ["main", "async-subagent"])
@@ -355,11 +366,7 @@ async def test_refused_primary_uses_configured_fallbacks(
 ):
     primary = _model()
     fallbacks = [
-        ChatAnthropic(
-            model="fallback",
-            api_key="test",
-            base_url="https://api.minimaxi.com/anthropic",
-        )
+        _model("fallback", base_url="https://api.minimaxi.com/anthropic")
         for _ in fallback_reasons
     ]
     reasons = {id(primary): "refusal"}
@@ -379,9 +386,7 @@ async def test_refused_primary_uses_configured_fallbacks(
         return ModelResponse(result=[_message(reason, content=content)])
 
     request = ModelRequest(model=primary, messages=[], tools=[], state={})
-
-    async def run():
-        return await _call(middleware, answer, use_async, request)
+    run = partial(_call, middleware, answer, use_async, request)
 
     if "end_turn" in fallback_reasons:
         response = await run()

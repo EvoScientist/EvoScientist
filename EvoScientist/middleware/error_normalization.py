@@ -191,6 +191,7 @@ def _check_refusal_output(response: ModelResponse) -> ModelResponse:
         if refusal is None:
             # v3 marks the assembled list as v1, bypassing the Anthropic
             # translator that normally derives this block from stop_details.
+            # (langchain-ai/langchain#42026)
             details = message.response_metadata.get("stop_details")
             if not isinstance(details, dict):
                 details = {}
