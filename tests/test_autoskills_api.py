@@ -1182,7 +1182,7 @@ def test_approve_route_reports_post_install_staleness_with_cleanup_detail(
     assert _only_draft(server)["status"] == "pending"
 
 
-def test_approve_route_without_client_digest_installs_the_current_snapshot(
+def test_approve_route_without_client_digest_refuses_a_draft_rewritten_since_submit(
     server, served, secret, quiet_skill_index
 ):
     _draft(served, "focused-validation")
@@ -1190,8 +1190,9 @@ def test_approve_route_without_client_digest_installs_the_current_snapshot(
     skill = (
         autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation" / "SKILL.md"
     )
+    # The agent's write_file takes no lock and leaves the version as it was.
     skill.write_text(
-        skill.read_text(encoding="utf-8").replace("Steps.", "Current WebUI body."),
+        skill.read_text(encoding="utf-8").replace("Steps.", "Rewritten after submit."),
         encoding="utf-8",
     )
 
@@ -1201,12 +1202,15 @@ def test_approve_route_without_client_digest_installs_the_current_snapshot(
         "approve",
         secret,
         scope="workspace",
-        expected_updated_at=shown["expected_updated_at"],
+        expected_updated_at=shown["updated_at"],
     )
 
-    assert response.status_code == 200, response.json()
-    installed = served.skills_dir / "focused-validation" / "SKILL.md"
-    assert "Current WebUI body." in installed.read_text(encoding="utf-8")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"] == "draft_changed", body
+    assert body["detail"] == "Proposal changed since it was submitted; resubmit it"
+    assert not (served.skills_dir / "focused-validation").exists()
+    assert _only_draft(server)["status"] == "pending"
 
 
 def test_approve_route_global_scope(server, served, secret, quiet_skill_index):

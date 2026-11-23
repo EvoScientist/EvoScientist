@@ -375,6 +375,98 @@ def test_approval_refuses_content_changed_since_the_client_digest(tmp_path):
     assert not (skills_dir / "focused-validation").exists()
 
 
+def test_approval_without_a_client_digest_refuses_a_draft_rewritten_since_submit(
+    tmp_path,
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    # The agent's file writes take no lock and leave the version as it was.
+    skill = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8") + "Changed after it was submitted.\n",
+        encoding="utf-8",
+    )
+
+    result = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir
+    )
+
+    assert result["approved"] is False
+    assert result["error"] == "Proposal changed since it was submitted; resubmit it"
+    assert not (skills_dir / "focused-validation").exists()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+
+    _resubmit_focused_validation(memory_dir, skills_dir)
+
+    assert _approve_quietly(memory_dir, "focused-validation", skills_dir)["approved"]
+    installed = skills_dir / "focused-validation" / "SKILL.md"
+    assert "Changed after it was submitted." in installed.read_text(encoding="utf-8")
+
+
+def test_auto_approval_refuses_a_draft_rewritten_since_submit(tmp_path):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    skill = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8") + "Changed after it was submitted.\n",
+        encoding="utf-8",
+    )
+
+    result = approve_skill_proposal(
+        memory_dir, "focused-validation", skills_dir=skills_dir, approved_by="auto"
+    )
+
+    assert result["approved"] is False
+    assert result["error"] == "Proposal changed since it was submitted; resubmit it"
+    assert not (skills_dir / "focused-validation").exists()
+
+
+def test_a_draft_submitted_before_the_digest_was_recorded_is_approved(tmp_path):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    _edit_manifest(memory_dir, "focused-validation", content_digest=None)
+    skill = autoskill_proposals_dir(memory_dir) / "focused-validation" / "SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8") + "Edited since it was submitted.\n",
+        encoding="utf-8",
+    )
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = approve_skill_proposal(
+            memory_dir, "focused-validation", skills_dir=skills_dir
+        )
+
+    assert result["approved"] is True, result
+    installed = skills_dir / "focused-validation" / "SKILL.md"
+    assert "Edited since it was submitted." in installed.read_text(encoding="utf-8")
+
+
+def test_the_digest_of_what_the_client_was_shown_is_the_comparison_point(tmp_path):
+    from EvoScientist.memory.autoskills.proposals import _content_digest
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    folder = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (folder / "SKILL.md").write_text(
+        (folder / "SKILL.md").read_text(encoding="utf-8") + "Edited after submit.\n",
+        encoding="utf-8",
+    )
+    # The client renders the draft as it is now, and vouches for that text.
+    shown = _content_digest(folder)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = approve_skill_proposal(
+            memory_dir,
+            "focused-validation",
+            skills_dir=skills_dir,
+            expected_content_digest=shown,
+        )
+
+    assert result["approved"] is True, result
+    installed = skills_dir / "focused-validation" / "SKILL.md"
+    assert "Edited after submit." in installed.read_text(encoding="utf-8")
+
+
 def test_the_snapshot_is_copied_without_the_install_copy(tmp_path, monkeypatch):
     """The snapshot copy is its own step, not the install copy.
 
@@ -2554,6 +2646,8 @@ def test_draft_linking_inside_its_folder_is_approved(tmp_path):
     (folder / "scripts").mkdir()
     (folder / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")
     (folder / "check-link.py").symlink_to(folder / "scripts" / "check.py")
+    # The digest is recorded at submit, so the link has to be part of a submission.
+    _submit_focused_validation(memory_dir, skills_dir)
 
     with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
         approved = approve_skill_proposal(

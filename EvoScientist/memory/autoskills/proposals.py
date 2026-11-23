@@ -1838,19 +1838,32 @@ def approve_skill_proposal(
                     }
                 if failure is not None:
                     return failure
-                submission_digest = None
-                if approved_by == "auto":
+                recorded_digest = manifest.get("content_digest")
+                if not isinstance(recorded_digest, str) or not _DIGEST_RE.fullmatch(
+                    recorded_digest
+                ):
+                    # A draft submitted before the digest was recorded has none.
+                    recorded_digest = None
+                if approved_by == "auto" and recorded_digest is None:
                     # A preview cannot substitute for the submission in AUTO mode.
-                    recorded_digest = manifest.get("content_digest")
-                    if not isinstance(recorded_digest, str) or not _DIGEST_RE.fullmatch(
-                        recorded_digest
-                    ):
-                        return {
-                            "approved": False,
-                            "proposal_id": manifest.get("proposal_id"),
-                            "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
-                        }
-                    submission_digest = recorded_digest
+                    return {
+                        "approved": False,
+                        "proposal_id": manifest.get("proposal_id"),
+                        "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
+                    }
+                # A draft submitted before the digest was recorded has nothing to
+                # compare against.
+                compared: str | None = None
+                changed = ""
+                if approved_by == "auto" or expected_content_digest is None:
+                    # The comparison point is the submission, as in AUTO mode: a
+                    # draft rewritten in place since then has to be resubmitted.
+                    compared = recorded_digest
+                    changed = "Proposal changed since it was submitted; resubmit it"
+                else:
+                    # The client's digest is of what it was shown.
+                    compared = expected_content_digest
+                    changed = "Proposal changed since it was shown"
                 try:
                     snapshot, snapshot_digest, approved_digests = _snapshot_proposal(
                         memory_dir, proposal_dir
@@ -1861,15 +1874,12 @@ def approve_skill_proposal(
                         "proposal_id": manifest.get("proposal_id"),
                         "error": f"Could not snapshot the skill: {exc}",
                     }
-                if any(
-                    digest is not None and digest != snapshot_digest
-                    for digest in (submission_digest, expected_content_digest)
-                ):
+                if compared is not None and compared != snapshot_digest:
                     return {
                         "approved": False,
                         "proposal_id": manifest.get("proposal_id"),
                         "content_digest": snapshot_digest,
-                        "error": "Proposal changed since it was shown",
+                        "error": changed,
                     }
                 decision_updated_at = manifest["updated_at"]
         except FileLockTimeout:

@@ -374,6 +374,10 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     error = str(result.get("error") or "")
     if error.startswith("Only pending proposals"):
         return 409, {"error": "not_pending", "status": result.get("status")}
+    if error.startswith("Proposal changed since it was submitted"):
+        # The version is the same as the client's, so there is nothing to
+        # reload: the draft has to be submitted again.
+        return 409, {"error": "draft_changed", "detail": _failure_text(result)}
     if error.startswith(
         ("Proposal changed since it was read", "Proposal changed since it was shown")
     ):
@@ -499,10 +503,12 @@ def decide(
     expected_updated_at: object = None,
     expected_content_digest: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Decide one served draft, refusing versions or content the client did not read.
+    """Decide one served draft, refusing a version or content the client did not read.
 
-    The shipped WebUI omits ``expected_content_digest``; its absence leaves that
-    optional check disabled while ``expected_updated_at`` still guards the version.
+    A client that sends ``expected_content_digest`` vouches for the content it
+    was shown. The shipped WebUI sends none, so its decision is checked against
+    the digest recorded when the draft was submitted: one rewritten in place
+    since then is refused until it is submitted again.
     """
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
