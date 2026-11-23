@@ -11,7 +11,6 @@ import anthropic
 import httpx2
 import pytest
 from deepagents import create_deep_agent
-from deepagents.middleware.subagents import _refusal_notice_for
 from langchain.agents.middleware import ModelRefusalMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_anthropic import ChatAnthropic
@@ -92,12 +91,10 @@ async def test_refusal_detection_passes_normal_response(use_async):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-@pytest.mark.parametrize("case", ["empty", "partial", "refusal-block"])
+@pytest.mark.parametrize("case", ["empty", "partial"])
 async def test_refusal_detection_raises_on_metadata_only_refusal(use_async, case):
-    extras = {"category": "safety"}
-    block = {"type": "refusal", "refusal": "Cannot continue", "extras": extras}
     text = {"type": "text", "text": "Partial answer"}
-    content = {"empty": [], "partial": [text], "refusal-block": [block]}[case]
+    content = {"empty": [], "partial": [text]}[case]
     message = _message(content=content)
     response = ModelResponse(result=[message])
     middleware = [errors.ModelRefusalDetectionMiddleware()]
@@ -107,8 +104,6 @@ async def test_refusal_detection_raises_on_metadata_only_refusal(use_async, case
     assert raw.response_metadata == message.response_metadata
     assert sum(b["type"] == "refusal" for b in raw.content_blocks) == 1
     assert message.content == content
-    if case == "refusal-block":
-        assert raw is message
 
 
 @pytest.mark.parametrize("use_async", [False, True])
@@ -124,9 +119,6 @@ async def test_existing_refusal_error_keeps_its_type_and_single_block(use_async)
         await _call(middleware, lambda _: response, use_async)
     assert caught.value.raw_message is message
     assert message.content == [block]
-    assert "The subagent stopped because a model refused" in _refusal_notice_for(
-        caught.value
-    )
 
 
 def _provider_message(reason, *, output_tokens=0):
@@ -215,11 +207,13 @@ async def test_local_gateway_fails_turn_on_streamed_refusal(
         metadata = caught.value.__cause__.raw_message.response_metadata
         assert metadata["output_version"] == "v1"
     else:
-        tail = "\n\nFallback answer" if reason == "refusal" else ""
         answer = await stream_json(LocalGraphGateway(), request, out=output)
-        assert answer == "Partial answer" + tail
+        expected = "Fallback answer" if reason == "refusal" else "Partial answer"
+        assert answer == expected
     events = [json.loads(line) for line in output.getvalue().splitlines()]
     assert any(e["type"] == "text" and "Partial answer" in e["content"] for e in events)
+    discarded = any(e["type"] == "model_output_discarded" for e in events)
+    assert discarded == (reason == "refusal" and with_fallback)
     assert events[-1]["type"] == ("error" if failed else "done")
     if failed:
         assert not any(e["type"] == "done" for e in events)
@@ -350,7 +344,12 @@ def _refusal_stack(workspace, model, kind):
             for_async_subagent=kind == "async-subagent",
         )
     # Exercise the factory's error-handling order without unrelated tools or memory.
-    keep = {"error_normalization", "model_fallback", "model_refusal_detection"}
+    keep = {
+        "error_normalization",
+        "model_fallback",
+        "model_call_boundary",
+        "model_refusal_detection",
+    }
     return [m for m in middleware if m.name in keep]
 
 

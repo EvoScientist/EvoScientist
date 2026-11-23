@@ -415,7 +415,6 @@ def _inject_subagent_middleware(
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
             create_context_editing_middleware(chat_model),
-            ModelRefusalDetectionMiddleware(),
             create_runtime_context_middleware(),
             ToolErrorHandlerMiddleware(),
             WindowsFilePathMiddleware(),
@@ -424,6 +423,7 @@ def _inject_subagent_middleware(
             # Inside the retry layer: marks each provider call for the
             # stream decoder.
             ModelCallBoundaryMiddleware(),
+            ModelRefusalDetectionMiddleware(),
         ]
         if memory_controls.memory_enabled:
             middleware.append(memory_middleware)
@@ -1104,7 +1104,6 @@ def _get_default_middleware(
         ConfigurableModelMiddleware(),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),
-        ModelRefusalDetectionMiddleware(),
         ContextOverflowMapperMiddleware(),
         ToolErrorHandlerMiddleware(),
         WindowsFilePathMiddleware(),
@@ -1124,6 +1123,7 @@ def _get_default_middleware(
         # Inside the fallback chain and the tool selector: marks each
         # provider call for the stream decoder.
         ModelCallBoundaryMiddleware(),
+        ModelRefusalDetectionMiddleware(),
     ]
     if cfg.enable_scheduler and not for_async_subagent:
         mw.append(create_scheduler_middleware(workspace))

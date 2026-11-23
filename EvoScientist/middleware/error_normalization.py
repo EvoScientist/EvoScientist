@@ -186,19 +186,17 @@ def _check_refusal_output(response: ModelResponse) -> ModelResponse:
             continue
         if message.response_metadata.get("stop_reason") != "refusal":
             continue
-        blocks = message.content_blocks
-        refusal = next((b for b in blocks if b.get("type") == "refusal"), None)
-        if refusal is None:
-            # v3 marks the assembled list as v1, bypassing the Anthropic
-            # translator that normally derives this block from stop_details.
-            # (langchain-ai/langchain#42026)
-            details = message.response_metadata.get("stop_details")
-            if not isinstance(details, dict):
-                details = {}
-            refusal = {"type": "refusal", "refusal": details.get("explanation") or ""}
-            if category := details.get("category"):
-                refusal["extras"] = {"category": category}
-            message = message.model_copy(update={"content": [*blocks, refusal]})
+        # v3 marks the assembled list as v1, bypassing the Anthropic
+        # translator that normally derives this block from stop_details.
+        # (langchain-ai/langchain#42026)
+        details = message.response_metadata.get("stop_details")
+        if not isinstance(details, dict):
+            details = {}
+        refusal = {"type": "refusal", "refusal": details.get("explanation") or ""}
+        if category := details.get("category"):
+            refusal["extras"] = {"category": category}
+        content = [*message.content_blocks, refusal]
+        message = message.model_copy(update={"content": content})
         raise ModelRefusalError.from_refusal(refusal, raw_message=message)
     return response
 
@@ -206,7 +204,8 @@ def _check_refusal_output(response: ModelResponse) -> ModelResponse:
 class ModelRefusalDetectionMiddleware(AgentMiddleware):
     """Raise ModelRefusalError for refusals recorded only in response metadata.
 
-    List it after ModelFallbackMiddleware so every fallback attempt is checked.
+    List it after ModelCallBoundaryMiddleware: each fallback attempt is checked,
+    and a refused attempt's streamed output is dropped like a failed one's.
     """
 
     name = "model_refusal_detection"
