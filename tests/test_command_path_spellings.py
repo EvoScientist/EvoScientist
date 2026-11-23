@@ -774,6 +774,10 @@ def test_windows_spaced_root_normalizes_case_and_separators(
         'cd sub && D="/tmp/build"; mkdir -p $D',
         "cd sub && export D=/tmp/build; ls $D",
         "cd sub && declare -x D=/tmp/build; ls $D",
+        "cd sub && D=/tmp/build E=ok; mkdir -p $D",
+        "cd sub && D=/tmp/build E=ok\nmkdir -p $D",
+        "cd sub && command export D=/tmp/build; mkdir -p $D",
+        "cd sub && builtin declare -x D=/tmp/build; mkdir -p $D",
     ],
 )
 def test_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
@@ -797,6 +801,8 @@ def test_assignment_after_cd_in_spaced_workspace_is_refused(tmp_path, command):
         "cd sub && make OUT=/tmp/build",
         "OUT=build; cd sub && make OUT=/tmp/build",
         "cd sub && OUT=/tmp/build make",
+        "cd sub && OUT=/tmp/build E=ok make",
+        "cd sub && command make OUT=/tmp/build",
     ],
 )
 def test_spaced_workspace_paths_outside_assignments_after_cd_still_map(

@@ -2476,32 +2476,40 @@ def _sets_shell_variable(
     if index is None:
         return False
     if words.name_flags[index]:
-        following = next(
-            (at for at, token in enumerate(tokens) if int(token["start"]) >= end),
-            None,
-        )
-        return not (
-            following is not None
-            and words.name_flags[following]
-            and tokens[following]["type"] == "word"
-            and shell_syntax.command_newline(
-                command, end, int(tokens[following]["start"])
-            )
-            is None
-        )
-    name = next(
-        (
-            str(token["value"])
-            for token, is_name in zip(
-                reversed(tokens[:index]),
-                reversed(words.name_flags[:index]),
-                strict=True,
-            )
-            if is_name and not shell_syntax.ASSIGNMENT_RE.match(str(token["raw"]))
-        ),
-        None,
+        # The assignments after it on the line are one group, a prefix only
+        # when a command follows the group.
+        previous_end = end
+        for token, is_name in zip(
+            tokens[index + 1 :], words.name_flags[index + 1 :], strict=True
+        ):
+            if (
+                not is_name
+                or token["type"] != "word"
+                or shell_syntax.command_newline(
+                    command, previous_end, int(token["start"])
+                )
+                is not None
+            ):
+                return True
+            if not shell_syntax.ASSIGNMENT_RE.match(str(token["raw"])):
+                return False
+            previous_end = int(token["end"])
+        return True
+    # The command and the words before this one (`command export D=x`).
+    before: list[str] = []
+    for token, is_name in zip(
+        reversed(tokens[:index]), reversed(words.name_flags[:index]), strict=True
+    ):
+        before.append(str(token["value"]))
+        if is_name and not shell_syntax.ASSIGNMENT_RE.match(str(token["raw"])):
+            break
+    else:
+        return False
+    name = before[-1]
+    return name in shell_syntax.DECLARATION_NAMES or (
+        name in shell_syntax.WRAPPER_NAMES
+        and any(word in shell_syntax.DECLARATION_NAMES for word in before[:-1])
     )
-    return name in shell_syntax.DECLARATION_NAMES
 
 
 def _adds_whitespace(path: str, rewritten: str | None) -> bool:
