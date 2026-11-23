@@ -557,21 +557,17 @@ class TestBuildConnections:
             assert Path(conns["fs"]["command"]).parent == own_bin
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX empty PATH entry searches cwd")
-    def test_env_node_shebang_with_cleaned_path_skips_fake_node_in_cwd(
+    def test_node_server_path_skips_fake_node_in_cwd(
         self, monkeypatch, node_rules, tmp_path
     ):
         """Looking up node on the cleaned PATH does not resolve to a fake node in cwd."""
         cwd = tmp_path / "cwd"
-        cwd.mkdir()
-        fake_node = cwd / "node"
-        fake_node.write_text("#!/bin/sh\necho FAKE_NODE\nexit 1\n")
-        fake_node.chmod(0o755)
-
         real_bin = tmp_path / "real_bin"
-        real_bin.mkdir()
-        real_node = real_bin / "node"
-        real_node.write_text("#!/bin/sh\necho REAL_NODE\n")
-        real_node.chmod(0o755)
+        for folder in (cwd, real_bin):
+            folder.mkdir()
+            node = folder / "node"
+            node.write_text("#!/bin/sh\n")
+            node.chmod(0o755)
 
         monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(real_bin)]))
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
