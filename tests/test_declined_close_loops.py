@@ -9,6 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
+from EvoScientist.paths import Workspace
 from EvoScientist.stream import display as display_mod
 from tests.fakes.common import (
     FakeCheckpointAgent,
@@ -317,6 +318,7 @@ class TestConsumerClosesAtADecline:
             manager=manager,
             agent=agent,
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=gateway,
             max_concurrent=2,
             max_pending=10,

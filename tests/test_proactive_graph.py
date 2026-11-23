@@ -10,6 +10,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph_sdk.errors import NotFoundError
 
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.proactive import cron as proactive_cron
 from EvoScientist.proactive import graph as proactive_graph
 from EvoScientist.proactive.commit import build_proactive_tag
@@ -52,7 +53,7 @@ def test_create_proactive_cron_binds_a_rejecting_cron_to_the_thread(workspace):
         client, workspace, thread_id="t-cron", candidates=["t1"], timezone="UTC"
     )
     args = client.crons.create_for_thread.call_args
-    assert args.args == ("t-cron", "proactive")
+    assert args.args == ("t-cron", workspace_assistant_id("proactive", workspace))
     assert args.kwargs["schedule"] == "*/10 * * * *"
     assert args.kwargs["input"] == {"candidates": [{"thread_id": "t1"}]}
     assert args.kwargs["metadata"]["run_kind"] == "proactive_check"
@@ -78,8 +79,16 @@ def test_list_proactive_crons_keeps_only_this_workspace(workspace, tmp_path):
     client = MagicMock()
     client.crons.search.side_effect = [
         [
-            {"cron_id": "c1", "metadata": {"workspace_dir": workspace.key}},
-            {"cron_id": "c2", "metadata": {"workspace_dir": other.as_posix()}},
+            {
+                "cron_id": "c1",
+                "assistant_id": workspace_assistant_id("proactive", workspace),
+                "metadata": {"workspace_dir": workspace.key},
+            },
+            {
+                "cron_id": "c2",
+                "assistant_id": workspace_assistant_id("proactive", other.as_posix()),
+                "metadata": {"workspace_dir": workspace.key},
+            },
         ],
         [],
     ]

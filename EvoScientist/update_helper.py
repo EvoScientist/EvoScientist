@@ -5,12 +5,13 @@ On Windows a process running from the uv tool environment keeps its files
 open, and a ``uv tool install --force`` that fails on them leaves the
 environment broken. ``EvoSci`` itself runs from that environment, so it
 cannot stay alive while uv replaces it: after the version lookup, the
-constraints download and the server check, it writes this helper, starts it
-and exits. The helper (Windows PowerShell, not the environment's Python)
-waits with no time limit until no process runs from the environment, runs
-uv (with one retry after another wait), runs the new ``EvoSci setup`` and
-writes the update's terminal line. Whatever fails, from reading its config
-on, ends with exactly one terminal line.
+constraints download, the server check and a trial install into a scratch
+tool dir, it writes this helper, starts it and exits. The helper (Windows
+PowerShell, not the environment's Python) waits with no time limit until
+no process runs from the environment, runs uv (with one retry after
+another wait), runs the new ``EvoSci setup`` and writes the update's
+terminal line. Whatever fails, from reading its config on, ends with
+exactly one terminal line.
 
 One helper runs at a time: a second update while one waits or installs ends
 with ``environment_busy`` (an empty ``detail.waiting_for``) and changes
@@ -267,7 +268,7 @@ public static extern bool WriteFile(IntPtr hFile, byte[] buffer, uint count, out
         $rc = Invoke-Uv
     }
     if ($rc -ne 0) {
-        Emit 'error' "uv could not install EvoScientist $($cfg.target) (exit $rc, see its output).$($cfg.install_hint) If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" $null 'install_failed'
+        Emit 'error' "uv could not install EvoScientist $($cfg.target) (exit $rc, see its output). If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" $null 'install_failed'
         $finished = $true
         return
     }

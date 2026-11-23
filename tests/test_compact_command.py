@@ -545,3 +545,89 @@ class TestCompactCommandUI:
 
         result = CompactResult("ok", "hello world")
         assert str(result) == "hello world"
+
+
+class TestCompactKeptReasoning:
+    """Claude binds a reasoning block to the history before it, so messages kept
+    across a /compact must lose theirs, as after an automatic summary."""
+
+    @staticmethod
+    def _claude_reply(text: str):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": text},
+            ],
+            response_metadata={
+                "model_provider": "anthropic",
+                "model_name": "claude-sonnet-5-5",
+            },
+        )
+
+    async def test_kept_messages_drop_bound_reasoning(self, workspace, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from deepagents.middleware.summarization import SummarizationMiddleware
+        from langchain_core.language_models import FakeListChatModel
+        from langchain_core.messages import HumanMessage
+
+        messages = TestCompactOffloadWire._build_messages()[:-1]
+        messages.append(self._claude_reply("answer 3 " * 50))
+        graph_gateway = FakeGraphGateway(
+            state_values={"messages": messages, "_summarization_event": None}
+        )
+
+        result = await TestCompactOffloadWire()._compact_real(
+            graph_gateway, workspace, tmp_path
+        )
+
+        assert result.status == "ok"
+        event = graph_gateway.updated_states[0][2]["_summarization_event"]
+        assert event["created_at_index"] == len(messages)
+        later = [*messages, HumanMessage("next"), self._claude_reply("new answer")]
+        middleware = SummarizationMiddleware(
+            model=FakeListChatModel(responses=["unused"]),
+            backend=FilesystemBackend(root_dir=tmp_path),
+        )
+        effective = middleware._apply_event_to_messages(later, event)
+        kept, new = effective[-3], effective[-1]
+        assert [block["type"] for block in kept.content] == ["text"]
+        assert [block["type"] for block in new.content] == ["thinking", "text"]
+
+    async def test_index_counts_raw_state_messages_after_an_earlier_summary(
+        self, workspace, tmp_path
+    ):
+        from deepagents.backends import FilesystemBackend
+        from deepagents.middleware.summarization import SummarizationMiddleware
+        from langchain_core.language_models import FakeListChatModel
+        from langchain_core.messages import HumanMessage
+
+        messages = TestCompactOffloadWire._build_messages()
+        messages += [HumanMessage("question 4 " * 50), self._claude_reply("a4 " * 50)]
+        earlier = {
+            "cutoff_index": 4,
+            "summary_message": HumanMessage("earlier summary"),
+            "file_path": None,
+        }
+        graph_gateway = FakeGraphGateway(
+            state_values={"messages": messages, "_summarization_event": earlier}
+        )
+
+        result = await TestCompactOffloadWire()._compact_real(
+            graph_gateway, workspace, tmp_path
+        )
+
+        assert result.status == "ok"
+        event = graph_gateway.updated_states[0][2]["_summarization_event"]
+        middleware = SummarizationMiddleware(
+            model=FakeListChatModel(responses=["unused"]),
+            backend=FilesystemBackend(root_dir=tmp_path),
+        )
+        # The earlier summary makes the effective list shorter than the state.
+        assert len(middleware._apply_event_to_messages(messages, earlier)) < len(
+            messages
+        )
+        assert event["created_at_index"] == len(messages)
+        kept = middleware._apply_event_to_messages(messages, event)[-1]
+        assert [block["type"] for block in kept.content] == ["text"]

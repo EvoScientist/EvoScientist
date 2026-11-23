@@ -1,0 +1,1141 @@
+"""A media file the agent writes or reads is sent to the channel chat.
+
+Covers the Rich loop, the TUI and the standalone runner's consumer, which all
+forward through ``display.forward_media_result``. deepagents' ``write_file``
+and ``read_file`` name the file in ``file_path``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from EvoScientist.stream import display as display_mod
+from tests.fakes.common import FakeGraphGateway, stub_consumer
+
+_END = [
+    {"type": "text", "content": "finished"},
+    {"type": "done", "response": "finished"},
+]
+
+
+def _call(call_id: str, tool_name: str, args: dict) -> dict:
+    return {"type": "tool_call", "id": call_id, "name": tool_name, "args": args}
+
+
+def _result(call_id: str, tool_name: str, success: bool = True) -> dict:
+    return {
+        "type": "tool_result",
+        "id": call_id,
+        "name": tool_name,
+        "content": "ok" if success else "[TOOL ERROR] refused",
+        "success": success,
+    }
+
+
+def _file_tool_turn(tool_name: str, args: dict, success: bool = True) -> list[dict]:
+    return [_call("tc1", tool_name, args), _result("tc1", tool_name, success), *_END]
+
+
+def _one_step(*calls: tuple[object, bool]) -> list[dict]:
+    """A turn whose model step writes every file of *calls* before any result."""
+    ids = [f"tc{i}" for i in range(len(calls))]
+    return [
+        *(
+            _call(i, "write_file", {"file_path": path, "content": "x"})
+            for i, (path, _) in zip(ids, calls, strict=True)
+        ),
+        *(_result(i, "write_file", ok) for i, (_, ok) in zip(ids, calls, strict=True)),
+        *_END,
+    ]
+
+
+CASES = [
+    pytest.param("write_file", {"file_path": "/fig.png", "content": "x"}, id="write"),
+    pytest.param("read_file", {"file_path": "/fig.png"}, id="read"),
+    pytest.param("write_file", {"path": "/fig.png", "content": "x"}, id="legacy"),
+    pytest.param("read_file", {"file_path": "/fig.png", "path": "/a.png"}, id="both"),
+]
+
+# Files written in one step -> the files sent, in order.
+ONE_STEP_CASES = [
+    pytest.param(
+        [("/a.png", True), ("/b.png", True)], ["a.png", "b.png"], id="two-media"
+    ),
+    pytest.param(
+        [("/a.png", True), ("/notes.txt", True)], ["a.png"], id="media-then-text"
+    ),
+    pytest.param(
+        [("/a.png", True), ("/b.png", False)], ["a.png"], id="second-call-failed"
+    ),
+    pytest.param(
+        [("/a.png", True), (["/b.png"], False)], ["a.png"], id="second-call-malformed"
+    ),
+]
+
+NOT_SENT_CASES = [
+    pytest.param({"file_path": "/notes.txt", "content": "x"}, True, id="not-media"),
+    pytest.param({"file_path": "/fig.png", "content": "x"}, False, id="failed"),
+    pytest.param({"content": "x"}, True, id="no-path"),
+]
+
+
+# Every spelling the file tools accept for ``<work_dir>/fig.png``; ``{root}``
+# is the work folder.
+PATH_CASES = [
+    pytest.param("/fig.png", id="virtual"),
+    pytest.param("fig.png", id="relative"),
+    pytest.param("{root}/fig.png", id="host-absolute"),
+]
+
+
+def _path_turn(tool_name: str, path: str, root) -> list[dict]:
+    return _file_tool_turn(tool_name, {"file_path": path.format(root=root)})
+
+
+def _subagent_turn(tool_name: str, path: str, root) -> list[dict]:
+    """A turn whose sub-agent calls *tool_name* on *path*."""
+    sa = {"subagent": "research", "instance_id": "task:sa1"}
+    return [
+        {
+            "type": "subagent_start",
+            "name": "research",
+            "description": "",
+            "instance_id": "task:sa1",
+            "tool_call_id": "task1",
+        },
+        {
+            "type": "subagent_tool_call",
+            **sa,
+            "name": tool_name,
+            "args": {"file_path": path.format(root=root)},
+            "id": "sc1",
+        },
+        {
+            "type": "subagent_tool_result",
+            **sa,
+            "name": tool_name,
+            "content": "ok",
+            "success": True,
+            "id": "sc1",
+        },
+        *_END,
+    ]
+
+
+def _make_files(root) -> None:
+    for name in ("fig.png", "a.png", "b.png", "notes.txt"):
+        (root / name).write_bytes(b"x")
+
+
+def _bytes_sent_to(sent: list[bytes]):
+    """A send callback that records what each file holds when it is sent."""
+
+    def _send(path: str) -> None:
+        with open(path, "rb") as fh:
+            sent.append(fh.read())
+
+    return _send
+
+
+def _rich_sent(events, work_dir, received_media=None) -> list[str]:
+    _make_files(work_dir)
+    sent: list[str] = []
+    display_mod._run_streaming(
+        agent=MagicMock(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=False,
+        on_file_write=sent.append,
+        work_dir=work_dir,
+        received_media=received_media,
+        gateway=FakeGraphGateway(events=events),
+        _state=display_mod.StreamState(),
+    )
+    return sent
+
+
+async def _tui_sent(monkeypatch, workspace, events, received_media=None) -> list[str]:
+    from EvoScientist.paths import SessionDirs
+    from tests.fakes.tui import run_turn
+
+    _make_files(workspace.root)
+    sent: list[str] = []
+    await run_turn(
+        monkeypatch,
+        workspace,
+        [events],
+        prepare=lambda app: setattr(app, "_dirs", SessionDirs(workspace)),
+        on_media_cb=sent.append,
+        received_media=received_media,
+    )
+    return sent
+
+
+class TestRichLoop:
+    @pytest.fixture(autouse=True)
+    def _quiet(self, monkeypatch):
+        monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
+
+    @staticmethod
+    def _run(events, work_dir) -> list[str]:
+        return _rich_sent(events, work_dir)
+
+    @pytest.mark.parametrize(("tool_name", "args"), CASES)
+    def test_a_media_file_is_sent(self, tmp_path, tool_name, args):
+        assert self._run(_file_tool_turn(tool_name, args), tmp_path) == [
+            str((tmp_path / "fig.png").resolve())
+        ]
+
+    @pytest.mark.parametrize(("calls", "expected"), ONE_STEP_CASES)
+    def test_each_result_sends_its_own_file(self, tmp_path, calls, expected):
+        assert self._run(_one_step(*calls), tmp_path) == [
+            str((tmp_path / name).resolve()) for name in expected
+        ]
+
+    @pytest.mark.parametrize(("args", "success"), NOT_SENT_CASES)
+    def test_nothing_is_sent(self, tmp_path, args, success):
+        events = _file_tool_turn("write_file", args, success)
+        assert self._run(events, tmp_path) == []
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    @pytest.mark.parametrize("path", PATH_CASES)
+    def test_every_path_spelling_is_sent(self, tmp_path, tool_name, path):
+        events = _path_turn(tool_name, path, tmp_path)
+        assert self._run(events, tmp_path) == [str((tmp_path / "fig.png").resolve())]
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    def test_a_subagent_file_is_sent(self, tmp_path, tool_name):
+        events = _subagent_turn(tool_name, "/fig.png", tmp_path)
+        assert self._run(events, tmp_path) == [str((tmp_path / "fig.png").resolve())]
+
+    @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file"])
+    @pytest.mark.parametrize("path", PATH_CASES)
+    def test_received_media_read_filter(self, tmp_path, turn, tool_name, path):
+        attachment = str((tmp_path / "fig.png").resolve())
+        sent = _rich_sent(
+            turn(tool_name, path, tmp_path), tmp_path, received_media=[attachment]
+        )
+        assert sent == ([] if tool_name == "read_file" else [attachment])
+
+    def test_modified_received_media_is_forwarded_on_read(self, tmp_path):
+        svg = tmp_path / "plot.svg"
+        svg.write_bytes(b"<svg>as received</svg>")
+        attachment = str(svg.resolve())
+        sent: list[bytes] = []
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r1", "read_file")
+            yield _call("e1", "edit_file", {"file_path": "/plot.svg"})
+            svg.write_bytes(b"<svg>updated</svg>")
+            yield _result("e1", "edit_file")
+            yield _call("r2", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        display_mod._run_streaming(
+            agent=None,
+            message="edit plot",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=False,
+            on_file_write=_bytes_sent_to(sent),
+            work_dir=tmp_path,
+            received_media=[attachment],
+            gateway=FakeGraphGateway(stream=_stream),
+            _state=display_mod.StreamState(),
+        )
+        assert sent == [b"<svg>updated</svg>"]
+
+
+class TestTui:
+    @pytest.fixture(autouse=True)
+    def _textual(self):
+        pytest.importorskip("textual")
+
+    @staticmethod
+    async def _run(monkeypatch, workspace, events) -> list[str]:
+        return await _tui_sent(monkeypatch, workspace, events)
+
+    @pytest.mark.parametrize(("tool_name", "args"), CASES)
+    async def test_a_media_file_is_sent(self, monkeypatch, workspace, tool_name, args):
+        events = _file_tool_turn(tool_name, args)
+        assert await self._run(monkeypatch, workspace, events) == [
+            str((workspace.root / "fig.png").resolve())
+        ]
+
+    @pytest.mark.parametrize(("calls", "expected"), ONE_STEP_CASES)
+    async def test_each_result_sends_its_own_file(
+        self, monkeypatch, workspace, calls, expected
+    ):
+        assert await self._run(monkeypatch, workspace, _one_step(*calls)) == [
+            str((workspace.root / name).resolve()) for name in expected
+        ]
+
+    @pytest.mark.parametrize(("args", "success"), NOT_SENT_CASES)
+    async def test_nothing_is_sent(self, monkeypatch, workspace, args, success):
+        events = _file_tool_turn("write_file", args, success)
+        assert await self._run(monkeypatch, workspace, events) == []
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    @pytest.mark.parametrize("path", PATH_CASES)
+    async def test_every_path_spelling_is_sent(
+        self, monkeypatch, workspace, tool_name, path
+    ):
+        events = _path_turn(tool_name, path, workspace.root)
+        assert await self._run(monkeypatch, workspace, events) == [
+            str((workspace.root / "fig.png").resolve())
+        ]
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    async def test_a_subagent_file_is_sent(self, monkeypatch, workspace, tool_name):
+        events = _subagent_turn(tool_name, "/fig.png", workspace.root)
+        assert await self._run(monkeypatch, workspace, events) == [
+            str((workspace.root / "fig.png").resolve())
+        ]
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "write_file"])
+    async def test_received_media_read_filter(self, monkeypatch, workspace, tool_name):
+        attachment = str((workspace.root / "fig.png").resolve())
+        sent = await _tui_sent(
+            monkeypatch,
+            workspace,
+            _path_turn(tool_name, "/fig.png", workspace.root),
+            received_media=[attachment],
+        )
+        assert sent == ([] if tool_name == "read_file" else [attachment])
+
+    async def test_modified_received_media_is_forwarded_on_read(
+        self, monkeypatch, workspace
+    ):
+        from EvoScientist.gateway.runtime import RuntimeGateways
+        from EvoScientist.paths import SessionDirs
+        from tests.fakes.tui import run_turn
+
+        svg = workspace.root / "plot.svg"
+        svg.write_bytes(b"<svg>as received</svg>")
+        attachment = str(svg.resolve())
+        sent: list[bytes] = []
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r1", "read_file")
+            yield _call("x1", "execute", {"command": "convert"})
+            svg.write_bytes(b"<svg>updated</svg>")
+            yield _result("x1", "execute")
+            yield _call("r2", "read_file", {"file_path": "/plot.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        custom_gateway = FakeGraphGateway(stream=_stream)
+
+        def _prepare(app):
+            app._dirs = SessionDirs(workspace)
+            app._runtime_gateways = RuntimeGateways(
+                thread_store=custom_gateway.thread_store,
+                graph_gateway=custom_gateway,
+            )
+
+        await run_turn(
+            monkeypatch,
+            workspace,
+            [],
+            prepare=_prepare,
+            on_media_cb=_bytes_sent_to(sent),
+            received_media=[attachment],
+        )
+        assert sent == [b"<svg>updated</svg>"]
+
+    @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    @pytest.mark.parametrize(
+        "path", [*PATH_CASES, pytest.param("/gone.png", id="missing")]
+    )
+    async def test_the_rich_loop_sends_the_same(
+        self, monkeypatch, workspace, turn, tool_name, path
+    ):
+        events = turn(tool_name, path, workspace.root)
+        rich = await asyncio.to_thread(_rich_sent, events, workspace.root)
+        assert await self._run(monkeypatch, workspace, events) == rich
+
+
+async def _consumer_turn(consumer, media=None) -> list:
+    """Run one turn and return everything it queued for the chat."""
+    from EvoScientist.channels.bus.events import InboundMessage
+
+    msg = InboundMessage(
+        channel="stub", sender_id="u1", chat_id="c1", content="go", media=media or []
+    )
+    await consumer._stream_with_hitl(msg, None, "t1", msg.session_key)
+    queued = []
+    while not consumer.bus.outbound.empty():
+        queued.append(consumer.bus.outbound.get_nowait())
+    return queued
+
+
+def _queued_media(queued) -> list[str]:
+    return [path for out in queued for path in out.media]
+
+
+class TestStandaloneConsumer:
+    """``EvoSci channel --agent`` replies through ``InboundConsumer``."""
+
+    @staticmethod
+    async def _run(workspace, events) -> list[str]:
+        _make_files(workspace.root)
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+        return _queued_media(await _consumer_turn(consumer))
+
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    @pytest.mark.parametrize("path", PATH_CASES)
+    async def test_every_path_spelling_is_sent(self, workspace, tool_name, path):
+        events = _path_turn(tool_name, path, workspace.root)
+        assert await self._run(workspace, events) == [
+            str((workspace.root / "fig.png").resolve())
+        ]
+
+    async def test_a_subagent_file_is_sent(self, workspace):
+        events = _subagent_turn("write_file", "/fig.png", workspace.root)
+        assert await self._run(workspace, events) == [
+            str((workspace.root / "fig.png").resolve())
+        ]
+
+    @pytest.mark.parametrize(("args", "success"), NOT_SENT_CASES)
+    async def test_nothing_is_sent(self, workspace, args, success):
+        events = _file_tool_turn("write_file", args, success)
+        assert await self._run(workspace, events) == []
+
+    async def test_the_file_goes_out_before_the_reply(self, workspace):
+        _make_files(workspace.root)
+        events = _file_tool_turn("write_file", {"file_path": "/fig.png"})
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+        queued = await _consumer_turn(consumer)
+        assert [(out.content, out.media) for out in queued] == [
+            ("", [str((workspace.root / "fig.png").resolve())]),
+            ("finished", []),
+        ]
+
+    @pytest.mark.parametrize("turn", [_path_turn, _subagent_turn])
+    @pytest.mark.parametrize(
+        "path",
+        ["media/paper.pdf", "/media/paper.pdf", "{root}/media/paper.pdf"],
+    )
+    async def test_received_attachment_is_not_echoed(self, workspace, turn, path):
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        events = turn("read_file", path, workspace.root)
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[str(attachment)])
+
+        assert _queued_media(queued) == []
+
+    async def test_received_attachment_can_be_replaced(self, workspace):
+        attachment = workspace.root / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        path = str(attachment)
+        events = [
+            _call("read", "read_file", {"file_path": path}),
+            _result("read", "read_file"),
+            _call("write", "write_file", {"file_path": path, "content": "updated"}),
+            _result("write", "write_file"),
+            *_END,
+        ]
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[path])
+
+        assert _queued_media(queued) == [str(attachment.resolve())]
+
+    @pytest.mark.parametrize(
+        ("edited", "mtime_shift_ns"),
+        [
+            pytest.param(b"<svg>outgoing</svg>", 1_000_000_000, id="same-size"),
+            pytest.param(b"<svg>edited</svg>", 0, id="same-mtime"),
+        ],
+    )
+    async def test_modified_received_attachment_is_forwarded_on_read(
+        self, workspace, monkeypatch, edited, mtime_shift_ns
+    ):
+        import os
+
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "diagram.svg"
+        attachment.write_bytes(b"<svg>incoming</svg>")
+        received = attachment.stat()
+        sent: list[bytes] = []
+
+        async def _send(_msg, path):
+            _bytes_sent_to(sent)(path)
+
+        async def _stream(_request):
+            yield _call("r1", "read_file", {"file_path": "/media/diagram.svg"})
+            yield _result("r1", "read_file")
+            yield _call("e1", "edit_file", {"file_path": "/media/diagram.svg"})
+            attachment.write_bytes(edited)
+            os.utime(
+                attachment,
+                ns=(received.st_atime_ns, received.st_mtime_ns + mtime_shift_ns),
+            )
+            yield _result("e1", "edit_file")
+            yield _call("r2", "read_file", {"file_path": "/media/diagram.svg"})
+            yield _result("r2", "read_file")
+            for event in _END:
+                yield event
+
+        consumer = stub_consumer(workspace, FakeGraphGateway(stream=_stream))
+        monkeypatch.setattr(consumer, "_send_media", _send)
+        await _consumer_turn(consumer, media=[str(attachment)])
+        assert sent == [edited]
+
+    async def test_received_filter_is_per_turn(self, workspace):
+        attachment = workspace.root / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        path = str(attachment)
+        events = _file_tool_turn("read_file", {"file_path": path})
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+
+        assert _queued_media(await _consumer_turn(consumer, media=[path])) == []
+        assert _queued_media(await _consumer_turn(consumer)) == [
+            str(attachment.resolve())
+        ]
+
+    async def test_same_named_file_elsewhere_is_forwarded(self, workspace):
+        media_dir = workspace.root / "media"
+        media_dir.mkdir()
+        attachment = media_dir / "paper.pdf"
+        attachment.write_bytes(b"incoming document")
+        output = workspace.root / "paper.pdf"
+        output.write_bytes(b"incoming document")
+        events = _file_tool_turn("read_file", {"file_path": "/paper.pdf"})
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+
+        queued = await _consumer_turn(consumer, media=[str(attachment)])
+
+        assert _queued_media(queued) == [str(output.resolve())]
+
+
+async def test_queue_bridge_preserves_received_media(monkeypatch, tmp_path):
+    from EvoScientist.channels.bus.events import InboundMessage
+    from EvoScientist.channels.bus.message_bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.cli import channel as channel_mod
+
+    queued = []
+
+    def enqueue(message):
+        queued.append(message)
+        result = asyncio.get_running_loop().create_future()
+        result.set_result("done")
+        return result
+
+    monkeypatch.setattr(channel_mod, "_enqueue_channel_message", enqueue)
+    bus = MessageBus()
+    manager = ChannelManager(bus, media_dir=tmp_path / "media")
+    received = [str(tmp_path / "paper.pdf")]
+    message = InboundMessage(
+        channel="stub", sender_id="u1", chat_id="c1", content="go", media=received
+    )
+
+    await channel_mod._handle_bus_message(bus, manager, message)
+
+    assert len(queued) == 1
+    assert queued[0].media == received
+    assert queued[0].media is not received
+
+
+class TestConsumerTurnEnds:
+    """A file collected before the turn ends early is still sent."""
+
+    @staticmethod
+    async def _run(monkeypatch, workspace, outcome=None, error=None) -> list[str]:
+        """A turn that writes ``fig.png``, then pauses for an approval answered
+        with *outcome*, or fails with *error*."""
+        import EvoScientist.channels.consumer as consumer_mod
+        from tests.fakes.common import interrupt_event
+
+        _make_files(workspace.root)
+        head = _file_tool_turn("write_file", {"file_path": "/fig.png"})[:2]
+
+        async def _stream(_request):
+            for event in head:
+                yield event
+            if error is not None:
+                raise error
+            yield interrupt_event(1)
+
+        async def _resolve(*_args, **_kwargs):
+            return outcome
+
+        monkeypatch.setattr(consumer_mod, "resolve_approval", _resolve)
+        consumer = stub_consumer(workspace, FakeGraphGateway(stream=_stream))
+        return _queued_media(await _consumer_turn(consumer))
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            pytest.param({"rejected": True}, id="rejected"),
+            pytest.param({}, id="unanswered"),
+            pytest.param({"unrecognized_reply": "what?"}, id="unrecognized-reply"),
+            pytest.param({"budget_exhausted": True}, id="round-limit"),
+        ],
+    )
+    async def test_an_approval_that_ends_the_turn(
+        self, monkeypatch, workspace, outcome
+    ):
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        sent = await self._run(monkeypatch, workspace, ApprovalOutcome(**outcome))
+        assert sent == [str((workspace.root / "fig.png").resolve())]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(TimeoutError(), id="timeout"),
+            pytest.param(RuntimeError(), id="error"),
+        ],
+    )
+    async def test_a_failed_stream(self, monkeypatch, workspace, error):
+        sent = await self._run(monkeypatch, workspace, error=error)
+        assert sent == [str((workspace.root / "fig.png").resolve())]
+
+
+class TestOnlySandboxFilesAreSent:
+    """A path is read as the sandbox reads it, so only a file inside the work
+    folder (or the media folder) is ever sent, never a host file elsewhere."""
+
+    @pytest.fixture
+    def folders(self, tmp_path, monkeypatch):
+        """A work folder, and a host folder the sandbox reads like ``/home/``."""
+        import EvoScientist.backends as backends_mod
+
+        work_dir = tmp_path / "ws"
+        host = tmp_path / "host"
+        work_dir.mkdir()
+        host.mkdir()
+        (host / "passport.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        return work_dir, host
+
+    def test_a_host_file_the_workspace_lacks_is_not_sent(self, folders):
+        work_dir, host = folders
+        assert (
+            display_mod.resolve_media_path(str(host / "passport.pdf"), work_dir) == ""
+        )
+
+    def test_a_host_path_does_not_name_a_workspace_file_of_that_name(self, folders):
+        work_dir, host = folders
+        (work_dir / "passport.pdf").write_bytes(b"x")
+        assert (
+            display_mod.resolve_media_path(str(host / "passport.pdf"), work_dir) == ""
+        )
+
+    def test_the_rich_loop_does_not_send_the_host_file(self, folders, monkeypatch):
+        monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
+        work_dir, host = folders
+        events = _file_tool_turn("write_file", {"file_path": f"{host}/passport.pdf"})
+        assert _rich_sent(events, work_dir) == []
+
+    async def test_the_consumer_does_not_send_the_host_file(
+        self, workspace, tmp_path, monkeypatch
+    ):
+        import EvoScientist.backends as backends_mod
+
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "passport.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        events = _file_tool_turn("write_file", {"file_path": f"{host}/passport.pdf"})
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == []
+
+    def test_a_file_outside_the_work_folder_is_not_sent(self, tmp_path, monkeypatch):
+        """Whatever spelling names it: relative, host-absolute, ``..``."""
+        work_dir = tmp_path / "ws"
+        work_dir.mkdir()
+        (tmp_path / "host.png").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        for path in ("host.png", str(tmp_path / "host.png"), "/../host.png"):
+            assert display_mod.resolve_media_path(path, work_dir) == "", path
+
+    def test_a_link_out_of_the_work_folder_is_not_sent(self, tmp_path):
+        work_dir = tmp_path / "ws"
+        work_dir.mkdir()
+        (tmp_path / "host.png").write_bytes(b"x")
+        (work_dir / "link.png").symlink_to(tmp_path / "host.png")
+        assert display_mod.resolve_media_path("/link.png", work_dir) == ""
+
+    def test_without_a_work_folder_nothing_is_sent(self, tmp_path, monkeypatch):
+        (tmp_path / "fig.png").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        assert display_mod.resolve_media_path("fig.png", None) == ""
+
+    def test_a_file_in_the_media_folder_is_sent(self, tmp_path):
+        """In ``--mode=run`` the sandbox reaches attachments by real path."""
+        work_dir = tmp_path / "runs" / "r1"
+        media_dir = tmp_path / "media"
+        work_dir.mkdir(parents=True)
+        media_dir.mkdir()
+        (media_dir / "photo.png").write_bytes(b"x")
+        assert display_mod.resolve_media_path(
+            str(media_dir / "photo.png"), work_dir, media_dir=media_dir
+        ) == str((media_dir / "photo.png").resolve())
+
+    def test_dangerous_mode_sends_the_host_file(self, folders):
+        """There the sandbox writes host paths as given."""
+        work_dir, host = folders
+        path = str(host / "passport.pdf")
+        assert display_mod.resolve_media_path(path, work_dir, dangerous=True) == path
+
+
+class TestRoutedPaths:
+    """A path under one of the agent's routes names that tier's file."""
+
+    def test_skill_write_never_falls_back_to_global_media(self, tmp_path):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        global_dir.mkdir()
+        (global_dir / "image.svg").write_text("global")
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+        assert backend.file_path("/image.svg", tool_name="write_file") is None
+        assert (
+            backend.file_path("/image.svg", tool_name="read_file")
+            == global_dir / "image.svg"
+        )
+
+    @pytest.mark.parametrize("subagent", [False, True])
+    @pytest.mark.parametrize("tool_name", ["write_file", "read_file"])
+    async def test_skill_collision_forwards_primary_not_global(
+        self, workspace, subagent, tool_name
+    ):
+        from EvoScientist import paths
+
+        primary = workspace.skills_dir / "demo/assets/logo.svg"
+        global_file = paths.GLOBAL_SKILLS_DIR / "demo/assets/logo.svg"
+        for file, payload in [(primary, b"workspace"), (global_file, b"global")]:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(payload)
+        events = (
+            _subagent_turn(tool_name, "/skills/demo/assets/logo.svg", workspace.root)
+            if subagent
+            else _file_tool_turn(
+                tool_name, {"file_path": "/skills/demo/assets/logo.svg"}
+            )
+        )
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == [str(primary.resolve())]
+
+    @pytest.mark.parametrize("fallback", [False, True])
+    def test_colliding_skill_tiers_forward_the_tier_read_served(
+        self, tmp_path, monkeypatch, fallback
+    ):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        for folder, text in ((primary, "workspace"), (secondary, "builtin")):
+            folder.mkdir()
+            (folder / "result.txt").write_text(text)
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+        if fallback:
+            from deepagents.backends.protocol import ReadResult
+
+            monkeypatch.setattr(
+                backend._primary, "read", lambda *_: ReadResult(error="too large")
+            )
+        result = backend.read("/result.txt")
+        assert ("builtin" if fallback else "workspace") in str(result)
+        served = secondary if fallback else primary
+        assert backend.file_path("/result.txt") == served / "result.txt"
+
+    def test_single_skill_tier_still_resolves(self, tmp_path):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        secondary.mkdir()
+        file = secondary / "result.txt"
+        file.write_text("builtin")
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+        assert backend.file_path("/result.txt") == file
+
+    @pytest.mark.parametrize("outcome", ["error", "legacy", "exception"])
+    def test_colliding_skill_tiers_fall_back_to_global(
+        self, tmp_path, monkeypatch, outcome
+    ):
+        from deepagents.backends.protocol import ReadResult
+
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, global_dir, secondary = [
+            tmp_path / name for name in ("primary", "global", "builtin")
+        ]
+        for folder in (primary, global_dir, secondary):
+            folder.mkdir()
+            (folder / "result.txt").write_text(folder.name)
+        backend = MergedSkillsBackend(str(primary), str(secondary), str(global_dir))
+
+        def fail(*args):
+            if outcome == "exception":
+                raise OSError("unreadable")
+            return (
+                "Error: unreadable"
+                if outcome == "legacy"
+                else ReadResult(error="unreadable")
+            )
+
+        monkeypatch.setattr(backend._primary, "read", fail)
+        assert backend.file_path("/result.txt") == global_dir / "result.txt"
+        monkeypatch.setattr(backend._global, "read", fail)
+        assert backend.file_path("/result.txt") == secondary / "result.txt"
+        monkeypatch.setattr(backend._secondary, "read", fail)
+        assert backend.file_path("/result.txt") is None
+        # Writes still name primary, without consulting its read result.
+        assert (
+            backend.file_path("/result.txt", tool_name="write_file")
+            == primary / "result.txt"
+        )
+
+    def test_single_skill_tier_does_not_read_again(self, tmp_path, monkeypatch):
+        from EvoScientist.backends import MergedSkillsBackend
+
+        primary, secondary = tmp_path / "primary", tmp_path / "secondary"
+        primary.mkdir()
+        file = primary / "result.txt"
+        file.write_text("workspace")
+        backend = MergedSkillsBackend(str(primary), str(secondary))
+
+        def unexpected_read(*args):
+            pytest.fail("single-tier forwarding should not re-read the file")
+
+        for tier in backend._backends():
+            monkeypatch.setattr(tier, "read", unexpected_read)
+        assert backend.file_path("/result.txt") == file
+
+    LOGO = "/skills/demo/assets/logo.svg"
+
+    @pytest.fixture
+    def run_dirs(self, workspace):
+        """A ``--mode=run`` folder holding a same-named decoy of each tier file."""
+        from EvoScientist.paths import SessionDirs
+
+        dirs = SessionDirs(workspace, workspace.runs_dir / "r1")
+        for decoy in ("skills/demo/assets/logo.svg", "memories/chart.png"):
+            (dirs.work_dir / decoy).parent.mkdir(parents=True, exist_ok=True)
+            (dirs.work_dir / decoy).write_bytes(b"decoy")
+        return dirs
+
+    @staticmethod
+    def _resolve(dirs, path, **kwargs) -> str:
+        from EvoScientist.EvoScientist import file_tool_routes
+
+        return display_mod.resolve_media_path(
+            path,
+            dirs.work_dir,
+            media_dir=dirs.sandbox_media_dir,
+            routes=file_tool_routes(dirs.workspace),
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_a_skills_write_sends_the_workspace_tier_file(self, run_dirs, dangerous):
+        logo = run_dirs.workspace.skills_dir / "demo" / "assets" / "logo.svg"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"x")
+        assert self._resolve(run_dirs, self.LOGO, dangerous=dangerous) == str(
+            logo.resolve()
+        )
+
+    def test_a_skills_read_sends_the_tier_it_found(self, run_dirs):
+        from EvoScientist import paths
+
+        logo = paths.GLOBAL_SKILLS_DIR / "demo" / "assets" / "logo.svg"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"x")
+        assert self._resolve(run_dirs, self.LOGO) == str(logo.resolve())
+
+    def test_a_memories_path_sends_the_memory_file(self, run_dirs):
+        from EvoScientist import paths
+
+        chart = paths.MEMORIES_DIR / "chart.png"
+        chart.parent.mkdir(parents=True, exist_ok=True)
+        chart.write_bytes(b"x")
+        assert self._resolve(run_dirs, "/memories/chart.png") == str(chart.resolve())
+
+    @pytest.mark.parametrize("path", [LOGO, "/memories/chart.png"])
+    def test_no_tier_file_sends_nothing_not_the_work_folder_file(self, run_dirs, path):
+        assert self._resolve(run_dirs, path) == ""
+
+    def test_a_tier_without_files_on_disk_sends_nothing(self, run_dirs):
+        from deepagents.backends.protocol import BackendProtocol
+
+        assert (
+            display_mod.resolve_media_path(
+                self.LOGO,
+                run_dirs.work_dir,
+                routes={"/skills/": MagicMock(spec=BackendProtocol)},
+            )
+            == ""
+        )
+
+    async def test_the_consumer_sends_the_memory_file(self, workspace):
+        from EvoScientist import paths
+
+        chart = paths.MEMORIES_DIR / "chart.png"
+        chart.parent.mkdir(parents=True, exist_ok=True)
+        chart.write_bytes(b"x")
+        (workspace.root / "memories").mkdir()
+        (workspace.root / "memories" / "chart.png").write_bytes(b"decoy")
+        events = _file_tool_turn("read_file", {"file_path": "/memories/chart.png"})
+        consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
+        assert _queued_media(await _consumer_turn(consumer)) == [str(chart.resolve())]
+
+
+class TestSandboxDangerousMode:
+    """Host paths are read as given only for a sandbox this session built."""
+
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_classic_cli_captures_config_before_building_gateway(
+        self, monkeypatch, workspace, explicit
+    ):
+        from EvoScientist.cli.interactive import cmd_interactive
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.paths import SessionDirs
+
+        snapshot = EvoScientistConfig(dangerous_mode=True)
+        effective = MagicMock(return_value=snapshot)
+        monkeypatch.setattr("EvoScientist.config.get_effective_config", effective)
+        monkeypatch.setattr(
+            "EvoScientist.cli.interactive.resolve_ui_backend", lambda *a, **kw: "cli"
+        )
+
+        class GatewayReached(Exception):
+            pass
+
+        def capture(config, surface):
+            assert config is snapshot
+            raise GatewayReached()
+
+        monkeypatch.setattr("EvoScientist.config.resolve_gateway_backend", capture)
+        with pytest.raises(GatewayReached):
+            cmd_interactive(
+                dirs=SessionDirs(workspace), config=snapshot if explicit else None
+            )
+        assert effective.call_count == (0 if explicit else 1)
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_serve_uses_the_config_that_built_its_agent(self, monkeypatch, dangerous):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from EvoScientist.cli.commands import _serve_process_message
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.runtime import AsyncRuntime
+        from tests.fakes.serve import runtime_state
+
+        config = EvoScientistConfig(dangerous_mode=dangerous)
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config",
+            lambda: EvoScientistConfig(dangerous_mode=not dangerous),
+        )
+        state = runtime_state(config=config)
+        msg = ChannelMessage(
+            msg_id="mode-change",
+            content="hello",
+            sender="user",
+            channel_type="imessage",
+            metadata={},
+            channel_ref=None,
+            bus_ref=None,
+            chat_id="chat",
+            message_id="mode-change",
+        )
+        with (
+            AsyncRuntime(thread_name="test-media-mode") as runtime,
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("EvoScientist.cli.commands.build_metadata", return_value={}),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"
+            ) as stream,
+        ):
+            state.async_runtime = runtime
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg, runtime_state=state, model="model", show_thinking=False
+            )
+        assert stream.call_args.kwargs["dangerous"] is dangerous
+
+    def test_unknown_mode_never_grants_host_access(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config",
+            lambda: SimpleNamespace(dangerous_mode=True),
+        )
+        assert (
+            sandbox_dangerous_mode(LocalGraphGateway(thread_store=MagicMock()), None)
+            is False
+        )
+
+    async def test_tui_config_change_does_not_forward_host_file(
+        self, monkeypatch, workspace, tmp_path
+    ):
+        import EvoScientist.backends as backends
+        from EvoScientist.config import EvoScientistConfig
+        from EvoScientist.paths import SessionDirs
+        from tests.fakes.tui import run_turn
+
+        original = EvoScientistConfig(dangerous_mode=False)
+        monkeypatch.setattr(
+            "EvoScientist.config.get_effective_config", lambda: original
+        )
+        host = tmp_path / "host"
+        host.mkdir()
+        private = host / "private.pdf"
+        private.write_bytes(b"private host file")
+        monkeypatch.setattr(backends, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        sent = []
+
+        def prepare(app):
+            app._dirs = SessionDirs(workspace)
+            monkeypatch.setattr(
+                "EvoScientist.config.get_effective_config",
+                lambda: EvoScientistConfig(dangerous_mode=True),
+            )
+
+        await run_turn(
+            monkeypatch,
+            workspace,
+            [_file_tool_turn("read_file", {"file_path": str(private)})],
+            prepare=prepare,
+            on_media_cb=sent.append,
+        )
+        assert sent == []
+
+    @staticmethod
+    def _config(dangerous: bool):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(dangerous_mode=dangerous)
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_an_in_process_agent_follows_the_config(self, dangerous):
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+
+        gateway = LocalGraphGateway(thread_store=MagicMock())
+        assert sandbox_dangerous_mode(gateway, self._config(dangerous)) is dangerous
+
+    def test_a_server_backed_session_is_never_dangerous(self):
+        """The server's sandbox keeps its own mode, which the session can't see."""
+        from EvoScientist.gateway.composite import CompositeGraphGateway
+        from EvoScientist.gateway.local import LocalGraphGateway
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        gateway = CompositeGraphGateway(
+            read=LocalGraphGateway(thread_store=MagicMock()),
+            execute=object.__new__(LangGraphServerGateway),
+        )
+        assert sandbox_dangerous_mode(gateway, self._config(True)) is False
+
+    async def test_a_server_backed_standalone_does_not_send_the_host_file(
+        self, workspace, tmp_path, monkeypatch
+    ):
+        """``channel --agent`` with ``--dangerous`` against a server."""
+        import EvoScientist.backends as backends_mod
+        from EvoScientist.gateway.runtime import sandbox_dangerous_mode
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "private.pdf").write_bytes(b"secret")
+        monkeypatch.setattr(backends_mod, "_SYSTEM_PATH_PREFIXES", (f"{host}/",))
+        events = _file_tool_turn("read_file", {"file_path": f"{host}/private.pdf"})
+        gateway = FakeGraphGateway(events=events)
+        consumer = stub_consumer(
+            workspace,
+            gateway,
+            dangerous=sandbox_dangerous_mode(
+                object.__new__(LangGraphServerGateway), self._config(True)
+            ),
+        )
+        assert _queued_media(await _consumer_turn(consumer)) == []
+
+
+class TestChannelAttachmentPropagation:
+    def test_serve_channel_handler_passes_received_media(self, monkeypatch, workspace):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from EvoScientist.cli.commands import _serve_process_message
+        from EvoScientist.runtime import AsyncRuntime
+        from tests.fakes.serve import runtime_state
+
+        msg = ChannelMessage(
+            msg_id="serve-received-media",
+            content="read these attachments",
+            sender="user",
+            channel_type="imessage",
+            chat_id="chat",
+            media=[str(workspace.root / "fig.png"), str(workspace.root / "a.png")],
+        )
+        state = runtime_state()
+        with (
+            AsyncRuntime(thread_name="test-serve-received-media") as runtime,
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("EvoScientist.cli.commands.build_metadata", return_value={}),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"
+            ) as stream,
+        ):
+            state.async_runtime = runtime
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg, runtime_state=state, model="model", show_thinking=False
+            )
+        stream.assert_called_once()
+        assert stream.call_args.kwargs["received_media"] == msg.media
+
+    async def test_tui_channel_handler_passes_received_media(
+        self, monkeypatch, workspace
+    ):
+        from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
+        from tests.fakes.tui import capture_app
+
+        app = await capture_app(monkeypatch, workspace)
+        msg = ChannelMessage(
+            msg_id="tui-received-media",
+            content="read these attachments",
+            sender="user",
+            channel_type="imessage",
+            chat_id="chat",
+            media=[str(workspace.root / "fig.png"), str(workspace.root / "a.png")],
+        )
+        stream = AsyncMock(return_value="ok")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            monkeypatch.setattr(
+                app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
+            )
+            monkeypatch.setattr(app, "_stream_with_widgets", stream)
+            _register_channel_request(msg)
+            await app._process_channel_message(msg)
+        stream.assert_awaited_once()
+        assert stream.call_args.kwargs["received_media"] == msg.media

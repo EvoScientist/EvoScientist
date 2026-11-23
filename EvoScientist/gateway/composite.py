@@ -36,8 +36,12 @@ Routing table (read = local, execute = langgraph server):
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
   go to the server, where runs and background processes live.
-- ``delete_thread`` fans out to both stores; success if either deleted, so a
-  thread that only exists in one store is still removed without error.
+- ``delete_thread`` deletes a UUID on the server first (it asks the thread's
+  runs to stop, then deletes the thread), then removes the local rows. A server
+  error propagates and leaves the local rows for a plain retry; a thread the
+  server does not have is still removed locally. A local failure after a server
+  delete is only logged, since the server's delete already removed the thread's
+  checkpoints from the shared database. Legacy ids are local-only.
 
 **Legacy (non-UUID) thread ids** are local-only: langgraph-api rejects non-UUID
 ids, so a legacy thread can never be registered or executed server-side. Reads
@@ -183,24 +187,21 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        read_ok = await self._read.delete_thread(thread_id, target)
+        # Server first, so a server error leaves the local rows for a retry.
         exec_ok = False
         if _is_uuid(thread_id):
-            try:
-                exec_ok = await self._execute.delete_thread(thread_id, target)
-            except Exception:  # server hiccup must not block the local delete
-                # WARNING, not DEBUG: the call still returns success off the
-                # local delete, so a thread the server still holds reports as
-                # deleted. Without a breadcrumb at a normal log level the
-                # divergence is invisible in any real deployment. The full fix
-                # (report failure only when neither side deleted) is a tracked
-                # follow-up; this keeps the current behavior self-reporting.
+            exec_ok = await self._execute.delete_thread(thread_id, target)
+        try:
+            read_ok = await self._read.delete_thread(thread_id, target)
+        except Exception as exc:
+            if exec_ok:
                 logger.warning(
-                    "composite: server-side delete failed for thread %s; "
-                    "local delete succeeded",
+                    "Server deletion completed for thread %r, but local cleanup failed: %r",
                     thread_id,
-                    exc_info=True,
+                    exc,
                 )
+                return True
+            raise
         return read_ok or exec_ok
 
     # --- Execution ------------------------------------------------------------

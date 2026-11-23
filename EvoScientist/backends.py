@@ -1,20 +1,23 @@
 """Custom backends for EvoScientist agent."""
 
+import asyncio
+import contextlib
 import errno
 import os
 import posixpath
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -31,8 +34,8 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 
-from . import paths
-from .cancellation import current_cancel_event
+from . import paths, shell_syntax
+from .cancellation import bind_cancel_event, current_cancel_event
 
 if TYPE_CHECKING:
     from langgraph.types import Command
@@ -41,8 +44,9 @@ if TYPE_CHECKING:
 # SKILLS_DIR constant).
 _BUILTIN_SKILLS_DIR = Path(__file__).parent / "skills"
 
-# System path prefixes that should never appear in virtual paths.
-# If the agent hallucinates an absolute system path, we block it.
+# Folder names that make a path look like a host path. Commands block such a
+# path unless it maps into the workspace; the file tools only cut it at the
+# workspace's folder name.
 _SYSTEM_PATH_PREFIXES = (
     "/Users/",
     "/home/",
@@ -59,17 +63,21 @@ _SYSTEM_PATH_PREFIXES = (
     "/root/",
 )
 
+# Device files commands use for plumbing; they are never confinement escapes.
+_PASSTHROUGH_DEVICE_PATHS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+
 # Path-confinement patterns: keep the agent inside the workspace. These are
 # bypassed in dangerous mode (real-filesystem access).
 _PATH_PATTERNS = [
     r"~/",  # home directory
-    r"\bcd\s+/",  # cd to absolute path
 ]
-# Destructive patterns: catastrophic regardless of mode — always enforced.
+# Destructive patterns: catastrophic in every mode; `target` is where the
+# removed path starts. Outside dangerous mode a target strictly inside the
+# workspace (written after a `cd`) is exempt.
 _DESTRUCTIVE_PATTERNS = [
-    r"\brm\s+-rf\s+/",  # rm -rf with absolute path
+    re.compile(r"\brm\s+-rf\s+(?P<target>/)"),  # rm -rf with absolute path
     # The same with a Windows drive path, which Git Bash's rm accepts.
-    r"\brm\s+-rf\s+['\"]?[A-Za-z]:[\\/]",
+    re.compile(r"\brm\s+-rf\s+(?P<target>['\"]?[A-Za-z]:[\\/])"),
 ]
 
 # Dangerous commands that should never be executed
@@ -81,7 +89,46 @@ BLOCKED_COMMANDS = [
     "dd",
     "shutdown",
     "reboot",
+    # Kill by name or pattern, which reaches EvoScientist's own processes.
+    "pkill",
+    "killall",
 ]
+_BLOCKED_COMMAND_HINTS = dict.fromkeys(
+    ("pkill", "killall"),
+    "Stop only a process you started, by its id: stop_process with the id "
+    "run_in_background returned, or kill <PID> with the PID you captured. "
+    "Never by name or pattern, which can reach EvoScientist itself.",
+)
+_KILL_BY_LOOKUP_ERROR = (
+    "Command blocked: kill takes only the id of a process you started (kill "
+    "12345, or stop_process with the id run_in_background returned). Ids a "
+    "process lookup found (pgrep, pidof, ps, lsof, fuser), also through a "
+    "variable or a read loop beside one, and -1 / 0 can reach EvoScientist "
+    "itself."
+)
+# The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
+# `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
+_HOME_VARIABLE_RE = re.compile(r"\$\{?(?:HOME|USERPROFILE)\b|(?i:%USERPROFILE%)")
+# The home folder itself as an rm target: `~` or `~user` as written, or one
+# of the variables above, then only `/`, `/.`, `/*` or `/.*` steps. Each step
+# takes one slash, so a long run of slashes splits one way only (no
+# backtracking).
+_HOME_STEPS = r"(?:/\.?\*?)*"
+_HOME_TILDE_TARGET_RE = re.compile(rf"~(?:\w[\w.-]*)?{_HOME_STEPS}")
+_HOME_VARIABLE_TARGET_RE = re.compile(
+    rf"(?:\$(?:HOME|USERPROFILE)|\$\{{(?:HOME|USERPROFILE)\}}|(?i:%USERPROFILE%))"
+    rf"{_HOME_STEPS}"
+)
+# Commands that find processes by name, pattern or resource.
+_PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
+# Of those, the ones whose only job is matching names.
+_NAME_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof"})
+# Commands that stop processes, checked by _kill_by_lookup.
+_KILL_COMMANDS = frozenset({"kill", "fuser", "taskkill", "taskkill.exe"})
+_BLOCKED_COMMAND_HINTS["chmod"] = (
+    "To run a script, call it through its interpreter (bash run.sh, "
+    "python run.py) instead of making it executable."
+)
 
 
 _active_shell_processes_lock = threading.RLock()
@@ -153,7 +200,8 @@ def _register_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        _active_shell_processes.setdefault(event, set()).add(process)
+        for owner in _shell_process_owners(event):
+            _active_shell_processes.setdefault(owner, set()).add(process)
         cancel_now = event.is_set()
     if cancel_now:
         _terminate_process_tree(process)
@@ -166,108 +214,18 @@ def _unregister_shell_process(
     if event is None:
         return
     with _active_shell_processes_lock:
-        processes = _active_shell_processes.get(event)
-        if processes is None:
-            return
-        processes.discard(process)
-        if not processes:
-            _active_shell_processes.pop(event, None)
+        for owner in _shell_process_owners(event):
+            processes = _active_shell_processes.get(owner)
+            if processes is not None:
+                processes.discard(process)
+                if not processes:
+                    _active_shell_processes.pop(owner, None)
 
 
-def _shell_token_spans(command: str) -> list[dict[str, object]]:
-    """Tokenize enough shell syntax to find quoted SSH remote commands.
-
-    This is intentionally small: it tracks words, quotes, and command
-    separators, but does not try to be a full POSIX shell parser.
-    """
-    tokens: list[dict[str, object]] = []
-    i = 0
-    n = len(command)
-
-    def read_operator(index: int) -> str | None:
-        if command.startswith(("&&", "||"), index):
-            return command[index : index + 2]
-        if command.startswith("&>", index):
-            return "&>"
-        ch = command[index]
-        if ch in "`();|&":
-            return ch
-        if ch in "<>":
-            # `>>`/`<<` and `>|` (force-clobber redirect) are single redirection
-            # operators, NOT a pipe — the trailing `|` must not read as a boundary.
-            if index + 1 < n and (
-                command[index + 1] == ch or (ch == ">" and command[index + 1] == "|")
-            ):
-                return command[index : index + 2]
-            return ch
-        if ch.isdigit():
-            j = index
-            while j < n and command[j].isdigit():
-                j += 1
-            if j < n and command[j] in "<>":
-                end = j + 1
-                # `2>&1`, `2>>`, and `2>|` (fd force-clobber) are single
-                # redirection operators — the trailing `|` is not a pipe.
-                if end < n and command[end] in ("&", "|", command[j]):
-                    end += 1
-                return command[index:end]
-        return None
-
-    while i < n:
-        if command[i].isspace():
-            i += 1
-            continue
-        operator = read_operator(i)
-        if operator is not None:
-            tokens.append(
-                {"type": "op", "value": operator, "start": i, "end": i + len(operator)}
-            )
-            i += len(operator)
-            continue
-
-        start = i
-        value: list[str] = []
-        quoted = False
-        while i < n:
-            ch = command[i]
-            if ch.isspace():
-                break
-            if read_operator(i) is not None:
-                break
-            if ch in ("'", '"'):
-                quoted = True
-                quote = ch
-                i += 1
-                while i < n:
-                    inner = command[i]
-                    if inner == quote:
-                        i += 1
-                        break
-                    if inner == "\\" and quote == '"' and i + 1 < n:
-                        value.append(command[i + 1])
-                        i += 2
-                    else:
-                        value.append(inner)
-                        i += 1
-                continue
-            if ch == "\\" and i + 1 < n:
-                value.append(command[i + 1])
-                i += 2
-                continue
-            value.append(ch)
-            i += 1
-
-        tokens.append(
-            {
-                "type": "word",
-                "value": "".join(value),
-                "raw": command[start:i],
-                "start": start,
-                "end": i,
-                "quoted": quoted,
-            }
-        )
-    return tokens
+def _shell_process_owners(event: threading.Event | None) -> Iterator[threading.Event]:
+    while event is not None:
+        yield event
+        event = event._parent if isinstance(event, _ExecuteCancelEvent) else None
 
 
 # Commands that are dangerous as the RIGHT-HAND SIDE of a pipe (they consume
@@ -329,7 +287,7 @@ def check_dangerous_command(command: str) -> str | None:
     not detected — this is a known limitation, not a bug to fix here.
     """
     after_pipe = False
-    for token in _shell_token_spans(command):
+    for token in shell_syntax.parse(command).tokens:
         if token.get("type") == "op":
             value = token.get("value")
             if value == "|":
@@ -377,7 +335,7 @@ class ActionVerdict:
 # gate to the backend. Set client-side by ``resolve_per_run_config`` from
 # ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
 # every gateway run; read by the HITL ``when`` predicate and the backend/background
-# guards. A per-run channel (not a construction flag) so a keepalive server can
+# guards. A per-run channel (not a construction flag) so a shared server can
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
@@ -649,12 +607,14 @@ def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
         return None
 
     def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
+        # ``convert_to_messages`` leaves a dict's ``invalid_tool_calls`` in
+        # ``additional_kwargs`` (server state messages arrive as dicts).
+        invalid = message.invalid_tool_calls or message.additional_kwargs.get(
+            "invalid_tool_calls"
+        )
         return [
             *((call, False) for call in message.tool_calls),
-            *(
-                (call, True)
-                for call in (getattr(message, "invalid_tool_calls", None) or ())
-            ),
+            *((call, True) for call in invalid or ()),
         ]
 
     last_calls: list[tuple[dict, bool]] = []
@@ -768,6 +728,27 @@ def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     return Command(resume={interrupt_id: {"decisions": decisions}})
 
 
+def build_ask_user_resume(interrupt_id: str | None, payload: dict) -> "Command":
+    """Key an ask_user answer by the id of the interrupt the client displayed.
+
+    An event without a real id (the stream decoders' ``"default"``) resumes
+    flat: LangGraph reads ``resume`` as an id map only when every key is an
+    xxh3-128 digest, so a keyed ``{"default": payload}`` would be handed to
+    the node as the answer itself.
+
+    Keying matters when the agent calls ``ask_user`` twice in one message:
+    both interrupts are pending at once and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. The
+    keyed resume answers the interrupt the client displayed and re-parks the
+    rest, which re-emit on the next stream and are drained one at a time.
+    """
+    from langgraph.types import Command
+
+    if not interrupt_id or interrupt_id == "default":
+        return Command(resume=payload)  # single unkeyed interrupt
+    return Command(resume={interrupt_id: payload})
+
+
 _SSH_OPTIONS_WITH_VALUE = {
     "-B",
     "-b",
@@ -857,7 +838,7 @@ def _ssh_invocations(
         >>> _ssh_invocations("/tmp/ssh host 'pwd'")
         []
     """
-    tokens = _shell_token_spans(command)
+    tokens = shell_syntax.parse(command).tokens
     invocations: list[tuple[list[dict[str, object]], int, int, int | None, int]] = []
     segment: list[dict[str, object]] = []
 
@@ -878,12 +859,17 @@ def _ssh_invocations(
             (words, ssh_idx, host_idx, remote_idx, remote_extra_argv_count)
         )
 
+    prev_end = 0
     for token in tokens:
-        if token.get("type") == "op":
+        ends_command = shell_syntax.command_newline(
+            command, prev_end, int(token["start"])
+        )
+        if token.get("type") == "op" or ends_command is not None:
             flush_segment()
             segment = []
-        else:
+        if token.get("type") != "op":
             segment.append(token)
+        prev_end = int(token["end"])
     flush_segment()
     return invocations
 
@@ -984,36 +970,10 @@ def _validate_ssh_remote_command_format(command: str) -> str | None:
     return None
 
 
-def _split_shell_commands(command: str) -> list[str]:
-    """Split a compound shell command into individual base commands.
-
-    Handles command-boundary shell operators tracked by ``_shell_token_spans``.
-    Redirection operators are not boundaries; their operands are filenames, not
-    commands.
-    """
-    command_boundaries = {"&&", "||", ";", "|", "&", "(", ")", "`"}
-    base_commands: list[str] = []
-    segment: list[str] = []
-
-    def flush_segment() -> None:
-        words = [token for token in segment if token]
-        if words:
-            base_commands.append(words[0])
-
-    for token in _shell_token_spans(command):
-        if token.get("type") == "op" and token.get("value") in command_boundaries:
-            flush_segment()
-            segment = []
-        else:
-            segment.append(str(token.get("value", "")))
-    flush_segment()
-    return base_commands
-
-
 def _split_command_segments(command: str) -> list[str] | None:
     """Split a compound command into raw segment strings on command boundaries.
 
-    Quote-aware (via ``_shell_token_spans``). Boundaries are ``;`` ``&&`` ``||``
+    Quote-aware (via ``shell_syntax.tokenize``). Boundaries are ``;`` ``&&`` ``||``
     ``|`` ``&`` and grouping; redirections are not boundaries. Lets the allow-list
     clear a chain only when *every* segment is allow-listed, not just the leading
     one (``ls; rm -rf x`` must not ride in on an allow-listed ``ls``).
@@ -1032,7 +992,7 @@ def _split_command_segments(command: str) -> list[str] | None:
     boundaries = {"&&", "||", ";", "|", "&", "(", ")"}
     segments: list[str] = []
     seg_start = 0
-    for token in _shell_token_spans(command):
+    for token in shell_syntax.tokenize(command):
         if token.get("type") == "op" and token.get("value") in boundaries:
             seg = command[seg_start : int(token["start"])].strip()
             if seg:
@@ -1044,13 +1004,63 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
+# ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
+_GLUED_VALUE_PREFIX_RE = re.compile(
+    r"\+{0,2}[\w.-]+(?:\[[^]]*\])?(?::[A-Z]+)?[+:?!]*=|-[A-Za-z]+,?"
+)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    for token in command.split():
+    parsed = shell_syntax.parse(command)
+    tokens = parsed.tokens
+    decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
+    # Quotes and escapes can split a literal path component as written.
+    # Inspect shell-decoded words too.
+    for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
+        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
+        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+        value = token
+        for _ in range(4):
+            glued = _GLUED_VALUE_PREFIX_RE.match(value)
+            if glued is None:
+                break
+            value = value[glued.end() :]
+            entries = [value] if glued[0].startswith("-") else value.split(":")
+            if any(".." in PurePosixPath(entry).parts for entry in entries):
+                return True
+
+    # The substitution helper reads shell words, not whole commands: comments
+    # and literal heredoc bodies must not affect its quote tracking.
+    def check_substitution(inner: str) -> tuple[str, bool]:
+        return inner, _has_traversal_component(inner)
+
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                str(token["raw"]), check_substitution
+            )
+            if traversal:
+                return True
+    for start, end, expands in parsed.bodies:
+        if expands:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                command[start:end], check_substitution, heredoc=True
+            )
+            if traversal:
+                return True
+    # A shell's script (bash -c '...') is a command line of its own: check
+    # inside it too, the way _extract_all_paths recurses into script words.
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) in scripts:
+            if _has_traversal_component(str(token["value"])):
+                return True
     return False
 
 
@@ -1059,8 +1069,7 @@ def _collect_executable_positions(command: str) -> set[int]:
 
     These are command names/paths that appear in executable position (e.g.
     ``/usr/bin/python`` in ``/usr/bin/python script.py``) and should not be
-    treated as dangerous operand paths.  Also covers the argument position
-    right after ``pip install`` / ``pip3 install`` (package path).
+    treated as dangerous operand paths.
     """
     offsets: set[int] = set()
     for segment in re.split(r"\s*(?:&&|\|\||;)\s*", command):
@@ -1078,19 +1087,6 @@ def _collect_executable_positions(command: str) -> set[int]:
                 continue
             # First token is the executable itself — mark its offset
             offsets.add(seg_start)
-            # pip install <path> — mark the install-target token
-            if (
-                len(tokens) >= 3
-                and tokens[0] in ("pip", "pip3")
-                and tokens[1] == "install"
-            ):
-                # Find position of the 3rd token (the package arg) onwards
-                rest = pipe_seg_stripped
-                for t in tokens[:2]:
-                    idx = rest.find(t)
-                    rest = rest[idx + len(t) :]
-                pkg_offset = seg_start + (len(pipe_seg_stripped) - len(rest.lstrip()))
-                offsets.add(pkg_offset)
     return offsets
 
 
@@ -1112,6 +1108,65 @@ def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool
     return False
 
 
+_SEARCH_LIST_VARIABLES = frozenset(
+    {
+        "PATH",
+        "PYTHONPATH",
+        "LD_LIBRARY_PATH",
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "PKG_CONFIG_PATH",
+        "MANPATH",
+        "CLASSPATH",
+        "NODE_PATH",
+    }
+)
+
+
+def _is_toolchain_path_assignment(raw: str) -> bool:
+    """A literal toolchain location in an assignment is a setting, not an operand.
+
+    Not a read-only guarantee: a later ``$NAME`` can still write there.
+    """
+    if re.search(r"(?<!\\)[$`]", raw):
+        return False
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        return False
+    if len(words) != 1:
+        return False
+    # A quoted setting may contain path-list separators and compiler flags,
+    # but must not swallow a command list supplied to eval or another shell.
+    match = re.fullmatch(
+        r"(?:-D)?[A-Za-z_]\w*=(/[^\s;:|&<>]*(?:[;:]/[^\s;:|&<>]*)*)"
+        r"(?:\s+-[^\s;|&<>]+)*",
+        words[0],
+    )
+    return match is not None and _is_under_allowed_prefix(
+        match[1], ("/usr", "/opt", "/bin", "/sbin")
+    )
+
+
+def _is_search_path_assignment(raw: str) -> bool:
+    """Search-list values are data; commands substituted into them are not."""
+    match = re.match(r"([A-Za-z_]\w*)=", raw)
+    return match is not None and match[1] in _SEARCH_LIST_VARIABLES
+
+
+def _attached_path_word(raw: str) -> tuple[str, str] | None:
+    """Split a literal option/assignment prefix from its absolute path."""
+    if _is_search_path_assignment(raw):
+        return None
+    path_pattern = r"((?:/|[A-Za-z]:[\\/]).*)" if _is_windows() else r"(/.*)"
+    match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)" + path_pattern, raw)
+    if match is None:
+        match = re.fullmatch(r"(-[A-Za-z])" + path_pattern, raw)
+    return (match[1], match[2]) if match is not None else None
+
+
 def _extract_all_paths(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
@@ -1120,7 +1175,7 @@ def _extract_all_paths(
 
     Scans both shell tokens and string literals (single/double quoted) to find
     paths that start with system prefixes like /Users/, /etc/, /tmp/, etc.
-    Skips paths in executable position (command name) and pip install targets.
+    Skips paths in executable position (command name).
 
     Paths matched by ``allow_prefixes`` (via ``_is_under_allowed_prefix``)
     are dropped.
@@ -1135,15 +1190,774 @@ def _extract_all_paths(
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+    path_assignments: list[tuple[int, int]] = []
+    allowed_path_words: list[tuple[int, int]] = []
+    tokens = shell_syntax.parse(command).tokens
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] != "word":
+            continue
+        if int(token["start"]) in scripts:
+            # A shell's script is a command line, not one assignment value.
+            paths.extend(_extract_all_paths(str(token["value"]), allow_prefixes))
+            path_assignments.append((int(token["start"]), int(token["end"])))
+            continue
+        raw = str(token["raw"])
+        value = str(token["value"])
+        attached = _attached_path_word(value)
+        path = attached[1] if attached is not None else value
+        if (
+            (
+                path.startswith("/")
+                or (_is_windows() and PureWindowsPath(path).is_absolute())
+            )
+            and _under_any(path, allow_prefixes)
+            and not re.search(r"[$`;\n|&<>]|\s/", path)
+        ):
+            # The raw regex splits spaced roots and quoted-root + /tmp
+            # concatenations. Keep a literal allowed path together, but do
+            # not exempt code or substitutions that can name other paths.
+            allowed_path_words.append((int(token["start"]), int(token["end"])))
+        if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
+            continue
+        path_assignments.append((int(token["start"]), int(token["end"])))
+
+        def collect_substitution(inner: str) -> tuple[str, bool]:
+            # Literal PATH entries are search-list data, but commands inside
+            # substitutions still read operands and must not bypass validation.
+            paths.extend(_extract_all_paths(inner, allow_prefixes))
+            return inner, False
+
+        shell_syntax.rewrite_substitutions(str(token["raw"]), collect_substitution)
     for m in path_re.finditer(command):
+        if any(start <= m.start(1) < end for start, end in allowed_path_words):
+            continue
+        if any(start <= m.start() < end for start, end in path_assignments):
+            continue
         # Skip paths that land at an executable-position offset
         if m.start(1) in exe_offsets:
             continue
         extracted = m.group(1)
+        if extracted in _PASSTHROUGH_DEVICE_PATHS:
+            continue
         if _is_under_allowed_prefix(extracted, allow_prefixes):
             continue
         paths.append(extracted)
+    # Attached option and assignment values have no whitespace before the
+    # slash, so the general literal scan deliberately does not match them.
+    for token in tokens:
+        if token["type"] != "word" or int(token["start"]) in scripts:
+            continue
+        if _is_toolchain_path_assignment(str(token["raw"])):
+            continue
+        attached = _attached_path_word(str(token["value"]))
+        if attached is None:
+            continue
+        path = attached[1]
+        if (
+            _is_system_path(path)
+            and path not in _PASSTHROUGH_DEVICE_PATHS
+            and not _is_under_allowed_prefix(path, allow_prefixes)
+        ):
+            paths.append(path)
     return paths
+
+
+def _removal_target(token: dict[str, object]) -> str:
+    """A removal target as the agent's shell reads it, with ``/`` separators."""
+    if _is_windows():
+        from . import agent_shell
+
+        if not agent_shell.uses_bash():
+            # cmd.exe keeps backslashes; drop quotes of both kinds, which a
+            # program such as MSYS rm may still strip.
+            return re.sub("[\"']", "", str(token["raw"])).replace("\\", "/")
+    return str(token["value"]).replace("\\", "/")
+
+
+def _under_any(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether *path* is one of *folders* or inside one, with either separator
+    (case-insensitive on Windows)."""
+    path = path.replace("\\", "/")
+    folders = tuple(folder.replace("\\", "/") for folder in folders)
+    if _is_windows():
+        path, folders = path.lower(), tuple(folder.lower() for folder in folders)
+    return _is_under_allowed_prefix(path, folders)
+
+
+def _removal_problem(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> str | None:
+    """Why *path* may not be removed: ``"outside"`` (not strictly inside the
+    workspace, ``..``, or an expansion that could leave it) or ``"protected"``
+    (a protected folder, inside one or holding one); ``None`` when it may."""
+    path = path.replace("\\", "/")
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    if _is_windows():  # case-insensitive file systems
+        path, root = path.lower(), root.lower()
+    if not path.startswith(root + "/"):
+        return "outside"
+    segments = [
+        part for part in path[len(root) + 1 :].split("/") if part not in ("", ".")
+    ]
+    # A literal first segment keeps the target below the root whatever the
+    # rest expands to (`%` expands under cmd.exe).
+    if not segments or ".." in segments or re.search(r"[$`%]", segments[0]):
+        return "outside"
+    normalized = root + "/" + "/".join(segments)
+    if _under_any(normalized, protected) or any(
+        _under_any(folder, (normalized,)) for folder in protected
+    ):
+        return "protected"
+    return None
+
+
+def _protected_removal_error(target: str, folder: str | None = None) -> str:
+    """The refusal of removing *target*; *folder*: the workspace folder, other
+    than the root, that the command may change into and *target* is read from."""
+    read_from = (
+        f" (read from '{folder}', a folder this command may change into)"
+        if folder
+        else ""
+    )
+    return (
+        f"Command blocked: '{target}'{read_from} is or holds a protected folder "
+        f"(skills, memories or media), which shell commands may not remove."
+    )
+
+
+def _outside_removal_error(operand: str) -> str:
+    """The refusal of a recursive rm of *operand*, outside the workspace."""
+    return (
+        f"Command blocked: rm would remove '{operand}', which is "
+        f"outside the workspace or may expand there. Remove a "
+        f"path inside the workspace (e.g., './build')."
+    )
+
+
+def _unknown_values_error(word: str) -> str:
+    """The refusal of a command whose *word* may name paths the check does
+    not follow (see :class:`shell_syntax.UnknownValues`)."""
+    return (
+        f"Command blocked: '{word}' may name paths the check does not follow: "
+        f"it uses a variable this command sets other than with a plain "
+        f"NAME=value (printf -v, unset, a loop over a variable's words, or any "
+        f"variable once the command runs eval), or one with too many values "
+        f"to check. Write the path out instead."
+    )
+
+
+def _workspace_folder(folder: str, root: str) -> str | None:
+    """*folder* relative to the workspace *root*, ``/`` separated; ``None``
+    for the root itself or a folder outside it."""
+    if folder == root or not _under_any(folder, (root,)):
+        return None
+    return folder[len(root.rstrip("/")) + 1 :]
+
+
+def _is_home_word(raw: str) -> bool:
+    """Whether a word as written starts in the home folder: ``~``, ``$HOME``
+    or ``$USERPROFILE`` that the shell expands (not inside single quotes), or
+    cmd.exe's ``%USERPROFILE%``."""
+    return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
+
+
+def _bare_cd_goes_home() -> bool:
+    """A bare ``cd`` goes home, except in cmd.exe, where it prints the folder."""
+    if not _is_windows():
+        return True
+    from . import agent_shell
+
+    return agent_shell.uses_bash()
+
+
+def _folder_target(
+    found: shell_syntax.SimpleCommand,
+    assigned: dict[str, tuple[str, ...] | None] | None = None,
+) -> tuple[str, dict[str, object] | None] | None:
+    """The target of a ``cd`` / ``pushd`` as written, with its token: the
+    first argument that is not an option as the shell reads it (``"-P"`` is
+    one, and so is ``$O`` when every value *assigned* to it is); ``None``
+    when it names none."""
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if value.startswith("-") and value != "-":
+            continue
+        if assigned and "$" in arg:
+            values = shell_syntax.word_values(arg, value, assigned)
+            if values and all(each.startswith("-") and each != "-" for each in values):
+                continue
+        return arg, token
+    return None
+
+
+def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
+    """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
+    absolute target outside them (a drive path on Windows too), the home
+    folder (``~``, ``$HOME``) or a bare ``cd``. A target that names a
+    variable the command sets is also read with each of its values, where a
+    ``..`` component leaves too (``T=..; cd "$T"``); one whose values are not
+    followed is read as written when only the run sets it (``read D``), as
+    a variable the command does not set. :class:`shell_syntax.UnknownValues`
+    when the check knows its values only in part (``T=.; T+=.``)."""
+
+    def absolute_outside(path: str) -> bool:
+        return (
+            path.startswith("/") or (_is_windows() and bool(_DRIVE_PATH_RE.match(path)))
+        ) and not _under_any(path, allow_prefixes)
+
+    assigned = shell_syntax.assigned_values(command) if "$" in command else {}
+    plain: shell_syntax.AssignedValues | None = None
+    for found in shell_syntax.simple_commands(command):
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        try:
+            target = _folder_target(found, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:
+                raise
+            target = _folder_target(found)  # its options read as written
+        if target is None:
+            if found.name == "cd" and _bare_cd_goes_home():
+                return "cd"
+            continue
+        arg, token = target
+        # As the agent's shell reads it, so a Windows drive path is absolute too.
+        path = _removal_target(token) if token is not None else arg
+        if _is_home_word(arg) or absolute_outside(path):
+            return f"{found.name} {arg}"
+        if "$" not in arg:
+            continue
+        try:
+            values = shell_syntax.word_values(arg, path, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:  # the values it may have are not all checked
+                raise
+            # The run may also set it (`read D`, `source`): what the run sets
+            # is read as written, as for a variable the command does not set
+            # (the rm check refuses it in front of a recursive rm), and its
+            # plain `=` values are still checked.
+            if plain is None:
+                plain = shell_syntax.assigned_values(command, plain_only=True)
+            try:
+                values = shell_syntax.word_values(arg, path, plain)
+            except shell_syntax.UnknownValues as plain_exc:
+                if plain_exc.partial:
+                    raise
+                continue
+        for value in values or ():
+            if (
+                _is_home_word(value)
+                or absolute_outside(value)
+                or ".." in re.split(r"[\\/]", value)
+            ):
+                return f"{found.name} {arg}"
+        # An empty value outside quotes leaves no argument: a bare cd.
+        if (
+            found.name == "cd"
+            and values
+            and not re.search("[\"']", arg)
+            and any(not value.strip() for value in values)
+            and _bare_cd_goes_home()
+        ):
+            return f"{found.name} {arg}"
+    return None
+
+
+def _literal_folder(operand: str) -> str | None:
+    """The folder an operand names before its first expansion (``$`` or a
+    backtick), as the agent's shell reads it: ``skills`` for
+    ``skills/$(printf demo)`` and ``sk\\ills/$(printf demo)``; ``None`` when
+    no whole folder name comes first."""
+    prefix = re.split(r"[$`]", operand, maxsplit=1)[0]
+    if "/" not in prefix:
+        return None
+    tokens = shell_syntax.tokenize(prefix.rsplit("/", 1)[0])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return _removal_target(tokens[0]) or None
+
+
+# Most folders an rm is checked from; each `cd` may double them.
+_FOLDERS_CAP = 64
+
+
+class _TooManyFolders(Exception):
+    """A command may run in more folders than :data:`_FOLDERS_CAP`."""
+
+
+def _word_paths(
+    word: str,
+    token: dict[str, object] | None,
+    assigned: dict[str, tuple[str, ...] | None],
+    plain: dict[str, tuple[str, ...] | None] | None = None,
+) -> list[str]:
+    """The paths a word may name as the agent's shell reads it, with ``/``
+    separators: with each value of the variables its command sets (see
+    :func:`shell_syntax.word_values`), else itself, also when only the run
+    knows a value (``D=$(date +%F); rm -rf memories/$D``). With *plain* (see
+    :func:`shell_syntax.assigned_values`), a variable only the run sets
+    (``read D``) is read as written too, besides its plain `=` values;
+    :class:`shell_syntax.UnknownValues` otherwise."""
+    path = _removal_target(token) if token is not None else word
+    try:
+        values = shell_syntax.word_values(word, path, assigned)
+    except shell_syntax.UnknownValues as exc:
+        if exc.partial or plain is None:
+            raise
+        values = [*(shell_syntax.word_values(word, path, plain) or ()), path]
+    return [value.replace("\\", "/") for value in values] if values else [path]
+
+
+def _normpath(path: str) -> str:
+    """*path* normalised, with one leading ``/`` (``posixpath.normpath`` keeps
+    two, so ``env -C /`` would read ``//W/skills``)."""
+    return re.sub(r"^/+", "/", posixpath.normpath(path))
+
+
+def _folder_from(folder: str, target: str) -> str | None:
+    """The folder a ``cd`` to *target* from *folder* enters (an absolute
+    target as it is); ``None`` when only the run knows it (an expansion, a
+    glob, ``-``)."""
+    if not target or target == "-" or re.search(r"[$`%*?\[]", target):
+        return None
+    if target.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(target)):
+        return _normpath(target)
+    return _normpath(f"{folder}/{target}")
+
+
+def _possible_folders(
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """The folders the commands of one command may run in, read in order,
+    each with the ``env -C`` folders of the command that entered it: the
+    workspace root, and each ``cd`` / ``pushd`` target read from every folder
+    found before it that the ``cd`` may run in (see :func:`_run_folders`),
+    also with the values of the variables the command sets. A target only the
+    run knows adds none, nor do ``cd -`` and ``popd``, which return to one of
+    them. :class:`_TooManyFolders` past :data:`_FOLDERS_CAP` folders."""
+    root = posixpath.normpath(workspace_root.replace("\\", "/"))
+    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
+    for found in commands:
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        target = _folder_target(found, assigned)
+        if target is None:
+            continue
+        for value in _word_paths(*target, assigned):
+            for start in _run_folders(found.folders, list(folders), assigned):
+                entered = _folder_from(start, value)
+                if entered is None or (entered, found.folders) in folders:
+                    continue
+                if len(folders) >= _FOLDERS_CAP:
+                    raise _TooManyFolders
+                folders.append((entered, found.folders))
+    return folders
+
+
+# A function definition in text the parser does not read as code.
+_FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
+
+
+def _runs_out_of_order(
+    command: str, commands: list[shell_syntax.SimpleCommand]
+) -> bool:
+    """Whether *command* (its *commands*) may change folder in a command
+    that may run again or before one written ahead of it: a ``cd`` /
+    ``pushd``, or code run from a string or a file, inside a loop or a
+    function body (see :class:`shell_syntax.SimpleCommand`), so that the
+    folders it may run in are not read in order. A string run as code
+    (``eval``, ``source``) is not parsed, so a function definition in its
+    text counts too."""
+    if any(
+        found.repeats
+        and (
+            found.name in shell_syntax.FOLDER_COMMANDS
+            or found.name in shell_syntax.CODE_RUNNER_NAMES
+            or found.name in ("source", ".")
+        )
+        for found in commands
+    ):
+        return True
+    return any(
+        found.name in shell_syntax.CODE_RUNNER_NAMES or found.name in ("source", ".")
+        for found in commands
+    ) and bool(_FUNCTION_TEXT_RE.search(command))
+
+
+def _run_folders(
+    chain: tuple[str, ...],
+    folders: list[tuple[str, tuple[str, ...]]],
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[str]:
+    """The folders a command under the ``env -C`` folders *chain* may run in:
+    each of *folders* (see :func:`_possible_folders`) entered under the start
+    of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
+    with the rest of *chain* applied. An ``env -C`` folder only the run knows
+    keeps the folder it is read from, as a ``cd`` to it does
+    (``env -C "$(pwd)"``). :class:`_TooManyFolders` when ``env -C`` folders
+    with many values would take them past :data:`_FOLDERS_CAP`."""
+    reached: list[str] = []
+    for folder, entered_under in folders:
+        if chain[: len(entered_under)] != entered_under:
+            continue
+        starts = [folder]
+        for folder_word in chain[len(entered_under) :]:
+            # One argument already: its value is not split again.
+            values = shell_syntax.word_values(f'"{folder_word}"', folder_word, assigned)
+            starts = list(
+                dict.fromkeys(
+                    _folder_from(start, value.replace("\\", "/")) or start
+                    for start in starts
+                    for value in (values or [folder_word])
+                )
+            )
+            if len(starts) > _FOLDERS_CAP:
+                raise _TooManyFolders
+        reached.extend(starts)
+    reached = list(dict.fromkeys(reached))
+    if len(reached) > max(_FOLDERS_CAP, len(folders)):
+        raise _TooManyFolders
+    return reached
+
+
+def _removes_protected(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> bool:
+    """Whether removing *path* (absolute, ``/`` separators) removes a protected
+    folder: inside one anywhere, or holding one in the workspace."""
+    path = posixpath.normpath(path)
+    return (
+        _under_any(path, protected)
+        or _removal_problem(path, workspace_root, protected) == "protected"
+    )
+
+
+def _recursive_rm_operands(
+    found: shell_syntax.SimpleCommand,
+) -> list[tuple[str, dict[str, object] | None]]:
+    """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
+    ``--recursive``, in any spelling), with their tokens. Options are read as
+    the shell passes them to rm, so a quoted ``'-r'`` counts too."""
+    if found.name != "rm":
+        return []
+    operands: list[tuple[str, dict[str, object] | None]] = []
+    recursive = options_done = False
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if not options_done and value == "--":
+            options_done = True
+        elif not options_done and value.startswith("-") and value != "-":
+            recursive = recursive or (
+                # GNU rm takes any unambiguous prefix of a long option.
+                (len(value) > 2 and "--recursive".startswith(value))
+                or (not value.startswith("--") and bool({"r", "R"} & set(value[1:])))
+            )
+        else:
+            operands.append((arg, token))
+    return operands if recursive else []
+
+
+def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
+    """Whether an rm operand is the file system root, a drive root or the home
+    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.``,
+    ``/*`` or ``/.*``; rm itself refuses a ``.`` operand, but not every rm is
+    checked)."""
+    path = _removal_target(token) if token is not None else operand
+    if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
+        return True
+    # The shell expands a tilde only while its prefix is unquoted; the steps
+    # after it are read as the shell passes them (`~/""` is `~/`).
+    tilde_prefix = operand.split("/", 1)[0]
+    return bool(
+        (
+            operand.startswith("~")
+            and not re.search(r"[\"'\\]", tilde_prefix)
+            and _HOME_TILDE_TARGET_RE.fullmatch(path.replace("\\", "/"))
+        )
+        or (
+            _is_home_word(operand)
+            and _HOME_VARIABLE_TARGET_RE.fullmatch(path.replace("\\", "/"))
+        )
+    )
+
+
+# `$NAME` / `${NAME...}`: the variable a word expands.
+_VARIABLE_REFERENCE_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+# Commands that read lines into variables: their options whose value is the
+# rest of the word or the next word, and the variable set without operands.
+_READ_COMMANDS = {
+    "read": (frozenset("adinNptu"), "REPLY"),
+    "mapfile": (frozenset("dnOsuCc"), "MAPFILE"),
+    "readarray": (frozenset("dnOsuCc"), "MAPFILE"),
+}
+
+
+def _runs_lookup(text: str) -> bool:
+    """Whether a word runs a process lookup in a ``$(...)`` or backticks."""
+    return ("$(" in text or "`" in text) and bool(
+        _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(text))
+    )
+
+
+def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
+    """The variables a ``read``, ``mapfile`` or ``readarray`` sets: its
+    operands and a ``read -a`` array, or ``REPLY`` / ``MAPFILE``."""
+    options_with_value, default = _READ_COMMANDS[found.name]
+    values = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    names: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        index += 1
+        if value == "--":
+            names.extend(values[index:])
+            break
+        if not value.startswith("-") or value == "-":
+            names.append(value)
+            continue
+        for position, letter in enumerate(value[1:], start=1):
+            if letter not in options_with_value:
+                continue
+            target = value[position + 1 :]
+            if not target and index < len(values):
+                target = values[index]
+                index += 1
+            if letter == "a" and found.name == "read":
+                names.append(target)
+            break
+    # `read 'p[0]'` sets an element of the array `p`.
+    names = [
+        match[1]
+        for match in (re.fullmatch(r"([A-Za-z_]\w*)(?:\[[^\]]*\])?", n) for n in names)
+        if match is not None
+    ]
+    return names or [default]
+
+
+def _looked_up_variables(
+    command: str, commands: list[shell_syntax.SimpleCommand], looks_up: bool
+) -> frozenset[str]:
+    """The variables that may hold ids a process lookup found: set from a
+    substitution that runs one, looped over one in ``for``, or set by a
+    ``read`` in a command that runs one (*looks_up*), wherever its input
+    comes from."""
+    names = {
+        name for name, value in shell_syntax.assignments(command) if _runs_lookup(value)
+    }
+    for found in commands:
+        if found.name == "for" and found.args[1:2] == ("in",):
+            if any(_runs_lookup(arg) for arg in found.args[2:]):
+                names.add(found.args[0])
+        elif found.name in _READ_COMMANDS and looks_up:
+            names.update(_read_variables(found))
+    return frozenset(names)
+
+
+def _kill_by_lookup(
+    found: shell_syntax.SimpleCommand,
+    looks_up: bool,
+    by_name: bool,
+    looked_up: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether a kill reaches processes found by name or pattern, or -1, 0 or
+    a process group. *looks_up*: the command runs a process lookup; *by_name*:
+    one that matches names (pgrep, pidof), so a variable holds its ids;
+    *looked_up*: the variables that hold ids a lookup found."""
+    if found.name == "fuser":
+        return any(
+            arg in ("-k", "--kill")
+            or (arg[:2] != "--" and arg[:1] == "-" and "k" in arg)
+            for arg in found.args
+        )
+    if found.name in ("taskkill", "taskkill.exe"):
+        options = {arg.upper() for arg in found.args}
+        by_pid = bool(options & {"/PID", "-PID"})
+        return bool(options & {"/IM", "-IM"}) or (
+            not by_pid and bool(options & {"/FI", "-FI"})
+        )
+    if "xargs" in found.via and looks_up:
+        return True
+    # As the shell reads them, so a quoted "-1" or "-$PGID" counts too.
+    args = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    if args and args[0] in ("-l", "-L"):
+        return False
+    if args and args[0] in ("-s", "-n"):
+        args = args[2:]
+    elif args and args[0].startswith("-") and args[0] != "--":
+        args = args[1:]  # the signal: -9, -TERM
+    if args and args[0] == "--":
+        args = args[1:]
+    return any(
+        re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
+        or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
+        or not looked_up.isdisjoint(_VARIABLE_REFERENCE_RE.findall(arg))
+        or (
+            ("$(" in arg or "`" in arg)
+            and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
+        )
+        for arg in args
+    )
+
+
+def _value_outside(path: str, workspace_root: str, protected: tuple[str, ...]) -> bool:
+    """Whether a value of a variable, read as the path an rm removes, climbs
+    with ``..``, starts at home or lies outside the workspace."""
+    return (
+        _is_home_word(path)
+        or ".." in path.split("/")
+        or (
+            (path.startswith("/") or bool(_DRIVE_PATH_RE.match(path)))
+            and _removal_problem(path, workspace_root, protected) == "outside"
+        )
+    )
+
+
+def _blank_substitutions(word: str) -> str:
+    """*word* with the body of each ``$(...)`` and backtick substitution
+    emptied."""
+    out: list[str] = []
+    index, quote = 0, None
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif char == "\\":
+            out.append(word[index : index + 2])
+            index += 2
+            continue
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif word.startswith("$(", index):
+            close = shell_syntax.matching_paren(word, index + 2)
+            if close is not None:
+                out.append("$()")
+                index = close + 1
+                continue
+        elif char == "`":
+            close = word.find("`", index + 1)
+            if close != -1:
+                out.append("``")
+                index = close + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _folder_removal_error(
+    command: str,
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    protected: tuple[str, ...],
+) -> str | None:
+    """The refusal of a recursive rm in *command* (its *commands*) that
+    removes a protected folder, with every operand read from every folder the
+    rm may run in, and with the values of the variables the command sets:
+    only a protected folder is refused (rm itself refuses `.`). A first
+    segment that expands may be anything, so it is left alone, unless the
+    folder it is read from is itself in a protected folder."""
+    removals = [
+        (found, operand, token)
+        for found in commands
+        for operand, token in _recursive_rm_operands(found)
+    ]
+    if not removals:
+        return None
+    relative = any(
+        not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+        for _found, operand, token in removals
+        for path in [_removal_target(token) if token is not None else operand]
+    )
+    changes_folder = any(
+        found.name in shell_syntax.FOLDER_COMMANDS for found in commands
+    )
+    # `cd NAME` may enter the folder in $NAME.
+    hides_folder_changes = any(
+        found.name == "shopt" and "cdable_vars" in found.args for found in commands
+    )
+    if relative and (
+        hides_folder_changes
+        or (changes_folder and _runs_out_of_order(command, commands))
+    ):
+        return (
+            "Command blocked: the folder each recursive rm runs in is not "
+            "followed, as the command changes folder in a loop or a function "
+            "(or with cdable_vars). Run the rm as a command of its own, or "
+            "name its path from the workspace root."
+        )
+    assigned = shell_syntax.assigned_values(command)
+    # A variable only the run sets (`read D`) is read as written, as one the
+    # command does not set, besides its plain `=` values.
+    plain = shell_syntax.assigned_values(command, plain_only=True)
+    # Built once, and only when a relative path needs it.
+    folders: list[tuple[str, tuple[str, ...]]] | None = None
+    for found, operand, token in removals:
+        if token is not None:
+            operand_paths = _word_paths(operand, token, assigned, plain)
+            # A value of a variable the command sets, checked as a written
+            # path is: it may not climb with `..`, start at home or lie
+            # outside.
+            for path in operand_paths:
+                if path == _removal_target(token):
+                    continue
+                if _value_outside(path, workspace_root, protected):
+                    return _outside_removal_error(operand)
+        else:
+            # Its values too, with each substitution emptied and the quotes
+            # dropped, so the words inside a substitution are not read as
+            # values.
+            blank = _blank_substitutions(operand)
+            for path in _word_paths(blank, None, assigned, plain):
+                if path == blank:
+                    continue
+                if _value_outside(re.sub("[\"']", "", path), workspace_root, protected):
+                    return _outside_removal_error(operand)
+            # Glued to a substitution: whatever it expands to stays under the
+            # literal folder written before it, or under the folder the rm
+            # runs in when none is.
+            try:
+                written_values = shell_syntax.word_values(operand, operand, assigned)
+            except shell_syntax.UnknownValues as exc:
+                if exc.partial:
+                    raise
+                written_values = [
+                    *(shell_syntax.word_values(operand, operand, plain) or ()),
+                    operand,
+                ]
+            operand_paths = [
+                _literal_folder(written) or written
+                for written in written_values or [operand]
+            ]
+        relative_paths = []
+        for path in operand_paths:
+            if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                relative_paths.append(path)
+            elif _removes_protected(path, workspace_root, protected):
+                return _protected_removal_error(operand)
+        if not relative_paths:
+            continue
+        if folders is None:
+            folders = _possible_folders(commands, workspace_root, assigned)
+        for folder in _run_folders(found.folders, folders, assigned):
+            for path in relative_paths:
+                if _removes_protected(
+                    _normpath(f"{folder}/{path}"), workspace_root, protected
+                ):
+                    return _protected_removal_error(
+                        operand, _workspace_folder(folder, folders[0][0])
+                    )
+    return None
 
 
 def validate_command(
@@ -1151,6 +1965,7 @@ def validate_command(
     allow_prefixes: tuple[str, ...] = (),
     *,
     dangerous: bool = False,
+    workspace_root: str | None = None,
 ) -> str | None:
     """
     Validate a shell command for safety.
@@ -1160,10 +1975,14 @@ def validate_command(
         allow_prefixes: Absolute path prefixes exempt from the system-path
             block list (matching rules in ``_is_under_allowed_prefix``).
         dangerous: When True (real-filesystem mode), skip the path-confinement
-            checks (``..`` traversal, ``~/``/``cd /`` patterns, absolute system
-            paths). Privileged commands (:data:`BLOCKED_COMMANDS`) and
-            catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
+            checks (``..`` traversal, ``~/``, ``cd`` out of the workspace,
+            absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
+            and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
             enforced.
+        workspace_root: The workspace; ``cd`` may enter it, a destructive
+            pattern whose target lies strictly inside it is allowed, and the
+            relative operands of a recursive rm are resolved against it and
+            every folder a ``cd`` or ``pushd`` in the command may enter.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1186,22 +2005,115 @@ def validate_command(
                     f"Use relative paths (e.g., './file.py') instead."
                 )
 
-    # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
-    for pattern in _DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command):
+        try:
+            outside = _cd_target_outside(
+                command, (workspace_root,) if workspace_root else ()
+            )
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
+        if outside is not None:
             return (
-                f"Command blocked: contains forbidden pattern '{pattern}'. "
+                f"Command blocked: '{outside}' leaves the workspace. "
+                f"Commands start in the workspace root; change into a directory "
+                f"inside it (e.g., 'cd ./subdir')."
+            )
+
+    # Catastrophic patterns (e.g. `rm -rf /`) — always enforced.
+    commands = shell_syntax.simple_commands(command)
+    tokens = shell_syntax.parse(command).tokens
+    whole_words = {
+        (start, end) for start, end, _quoted in shell_syntax.glued_words(tokens)
+    }
+    # A target glued to a substitution can expand to more paths than it shows.
+    targets = {
+        int(token["start"]): token
+        for token in tokens
+        if token["type"] == "word"
+        and (int(token["start"]), int(token["end"])) in whole_words
+    }
+    # Memories, skills and media stay protected even inside the workspace.
+    protected = tuple(prefix for prefix in allow_prefixes if prefix != workspace_root)
+    for pattern in _DESTRUCTIVE_PATTERNS:
+        for match in pattern.finditer(command):
+            target = targets.get(match.start("target"))
+            problem = (
+                _removal_problem(_removal_target(target), workspace_root, protected)
+                if not dangerous and workspace_root and target is not None
+                else "outside"
+            )
+            if problem is None:
+                continue
+            if problem == "protected":
+                return _protected_removal_error(str(target["raw"]))
+            return (
+                f"Command blocked: contains forbidden pattern '{match.group(0)}'. "
                 f"All commands must operate within the workspace directory. "
                 f"Use relative paths (e.g., './file.py') instead."
             )
-
-    # Check for dangerous commands (pipeline-aware) — always enforced.
-    for base_cmd in _split_shell_commands(command):
-        if base_cmd in BLOCKED_COMMANDS:
-            return (
-                f"Command blocked: '{base_cmd}' is not allowed in sandbox mode. "
-                f"Only standard development commands are permitted."
+    # Every absolute operand of a recursive rm, however it is spelled.
+    if not dangerous and workspace_root:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                path = _removal_target(token) if token is not None else operand
+                bare = path.lstrip("'\"")
+                if _is_home_word(operand):
+                    problem = "outside"
+                elif not bare.startswith("/") and not _DRIVE_PATH_RE.match(bare):
+                    continue
+                elif token is None:
+                    problem = "outside"  # glued to a substitution
+                else:
+                    problem = _removal_problem(path, workspace_root, protected)
+                if problem == "protected":
+                    return _protected_removal_error(operand)
+                if problem is not None:
+                    return _outside_removal_error(operand)
+        try:
+            refusal = _folder_removal_error(
+                command, commands, workspace_root, protected
             )
+        except shell_syntax.UnknownValues as exc:
+            refusal = _unknown_values_error(exc.word)
+        except _TooManyFolders:
+            refusal = (
+                f"Command blocked: it may change into more than {_FOLDERS_CAP} "
+                f"folders, more than the check follows. Split it into shorter "
+                f"commands."
+            )
+        if refusal is not None:
+            return refusal
+
+    # Dangerous mode allows rm anywhere, but never of the whole system or home.
+    if dangerous:
+        for found in commands:
+            for operand, token in _recursive_rm_operands(found):
+                if _whole_system_target(operand, token):
+                    return (
+                        f"Command blocked: rm would remove '{operand}', the root, a "
+                        f"drive or the home folder, which is refused in every mode."
+                    )
+
+    # Blocked commands and kills by lookup, wherever they run — always enforced.
+    looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
+    by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
+    looked_up = (
+        _looked_up_variables(command, commands, looks_up)
+        if any(found.name in _KILL_COMMANDS for found in commands)
+        else frozenset()
+    )
+    for found in commands:
+        if found.name in BLOCKED_COMMANDS:
+            hint = _BLOCKED_COMMAND_HINTS.get(
+                found.name, "Only standard development commands are permitted."
+            )
+            return (
+                f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
+                f"{hint}"
+            )
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(
+            found, looks_up, by_name, looked_up
+        ):
+            return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.
     # Catches attacks like: python -c "os.remove('/Users/foo/file')"
@@ -1363,19 +2275,51 @@ def _rewrite_quoted_path(
     workspace_name: str | None,
     skills_dir: str | Path | None = None,
     media_dirs: tuple[Path, ...] = (),
+    anchor: str | None = None,
+    workspace_root: str | None = None,
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
-    or ``None`` if no rewrite applies.
+    or ``None`` if no rewrite applies. With *anchor* (the workspace root,
+    after a ``cd``) workspace-relative results become absolute.
     """
     if not path or "://" in path[max(0, len(path) - 10) :]:
         return None
-    if not path.startswith("/"):
+    if not path.startswith("/") or path in _PASSTHROUGH_DEVICE_PATHS:
         return None
+
+    def in_workspace(relative: str) -> str:
+        if anchor:
+            # The root itself as `<root>/.`, which rm refuses to remove.
+            return _platform_quote(
+                anchor.rstrip("/") + ("/" + relative if relative else "/.")
+            )
+        return _platform_quote("./" + relative if relative else ".")
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        if skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        ):
+            resolved = in_workspace("skills/" + skill if skill else "skills")
         return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        protected = tuple(
+            str(folder)
+            for folder in (
+                skills_dir,
+                paths.GLOBAL_SKILLS_DIR,
+                paths.MEMORIES_DIR,
+                _BUILTIN_SKILLS_DIR,
+                *media_dirs,
+            )
+            if folder is not None
+        )
+        if _under_any(path, protected):
+            return None
+        return in_workspace(path[len(workspace_root.rstrip("/")) :].lstrip("/"))
 
     # Fix hallucinated system absolute paths that reference the workspace.
     if workspace_name:
@@ -1384,15 +2328,301 @@ def _rewrite_quoted_path(
                 marker = f"/{workspace_name}/"
                 idx = path.rfind(marker)
                 if idx != -1:
-                    relative = path[idx + len(marker) :]
-                    return _guard_bare_absolute(
-                        shlex.quote("./" + relative if relative else ".")
-                    )
+                    return _guard_bare_absolute(in_workspace(path[idx + len(marker) :]))
                 if path.endswith(f"/{workspace_name}"):
-                    return _guard_bare_absolute(shlex.quote("."))
+                    return _guard_bare_absolute(in_workspace(""))
                 break
 
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path.lstrip("/"))
+    if _is_system_path(path) and workspace_root:
+        if Path(workspace_root + path).exists():
+            return in_workspace(path.lstrip("/"))
     return None
+
+
+_QUOTED_SPAN_RE = re.compile(r'(["\'])((?:\\.|(?!\1).)*?)\1')
+
+
+def _is_system_path(path: str) -> bool:
+    return any((path + "/").startswith(prefix) for prefix in _SYSTEM_PATH_PREFIXES)
+
+
+_DRIVE_PATH_RE = re.compile(r"[A-Za-z]:([\\/]|$)")
+
+
+def _windows_workspace_rest(word: str, workspace_root: str | None) -> str | None:
+    """The ``/...`` rest of a word that starts with the workspace root, written
+    with either separator, or ``None``; only for a root with a drive (Windows)."""
+    if not workspace_root or not _DRIVE_PATH_RE.match(workspace_root):
+        return None
+    root = workspace_root.replace("\\", "/").rstrip("/")
+    head = word[: len(root)].replace("\\", "/")
+    rest = word[len(root) :]
+    if head.lower() != root.lower() or not (rest == "" or rest.startswith("/")):
+        return None
+    return rest
+
+
+def _rewrite_path_word(
+    raw: str,
+    *,
+    workspace_root: str | None,
+    workspace_name: str | None,
+    skills_dir: str | Path | None,
+    media_dirs: tuple[Path, ...],
+    absolute: bool,
+    attached: bool = False,
+) -> tuple[str | None, bool]:
+    """Replacement for an unquoted path word (``None`` keeps it), and whether it
+    maps to the workspace's ``tmp/``. After a ``cd`` (*absolute*) workspace
+    paths are the quoted root plus the raw rest, so globs keep working."""
+
+    def in_workspace(rest: str) -> str:
+        if absolute and workspace_root:
+            if all(part in ("", ".") for part in rest.split("/")):
+                # The root itself as `<root>/.`: rm refuses a `.` operand, as
+                # it does the `.` written before a `cd`.
+                return _platform_quote(workspace_root) + "/."
+            return _platform_quote(workspace_root) + rest
+        return "." + rest if rest else "."
+
+    path = raw
+    if path in _PASSTHROUGH_DEVICE_PATHS:
+        return None, False
+    # Skills, memories and media inside the workspace keep their host path,
+    # so validation still sees them as protected.
+    protected = tuple(
+        str(folder)
+        for folder in (
+            skills_dir,
+            paths.GLOBAL_SKILLS_DIR,
+            paths.MEMORIES_DIR,
+            _BUILTIN_SKILLS_DIR,
+            *media_dirs,
+        )
+        if folder is not None
+    )
+    rest = _windows_workspace_rest(path, workspace_root)
+    if rest is not None:
+        if not _under_any(path, protected):
+            return in_workspace(rest), False
+        from . import agent_shell
+
+        # Git Bash would read the separators as escapes; real escapes stay.
+        return (
+            re.sub(r"\\(?=[\w.-])", "/", path) if agent_shell.uses_bash() else None
+        ), False
+
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
+    if resolved is not None:
+        skill = _subpath_under_mount(path, "/skills")
+        missing_skill = skill is not None and resolved == _platform_quote(
+            "./skills/" + skill if skill else "./skills"
+        )
+        if missing_skill and absolute and workspace_root:
+            return in_workspace(path), False
+        return resolved, False
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        if _under_any(path, protected):
+            return None, False
+        return in_workspace(path[len(workspace_root.rstrip("/")) :]), False
+
+    # Fix hallucinated system absolute paths that reference the workspace.
+    if workspace_name and _is_system_path(path):
+        marker = f"/{workspace_name}/"
+        idx = path.rfind(marker)
+        if idx != -1:
+            rest = path[idx + len(marker) - 1 :]
+            return in_workspace("" if rest == "/" else rest), False
+        if path.endswith(f"/{workspace_name}"):
+            return in_workspace(""), False
+
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path), True
+
+    if _is_system_path(path):
+        # A host path, unless the workspace has it; validation reports the rest.
+        if workspace_root and Path(workspace_root + path).exists():
+            return in_workspace(path), False
+        return None, False
+
+    if attached and not (
+        path != "/" and workspace_root and Path(workspace_root + path).exists()
+    ):
+        # Attached slash values can be separators, routes or patterns.
+        # Only known workspace files get the bare-word fallback here.
+        return None, False
+    return in_workspace("" if path == "/" else path), False
+
+
+def _convert_command_paths(
+    command: str,
+    workspace_name: str | None = None,
+    skills_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
+    after_cd: bool = False,
+) -> tuple[str, bool]:
+    """:func:`convert_virtual_paths_in_command`, plus whether the result uses
+    the workspace's ``tmp/``; *after_cd* marks a substitution that runs after one."""
+    words = shell_syntax.parse(command)
+    cd_starts = [
+        int(token["start"])
+        for token, is_command_name in zip(words.tokens, words.name_flags, strict=True)
+        if is_command_name and token["value"] in ("cd", "pushd")
+    ]
+    rules = {
+        "workspace_root": workspace_root,
+        "workspace_name": workspace_name,
+        "skills_dir": skills_dir,
+        "media_dirs": media_dirs,
+    }
+    scripts = shell_syntax.shell_script_words(words.tokens)
+    # A variable can be read after a cd or in another folder, so its value names
+    # the workspace path, unless that path needs quoting ($VAR would split).
+    anchor_values = (
+        bool(workspace_root) and _platform_quote(workspace_root)[0] not in "'\""
+    )
+    edits: list[tuple[int, int, str]] = []
+    uses_tmp = False
+    for start, end, quoted in shell_syntax.glued_words(words.tokens):
+        if start in words.delimiters or start in words.arithmetic:
+            continue
+        raw = command[start:end]
+        absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        value_absolute = absolute or (
+            anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
+        )
+        script = raw[1:-1]
+        if (
+            start in scripts
+            and len(raw) >= 2
+            and raw[0] in "'\""
+            and raw[-1] == raw[0]
+            and raw[0] not in script.replace('\\"', "")
+        ):
+            # The script of `sh -c` runs as a command line of its own.
+            converted, tmp = _convert_command_paths(script, **rules, after_cd=absolute)
+            uses_tmp = uses_tmp or tmp
+            replacement = (
+                raw
+                if converted == script
+                else shlex.quote(converted)
+                if raw[0] == "'"
+                else '"' + converted + '"'
+            )
+        elif quoted and _is_search_path_assignment(raw):
+            replacement, tmp = shell_syntax.rewrite_substitutions(
+                raw,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
+        elif quoted:
+            anchor = workspace_root if value_absolute else None
+
+            def replace_quoted(
+                match: re.Match[str], anchor: str | None = anchor
+            ) -> str:
+                nonlocal uses_tmp
+                # Expansion can introduce traversal not visible to validation.
+                # Leave dynamic absolute paths intact so validation refuses them.
+                if match[1] == '"' and re.search(r"(?<!\\)[$`]", match[2]):
+                    return match[0]
+                # A span after host: or pod: is a remote path, not a local one.
+                if match.string[: match.start()].endswith(":"):
+                    return match[0]
+                path = match[2]
+                if match[1] == '"':
+                    path = re.sub(r'\\([\\"$`\n])', r"\1", path)
+                attached = _attached_path_word(path)
+                prefix = attached[0] if attached else ""
+                path = attached[1] if attached else path
+                result = _rewrite_quoted_path(
+                    path,
+                    workspace_name,
+                    skills_dir,
+                    media_dirs,
+                    anchor,
+                    workspace_root,
+                )
+                if (
+                    result is not None
+                    and (path == "/tmp" or path.startswith("/tmp/"))
+                    and not (
+                        workspace_root
+                        and _is_under_allowed_prefix(path, (workspace_root,))
+                    )
+                ):
+                    uses_tmp = True
+                return (prefix + result) if result is not None else match[0]
+
+            replacement: str | None = _QUOTED_SPAN_RE.sub(replace_quoted, raw)
+            replacement, tmp = shell_syntax.rewrite_substitutions(
+                replacement,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
+            )
+            uses_tmp = uses_tmp or tmp
+            # Split an attached option/assignment before mapping an unquoted
+            # path head, e.g. --output=/tmp/"out file".
+            attached = _attached_path_word(replacement)
+            prefix, path_word = attached or ("", replacement)
+            head = re.match(r"/[^'\"]*", path_word)
+            if head is not None:
+                rewritten, tmp = _rewrite_path_word(
+                    head.group(0),
+                    **rules,
+                    absolute=value_absolute,
+                    attached=attached is not None,
+                )
+                if rewritten is not None:
+                    if head.group(0).endswith("/") and not rewritten.endswith("/"):
+                        rewritten += "/"
+                    replacement = prefix + rewritten + path_word[head.end() :]
+                    uses_tmp = uses_tmp or tmp
+        elif (
+            raw.startswith("/")
+            or _windows_workspace_rest(raw, workspace_root) is not None
+        ):
+            replacement, tmp = _rewrite_path_word(raw, **rules, absolute=absolute)
+            uses_tmp = uses_tmp or tmp
+        else:
+            attached = _attached_path_word(raw)
+            if attached is None:
+                continue
+            prefix, path = attached
+            rewritten, tmp = _rewrite_path_word(
+                path, **rules, absolute=value_absolute, attached=True
+            )
+            uses_tmp = uses_tmp or tmp
+            replacement = prefix + rewritten if rewritten is not None else None
+        if replacement is not None and replacement != raw:
+            edits.append((start, end, replacement))
+    for body_start, body_end, expands in words.bodies:
+        if not expands:
+            continue
+        body = command[body_start:body_end]
+        converted, tmp = shell_syntax.rewrite_substitutions(
+            body,
+            lambda inner: _convert_command_paths(inner, **rules, after_cd=after_cd),
+            heredoc=True,
+        )
+        if converted != body:
+            edits.append((body_start, body_end, converted))
+            uses_tmp = uses_tmp or tmp
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(edits):
+        pieces.append(command[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(command[cursor:])
+    return "".join(pieces), uses_tmp
 
 
 def convert_virtual_paths_in_command(
@@ -1400,70 +2630,21 @@ def convert_virtual_paths_in_command(
     workspace_name: str | None = None,
     skills_dir: str | Path | None = None,
     media_dirs: tuple[Path, ...] = (),
+    workspace_root: str | None = None,
 ) -> str:
-    """Convert virtual paths (starting with ``/``) in commands to relative paths.
+    """Map virtual paths in a shell command into the workspace.
 
-    Also auto-corrects hallucinated system absolute paths that reference the
-    workspace directory (e.g. ``/Users/.../myproject/file.py`` → ``./file.py``).
-
-    Pre-process: quoted arguments whose content resolves to a virtual
-    mount (``/skills/...``, ``/memories/...``) or a workspace-prefixed
-    system path are rewritten as a single shell token — this fixes #237
-    where ``python "/skills/my skill/main.py"`` was truncated at the
-    embedded space.  Bare quoted ``/...`` paths (e.g. ``echo "/hi"``)
-    are left untouched since their semantics are ambiguous.
-    After pre-processing, the original regex handles unquoted
-    paths and workspace-name correction as before.
+    Words starting with ``/`` are paths. A quoted whole path, or an option
+    or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
+    mapped when it names ``/tmp``, a mount or a workspace file; an assignment's
+    value maps to the workspace path itself, as words after a ``cd`` do, unless
+    that path needs quoting. Search lists such as ``PATH``, other quoted text
+    and here-document bodies are data (``print(6 / 3)``), except commands
+    substituted inside double quotes.
     """
-    # Pre-process: rewrite quoted paths whose decoded content starts with /
-    command = re.sub(
-        r'(["\'])((?:\\.|(?!\1).)*?)\1',
-        lambda m: (
-            _rewrite_quoted_path(
-                re.sub(r"\\(.)", r"\1", m.group(2)),
-                workspace_name,
-                skills_dir,
-                media_dirs,
-            )
-            or m.group(0)
-        ),
-        command,
-    )
-
-    def replace_virtual_path(match: re.Match[str]) -> str:
-        path = match.group(0)
-
-        # Skip content that looks like a URL
-        if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
-            return path
-
-        resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
-        if resolved is not None:
-            return resolved
-
-        # Fix hallucinated system absolute paths that reference the workspace.
-        if workspace_name:
-            for prefix in _SYSTEM_PATH_PREFIXES:
-                if path.startswith(prefix):
-                    marker = f"/{workspace_name}/"
-                    idx = path.rfind(marker)
-                    if idx != -1:
-                        relative = path[idx + len(marker) :]
-                        return "./" + relative if relative else "."
-                    elif path.endswith(f"/{workspace_name}"):
-                        return "."
-                    break  # Matched system prefix but no workspace → fall through
-
-        # Convert virtual path
-        if path == "/":
-            return "."
-        return "." + path
-
-    # Match pattern: paths starting with / (but not URLs)
-    pattern = r'(?<=\s)/[^\s;|&<>\'"`]*|^/[^\s;|&<>\'"`]*'
-    converted = re.sub(pattern, replace_virtual_path, command)
-
-    return converted
+    return _convert_command_paths(
+        command, workspace_name, skills_dir, media_dirs, workspace_root
+    )[0]
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):
@@ -1615,7 +2796,7 @@ def build_autoskill_agent_backend(
     """
     from deepagents.backends import CompositeBackend
 
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     return CompositeBackend(
         default=AutoskillProposalSandboxBackend(
@@ -1623,7 +2804,7 @@ def build_autoskill_agent_backend(
             timeout=sandbox_timeout,
             # Its prompt validates proposals with `execute`; same python as
             # the other agents.
-            env=research_env_overrides(),
+            env=agent_shell_overrides(),
             skills_dir=skills_dir,
         ),
         routes={
@@ -1684,6 +2865,40 @@ class MergedSkillsBackend(BackendProtocol):
         if self._global:
             yield self._global
         yield self._secondary
+
+    def file_path(self, file_path: str, *, tool_name: str | None = None) -> Path | None:
+        """The write's primary file, otherwise the tier that ``read`` serves.
+
+        Re-read only when multiple tiers hold the file to preserve fallback
+        behavior without adding a second read in the single-tier case.
+        """
+        if tool_name == "write_file":
+            try:
+                path = self._primary._resolve_path(file_path)
+            except (ValueError, OSError):
+                return None
+            return path if path.is_file() else None
+        found = []
+        for backend in self._backends():
+            try:
+                path = backend._resolve_path(file_path)
+            except (ValueError, OSError):
+                continue
+            if path.is_file():
+                found.append((backend, path))
+        if len(found) == 1:
+            return found[0][1]
+        for backend, path in found:
+            try:
+                result = backend.read(file_path)
+                if hasattr(result, "error"):
+                    if result.error is None:
+                        return path
+                elif not str(result).startswith("Error:"):
+                    return path
+            except (ValueError, OSError):
+                continue
+        return None
 
     # -- read: try each tier in priority order --
 
@@ -1788,7 +3003,8 @@ def prepare_sandbox_command(
     the workspace, not the host root) and the same command validation.
 
     Returns ``(prepared_command, error)``: ``error`` is a message string when the command
-    is rejected (the caller must NOT run it), otherwise ``None``.
+    is rejected (the caller must NOT run it), otherwise ``None``. An accepted command
+    that uses ``/tmp`` gets the workspace's ``tmp/`` created, where the file tools put it.
 
     ``guard_dangerous`` (see :func:`check_dangerous_command`) does not see inside an SSH
     remote payload: a dangerous pipe *inside* a quoted ``ssh host '...'`` argument is not
@@ -1806,31 +3022,24 @@ def prepare_sandbox_command(
     command, ssh_replacements = _mask_ssh_remote_commands(command)
 
     cwd_str = str(cwd).rstrip("/")
-    # Replace literal workspace-root absolute paths with ./ after SSH masking so
-    # remote paths that happen to contain the local cwd are preserved, and before
-    # validation so local workspace paths are sanitized before the system-path
-    # check fires. Skipped in dangerous mode: there is no virtual workspace, the
-    # agent uses real absolute paths, and rewriting would corrupt any argument
-    # (echo text, grep/git pattern) that merely contains the cwd string.
-    if not dangerous:
-        ws = cwd_str + "/"
-        if ws in command:
-            command = command.replace(ws, "./")
     # The media folder as configured and as resolved: the file tools accept
     # both spellings, so commands do too.
     media_dirs: tuple[Path, ...] = ()
     if media_dir is not None:
         configured = Path(media_dir)
         media_dirs = tuple(dict.fromkeys((configured, configured.resolve())))
+    uses_tmp = False
     if virtual_mode:
-        command = convert_virtual_paths_in_command(
-            command=command,
+        # After SSH masking, so remote paths are never rewritten.
+        command, uses_tmp = _convert_command_paths(
+            command,
             workspace_name=Path(cwd_str).name,
             skills_dir=skills_dir,
             media_dirs=media_dirs,
+            workspace_root=cwd_str,
         )
-    # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
-    # before the resolver, so any absolute path it later injects reaches validate unstripped.
+    # The rewrite injects absolute paths under these, and host paths under the
+    # workspace are real paths inside the sandbox.
     allow_prefixes = tuple(
         str(prefix)
         for prefix in (
@@ -1839,11 +3048,15 @@ def prepare_sandbox_command(
             paths.MEMORIES_DIR,
             _BUILTIN_SKILLS_DIR,
             *media_dirs,
+            None if dangerous else cwd_str,
         )
         if prefix is not None
     )
     error = validate_command(
-        command, allow_prefixes=allow_prefixes, dangerous=dangerous
+        command,
+        allow_prefixes=allow_prefixes,
+        dangerous=dangerous,
+        workspace_root=None if dangerous else cwd_str,
     )
     if error:
         return command, error
@@ -1860,6 +3073,11 @@ def prepare_sandbox_command(
                 f"(the orchestrator can re-issue it after approval)."
             )
 
+    if uses_tmp:
+        # `/tmp` maps to the workspace's tmp/, as in the file tools; if it
+        # cannot be created the command reports that itself.
+        with contextlib.suppress(OSError):
+            Path(cwd_str, "tmp").mkdir(exist_ok=True)
     return _restore_spans(command, ssh_replacements), None
 
 
@@ -1889,6 +3107,17 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         # listing skips it.
         path.resolve().relative_to(self.cwd)
         return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
+
+
+class _ExecuteCancelEvent(threading.Event):
+    """A per-call event whose is_set(), but not wait(), checks its parent."""
+
+    def __init__(self, parent: threading.Event | None) -> None:
+        super().__init__()
+        self._parent = parent
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self._parent is not None and self._parent.is_set())
 
 
 class CustomSandboxBackend(LocalShellBackend):
@@ -1923,7 +3152,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         Args:
             root_dir: File system root directory
-            virtual_mode: Whether to enable virtual path mode
+            virtual_mode: Whether to enable virtual path mode; ``False`` only
+                with ``dangerous=True`` (it raises ``ValueError`` otherwise)
             timeout: Command execution timeout in seconds
             max_output_bytes: Max output size before truncation (default 100KB)
             env: Extra environment variables for subprocess
@@ -1968,6 +3198,10 @@ class CustomSandboxBackend(LocalShellBackend):
             # Real paths require the legacy (non-virtual) resolution path so the
             # parent backend returns absolute paths as-is.
             virtual_mode = False
+        elif not virtual_mode:
+            # Non-virtual resolution passes absolute paths to the host as-is,
+            # which only dangerous mode allows.
+            raise ValueError("virtual_mode=False requires dangerous=True")
         super().__init__(
             root_dir=root_dir,
             virtual_mode=virtual_mode,
@@ -1986,21 +3220,35 @@ class CustomSandboxBackend(LocalShellBackend):
         os.makedirs(str(self.cwd), exist_ok=True)
 
     def _resolve_path(self, key: str) -> Path:
-        """Resolve path with sanitization to prevent nested directories.
+        """Resolve a file-tool path to a path inside the workspace.
 
         Intercepts all file operations (read, write, edit, ls, grep, glob).
-        Auto-corrects common LLM path mistakes instead of crashing:
+        ``/`` is the workspace root, so any other path is the workspace path
+        as written (``/tmp/x`` is the workspace's ``tmp/x``, as in commands).
+        Paths that name the workspace itself are mapped into it:
           1. /Users/.../<cwd>/file.py      → /file.py (full cwd match — safest)
-          2. /<ws_name>/file.py            → /file.py
+          2. /<ws_name>/file.py            → /file.py (unless <cwd>/<ws_name> is a folder)
+             /<ws_name>                    → /        (unless <cwd>/<ws_name> exists)
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
-          4. /Users/name/file.py           → /file.py (keep basename)
+
+        On Windows a Git Bash path (``/c/...``) is read as the drive path it
+        names when that lies in the working folder or the media folder;
+        otherwise it stays a workspace path, so a workspace folder named with
+        one letter is still reached. A drive path that reaches the working
+        folder under another name (a junction, a ``subst`` drive, an 8.3 short
+        name) is mapped into it once resolved; one anywhere else is refused.
 
         In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
-        alias and let the parent resolve real absolute paths as-is.
+        alias or Git Bash path and let the parent resolve real absolute paths
+        as-is.
         """
         key = paths.host_file_tool_path(key)
+        drive_path = paths.git_bash_drive_path(key)
         if self._dangerous:
-            return super()._resolve_path(key)
+            return super()._resolve_path(drive_path or key)
+
+        if drive_path is not None and self._working_relative(drive_path) is not None:
+            key = drive_path
 
         media_path = self._media_path(key)
         if media_path is not None:
@@ -2011,7 +3259,7 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
-        # confuse the basename-based fallback below.
+        # confuse the folder-name match below.
         key_path = Path(key)
         if key_path.is_absolute():
             try:
@@ -2022,30 +3270,64 @@ class CustomSandboxBackend(LocalShellBackend):
                 virtual = relative.as_posix()
                 return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
-        # Auto-strip /<ws_name>/ prefix to prevent nesting
+        if _is_windows() and _DRIVE_PATH_RE.match(key):
+            relative = self._working_relative(key)
+            if relative is None:
+                # An OSError, so the file tools report it as an error message
+                # rather than raising.
+                raise PermissionError(
+                    errno.EACCES,
+                    "Path is outside the workspace; file tools reach only paths "
+                    "inside it, and '/' is its root",
+                    key,
+                )
+            virtual = relative.as_posix()
+            return super()._resolve_path("/" if virtual == "." else "/" + virtual)
+
+        # Auto-strip /<ws_name>/ prefix to prevent nesting, unless the
+        # workspace has its own <ws_name>: then the path is that folder, kept
+        # out of the system path correction below (a workspace named "tmp").
         ws_prefix = f"/{ws_name}/"
         if key.startswith(ws_prefix):
+            if (self.cwd / ws_name).is_dir():
+                return super()._resolve_path(key)
             key = key[len(ws_prefix) - 1 :]  # "/<ws>/main.py" → "/main.py"
         elif key == f"/{ws_name}":
+            if (self.cwd / ws_name).exists():
+                return super()._resolve_path(key)
             key = "/"
 
-        # Auto-correct system absolute paths
-        for prefix in _SYSTEM_PATH_PREFIXES:
-            if key.startswith(prefix):
-                # rfind, not find: the cwd's parent path may itself contain
-                # "/<ws_name>/" as a substring, and we want the boundary
-                # nearest the file — the workspace mount.
-                idx = key.rfind(ws_prefix)
-                if idx != -1:
-                    key = "/" + key[idx + len(ws_prefix) :]
-                elif key.endswith(f"/{ws_name}"):
-                    key = "/"
-                else:
-                    # Fall back to basename
-                    key = "/" + Path(key).name
-                break
+        # A host path that names the workspace by its folder name maps into it;
+        # any other path, system folder names included, is the workspace path
+        # as written.
+        if key.startswith(_SYSTEM_PATH_PREFIXES):
+            # rfind, not find: the cwd's parent path may itself contain
+            # "/<ws_name>/" as a substring, and we want the boundary
+            # nearest the file — the workspace mount.
+            idx = key.rfind(ws_prefix)
+            if idx != -1:
+                key = "/" + key[idx + len(ws_prefix) :]
+            elif key.endswith(f"/{ws_name}"):
+                key = "/"
 
         return super()._resolve_path(key)
+
+    def _working_relative(self, drive_path: str) -> Path | None:
+        """A Windows *drive_path* relative to the working folder, or None.
+
+        Compared as written, then resolved: the working folder is the resolved
+        one, so a junction, a ``subst`` drive or an 8.3 short name of it only
+        matches once resolved.
+        """
+        path = Path(drive_path)
+        try:
+            return path.relative_to(self.cwd)
+        except ValueError:
+            pass
+        try:
+            return path.resolve().relative_to(self.cwd)
+        except (ValueError, OSError, RuntimeError):
+            return None
 
     # Windows attachment references use a /C:/... file-tool alias so they
     # pass deepagents' validation before reaching this backend.
@@ -2053,11 +3335,16 @@ class CustomSandboxBackend(LocalShellBackend):
         """*key* relative to the media folder, if it names a path inside it.
 
         Compared as paths, not strings, so Windows keys with backslashes or
-        another drive-letter case match too.
+        another drive-letter case match too, and a Git Bash key (``/c/...``)
+        is read as the drive path it names, as ``_resolve_path`` reads it. A
+        Windows drive path that names the folder under another name (a
+        junction, a ``subst`` drive, an 8.3 short name) matches once resolved,
+        as the working folder does.
         """
         if self._media_dir is None:
             return None
-        path = Path(paths.host_file_tool_path(key))
+        key = paths.host_file_tool_path(key)
+        path = Path(paths.git_bash_drive_path(key) or key)
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):
@@ -2065,6 +3352,11 @@ class CustomSandboxBackend(LocalShellBackend):
                 return path.relative_to(base)
             except ValueError:
                 continue
+        if _is_windows() and _DRIVE_PATH_RE.match(str(path)):
+            try:
+                return path.resolve().relative_to(self._media_real)
+            except (ValueError, OSError, RuntimeError):
+                return None
         return None
 
     def _media_path(self, key: str) -> Path | None:
@@ -2087,6 +3379,9 @@ class CustomSandboxBackend(LocalShellBackend):
     def delete(self, file_path: str) -> DeleteResult:
         """Refuse ``delete`` for guarded async sub-agents (no approval path).
 
+        Also refuse a path that would remove the workspace root, and delete
+        exactly the path that was checked.
+
         No ``adelete`` override is needed: the inherited ``BackendProtocol.adelete``
         runs ``asyncio.to_thread(self.delete, ...)``, so async sub-agents reach
         this refusal too.
@@ -2095,7 +3390,49 @@ class CustomSandboxBackend(LocalShellBackend):
             return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
         if self._in_media(file_path):
             return DeleteResult(error=self._MEDIA_READ_ONLY_ERROR)
-        return super().delete(file_path)
+        # Resolve once and delete exactly that path: resolving again could
+        # name the workspace root if a folder named like it went away in
+        # between. A ValueError (path traversal) is raised, as the parent's
+        # delete raises it.
+        try:
+            resolved = self._resolve_path(file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+        if self._is_workspace_or_above(resolved):
+            return DeleteResult(error=self._DELETE_ROOT_ERROR)
+        # FilesystemBackend.delete's body, on the path resolved above.
+        try:
+            if not resolved.exists() and not resolved.is_symlink():
+                return DeleteResult(error=f"Error: '{file_path}' not found")
+            if resolved.is_symlink():
+                resolved.unlink()
+            elif resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+            return DeleteResult(path=file_path)
+        except (OSError, RuntimeError) as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+
+    _DELETE_ROOT_ERROR = (
+        "Delete blocked: the path is the workspace root or a folder that holds "
+        "it. Delete the files or folders inside the workspace instead."
+    )
+
+    def _is_workspace_or_above(self, path: Path) -> bool:
+        """Whether deleting *path* would remove the workspace root.
+
+        Dangerous mode leaves absolute paths as written, so ``..`` and
+        symlinked parents are resolved before comparing. A symlink is
+        removed as a link, so it never takes the workspace with it.
+        """
+        if path.is_symlink():
+            return False
+        try:
+            real = path.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return real == self.cwd or self.cwd.is_relative_to(real)
 
     _MEDIA_READ_ONLY_ERROR = (
         "The media folder holds channel attachments; the file tools do not "
@@ -2168,6 +3505,17 @@ class CustomSandboxBackend(LocalShellBackend):
                 for path, _ in files
             ]
         return super().upload_files(files)
+
+    async def aexecute(
+        self, command: str, *, timeout: int | None = None
+    ) -> ExecuteResponse:
+        event = _ExecuteCancelEvent(current_cancel_event())
+        with bind_cancel_event(event):
+            try:
+                return await super().aexecute(command, timeout=timeout)
+            except asyncio.CancelledError:
+                event.set()
+                raise
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """
@@ -2344,8 +3692,11 @@ class CustomSandboxBackend(LocalShellBackend):
                 output = "\n".join(output_parts) if output_parts else "<no output>"
 
                 truncated = False
-                if len(output) > self._max_output_bytes:
-                    output = output[: self._max_output_bytes]
+                output_bytes = output.encode("utf-8")
+                if len(output_bytes) > self._max_output_bytes:
+                    output = output_bytes[: self._max_output_bytes].decode(
+                        "utf-8", errors="ignore"
+                    )
                     output += (
                         f"\n\n... Output truncated at {self._max_output_bytes} bytes."
                     )
@@ -2377,28 +3728,94 @@ class CustomSandboxBackend(LocalShellBackend):
 
         # Enhance timeout errors with actionable recovery guidance
         if response.exit_code == 124:
-            cmd_words = command.split()
-            grep_hint = cmd_words[0] if cmd_words else "process"
-            # In dangerous mode `/` is the host root; use a workspace-relative
-            # log path so the suggested command doesn't fail or write to `/`.
-            output_log = "./output.log" if self._dangerous else "/output.log"
-            bg_cmd = f'{command} > {output_log} 2>&1 & echo "PID: $!"'
+            # No ready-made `command &` line: on a compound command it still
+            # holds the output pipe and hangs the same way.
             response = ExecuteResponse(
                 output=(
                     f"{response.output}\n\n"
                     f"Recovery — pick one:\n"
                     f"  1. Needs more time? Re-run with a larger timeout (up to 3600s): "
                     f"execute(command=..., timeout=600)\n"
-                    f"  2. Runs indefinitely? Run it in the background and keep the PID:\n"
-                    f"       {bg_cmd}\n"
-                    f"     Check: ps -p <PID>  (or: ps aux | grep {grep_hint})  ·  "
-                    f"Read: cat {output_log}  ·  Stop: kill <PID>"
+                    f"  2. Runs for minutes or longer? Start it with the "
+                    f"run_in_background tool: it returns a process id and writes the "
+                    f"output to a log (read it with check_process, stop it with "
+                    f"stop_process).\n"
+                    f"  3. No run_in_background tool here (a sub-agent)? Report the "
+                    f"command back so the main agent can run it in the background "
+                    f"instead of retrying it."
                 ),
                 exit_code=response.exit_code,
                 truncated=response.truncated,
             )
 
         return response
+
+
+def _routed_file_path(
+    backend: BackendProtocol, key: str, *, tool_name: str | None = None
+) -> Path | None:
+    """The file *key* names in a routed tier *backend*, or None if unknown."""
+    if isinstance(backend, MergedSkillsBackend):
+        return backend.file_path(key, tool_name=tool_name)
+    if not isinstance(backend, FilesystemBackend):
+        return None
+    try:
+        path = backend._resolve_path(key)
+    except (ValueError, OSError):
+        return None
+    return path if path.is_file() else None
+
+
+def sandbox_file_path(
+    path: str,
+    work_dir: str | Path,
+    *,
+    media_dir: str | Path | None = None,
+    dangerous: bool = False,
+    routes: dict[str, BackendProtocol] | None = None,
+    tool_name: str | None = None,
+) -> Path | None:
+    """The host file a file tool's *path* reached, or None outside the sandbox.
+
+    *routes* are the agent's file tool routes (see
+    ``EvoScientist.file_tool_routes``): a path under one of them names the
+    file in that route's tier, found as the agent's composite backend routes
+    it, or None when that tier keeps no file on disk. Any other path is
+    mapped the way :class:`CustomSandboxBackend` rooted at *work_dir* does,
+    so a host-looking path names the workspace file at that path as written,
+    not the host file. Outside dangerous mode the result
+    lies inside *work_dir* or *media_dir* once resolved; anything else, or a
+    path the sandbox refuses, gives None.
+    """
+    from deepagents.backends import CompositeBackend
+    from deepagents.backends.utils import validate_path
+
+    backend = CustomSandboxBackend(
+        root_dir=str(work_dir),
+        inherit_env=False,
+        dangerous=dangerous,
+        media_dir=media_dir,
+    )
+    if routes:
+        try:
+            routed, key = CompositeBackend(
+                default=backend, routes=routes
+            )._get_backend_and_key(validate_path(paths.file_tool_path(path)))
+        except ValueError:
+            return None
+        if routed is not backend:
+            return _routed_file_path(routed, key, tool_name=tool_name)
+    try:
+        resolved = backend._resolve_path(path)
+    except (ValueError, OSError):
+        return None
+    if dangerous:
+        return resolved
+    roots = [backend.cwd]
+    if media_dir is not None:
+        roots.append(Path(media_dir).resolve())
+    real = resolved.resolve()
+    return real if any(real.is_relative_to(root) for root in roots) else None
 
 
 class AutoskillProposalSandboxBackend(CustomSandboxBackend):

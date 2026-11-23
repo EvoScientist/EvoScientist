@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.graph.state import CompiledStateGraph
@@ -32,6 +32,16 @@ from EvoScientist.gateway import RuntimeGateways, ThreadStore
 from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.runtime import AsyncRuntime
 from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+from tests.fakes.serve import runtime_state
+
+
+@pytest.fixture(autouse=True)
+def _folders_are_names(monkeypatch):
+    """The folders here are names, not folders on disk: a session moving
+    to another project would otherwise create it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(registration, "prepare_workdir", lambda path: path)
 
 
 def _agent(name: str = "agent") -> CompiledStateGraph:
@@ -55,27 +65,43 @@ def _runtime_gateways(thread_store: ThreadStore | None = None) -> RuntimeGateway
     )
 
 
-def _runtime_state(
-    *,
-    agent: CompiledStateGraph | None = None,
-    thread_id: str = "tid",
-    dirs: SessionDirs | None = None,
-    config: EvoScientistConfig | None = None,
-    thread_store: ThreadStore | None = None,
-    runtime_gateways: RuntimeGateways | None = None,
-    async_runtime: AsyncRuntime | None = None,
-    gateway_backend: str | None = None,
-) -> ServeRuntimeState:
-    store = thread_store or _thread_store()
-    return ServeRuntimeState(
-        agent=agent if agent is not None else _agent(),
-        thread_id=thread_id,
-        dirs=dirs or SessionDirs(Workspace("/startup-ws")),
-        config=config,
-        runtime_gateways=runtime_gateways or _runtime_gateways(store),
-        async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
-        gateway_backend=gateway_backend,
+async def test_serve_resume_on_the_server_gateway_holds_no_agent(monkeypatch, tmp_path):
+    """On the server gateway serve starts without an agent, and a resume into
+    another workspace builds none either: it still adopts the folders and the
+    thread."""
+    import EvoScientist.EvoScientist as evo_mod
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    monkeypatch.setattr(evo_mod, "_config", None)
+    monkeypatch.setattr(evo_mod, "apply_config_to_env", lambda _cfg: None)
+    monkeypatch.setattr(
+        evo_mod, "create_cli_agent", MagicMock(side_effect=AssertionError("built"))
     )
+    cfg = _config()
+    store = _thread_store()
+    gateways = _runtime_gateways(store)
+    gateways.graph_gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    old_ws, new_ws = tmp_path / "old-ws", tmp_path / "new-ws"
+    old_ws.mkdir()
+    new_ws.mkdir()
+    state = runtime_state(
+        thread_id="old-tid",
+        dirs=SessionDirs(Workspace(old_ws)),
+        config=cfg,
+        runtime_gateways=gateways,
+    )
+    state.agent = None
+    runtime = ChannelRuntime(agent=None, thread_id="old-tid")
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=cfg)
+
+    with patch("EvoScientist.cli.commands._register_project", new=AsyncMock()):
+        await cb("new-tid", SessionDirs(Workspace(new_ws)))
+
+    assert state.agent is None
+    assert state.dirs == SessionDirs(Workspace(new_ws))
+    assert state.thread_id == "new-tid"
+    assert runtime.agent is None
+    assert runtime.thread_id == "new-tid"
 
 
 def test_serve_runtime_state_requires_owned_runtime():
@@ -96,7 +122,7 @@ async def test_hook_updates_runtime_state_on_agent_swap():
     it on the next message."""
     original_agent = _agent("original-agent")
     new_agent = _agent("new-agent")
-    state = _runtime_state(agent=original_agent)
+    state = runtime_state(agent=original_agent)
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -115,7 +141,7 @@ async def test_hook_syncs_channel_runtime():
     hook keeps the runtime in sync with the runtime state update."""
     original_agent = _agent("original-agent")
     new_agent = _agent("new-agent")
-    state = _runtime_state(agent=original_agent, thread_id="t")
+    state = runtime_state(agent=original_agent, thread_id="t")
     runtime = ChannelRuntime(agent=original_agent, thread_id="t")
     hook = _make_serve_cmd_completed_hook(state, runtime)
 
@@ -138,7 +164,7 @@ async def test_hook_noop_when_agent_unchanged():
     """Commands like ``/evoskills`` don't touch ``ctx.agent`` — the
     runtime state must stay put."""
     original_agent = _agent("original-agent")
-    state = _runtime_state(agent=original_agent)
+    state = runtime_state(agent=original_agent)
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -156,7 +182,7 @@ async def test_hook_noop_when_ctx_agent_is_none():
     """Guard against commands that reset ``ctx.agent`` to ``None`` —
     we never want to write ``None`` into runtime state."""
     original_agent = _agent("original-agent")
-    state = _runtime_state(agent=original_agent)
+    state = runtime_state(agent=original_agent)
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -175,7 +201,7 @@ async def test_hook_updates_thread_id_on_resume():
     new id into runtime state so the outer poll loop runs subsequent
     messages on the resumed thread."""
     agent = _agent("a")
-    state = _runtime_state(agent=agent, thread_id="original-tid")
+    state = runtime_state(agent=agent, thread_id="original-tid")
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -195,7 +221,7 @@ async def test_hook_updates_workspace_dir_on_resume():
     cfg = _config()
     old_agent = _agent("old-agent")
     reloaded_agent = _agent("reloaded-agent")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="original-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
@@ -212,7 +238,7 @@ async def test_hook_updates_workspace_dir_on_resume():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch(
@@ -223,14 +249,13 @@ async def test_hook_updates_workspace_dir_on_resume():
         await hook(ctx, old_agent, cmd)
 
     restored = SessionDirs(Workspace("/restored-ws"))
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=restored, backend=None, status_message=ANY
-    )
+    sync_server.assert_awaited_once_with(cfg, dirs=restored, backend=None)
     load_agent.assert_called_once_with(
         work_dir=str(restored.work_dir),
         workspace=restored.workspace,
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.dirs == restored
     assert state.agent is reloaded_agent
@@ -240,7 +265,7 @@ async def test_hook_syncs_channel_runtime_thread_id():
     """The bus reads ``ChannelRuntime.thread_id``; hook must sync it
     alongside the runtime state update."""
     agent = _agent("a")
-    state = _runtime_state(agent=agent, thread_id="original-tid")
+    state = runtime_state(agent=agent, thread_id="original-tid")
     runtime = ChannelRuntime(agent=agent, thread_id="original-tid")
     hook = _make_serve_cmd_completed_hook(state, runtime)
 
@@ -259,7 +284,7 @@ async def test_hook_syncs_channel_runtime_thread_id():
 async def test_hook_noop_when_thread_id_unchanged():
     """Most commands don't touch thread_id — runtime state stays put."""
     agent = _agent("a")
-    state = _runtime_state(agent=agent, thread_id="same-tid")
+    state = runtime_state(agent=agent, thread_id="same-tid")
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -278,7 +303,7 @@ async def test_hook_skips_resume_warning_when_thread_unchanged():
     ``ctx.thread_id`` unchanged — the in-memory-state warning must NOT
     fire because no resume actually happened."""
     agent = _agent("a")
-    state = _runtime_state(agent=agent, thread_id="original-tid")
+    state = runtime_state(agent=agent, thread_id="original-tid")
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -298,7 +323,7 @@ async def test_hook_emits_resume_warning_when_thread_changed():
     """``/resume <tid>`` that actually changes thread_id must surface
     the in-memory-state warning via ``ctx.ui``."""
     agent = _agent("a")
-    state = _runtime_state(agent=agent, thread_id="original-tid")
+    state = runtime_state(agent=agent, thread_id="original-tid")
     hook = _make_serve_cmd_completed_hook(state)
 
     ctx = MagicMock()
@@ -327,7 +352,7 @@ async def test_start_new_session_cb_rotates_thread_id():
     """``/new`` via channel calls this callback — must generate a new
     thread id, push into runtime state, and sync the channel runtime."""
     agent = _agent("a")
-    state = _runtime_state(
+    state = runtime_state(
         agent=agent,
         thread_id="old-tid",
         thread_store=_thread_store("freshly-generated-tid"),
@@ -348,7 +373,7 @@ async def test_start_new_session_cb_leaves_agent_alone():
     """``/new`` rotates thread only — agent handle must stay put
     (serve's agent is a single pre-loaded instance, not per-thread)."""
     agent = _agent("a")
-    state = _runtime_state(
+    state = runtime_state(
         agent=agent,
         thread_id="old-tid",
         thread_store=_thread_store("new-tid"),
@@ -367,7 +392,7 @@ async def test_start_new_session_cb_returns_to_root_after_run_folder_resume():
     old_agent = _agent("run-agent")
     root_agent = _agent("root-agent")
     workspace = Workspace("/ws")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="run-tid",
         dirs=SessionDirs(workspace, workspace.runs_dir / "20260930_120000"),
@@ -379,17 +404,16 @@ async def test_start_new_session_cb_returns_to_root_after_run_folder_resume():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch("EvoScientist.cli.commands._load_agent", return_value=root_agent),
     ):
         await cb()
 
+    # The project stays the same, so the server already serves it.
     root = SessionDirs(workspace)
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=root, backend=None, status_message=ANY
-    )
+    sync_server.assert_not_awaited()
     assert state.dirs == root
     assert state.thread_id == "new-tid"
     assert state.agent is root_agent
@@ -401,7 +425,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     cfg = _config()
     old_agent = _agent("old-agent")
     reloaded_agent = _agent("reloaded-agent")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
@@ -420,7 +444,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(side_effect=_sync_server),
         ) as sync_server,
         patch(
@@ -431,14 +455,13 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     new_dirs = SessionDirs(Workspace("/new-ws"))
-    sync_server.assert_awaited_once_with(
-        cfg, dirs=new_dirs, backend=None, status_message=ANY
-    )
+    sync_server.assert_awaited_once_with(cfg, dirs=new_dirs, backend=None)
     load_agent.assert_called_once_with(
         work_dir=str(Workspace("/new-ws").root),
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert call_order == ["load", "sync"]
     assert state.thread_id == "new-tid"
@@ -453,7 +476,7 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
     not the global flag, so it cannot restart the owned server in stripped
     mode."""
     cfg = _config()
-    state = _runtime_state(
+    state = runtime_state(
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
         config=cfg,
@@ -463,7 +486,7 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         patch(
@@ -474,10 +497,7 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     sync_server.assert_awaited_once_with(
-        cfg,
-        dirs=SessionDirs(Workspace("/new-ws")),
-        backend="langgraph_server",
-        status_message=ANY,
+        cfg, dirs=SessionDirs(Workspace("/new-ws")), backend="langgraph_server"
     )
 
 
@@ -485,7 +505,7 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
     cfg = _config()
     old_agent = _agent("old-agent")
     reloaded_agent = _agent("reloaded-agent")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
@@ -496,7 +516,7 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ),
         patch(
@@ -523,12 +543,12 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
 
 
 async def test_serve_resume_callback_preserves_state_when_server_refused():
-    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+    from EvoScientist.langgraph_dev.registration import OlderServerError
 
     cfg = _config()
     old_agent = _agent("old-agent")
     loaded_but_not_adopted = _agent("loaded-but-not-adopted")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
@@ -539,14 +559,14 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
 
     with (
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
-            new=AsyncMock(side_effect=WorkspaceMismatchError("workspace conflict")),
+            "EvoScientist.cli.commands._register_project",
+            new=AsyncMock(side_effect=OlderServerError()),
         ),
         patch(
             "EvoScientist.cli.commands._load_agent",
             return_value=loaded_but_not_adopted,
         ) as load_agent,
-        pytest.raises(WorkspaceMismatchError, match="workspace conflict"),
+        pytest.raises(OlderServerError),
     ):
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
@@ -555,6 +575,7 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
@@ -565,10 +586,42 @@ async def test_serve_resume_callback_preserves_state_when_server_refused():
     assert runtime.thread_id == "old-tid"
 
 
+async def test_serve_resume_callback_refuses_missing_project_before_agent_load(
+    tmp_path,
+):
+    """Loading the agent would recreate the folder empty."""
+    from EvoScientist.langgraph_dev.registration import ProjectFolderMissingError
+    from EvoScientist.langgraph_dev.registry import Registry
+
+    gone = Workspace(tmp_path / "gone")
+    Registry().set_registered(gone.key, True)
+    cfg = _config()
+    old_agent = _agent("old-agent")
+    state = runtime_state(
+        agent=old_agent,
+        thread_id="old-tid",
+        dirs=SessionDirs(Workspace(tmp_path)),
+        config=cfg,
+    )
+    runtime = ChannelRuntime(agent=old_agent, thread_id="old-tid")
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=cfg)
+
+    with (
+        patch("EvoScientist.cli.commands._load_agent") as load_agent,
+        pytest.raises(ProjectFolderMissingError),
+    ):
+        await cb("new-tid", SessionDirs(gone))
+
+    load_agent.assert_not_called()
+    assert not gone.root.exists()
+    assert state.thread_id == "old-tid"
+    assert runtime.agent is old_agent
+
+
 async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     cfg = _config()
     old_agent = _agent("old-agent")
-    state = _runtime_state(
+    state = runtime_state(
         agent=old_agent,
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/old-ws")),
@@ -583,7 +636,7 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
             side_effect=RuntimeError("load failed"),
         ) as load_agent,
         patch(
-            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            "EvoScientist.cli.commands._register_project",
             new=AsyncMock(),
         ) as sync_server,
         pytest.raises(RuntimeError, match="load failed"),
@@ -595,6 +648,7 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
         workspace=Workspace("/new-ws"),
         config=cfg,
         runtime=state.async_runtime,
+        graph_gateway=state.runtime_gateways.graph_gateway,
     )
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None
@@ -612,7 +666,7 @@ def test_serve_channel_new_and_resume_switch_threads():
     thread_store = FakeThreadStore(
         generated_thread_id="new-tid", resolved_thread_id="old-tid"
     )
-    state = _runtime_state(
+    state = runtime_state(
         thread_id="old-tid",
         dirs=SessionDirs(Workspace("/ws")),
         thread_store=thread_store,
@@ -671,7 +725,7 @@ def test_serve_process_message_reports_slash_dispatch_error_without_fallback():
         message_id="ts-1",
     )
     thread_store = _thread_store()
-    state = _runtime_state(
+    state = runtime_state(
         agent=_agent(),
         thread_id="tid",
         thread_store=thread_store,
@@ -714,7 +768,7 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
         message_id="ts-2",
     )
     thread_store = _thread_store()
-    state = _runtime_state(
+    state = runtime_state(
         agent=_agent(),
         thread_id="tid",
         dirs=SessionDirs(Workspace("/restored-workspace")),
@@ -775,7 +829,7 @@ def test_serve_process_message_starts_a_granted_chat_with_the_grant(granted):
         message_id="ts-3",
     )
     thread_store = _thread_store()
-    state = _runtime_state(
+    state = runtime_state(
         agent=_agent(),
         thread_id="tid",
         dirs=SessionDirs(Workspace("/ws")),
@@ -837,7 +891,7 @@ def test_serve_channel_send_does_not_block_owned_runtime_loop():
         chat_id="channel-user",
         message_id="ts-send",
     )
-    state = _runtime_state(agent=_agent(), thread_id="tid")
+    state = runtime_state(agent=_agent(), thread_id="tid")
 
     def _fake_run_streaming(**kwargs):
         async def _invoke_callback() -> None:

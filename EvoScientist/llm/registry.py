@@ -7,6 +7,8 @@ for the chat-model construction stack in :mod:`.models` (~2000 modules).
 
 from __future__ import annotations
 
+import asyncio
+
 
 class UnknownModelError(ValueError):
     """A router was given a model id it cannot address (a bare short name)."""
@@ -62,21 +64,26 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
+# The user's own endpoints serve the ids they are asked for, so a name given
+# with one is sent as written, never rewritten into another provider's id.
+_CUSTOM_ENDPOINT_PROVIDERS = frozenset({"custom-openai", "custom-anthropic"})
+
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax", "xiaomi", "xiaomi-token-plan"}
-
-# Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
-# cannot disable thinking — structured output must use json_schema there.
-# Moonshot-specific: do NOT widen to other mandatory-reasoning models.
-_OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS = frozenset(
-    {"moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"}
-)
 
 
 def _is_mandatory_thinking_kimi(model_id: str) -> bool:
     """True for Kimi models whose thinking cannot be disabled (K3 family)."""
     short_id = model_id.split("/")[-1]
     return short_id.startswith("kimi-k3") or short_id == "kimi-for-coding"
+
+
+def _openrouter_needs_json_schema(model_name: str) -> bool:
+    """Moonshot rejects a forced tool choice while thinking is enabled, and the
+    K3 family cannot disable thinking. Moonshot-specific: do NOT widen."""
+    return model_name.startswith("moonshotai/") and _is_mandatory_thinking_kimi(
+        model_name
+    )
 
 
 # Model registry: list of (short_name, model_id, provider)
@@ -94,18 +101,20 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
+    ("claude-fable-5-2", "claude-fable-5-2", "anthropic"),
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
     ("claude-sonnet-5-5", "claude-sonnet-5-5", "anthropic"),
     ("claude-haiku-5-5", "claude-haiku-5-5", "anthropic"),
     # OpenAI
+    ("gpt-6.2-sol", "gpt-6.2-sol", "openai"),
+    ("gpt-6.2-astra", "gpt-6.2-astra", "openai"),
+    ("gpt-6.1-terra", "gpt-6.1-terra", "openai"),
     ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
+    ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-6-sol", "gpt-6-sol", "openai"),
     ("gpt-6-luna", "gpt-6-luna", "openai"),
-    ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
-    ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
-    ("gpt-5.6-luna", "gpt-5.6-luna", "openai"),
     # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
     # Listed before the native providers and OpenRouter so that a short name
     # shared with them never resolves here (the dict below is last-entry-wins);
@@ -130,6 +139,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
     ("mistral-large-2512", "mistral-large-2512", "opper"),
     # Google GenAI
+    ("gemini-4-hydrogen", "gemini-4-hydrogen", "google-genai"),
+    ("gemini-4-carbon", "gemini-4-carbon", "google-genai"),
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
     ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
@@ -147,11 +158,8 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
     # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
+    ("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax"),
     ("minimax-m3", "MiniMax-M3", "minimax"),
-    ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
-    ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
-    ("minimax-m2.5", "MiniMax-M2.5", "minimax"),
-    ("minimax-m2.5-highspeed", "MiniMax-M2.5-highspeed", "minimax"),
     # NVIDIA
     ("nemotron-super", "nvidia/nemotron-3-super-120b-a12b", "nvidia"),
     ("nemotron-nano", "nvidia/nemotron-3-nano-30b-a3b", "nvidia"),
@@ -159,54 +167,56 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm4.7", "z-ai/glm4.7", "nvidia"),
     ("deepseek-v3.2", "deepseek-ai/deepseek-v3.2", "nvidia"),
     ("deepseek-v3.1", "deepseek-ai/deepseek-v3.1-terminus", "nvidia"),
-    ("kimi-k2.5", "moonshotai/kimi-k2.5", "nvidia"),
-    ("kimi-k2-thinking", "moonshotai/kimi-k2-thinking", "nvidia"),
-    ("minimax-m2.5", "minimaxai/minimax-m2.5", "nvidia"),
-    ("minimax-m2.1", "minimaxai/minimax-m2.1", "nvidia"),
     ("qwen3.5-397b", "qwen/qwen3.5-397b-a17b", "nvidia"),
     ("step-3.5-flash", "stepfun-ai/step-3.5-flash", "nvidia"),
     # SiliconFlow
-    ("minimax-m2.5", "Pro/MiniMaxAI/MiniMax-M2.5", "siliconflow"),
     ("glm-5.2", "Pro/zai-org/GLM-5.2", "siliconflow"),
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
-    ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
     # OpenRouter
+    ("claude-fable-5.2", "anthropic/claude-fable-5.2", "openrouter"),
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),
     ("claude-haiku-5.5", "anthropic/claude-haiku-5.5", "openrouter"),
+    ("gpt-6.2-sol", "openai/gpt-6.2-sol", "openrouter"),
+    ("gpt-6.2-astra", "openai/gpt-6.2-astra", "openrouter"),
+    ("gpt-6.1-terra", "openai/gpt-6.1-terra", "openrouter"),
     ("gpt-6.1-sol", "openai/gpt-6.1-sol", "openrouter"),
-    ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
+    ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
+    ("gemini-4-neon", "google/gemini-4-neon", "openrouter"),
+    ("gemini-4-hydrogen", "google/gemini-4-hydrogen", "openrouter"),
+    ("gemini-4-carbon", "google/gemini-4-carbon", "openrouter"),
     ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
+    ("kimi-k3.1-pro", "moonshotai/kimi-k3.1-pro", "openrouter"),
     ("kimi-k3", "moonshotai/kimi-k3", "openrouter"),
-    ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
     ("glm-5.3-flash", "z-ai/glm-5.3-flash", "openrouter"),
     ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
+    ("minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro", "openrouter"),
     ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.7", "x-ai/grok-4.7", "openrouter"),
-    ("hy4-preview", "tencent/hy4-preview", "openrouter"),
-    ("hy3", "tencent/hy3", "openrouter"),
+    ("hy4", "tencent/hy4", "openrouter"),
+    ("hy4-flash", "tencent/hy4-flash", "openrouter"),
+    ("qwen4-max", "qwen/qwen4-max", "openrouter"),
     ("qwen3.8-max", "qwen/qwen3.8-max-0902", "openrouter"),
     ("qwen3.8-flash", "qwen/qwen3.8-flash", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
-    ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "openrouter"),
+    ("deepseek-flash", "~deepseek/deepseek-flash-latest", "openrouter"),
     ("muse-wonder", "meta/muse-wonder", "openrouter"),
     ("muse-spark-open", "meta/muse-spark-open", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
     # Listed before Zhipu so simple GLM lookups keep their existing default.
     ("glm-5.2", "glm-5-2", "volcengine-code"),
-    ("kimi-k2.5", "kimi-k2-5", "volcengine-code"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5.3", "glm-5.3", "zhipu-code"),
     ("glm-5.3-flash", "glm-5.3-flash", "zhipu-code"),
@@ -261,19 +271,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # DeepSeek — ``deepseek-flash`` is the rolling Flash tier (V4.1-Flash today).
     ("deepseek-flash", "deepseek-flash", "deepseek"),
     ("deepseek-v4-pro", "deepseek-v4-pro", "deepseek"),
-    # Legacy alias kept so existing configs resolve here instead of falling
-    # through to the same-named OpenRouter id (server redirects to deepseek-flash).
-    ("deepseek-v4-flash", "deepseek-v4-flash", "deepseek"),
     # Moonshot (OpenAI-compatible)
+    ("kimi-k3.1-pro", "kimi-k3.1-pro", "moonshot"),
     ("kimi-k3", "kimi-k3", "moonshot"),
-    ("kimi-k2.6", "kimi-k2.6", "moonshot"),
-    ("kimi-k2.5", "kimi-k2.5", "moonshot"),
-    ("kimi-k2-thinking", "kimi-k2-thinking", "moonshot"),
-    ("kimi-k2-thinking-turbo", "kimi-k2-thinking-turbo", "moonshot"),
-    ("moonshot-v1-auto", "moonshot-v1-auto", "moonshot"),
-    ("moonshot-v1-128k", "moonshot-v1-128k", "moonshot"),
-    ("moonshot-v1-32k", "moonshot-v1-32k", "moonshot"),
-    ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
     # Kimi Coding Plan (Anthropic-compatible)
     ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
     # Xiaomi MiMo Token Plan (subscription, Anthropic-compatible)
@@ -291,6 +291,11 @@ MODELS: dict[str, tuple[str, str]] = {
 }
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
+# The reasoning level native Claude, OpenAI, OpenRouter and DeepSeek run at when
+# none is configured.
+DEFAULT_REASONING_EFFORT = "high"
+# Every reasoning level EvoScientist knows, lightest first.
+REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
@@ -340,19 +345,65 @@ async def list_model_picker_entries(
     ollama_base_url: str | None,
     *,
     include_custom_ollama: bool,
+    custom_openai_base_url: str | None = None,
+    custom_openai_api_key: str | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Return model picker entries, optionally including local Ollama models."""
-    entries = list_models_by_provider()
-    if ollama_base_url:
-        from .ollama_discovery import discover_ollama_models
+    """Return model picker entries, optionally including live endpoint models.
 
-        for detected_name in await discover_ollama_models(
-            ollama_base_url,
-            timeout=1.5,
-        ):
-            entries.append((detected_name, detected_name, "ollama"))
-        if include_custom_ollama:
-            entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    Ollama rows are appended. When ``custom_openai_base_url`` is set and the
+    endpoint lists models, those names replace the static ``custom-openai``
+    defaults in place (the group stays where the registry put it). An empty
+    or failed probe keeps the defaults, so the picker still opens offline.
+    """
+    entries = list_models_by_provider()
+    if not (ollama_base_url or custom_openai_base_url):
+        return entries
+
+    from .custom_openai_discovery import discover_custom_openai_models
+    from .ollama_discovery import discover_ollama_models
+
+    ollama_probe = (
+        discover_ollama_models(ollama_base_url, timeout=1.5)
+        if ollama_base_url
+        else None
+    )
+    custom_probe = (
+        discover_custom_openai_models(
+            custom_openai_base_url, custom_openai_api_key, timeout=1.5
+        )
+        if custom_openai_base_url
+        else None
+    )
+    ollama_models: list[str] = []
+    discovered: list[str] = []
+    if ollama_probe is not None and custom_probe is not None:
+        ollama_models, discovered = await asyncio.gather(ollama_probe, custom_probe)
+    elif ollama_probe is not None:
+        ollama_models = await ollama_probe
+    elif custom_probe is not None:
+        discovered = await custom_probe
+
+    for name in ollama_models:
+        entries.append((name, name, "ollama"))
+    if ollama_base_url and include_custom_ollama:
+        entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
+    if discovered:
+        # In place, not appended: the custom-openai group keeps the
+        # position it has in the static registry. The discovery already
+        # stripped blank ids and removed duplicates.
+        replacement = [(name, name, "custom-openai") for name in discovered]
+        merged: list[tuple[str, str, str]] = []
+        inserted = False
+        for row in entries:
+            if row[2] == "custom-openai":
+                if not inserted:
+                    merged.extend(replacement)
+                    inserted = True
+                continue
+            merged.append(row)
+        if not inserted:
+            merged.extend(replacement)
+        entries = merged
     return entries
 
 

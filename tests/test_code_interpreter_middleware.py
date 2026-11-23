@@ -9,16 +9,12 @@ allowlist (``task()`` stays reachable as the REPL global, with responseSchema).
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
 
-from EvoScientist.middleware import code_interpreter
 from EvoScientist.middleware.code_interpreter import (
     _DEFAULT_PTC_ALLOWLIST,
-    aclose_code_interpreters,
     create_code_interpreter_middleware,
 )
 
@@ -28,9 +24,12 @@ def test_task_excluded_from_ptc_allowlist():
     assert "task" not in _DEFAULT_PTC_ALLOWLIST
 
 
-def test_async_dispatch_tools_remain_in_allowlist():
-    # Guard against over-deletion: async fan-out is the killer PTC use case.
-    for name in ("start_async_task", "check_async_task", "list_async_tasks"):
+def test_async_tools_that_track_tasks_stay_out_of_allowlist():
+    # Starting, updating or cancelling a task from code is untested, so those
+    # stay out; reading tracked tasks is allowed.
+    for name in ("start_async_task", "update_async_task", "cancel_async_task"):
+        assert name not in _DEFAULT_PTC_ALLOWLIST
+    for name in ("check_async_task", "list_async_tasks"):
         assert name in _DEFAULT_PTC_ALLOWLIST
 
 
@@ -54,61 +53,15 @@ def test_create_code_interpreter_middleware_builds():
     assert create_code_interpreter_middleware() is not None
 
 
-@pytest.mark.asyncio
-async def test_aclose_code_interpreters_closes_registered_instances(monkeypatch):
-    middleware = create_code_interpreter_middleware()
-    close = AsyncMock()
-    monkeypatch.setattr(middleware, "aclose", close)
-
-    await aclose_code_interpreters()
-
-    close.assert_awaited_once_with()
+def test_after_agent_without_a_slot_returns_nothing():
+    # A run that ends in its first start hook never ran before_agent.
+    mw = create_code_interpreter_middleware()
+    assert mw.after_agent({"messages": []}, runtime=None) is None
 
 
-@pytest.mark.asyncio
-async def test_aclose_code_interpreters_bounds_stalled_cleanup(monkeypatch, caplog):
-    middleware = create_code_interpreter_middleware()
-    cancelled = asyncio.Event()
-
-    async def stalled_close():
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
-
-    monkeypatch.setattr(middleware, "aclose", stalled_close)
-
-    await asyncio.wait_for(
-        aclose_code_interpreters(timeout=0.01),
-        timeout=0.2,
-    )
-
-    assert cancelled.is_set()
-    assert "cleanup did not finish within 0.01 seconds" in caplog.text
-
-
-def test_del_skips_slot_close_during_interpreter_shutdown(monkeypatch):
-    middleware = create_code_interpreter_middleware()
-    registry = middleware._registry
-    registry.get("slot")
-    monkeypatch.setattr(code_interpreter.sys, "is_finalizing", lambda: True)
-
-    middleware.__del__()
-
-    remaining = sorted(registry._slots)
-    monkeypatch.undo()
-    registry.close()
-    assert remaining == ["slot"]
-
-
-def test_del_still_closes_slots_before_shutdown():
-    middleware = create_code_interpreter_middleware()
-    registry = middleware._registry
-    registry.get("slot")
-
-    middleware.__del__()
-
-    assert registry._slots == {}
+async def test_aafter_agent_without_a_slot_returns_nothing():
+    mw = create_code_interpreter_middleware()
+    assert await mw.aafter_agent({"messages": []}, runtime=None) is None
 
 
 def test_middleware_uses_thread_mode():
@@ -121,51 +74,6 @@ def test_middleware_uses_thread_mode():
     """
     mw = create_code_interpreter_middleware()
     assert mw._mode == "thread"
-
-
-def test_after_agent_evicts_slot_on_untouched_turn():
-    """Regression guard against reintroducing a conditional-snapshot gate
-    that skips ``after_agent`` on untouched turns.
-
-    Upstream ``after_agent`` in ``langchain_quickjs/middleware.py`` performs
-    two things: snapshot the REPL AND evict the slot (``finally:
-    self._registry.evict(slot_id)``). ``before_agent`` restores the REPL
-    on any turn that follows a touched one via ``self._registry.get`` —
-    which is get-or-create. So if ``after_agent`` returns early without
-    evicting, one ``ThreadWorker`` + QuickJS Runtime leaks per persistent
-    slot that ever went touched → quiet.
-
-    Fix: don't override ``after_agent`` / ``aafter_agent`` at all — inherit
-    upstream's unconditional snapshot+evict behavior. This test creates a
-    slot the way ``before_agent`` would, calls ``after_agent`` with an
-    untouched-state input, and asserts the slot was evicted.
-    """
-    mw = create_code_interpreter_middleware()
-    slot_id = mw._slot_update_for_runtime()["_quickjs_slot_id"]
-
-    # Simulate the slot creation that ``before_agent`` performs when it sees
-    # a prior turn's snapshot payload in state.
-    mw._registry.get(slot_id)
-    assert len(mw._registry._slots) == 1
-
-    # Untouched-turn state: no ``code_interpreter`` tool call between the
-    # last ``HumanMessage`` and end. Under the earlier buggy gate this
-    # returned ``{}`` without evicting — leaking the slot created above.
-    untouched_state = {
-        "_quickjs_slot_id": slot_id,
-        "_quickjs_snapshot_payload": b"payload-from-prior-turn",
-        "messages": [
-            HumanMessage(content="thanks"),
-            AIMessage(content="you're welcome"),
-        ],
-    }
-    mw.after_agent(untouched_state, runtime=None)
-
-    assert len(mw._registry._slots) == 0, (
-        "after_agent must evict the slot even on untouched turns, because "
-        "before_agent already restored a REPL that owns a ThreadWorker + "
-        "QuickJS Runtime. Skipping eviction leaks those resources."
-    )
 
 
 def test_evo_filtered_graph_strips_private_snapshot_field():
@@ -271,58 +179,28 @@ def test_strip_private_scrubs_task_result_snapshot_blob():
     assert tasks_after[1] is clean_task
 
 
-def test_agent_uses_filtered_graph_class():
-    """The ``__class__`` swap in ``main_graph.py`` is the load-bearing wiring
-    that makes ``_strip_private`` reach the langgraph-api endpoints.
-    ``_strip_private`` and ``_EvoFilteredGraph`` in isolation don't prove the
-    swap ran; every other test in this file passes even if someone drops the
-    swap line. This asserts the compiled agent is actually the filtered
-    subclass at module-load time, and that the subclass survives
-    ``Pregel.copy(update=...)`` — the call langgraph-api makes in
-    ``get_graph`` before yielding the graph to endpoint handlers.
-    """
-    from EvoScientist.langgraph_dev.main_graph import (
-        EvoScientist_agent,
-        _EvoFilteredGraph,
-    )
-
-    # Registered graphs sit behind a folder-checking factory; it serves this graph.
-    graph = EvoScientist_agent.graph
-    assert isinstance(graph, _EvoFilteredGraph)
-    assert isinstance(graph.copy(update={}), _EvoFilteredGraph)
-
-
-def test_all_registered_graphs_use_filtered_graph_class():
-    """Every graph registered in ``langgraph.json`` (main + all subagents)
-    gets the ``__class__`` swap via ``_apply_filter_to_all_registered_graphs``.
-    Iterating the config directly matches the auto-detect refactor: adding
-    a new subagent to ``langgraph.json`` should not require a corresponding
-    test update.
+def test_every_served_graph_uses_filtered_graph_class(
+    monkeypatch, tmp_path, tiny_graph
+):
+    """Every graph the server builds (main + all subagents) gets the
+    ``__class__`` swap. Iterates the registered builders, so a new graph needs
+    no test update.
 
     Subagents get ``create_code_interpreter_middleware`` unconditionally
     (``EvoScientist.py:_build_middleware_stack``), so they can touch the
     QuickJS REPL and write ``_quickjs_snapshot_payload`` on their own
-    checkpoint namespace. Async subagents also get their own ``thread_id``
-    and their ``/threads/{id}/state`` endpoint runs on their own compiled
-    graph — without the swap on those graphs, our filter would miss that
-    endpoint entirely.
+    checkpoint namespace, read through their own ``/threads/{id}/state``.
     """
-    import json
-    from importlib import import_module
-    from pathlib import Path
-
-    # Import triggers ``main_graph``'s swap loop.
-    from EvoScientist.langgraph_dev import main_graph
+    from EvoScientist.langgraph_dev import factories
     from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
+    from EvoScientist.paths import SessionDirs, Workspace
 
-    config_path = Path(main_graph.__file__).parent / "langgraph.json"
-    config = json.loads(config_path.read_text())
-    for name, path in config["graphs"].items():
-        module_path, attr = path.rsplit(":", 1)
-        graph = getattr(import_module(module_path), attr).graph
-        assert isinstance(graph, _EvoFilteredGraph), (
-            f"graph {name!r} ({path}) did not receive the class swap"
-        )
+    for graph_id in list(factories.BUILDERS):
+        monkeypatch.setitem(factories.BUILDERS, graph_id, tiny_graph)
+    graphs = factories.GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    for graph_id in factories.BUILDERS:
+        assert isinstance(graphs.get(graph_id, dirs), _EvoFilteredGraph), graph_id
 
 
 def test_strip_private_recurses_into_nested_subgraph_state():

@@ -14,6 +14,13 @@ from EvoScientist.prompts import (
 
 
 class TestGetSystemPrompt:
+    def test_triages_an_untracked_background_process(self):
+        # The notifier reports a process its registry lost as untracked; the
+        # agent must tell the user rather than acknowledge and wait for it.
+        result = get_system_prompt()
+        assert '`status="untracked"`' in result
+        assert "do not wait for it to finish" in result
+
     def test_returns_non_empty(self):
         result = get_system_prompt()
         assert isinstance(result, str)
@@ -181,6 +188,10 @@ class TestDangerousShellGuidelines:
         # privileged-command blocklist still advertised
         assert "sudo" in result
         assert "rm -rf /" in result
+
+    def test_only_the_sandbox_names_the_workspace_root(self):
+        assert "`/` is the workspace root" in get_system_prompt()
+        assert "`/` is the workspace root" not in get_system_prompt(dangerous=True)
 
     def test_dangerous_without_cwd_falls_back(self):
         result = get_system_prompt(dangerous=True)

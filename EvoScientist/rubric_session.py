@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .gateway.types import runs_in_process
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,14 +151,6 @@ def rubric_badge(
 
 
 # -- shared by the interactive CLI and the TUI ---------------------------------
-
-
-def runs_in_process(graph_gateway: Any) -> bool:
-    """Whether a session's runs execute in-process (the local gateway)."""
-    from .gateway.server import LangGraphServerGateway
-
-    execute_gateway = getattr(graph_gateway, "execute_gateway", graph_gateway)
-    return not isinstance(execute_gateway, LangGraphServerGateway)
 
 
 def thread_run_extra(

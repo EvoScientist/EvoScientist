@@ -52,12 +52,6 @@ def _step_channels(
         for t in (getattr(config, "channel_enabled", "") or "").split(",")
         if t.strip()
     }
-    # Legacy iMessage compat
-    if (
-        getattr(config, "imessage_enabled", False)
-        and "imessage" not in _currently_enabled
-    ):
-        _currently_enabled.add("imessage")
 
     # Direct pip packages for each channel extra.  Used to install the
     # exact dependency without requiring the evoscientist package itself
@@ -193,7 +187,6 @@ def _step_channels(
 
     if not selected:
         updates["channel_enabled"] = ""
-        updates["imessage_enabled"] = False
         return updates
 
     from ...mcp.registry import install_library, pip_install_hint
@@ -301,7 +294,6 @@ def _step_channels(
             ).ask()
             if senders is None:
                 raise KeyboardInterrupt()
-            updates["imessage_enabled"] = True
             updates["imessage_allowed_senders"] = senders.strip()
             enabled_channels.append("imessage")
             continue
@@ -797,8 +789,6 @@ def _step_channels(
         enabled_channels.append(ch_name)
 
     updates["channel_enabled"] = ",".join(enabled_channels)
-    # Keep legacy field in sync
-    updates["imessage_enabled"] = "imessage" in enabled_channels
 
     # --- Common prompt: send thinking (shown when any channel is enabled) ---
     if enabled_channels:

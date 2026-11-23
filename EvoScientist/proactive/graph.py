@@ -91,11 +91,11 @@ def _load_deps(previous: _Deps | None) -> _Deps:
     the cached shadow agents only with one of those, or on restart.
     """
     from ..config.settings import get_effective_config
-    from ..langgraph_dev.sdk import langgraph_dev_url
+    from ..langgraph_dev.sdk import configured_langgraph_dev_url
 
     cfg = get_effective_config()
     settings = _gate_settings(cfg)
-    url = langgraph_dev_url(cfg)
+    url = configured_langgraph_dev_url(cfg)
     key = (cfg.provider, cfg.model, settings, url)
     if previous is not None and previous.key == key:
         return previous

@@ -41,6 +41,7 @@ from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.channels.formatter import convert_markdown
 from EvoScientist.channels.middleware import DedupCache, MentionGatingMiddleware
 from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
+from EvoScientist.paths import Workspace
 from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1988,6 +1989,7 @@ class TestInboundConsumer:
         if agent is None:
             agent = MagicMock()
         kw.setdefault("graph_gateway", FakeGraphGateway())
+        kw.setdefault("workspace", Workspace("/tmp/channel-project"))
         return InboundConsumer(
             bus=bus,
             manager=mgr,
@@ -2033,6 +2035,7 @@ class TestInboundConsumer:
             manager=mgr,
             agent=MagicMock(),
             thread_id="shared_thread",  # Non-empty!
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=FakeGraphGateway(),
         )
         tid1 = await consumer._get_thread_id("alice")
@@ -2041,6 +2044,22 @@ class TestInboundConsumer:
         assert tid1 != tid2
         assert tid1 == "shared_thread:alice"
         assert tid2 == "shared_thread:bob"
+
+    async def test_run_request_targets_channel_workspace(self, tmp_path):
+        gateway = FakeGraphGateway(events=[{"type": "done", "content": "ok"}])
+        consumer = self._make_consumer(
+            tmp_path, graph_gateway=gateway, workspace=Workspace(tmp_path)
+        )
+        await consumer.bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="hi")
+        )
+        task = asyncio.create_task(consumer.run())
+        await asyncio.wait_for(consumer.bus.consume_outbound(), timeout=5.0)
+        await consumer.stop()
+        await task
+
+        (request,) = gateway.requests
+        assert request.target.workspace_dir == Workspace(tmp_path).key
 
     async def test_session_eviction_is_lru(self, tmp_path):
         """Sessions use LRU eviction: recently accessed senders are kept."""
@@ -2094,6 +2113,7 @@ class TestInboundConsumerErrorHandling:
             manager=mgr,
             agent=MagicMock(),
             thread_id="",
+            workspace=Workspace("/tmp/channel-project"),
             graph_gateway=FakeGraphGateway(),
         )
 

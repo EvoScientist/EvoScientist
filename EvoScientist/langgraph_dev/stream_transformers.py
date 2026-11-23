@@ -5,8 +5,7 @@ transformers declare (there is no default ``custom`` mode). It discovers extra
 transformers from a module-level ``stream_transformers`` symbol on the graph's
 source module (``langgraph_api.graph._register_stream_transformers_from_module``).
 ``main_graph`` re-exports :func:`stream_transformers` so the symbol is present on
-that module; the logic lives here so it can be unit-tested without building the
-full agent that importing ``main_graph`` triggers.
+that module; the logic lives here so it can be unit-tested on its own.
 """
 
 from __future__ import annotations

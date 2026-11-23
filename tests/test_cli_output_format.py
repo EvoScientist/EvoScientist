@@ -8,6 +8,7 @@ The dispatch itself runs the sink through ``GraphGateway.stream_events`` from th
 single-shot path; that sourcing is exercised by the json_sink unit tests.
 """
 
+import io
 import sys
 
 import pytest
@@ -36,7 +37,6 @@ def _overrides_for(monkeypatch, argv):
 
     import EvoScientist.config as cfg_mod
     from EvoScientist.cli._app import app
-    from EvoScientist.stream.console import console
 
     captured: dict[str, object] = {}
 
@@ -49,11 +49,7 @@ def _overrides_for(monkeypatch, argv):
         raise _Stop
 
     monkeypatch.setattr(cfg_mod, "get_effective_config", _grab)
-    original_console_file = console.file
-    try:
-        CliRunner().invoke(app, argv, catch_exceptions=True)
-    finally:
-        console.file = original_console_file
+    CliRunner().invoke(app, argv, catch_exceptions=True)
     return captured.get("overrides", {})
 
 
@@ -76,17 +72,18 @@ def test_no_auto_mode_writes_explicit_false_override(monkeypatch):
     assert overrides.get("auto_mode") is False
 
 
-def test_redirect_console_to_stderr():
+def test_redirect_console_to_stderr(monkeypatch):
     """redirect_console_to_stderr moves the shared console's output to stderr."""
     from EvoScientist.stream.console import console
     from EvoScientist.stream.json_sink import redirect_console_to_stderr
 
-    original = console.file
-    try:
-        redirect_console_to_stderr()
-        assert console.file is sys.stderr
-    finally:
-        console.file = original
+    redirect_console_to_stderr()
+    assert console.file is sys.stderr
+    # It follows a later replacement (a test's capture, say) rather than
+    # keeping the stream it found.
+    replaced = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", replaced)
+    assert console.file is replaced
 
 
 # ── CLI validation (via typer CliRunner) ──

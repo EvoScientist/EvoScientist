@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import os
 import signal
+from types import SimpleNamespace
 
+import pytest
+
+import EvoScientist.ccproxy_manager as ccproxy_mod
 from EvoScientist.cli import commands
 from EvoScientist.paths import SessionDirs, Workspace
 from tests.fakes.serve import run_serve_once, serve_config
@@ -27,9 +31,56 @@ def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):
     assert captured["dirs"] == SessionDirs(Workspace(expected))
     assert captured["media_dir"] == Workspace(expected).media_dir
     assert cli_ws.is_dir()
-    # The project .env can override the memories folder; it must be re-read
-    # before ensure_dirs() creates it.
-    assert order.index(("reload_env_dirs", None)) < order.index(("ensure_dirs", None))
+    assert ("ensure_dirs", None) in order
+
+
+def test_serve_loads_the_agent_for_the_gateway_it_built(monkeypatch, tmp_path):
+    import EvoScientist.gateway as gateway_mod
+
+    built = []
+    create = gateway_mod.create_runtime_gateways_for_config
+
+    def _create(*args, **kwargs):
+        built.append(create(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(gateway_mod, "create_runtime_gateways_for_config", _create)
+
+    _, captured = run_serve_once(
+        monkeypatch, serve_config(default_workdir=str(tmp_path))
+    )
+
+    assert len(built) == 1
+    assert captured["load_graph_gateway"] is built[0].graph_gateway
+
+
+@pytest.mark.parametrize("on_server", [False, True])
+def test_serve_says_it_loads_the_agent_only_when_it_builds_one(
+    monkeypatch, tmp_path, on_server
+):
+    import EvoScientist.gateway as gateway_mod
+    from EvoScientist.gateway.server import LangGraphServerGateway
+    from tests.fakes.common import FakeGraphGateway
+
+    gateway = FakeGraphGateway(generated_thread_ids=["t1"])
+    if on_server:
+        gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    monkeypatch.setattr(
+        gateway_mod,
+        "create_runtime_gateways_for_config",
+        lambda *_a, **_k: SimpleNamespace(graph_gateway=gateway),
+    )
+    printed: list[str] = []
+    print_ = commands.console.print
+    monkeypatch.setattr(
+        commands.console,
+        "print",
+        lambda *a, **k: (printed.append(str(a[0]) if a else ""), print_(*a, **k)),
+    )
+
+    run_serve_once(monkeypatch, serve_config(default_workdir=str(tmp_path)))
+
+    assert ("[dim]Loading agent...[/dim]" in printed) is not on_server
 
 
 def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_path):
@@ -279,3 +330,27 @@ def test_serve_sigint_cancels_active_message_scope_before_interrupt(
     )
 
     assert cancelled_scopes == ["channel:telegram:chat-2:message-2"]
+
+
+def test_serve_says_where_its_dangerous_flag_applies(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    noted: list = []
+    monkeypatch.setattr(commands, "_print_dangerous_flag_note", noted.append)
+
+    run_serve_once(monkeypatch, serve_config(default_workdir=ws), workdir=ws)
+
+    assert noted == ["local"]
+
+
+def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
+    """The server starts ccproxy; the session only points at it."""
+    pointed: list[int] = []
+    monkeypatch.setattr(ccproxy_mod, "uses_oauth", lambda _config: True)
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", pointed.append)
+    ws = str((tmp_path / "ws").resolve())
+    config = serve_config(default_workdir=ws)
+    config.ccproxy_port = 8123
+
+    run_serve_once(monkeypatch, config, workdir=ws)
+
+    assert pointed == [8123]

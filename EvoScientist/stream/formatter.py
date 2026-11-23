@@ -15,7 +15,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from .utils import FAILURE_PREFIX, SUCCESS_PREFIX, truncate
+from .utils import FAILURE_PREFIX, SUCCESS_PREFIX, TOOL_ERROR_PREFIX, truncate
 from .utils import is_success as _is_success
 
 
@@ -58,7 +58,7 @@ class ToolResultFormatter:
                 return ContentType.JSON
             return ContentType.SUCCESS
 
-        if content.startswith(FAILURE_PREFIX):
+        if content.startswith((FAILURE_PREFIX, TOOL_ERROR_PREFIX)):
             return ContentType.ERROR
 
         if self._is_json(content):

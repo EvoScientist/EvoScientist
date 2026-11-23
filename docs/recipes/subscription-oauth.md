@@ -24,7 +24,7 @@ EvoScientist (LangChain client)
     (both billed against your subscription quota, not API credits)
 ```
 
-- **Claude** (`anthropic_auth_mode: oauth`): `EvoSci` starts ccproxy automatically (or reuses a running instance on `ccproxy_port`) and points the Anthropic base URL at it.
+- **Claude** (`anthropic_auth_mode: oauth`): the background agent server starts ccproxy on `ccproxy_port` and stops it when it stops; a ccproxy you already run on that port is used instead, and left running. Sessions point the Anthropic base URL at it. `EvoSci server status` shows it.
 - **ChatGPT** (`openai_auth_mode: oauth`): EvoScientist opens OpenAI's sign-in page once, stores the token under `~/.evoscientist/auth/chatgpt.json`, and calls the Codex backend with it. No proxy and no Codex CLI are involved.
 
 ---
@@ -106,13 +106,15 @@ EvoSci
 
 Your browser opens OpenAI's sign-in page and returns to a local callback on `localhost:1455`. You stay signed in afterwards: the token refreshes itself before a request needs it.
 
+To sign in or out on its own, outside the wizard: `EvoSci login chatgpt` signs in, and `EvoSci logout chatgpt` removes the stored sign-in from this machine (it is not revoked at OpenAI). For programs such as the desktop app, `EvoSci login chatgpt --json` prints one JSON object per line instead (a `url` to open, then `signed_in` or an `error`) and never opens a browser itself; the event list is in the docstring of `EvoScientist/cli/login_cmd.py`.
+
 ### 2. Configure EvoScientist
 
 ```bash
 EvoSci config set openai_auth_mode oauth
 EvoSci config set provider         openai
 EvoSci config set model            gpt-6-sol
-EvoSci config set reasoning_effort high     # optional; see note below
+EvoSci config set reasoning_effort xhigh    # optional; see note below
 ```
 
 In this mode every `openai` model uses your plan: the main model, the auxiliary model and any OpenAI entry in the fallback chain. `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `EVOSCIENTIST_USE_RESPONSES_API` are ignored while it is on.
@@ -127,7 +129,7 @@ The '<model>' model is not supported when using Codex with a ChatGPT account.
 
 EvoScientist counts a 272K context window for models on this route, so a conversation whose main model is one of them is summarized before it reaches that size (as a fallback model, it gets the main model's budget). The backend accepts longer input, but every turn resends the whole context against your plan's usage limits; 272K is Codex's own default for most of these models.
 
-> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, plus `default`, which keeps EvoScientist's level for each model); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
+> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, with `high`, the level used when none is set, highlighted); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
 
 ### 4. Machines without a browser
 
@@ -177,14 +179,15 @@ print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly:
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Start EvoSci in a terminal to sign in.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Start `EvoSci` in a terminal and confirm the sign-in prompt |
+| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Sign in with EvoSci login chatgpt, or from Settings in the desktop app.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Run `EvoSci login chatgpt` (or start `EvoSci` in a terminal and confirm the sign-in prompt); in the desktop app, sign in from Settings |
 | `ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again to sign in, ...` | The sign-in prompt was declined or did not complete | Run `EvoSci` again and confirm the prompt, or switch to an API key with `EvoSci config set openai_auth_mode api_key` |
 | `Port 1455 is in use (another sign-in may be running). Close it and try again.` | Another sign-in, or a Codex CLI login, holds the callback port | Finish or close it, then retry |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account.` | Your ChatGPT plan does not include that model | Pick a model your plan serves |
 | OpenAI requests fail with a connection error to `127.0.0.1` right after upgrading | A background server started before the upgrade still routes OpenAI through ccproxy | `EvoSci server stop`, then start again |
 | `Run: ccproxy auth login claude_api` on startup | No Claude OAuth credentials on this machine | Run the login command shown |
 | `ccproxy is required for OAuth mode but not found` | OAuth extra not installed (Claude only) | `pip install 'evoscientist[oauth]'` |
-| ccproxy config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |
+| ccproxy config change has no effect | The background agent server's ccproxy predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | `EvoSci server stop`, then start again; check for a shadowing config file |
+| `ccproxy_port 8000 is in use by another program` | Another program, not a ccproxy that answers there, holds the port the server starts its ccproxy on | Stop it, or pick another port with `EvoSci config set ccproxy_port <port>` |
 
 **Debugging tip (Claude):** `ccproxy serve --port 8001 --log-level debug` on a spare port shows exactly what is forwarded upstream. **Warning:** debug logs print `Authorization` bearer tokens — never paste raw log lines anywhere. The same goes for `chatgpt.json`: it holds your ChatGPT tokens.
 

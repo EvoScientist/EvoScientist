@@ -28,15 +28,19 @@ Event fields:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TextIO, TypeVar
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 PROTOCOL = 1
 
@@ -126,8 +130,9 @@ class Emitter(Protocol):
 class JsonEmitter:
     """Write each event as one JSON line and flush, so a reader sees it at once.
 
-    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a piped stdout on
-    Windows uses the ANSI code page, which cannot encode every path.
+    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a
+    ``PYTHONIOENCODING`` the user set can still select the ANSI code page for a
+    piped stdout on Windows, which cannot encode every path.
     """
 
     def __init__(self, stream: TextIO | None = None) -> None:
@@ -153,6 +158,45 @@ def stdin_is_pipe() -> bool:
     except (OSError, ValueError, AttributeError):
         return False
     return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+# A stdin line longer than this is not a command and is dropped.
+_MAX_LINE = 65536
+
+
+def watch_stdin(fd: int, stop: threading.Event) -> None:
+    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
+
+    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
+    buffer lock, which interpreter shutdown may need.
+    """
+    pending = b""
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            if any(_is_stop(line) for line in lines):
+                break
+            if len(pending) > _MAX_LINE:
+                pending = b""  # not a command line; drop it
+    except OSError as exc:
+        logger.debug("stdin read failed: %s", exc)
+    finally:
+        try:
+            os.close(fd)
+        finally:
+            stop.set()
+
+
+def _is_stop(line: bytes) -> bool:
+    try:
+        message = json.loads(line)
+    except (ValueError, RecursionError):  # deep nesting raises RecursionError
+        return False
+    return isinstance(message, dict) and message.get("command") == "stop"
 
 
 # How often a silent step repeats its last ``running`` event, so a reader
@@ -195,6 +239,40 @@ def wait_with_heartbeat(
             last, changed_at = current, clock()
         elif clock() - changed_at >= silence_limit:
             raise StepStalled(f"no progress for {silence_limit:g} s")
+
+
+class Heartbeat:
+    """A ``(fraction, message)`` progress callback that remembers its last
+    line, so a step that reports nothing for a while can repeat it.
+
+    :meth:`beat` repeats the line now (between the polls of
+    :func:`wait_with_heartbeat`); :meth:`tick` repeats it only when
+    :data:`HEARTBEAT_INTERVAL` has passed since the last line, for a loop in
+    this process (between archive members). Both run on the caller's thread.
+    """
+
+    def __init__(
+        self,
+        report: Callable[[float, str], None],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._report = report
+        self._clock = clock
+        self._last: tuple[float, str] | None = None
+        self._at = clock()
+
+    def __call__(self, fraction: float, message: str) -> None:
+        self._last = (fraction, message)
+        self._at = self._clock()
+        self._report(fraction, message)
+
+    def beat(self) -> None:
+        if self._last is not None:
+            self(*self._last)
+
+    def tick(self) -> None:
+        if self._clock() - self._at >= HEARTBEAT_INTERVAL:
+            self.beat()
 
 
 class ProgressThrottle:

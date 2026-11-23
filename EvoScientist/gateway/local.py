@@ -254,7 +254,8 @@ class LocalGraphGateway:
 
         # Only query the dev server when the config says one should exist.
         # If it's down or was never started, return "unknown" (the notifier
-        # stops polling this id). Timeouts and HTTP errors propagate for retry.
+        # reports this id as untracked). Timeouts and HTTP errors propagate for
+        # retry.
         from ..EvoScientist import _ensure_config
         from ..langgraph_dev.sdk import (
             configured_langgraph_dev_url,

@@ -1034,10 +1034,6 @@ class ChannelManager:
         """Get a channel by name."""
         return self._channels.get(name)
 
-    def get_server(self, name: str) -> Channel | None:
-        """Backward compat: returns the Channel (was ChannelServer)."""
-        return self._channels.get(name)
-
     def get_status(self) -> dict[str, Any]:
         """Get status of all registered channels."""
         return {

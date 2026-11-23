@@ -14,7 +14,8 @@ import questionary
 from prompt_toolkit.formatted_text import FormattedText
 from questionary import Choice
 
-from ...llm import DEFAULT_MODEL, get_models_for_provider
+from ...llm import DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, get_models_for_provider
+from ...llm.custom_openai_discovery import list_custom_openai_models
 from ...llm.ollama_discovery import validate_ollama_connection
 from ...paths import Workspace
 from ..settings import EvoScientistConfig
@@ -60,9 +61,7 @@ def _step_ui_backend(config: EvoScientistConfig) -> str:
         Choice(title="CLI (classic terminal, lightweight)", value="cli"),
     ]
 
-    # Map legacy values to current ones
-    _legacy_map = {"textual": "tui", "rich": "cli"}
-    default_backend = _legacy_map.get(config.ui_backend, config.ui_backend)
+    default_backend = config.ui_backend
     if default_backend not in ("tui", "cli", "webui"):
         default_backend = "tui"
 
@@ -269,7 +268,7 @@ def _step_provider(
         Choice(title="OpenAI (GPT models — API / OAuth)", value="openai"),
         Choice(title="Google GenAI (Gemini models)", value="google-genai"),
         Choice(
-            title="MiniMax (M2 — M3 models, up to 1M context, thinking)",
+            title="MiniMax (M3.1 Flash, M3 — 1M context, thinking)",
             value="minimax",
         ),
         Choice(title="ZhipuAI (智谱 — GLM models)", value="zhipu"),
@@ -318,7 +317,7 @@ def _step_provider(
         # Third-party / aggregator
         Choice(title="NVIDIA (third party — limited free requests)", value="nvidia"),
         Choice(
-            title="SiliconFlow (aggregator — GLM, Kimi, MiniMax, etc.)",
+            title="SiliconFlow (aggregator — GLM models)",
             value="siliconflow",
         ),
         Choice(
@@ -828,8 +827,28 @@ def _step_model(
             console.print(f"  [dim]Using default: {model}[/dim]")
         return model
 
-    # Get models for the selected provider
-    entries = get_models_for_provider(provider)
+    # Get models for the selected provider. A live custom-openai endpoint
+    # lists its own ids; an empty or failed probe keeps the registry defaults.
+    if provider == "custom-openai":
+        # The probe sends the URL and the key the model calls will use:
+        # the environment first, then the wizard's value.
+        console.print("  [dim]Checking endpoint for models...[/dim]", end="")
+        discovered = list_custom_openai_models(
+            os.environ.get("CUSTOM_OPENAI_BASE_URL") or config.custom_openai_base_url,
+            os.environ.get("CUSTOM_OPENAI_API_KEY") or config.custom_openai_api_key,
+        )
+        if discovered:
+            console.print(
+                f"\r  [green]✓ The endpoint listed {len(discovered)} model(s)[/green]      "
+            )
+            entries = [(name, name) for name in discovered]
+        else:
+            console.print(
+                "\r  [yellow]✗ No models listed, showing the defaults[/yellow]      "
+            )
+            entries = get_models_for_provider(provider)
+    else:
+        entries = get_models_for_provider(provider)
 
     if not entries:
         # Custom / unknown provider: direct text input.
@@ -860,7 +879,8 @@ def _step_model(
     _CUSTOM_SENTINEL = "__custom__"
     choices = []
     for name, model_id in entries:
-        choices.append(Choice(title=f"{name} ({model_id})", value=name))
+        title = name if name == model_id else f"{name} ({model_id})"
+        choices.append(Choice(title=title, value=name))
     choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
     # Determine default. An explicit ``default_value`` override (e.g. a saved
@@ -946,9 +966,10 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-# Levels offered per provider; each one is sent unchanged on every route of
-# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``). "" stores nothing,
-# so each model keeps its own default.
+# Levels offered per provider, each one a level that provider's route takes (see
+# ``llm.models._ROUTE_REASONING_LEVELS``); a native Claude model whose profile lists
+# fewer gets the nearest one. With none stored these providers run at DEFAULT_REASONING_EFFORT.
+# Every list runs from the deepest level to the lightest.
 _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
     # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
     "openrouter": [
@@ -960,30 +981,47 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("none", "none   — disable reasoning entirely"),
     ],
     "openai": [
-        ("", "default — EvoScientist's level for each model (recommended)"),
-        ("low", "low    — fast responses with lighter reasoning"),
-        ("medium", "medium — balances speed and reasoning depth"),
-        ("high", "high   — greater reasoning depth"),
-        ("xhigh", "xhigh  — extra high reasoning depth"),
         ("max", "max    — deepest reasoning; uses your quota fastest"),
+        ("xhigh", "xhigh  — extra high reasoning depth"),
+        ("high", "high   — greater reasoning depth (recommended)"),
+        ("medium", "medium — balances speed and reasoning depth"),
+        ("low", "low    — fast responses with lighter reasoning"),
+    ],
+    # https://platform.claude.com/docs/en/build-with-claude/effort
+    "anthropic": [
+        ("max", "max    — deepest reasoning; costs the most per request"),
+        ("xhigh", "xhigh  — extra depth for coding and agentic work"),
+        ("high", "high   — thorough reasoning (recommended)"),
+        ("medium", "medium — balances speed and depth"),
+        ("low", "low    — fastest, for simple tasks"),
+    ],
+    # https://api-docs.deepseek.com/api/create-chat-completion
+    "deepseek": [
+        ("max", "max    — deepest reasoning"),
+        ("high", "high   — DeepSeek's default depth (recommended)"),
+        ("low", "low    — lighter reasoning, faster replies"),
+        ("none", "none   — turn thinking off"),
     ],
 }
 
 
-def _asks_reasoning_effort(provider: str) -> bool:
+def _asks_reasoning_effort(config: EvoScientistConfig, provider: str) -> bool:
     """Whether onboarding offers a reasoning level for ``provider``."""
+    # Claude Pro/Max sign-in runs through the local ccproxy, where no effort is sent.
+    if provider == "anthropic" and config.anthropic_auth_mode == "oauth":
+        return False
     return provider in _REASONING_EFFORT_CHOICES
 
 
 def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
-    """Step 3.5: Pick the reasoning effort level for OpenRouter or OpenAI.
+    """Step 3.5: Pick the reasoning effort level for a provider that takes one.
 
     Args:
         config: Current configuration.
         provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        Selected reasoning effort level.
+        The selected level; "" for the default level unless it is already stored.
     """
     levels = _REASONING_EFFORT_CHOICES[provider]
     effort_choices = [Choice(title=title, value=value) for value, title in levels]
@@ -992,7 +1030,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     current = config.reasoning_effort
     offered = {value for value, _ in levels}
     if current not in offered:
-        current = "" if "" in offered else "high"
+        current = DEFAULT_REASONING_EFFORT
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,
@@ -1005,6 +1043,10 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     if effort is None:
         raise KeyboardInterrupt()
 
+    # The default level is stored as "not set", so other routes keep their own;
+    # a high already stored stays.
+    if effort == DEFAULT_REASONING_EFFORT and config.reasoning_effort != effort:
+        return ""
     return effort
 
 

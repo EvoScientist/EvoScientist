@@ -110,7 +110,6 @@ def _invoke(monkeypatch, argv, config=None):
 
     import EvoScientist.config as cfg_mod
     from EvoScientist.cli._app import app
-    from EvoScientist.stream.console import console
 
     captured: dict[str, object] = {}
 
@@ -125,11 +124,7 @@ def _invoke(monkeypatch, argv, config=None):
 
     monkeypatch.setattr(cfg_mod, "get_effective_config", _grab)
     monkeypatch.setattr(cfg_mod, "apply_config_to_env", lambda _config: None)
-    original = console.file
-    try:
-        result = CliRunner().invoke(app, argv, catch_exceptions=True)
-    finally:
-        console.file = original
+    result = CliRunner().invoke(app, argv, catch_exceptions=True)
     return captured.get("overrides"), result
 
 
@@ -382,23 +377,18 @@ def test_rubric_is_refused_on_the_server_gateway(monkeypatch):
     assert "local gateway" in _plain(result.output)
 
 
-def test_runtime_fallback_keeps_the_rubric(monkeypatch):
-    """When the first renderer fails, the retry must still be a graded run."""
+def test_run_streaming_hands_the_rubric_to_the_renderer(monkeypatch):
+    """``-p --rubric`` reaches the renderer, so the run is graded."""
     from EvoScientist.cli import tui_runtime
-
-    class _FailingBackend:
-        def run_streaming(self, **_kwargs):
-            raise RuntimeError("renderer broke")
 
     seen: dict[str, object] = {}
 
-    class _FallbackBackend:
+    class _Backend:
         def run_streaming(self, **kwargs):
             seen.update(kwargs)
             return "ok"
 
-    monkeypatch.setattr(tui_runtime, "get_backend", lambda *_a, **_k: _FailingBackend())
-    monkeypatch.setattr(tui_runtime, "RichStreamingBackend", _FallbackBackend)
+    monkeypatch.setattr(tui_runtime, "get_backend", lambda *_a, **_k: _Backend())
 
     result = tui_runtime.run_streaming(
         ui_backend="tui",

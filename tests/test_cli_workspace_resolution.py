@@ -63,9 +63,6 @@ def _run(
     order: list[str] = []
     captured["order"] = order
     monkeypatch.setattr(commands, "ensure_dirs", lambda: order.append("ensure_dirs"))
-    monkeypatch.setattr(
-        commands, "reload_env_dirs", lambda: order.append("reload_env_dirs")
-    )
     monkeypatch.setattr(commands, "_ensure_async_subagent_server", _fake_ensure_server)
     monkeypatch.setattr(interactive_mod, "cmd_interactive", _fake_cmd_interactive)
 
@@ -75,6 +72,7 @@ def _run(
         mode=mode,
         name=name,
         prompt=None,
+        prompt_file=None,
         thread_id=None,
         workdir=workdir,
         use_cwd=use_cwd,
@@ -98,7 +96,7 @@ def test_cwd_is_default_workspace(monkeypatch, tmp_path):
     assert got["dirs"].work_dir == Workspace(tmp_path).root
     assert got["dirs"].run_dir is None
     assert got["server_dirs"] == got["dirs"]
-    assert got["order"] == ["reload_env_dirs", "ensure_dirs"]
+    assert got["order"] == ["ensure_dirs"]
 
 
 def test_symlinked_start_folder_gives_one_spelling(monkeypatch, tmp_path):
@@ -183,6 +181,7 @@ def _run_prompt(
     thread_id: str | None,
     stored: dict | None,
     backend: str = "local",
+    executes_on_server: bool = False,
 ) -> dict:
     """Drive the main callback through a ``-p`` run and capture its folders."""
     import EvoScientist.cli.interactive as interactive_mod
@@ -195,6 +194,11 @@ def _run_prompt(
         generated_thread_ids=["new-thread"],
         thread_store=FakeThreadStore(resolved_thread_id=thread_id, metadata=stored),
     )
+    if executes_on_server:
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        gateway.execute_gateway = object.__new__(LangGraphServerGateway)
+    captured["graph_gateway"] = gateway
 
     def _fake_get_effective_config(cli_overrides=None):
         merged = vars(config).copy()
@@ -203,7 +207,8 @@ def _run_prompt(
 
     @asynccontextmanager
     async def _fake_checkpointer():
-        yield None
+        captured["checkpointer_opened"] = True
+        yield "CHECKPOINTER"
 
     async def _fake_sync(_config, *, dirs, backend=None, **_kwargs):
         captured["synced"].append(dirs)
@@ -211,6 +216,8 @@ def _run_prompt(
     def _fake_load_agent(**kwargs):
         captured["agent_workspace"] = kwargs["workspace"]
         captured["agent_work_dir"] = kwargs["work_dir"]
+        captured["agent_checkpointer"] = kwargs["checkpointer"]
+        captured["agent_graph_gateway"] = kwargs["graph_gateway"]
         return object()
 
     def _fake_cmd_run(_agent, _prompt, *, thread_id, dirs, **_kwargs):
@@ -226,12 +233,18 @@ def _run_prompt(
         lambda _ctx: SimpleNamespace(run_sync=lambda fn: asyncio.run(fn())),
     )
     monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    captured["printed"] = []
+    monkeypatch.setattr(
+        commands.console,
+        "print",
+        lambda *a, **_k: captured["printed"].append(str(a[0]) if a else ""),
+    )
     monkeypatch.setattr(
         commands,
         "_ensure_async_subagent_server",
         lambda _config, *, dirs, backend=None: captured["prespawned"].append(dirs),
     )
-    monkeypatch.setattr(commands, "_sync_background_agent_server_workspace", _fake_sync)
+    monkeypatch.setattr(commands, "_register_project", _fake_sync)
     monkeypatch.setattr(commands, "_load_agent", _fake_load_agent)
     monkeypatch.setattr(
         gateway_mod,
@@ -239,6 +252,13 @@ def _run_prompt(
         lambda *_a, **_k: SimpleNamespace(graph_gateway=gateway),
     )
     monkeypatch.setattr(sessions_mod, "get_checkpointer", _fake_checkpointer)
+    captured["upgrades"] = 0
+
+    async def _fake_upgrade():
+        captured["upgrades"] += 1
+        gateway.thread_store.calls.append(("upgrade", None))
+
+    monkeypatch.setattr(sessions_mod, "_upgrade_stored_dirs_safely", _fake_upgrade)
     monkeypatch.setattr(interactive_mod, "cmd_run", _fake_cmd_run)
 
     commands._main_callback(
@@ -247,6 +267,7 @@ def _run_prompt(
         mode=None,
         name=None,
         prompt="hello",
+        prompt_file=None,
         thread_id=thread_id,
         workdir=None,
         use_cwd=False,
@@ -283,6 +304,64 @@ def test_one_shot_resume_uses_thread_workspace(monkeypatch, tmp_path):
     assert got["synced"] == [restored]
     # The server is started once, for the thread's folders.
     assert got["prespawned"] == []
+
+
+def test_one_shot_in_process_opens_the_checkpointer_for_the_agent(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+
+    got = _run_prompt(monkeypatch, _config(), thread_id=None, stored=None)
+
+    assert got["checkpointer_opened"] is True
+    assert got["agent_checkpointer"] == "CHECKPOINTER"
+    assert got["agent_graph_gateway"] is got["graph_gateway"]
+    assert "[dim]Loading agent...[/dim]" in got["printed"]
+    # Opening the checkpointer upgrades the stored folders.
+    assert got["upgrades"] == 0
+
+
+def test_one_shot_on_the_server_gateway_opens_no_checkpointer(monkeypatch, tmp_path):
+    """The server keeps its own checkpointer; the agent it would back is not built."""
+    monkeypatch.chdir(tmp_path)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id=None,
+        stored=None,
+        backend="langgraph_server",
+        executes_on_server=True,
+    )
+
+    assert "checkpointer_opened" not in got
+    assert got["agent_checkpointer"] is None
+    assert got["agent_graph_gateway"] is got["graph_gateway"]
+    assert "[dim]Loading agent...[/dim]" not in got["printed"]
+    # Without the checkpointer, the stored folders a resume reads are upgraded.
+    assert got["upgrades"] == 1
+
+
+def test_one_shot_resume_on_the_server_gateway_upgrades_before_it_reads(
+    monkeypatch, tmp_path
+):
+    launch, other = tmp_path / "launch", tmp_path / "other"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id="t-other",
+        stored={"workspace_dir": other.as_posix()},
+        backend="langgraph_server",
+        executes_on_server=True,
+    )
+
+    calls = [name for name, _ in got["graph_gateway"].thread_store.calls]
+    assert calls.index("upgrade") < calls.index("get_thread_metadata")
+    assert got["thread_id"] == "t-other"
+    assert got["run_dirs"] == SessionDirs(Workspace(other))
 
 
 def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):

@@ -26,7 +26,7 @@ class InboundMessage:
 
     @property
     def sender(self) -> str:
-        """Alias for ``sender_id`` (compatibility with IncomingMessage)."""
+        """Alias for ``sender_id``."""
         return self.sender_id
 
     @property
@@ -49,5 +49,5 @@ class OutboundMessage:
 
     @property
     def recipient(self) -> str:
-        """Alias for ``chat_id`` (compatibility with OutgoingMessage)."""
+        """Alias for ``chat_id``."""
         return self.chat_id

@@ -9,9 +9,8 @@ lock, because serve's poll loop and its slash commands run on different
 threads.
 
 The cron is recreated, never kept, whenever serve (re)takes ownership of it:
-after a dev-server restart with file persistence on, every tick of a kept
-thread-bound cron fails (the stored payload comes back with an auth user that
-does not serialise).
+after a dev-server restart, every tick of a kept thread-bound cron fails (the
+stored payload comes back with an auth user that does not serialise).
 """
 
 from __future__ import annotations
@@ -53,9 +52,9 @@ CRON_THREAD_MAX_AGE_SECONDS = 24 * 60 * 60
 # decisions, so a live cron's are at most one interval (10 min) plus a poll
 # old; an older one was left in the cron thread while serve was stopped.
 DECISION_MAX_AGE_SECONDS = 15 * 60
-# ``unavailable_reason`` while the dev server stays behind after a workspace
-# move; the next move that succeeds clears it.
-MOVE_FAILED_REASON = "the background agent server did not move to this workspace"
+# ``unavailable_reason`` while the dev server does not serve the workspace serve
+# moved to; the next move whose registration succeeds clears it.
+MOVE_FAILED_REASON = "the background agent server did not register this workspace"
 # The graph whose threads serve writes pushes into.
 MAIN_GRAPH_ID = "EvoScientist"
 # Node of the main graph a push is a reply of, for the fallback write.
@@ -429,7 +428,7 @@ class ProactiveServe:
             try:
                 self.client.crons.update(self._cron_id, input=cron_input(candidates))
             except NotFoundError:
-                # The dev server lost the cron (a restart without persistence).
+                # The dev server lost the cron (a restart that lost its state).
                 self.reconcile()
                 return
             self._mirrored = candidates
@@ -449,8 +448,8 @@ class ProactiveServe:
 
         The armed threads stay with the old workspace: their flag is in their
         metadata, and :meth:`adopt` arms a thread again when serve resumes it.
-        Called after the dev server moved, so a controller left unavailable by
-        an earlier failed move is available again.
+        Called once the dev server serves the new workspace, so a controller
+        left unavailable by an earlier failed move is available again.
         """
         with self._lock:
             if self.unavailable_reason == MOVE_FAILED_REASON:
@@ -486,7 +485,7 @@ class ProactiveServe:
                 self.armed.discard(thread_id)
 
     def _restamp_armed(self) -> None:
-        """Write the flag back where a dev-server restart without persistence lost it.
+        """Write the flag back when a restart lost the dev server's state.
 
         The tick reads the flag from thread metadata only, and no later run
         stamps it again.
@@ -639,8 +638,10 @@ class ProactiveServe:
         thread there comes first. *rows* come from
         ``sessions.latest_origin_checkpoints``, newest first: per thread, the
         stored folders and channel origin of its newest checkpoint that has an
-        origin, and its newest stored flag; they stand in when a restart without
-        file persistence lost the metadata, and the flag is written back then.
+        origin, and its newest stored flag; they stand in when a restart lost
+        the dev server's state (a hard kill before its periodic flush, or a
+        missing or unloadable ``.langgraph_ops.pckl``), and the flag is
+        written back then.
         A flag still on the server wins over a stored one. The restored thread
         stays a candidate until serve's thread changes or its fresh thread has
         its first turn.
@@ -683,9 +684,9 @@ class ProactiveServe:
                     # ``off``, or ``paused``: serve had left the thread.
                     continue
                 if flag != "on":
-                    # The tick reads the flag from thread metadata only, which
-                    # a dev-server restart without file persistence rebuilds
-                    # without it; no later run restamps it.
+                    # The tick reads the flag from thread metadata only, which a
+                    # restart that lost the dev server's state rebuilds without
+                    # it; no later run restamps it.
                     self.client.threads.update(thread_id, metadata={"proactive": "on"})
                 restore_origin(thread_id, origin)
                 self.armed.add(thread_id)
@@ -806,11 +807,15 @@ class ProactiveServe:
         node is not unique, fall back to ``model`` plus a clear of exactly
         that post-append state.
         """
+        from ..middleware.message_timestamp import CREATED_AT_KEY, created_at_now
+
         message = {
             "type": "ai",
             "content": text,
             "id": proactive_message_id(proactive_id),
             "additional_kwargs": build_proactive_tag(proactive_id),
+            # Written outside the agent, so no hook stamps it.
+            "response_metadata": {CREATED_AT_KEY: created_at_now()},
         }
         topology = self._main_topology()
         if topology.terminal_node is not None:

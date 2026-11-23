@@ -64,6 +64,7 @@ class _ScriptedModel(BaseChatModel):
     scripts: list[AIMessage]
     model_name: str | None = None
     bound: list[list[str]] = Field(default_factory=list)
+    choices: list[Any] = Field(default_factory=list)
     systems: list[str] = Field(default_factory=list)
     lasts: list[str] = Field(default_factory=list)
     calls: int = 0
@@ -74,6 +75,7 @@ class _ScriptedModel(BaseChatModel):
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> _ScriptedModel:
         self.bound.append([getattr(t, "name", None) or t.get("name") for t in tools])
+        self.choices.append(kwargs.get("tool_choice"))
         return self
 
     def _generate(
@@ -122,10 +124,18 @@ def _ai(*tool_calls: dict[str, Any], text: str = "") -> AIMessage:
     return AIMessage(content=text, tool_calls=list(tool_calls))
 
 
-def _finish() -> AIMessage:
+def _finish(summary: str = "done") -> AIMessage:
     return _ai(
-        {"name": "SubagentMemoryDecision", "id": "final", "args": {"summary": "done"}}
+        {
+            "name": "record_execution_summary",
+            "id": "final",
+            "args": {"summary": summary},
+        }
     )
+
+
+def _end() -> AIMessage:
+    return _ai(text="Finished.")
 
 
 def _search() -> AIMessage:
@@ -215,7 +225,7 @@ def _warnings(caplog) -> list[str]:
 @SYNC_AND_ASYNC
 async def test_sequential_writes_stop_at_the_limit(tmp_path, monkeypatch, use_async):
     scripts = [_ai(_record_call(f"c{i}", f"lesson {i}")) for i in range(8)]
-    graph, _ = _build(tmp_path, monkeypatch, [*scripts, _finish()])
+    graph, _ = _build(tmp_path, monkeypatch, [*scripts, _finish(), _end()])
     result = await _run(graph, use_async=use_async)
 
     assert len(_observation_files(tmp_path)) == 3
@@ -229,7 +239,7 @@ async def test_sequential_writes_stop_at_the_limit(tmp_path, monkeypatch, use_as
 @SYNC_AND_ASYNC
 async def test_parallel_writes_keep_the_first_three(tmp_path, monkeypatch, use_async):
     calls = [_record_call(f"p{i}", f"parallel lesson {i}") for i in range(6)]
-    graph, _ = _build(tmp_path, monkeypatch, [_ai(*calls), _finish()])
+    graph, _ = _build(tmp_path, monkeypatch, [_ai(*calls), _finish(), _end()])
     result = await _run(graph, use_async=use_async)
 
     assert len(_observation_files(tmp_path)) == 3
@@ -253,7 +263,7 @@ async def test_parallel_same_summary_writes_land_once(tmp_path, monkeypatch, use
         _record_call("a", "one lesson", scope="project", body="project body"),
         _record_call("b", "one lesson", scope="global", body="global body"),
     ]
-    graph, _ = _build(tmp_path, monkeypatch, [_ai(*calls), _finish()])
+    graph, _ = _build(tmp_path, monkeypatch, [_ai(*calls), _finish(), _end()])
     result = await _run(graph, use_async=use_async)
 
     assert len(_observation_files(tmp_path)) == 1
@@ -267,7 +277,9 @@ def test_record_tool_leaves_the_tool_list_once_the_limit_is_reached(
     tmp_path, monkeypatch
 ):
     scripts = [_ai(_record_call(f"c{i}", f"lesson {i}")) for i in range(3)]
-    _, model = _run_worker(tmp_path, monkeypatch, [*scripts, _search(), _finish()])
+    _, model = _run_worker(
+        tmp_path, monkeypatch, [*scripts, _search(), _finish(), _end()]
+    )
 
     assert "record_observation" in model.bound[0]
     assert "record_observation" in model.bound[2]
@@ -294,22 +306,23 @@ async def test_hard_stop_ends_a_run_that_never_wraps_up(
         f"evomemory-subagent-worker stopped at the budget of its {BUDGET} model "
         f"calls with 0 observations written (source general-purpose, session "
         f"{SESSION})",
-        "Subagent memory worker returned no structured summary",
     ]
 
 
 def test_last_budgeted_call_offers_only_the_summary_tool(tmp_path, monkeypatch, caplog):
     scripts = [_search()] * (BUDGET - 1) + [_finish()]
     with caplog.at_level(logging.WARNING):
-        result, model = _run_worker(tmp_path, monkeypatch, scripts)
+        _, model = _run_worker(tmp_path, monkeypatch, scripts)
 
     assert model.calls == BUDGET
     assert "search_observations" in model.bound[BUDGET - 2]
-    assert model.bound[BUDGET - 1] == ["SubagentMemoryDecision"]
+    assert model.bound[BUDGET - 1] == ["record_execution_summary"]
     assert "your last model call" not in model.systems[BUDGET - 2]
     assert "your last model call" in model.systems[BUDGET - 1]
-    assert result["structured_response"] is not None
-    assert _execution_files(tmp_path)
+    assert [
+        path.read_text(encoding="utf-8").endswith("done\n")
+        for path in _execution_files(tmp_path)
+    ] == [True]
     warnings = _warnings(caplog)
     assert len(warnings) == 1
     assert warnings[0].startswith(
@@ -317,7 +330,44 @@ def test_last_budgeted_call_offers_only_the_summary_tool(tmp_path, monkeypatch, 
     )
 
 
-def _run_with_model(tmp_path, monkeypatch, model):
+class _RateLimitedOnce(_ScriptedModel):
+    rate_limited: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if not self.rate_limited:
+            self.rate_limited = True
+            import httpx
+            import openai
+
+            request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+            raise openai.RateLimitError(
+                "Error code: 429",
+                response=httpx.Response(429, request=request),
+                body=None,
+            )
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@SYNC_AND_ASYNC
+async def test_rate_limited_worker_call_is_retried(tmp_path, monkeypatch, use_async):
+    from EvoScientist.middleware.model_retry import ModelRetryMiddleware
+
+    waits: list[float] = []
+    build = ModelRetryMiddleware.__init__
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    def fake_clock_and_sleep(self, **kwargs):
+        fakes = {
+            "clock": lambda: sum(waits),
+            "sleep": sleep,
+            "sync_sleep": waits.append,
+        }
+        build(self, **{**kwargs, **fakes, "rng": lambda: 0.5})
+
+    monkeypatch.setattr(ModelRetryMiddleware, "__init__", fake_clock_and_sleep)
+    model = _RateLimitedOnce(scripts=[_finish("after the retry"), _end()], bound=[])
     monkeypatch.setattr(
         "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
     )
@@ -326,58 +376,297 @@ def _run_with_model(tmp_path, monkeypatch, model):
         workspace=Workspace(tmp_path / "workspace"),
         memory_dir=tmp_path / "memories",
     )
-    return graph.invoke(
+    await _run(graph, use_async=use_async)
+
+    assert model.rate_limited
+    assert len(waits) == 1
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("after the retry\n")
+
+
+def test_subagent_worker_never_forces_a_tool_choice(tmp_path, monkeypatch):
+    """Structured output forced a tool choice on every call, which some models
+    reject; the summary tool is an ordinary tool the model chooses to call."""
+    _, model = _run_worker(tmp_path, monkeypatch, [_search(), _finish(), _end()])
+    _, wrapped = _run_worker(
+        tmp_path / "wrap", monkeypatch, [_search()] * (BUDGET - 1) + [_finish()]
+    )
+
+    assert "record_execution_summary" in model.bound[0]
+    assert model.choices == [None] * model.calls
+    assert wrapped.choices == [None] * wrapped.calls
+
+
+def test_wrap_up_reaches_a_model_with_native_structured_output(tmp_path, monkeypatch):
+    model = _ScriptedModel(
+        scripts=[_search()] * (BUDGET - 1) + [_finish()],
+        bound=[],
+        profile={"structured_output": True},
+    )
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+    graph = memory_worker.build_memory_worker_graph(
+        MemorySourceType.SUBAGENT,
+        workspace=Workspace(tmp_path / "workspace"),
+        memory_dir=tmp_path / "memories",
+    )
+    graph.invoke(
         {"messages": [HumanMessage("Review the run.")]}, config=_worker_config()
     )
 
+    assert model.bound[BUDGET - 1] == ["record_execution_summary"]
+    assert _execution_files(tmp_path)
 
-def test_wrap_up_is_skipped_on_a_provider_strategy_run(tmp_path, monkeypatch, caplog):
-    model = _ScriptedModel(
-        scripts=[_search()], bound=[], profile={"structured_output": True}
-    )
+
+@SYNC_AND_ASYNC
+async def test_run_without_a_summary_call_writes_nothing_and_warns_once(
+    tmp_path, monkeypatch, caplog, use_async
+):
+    graph, _ = _build(tmp_path, monkeypatch, [_ai(text="Done.")])
     with caplog.at_level(logging.WARNING):
-        result = _run_with_model(tmp_path, monkeypatch, model)
+        await _run(graph, use_async=use_async)
 
-    # Such a run never forced a tool choice, so its last call keeps every
-    # tool and the hard stop ends it.
-    assert model.calls == BUDGET
-    assert len(model.bound) == BUDGET
-    assert "search_observations" in model.bound[BUDGET - 1]
-    assert result.get("structured_response") is None
+    assert _execution_files(tmp_path) == []
     assert _warnings(caplog) == [
-        f"evomemory-subagent-worker stopped at the budget of its {BUDGET} model "
-        f"calls with 0 observations written (source general-purpose, session "
-        f"{SESSION})",
-        "Subagent memory worker returned no structured summary",
+        "Subagent memory worker ended without an execution summary"
     ]
 
 
-@pytest.mark.parametrize(
-    ("profile", "model_name", "tool_strategy"),
-    [
-        (None, None, True),
-        (None, "anthropic/claude-haiku-5.5", True),
-        ({"structured_output": False}, "claude-haiku-5-5", True),
-        ({"structured_output": True}, "claude-fable-5-1", False),
-        (None, "openai/gpt-5.5", False),
-        # A context-window patch leaves a profile without structured_output;
-        # the name list still decides, as it does in langchain.
-        ({"max_input_tokens": 400000}, "openai/gpt-6-sol", False),
-        ({"max_input_tokens": 200000}, "claude-fable-5", False),
-    ],
-)
-def test_strategy_replica_agrees_with_langchain(profile, model_name, tool_strategy):
-    from types import SimpleNamespace
+@SYNC_AND_ASYNC
+async def test_saved_summary_logs_no_warning(tmp_path, monkeypatch, caplog, use_async):
+    graph, _ = _build(tmp_path, monkeypatch, [_finish(), _end()])
+    with caplog.at_level(logging.WARNING):
+        await _run(graph, use_async=use_async)
 
-    from langchain.agents.factory import _supports_provider_strategy
+    assert _execution_files(tmp_path)
+    assert _warnings(caplog) == []
 
-    model = _ScriptedModel(scripts=[_finish()], profile=profile, model_name=model_name)
-    request = SimpleNamespace(
-        model=model, response_format=memory_worker.SubagentMemoryDecision
+
+@SYNC_AND_ASYNC
+async def test_wrap_up_answered_with_text_warns_that_no_summary_came(
+    tmp_path, monkeypatch, caplog, use_async
+):
+    scripts = [_search()] * (BUDGET - 1) + [_ai(text="All done.")]
+    graph, _ = _build(tmp_path, monkeypatch, scripts)
+    with caplog.at_level(logging.WARNING):
+        await _run(graph, use_async=use_async)
+
+    assert _execution_files(tmp_path) == []
+    assert _warnings(caplog) == [
+        f"evomemory-subagent-worker is making the last of its {BUDGET} model calls "
+        f"with 0 observations written (source general-purpose, session {SESSION})",
+        "Subagent memory worker ended without an execution summary",
+    ]
+
+
+def test_rejected_summary_is_named_on_one_warning_line(tmp_path, monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _run_worker(tmp_path, monkeypatch, [_finish("  "), _end()])
+
+    [warning] = _warnings(caplog)
+    assert warning.startswith(
+        "Subagent memory worker ended without an execution summary (last attempt: "
+        "Error invoking tool 'record_execution_summary'"
+    )
+    assert "\n" not in warning
+    assert _execution_files(tmp_path) == []
+
+
+def test_budget_stop_is_told_apart_by_the_last_reply_not_the_last_message(caplog):
+    guardrail = memory_worker._MemoryWorkerGuardrailMiddleware(
+        agent_name="evomemory-subagent-worker",
+        summary_tool="record_execution_summary",
+    )
+    # A tool may append a message after its result (deepagents' read_file
+    # adds video frames), so a cut-off run need not end on a ToolMessage.
+    cut_off = [
+        _ai({"name": "read_file", "id": "r", "args": {"file_path": "/clip.mp4"}}),
+        ToolMessage(content="frames follow", tool_call_id="r", name="read_file"),
+        HumanMessage("frame 1"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        guardrail.after_agent({"messages": cut_off}, None)
+
+    assert _warnings(caplog) == []
+
+
+def test_saved_summary_is_read_off_the_tool_status():
+    def reply(content: str, status: str) -> ToolMessage:
+        return ToolMessage(
+            content=content,
+            tool_call_id="c",
+            name="record_execution_summary",
+            status=status,
+        )
+
+    assert memory_worker._summary_saved([reply("[offloaded to a file]", "success")])
+    assert not memory_worker._summary_saved(
+        [reply(memory_worker._SUMMARY_SAVED, "error")]
     )
 
-    assert memory_worker._tool_strategy_run(request) is tool_strategy
-    assert _supports_provider_strategy(model) is (not tool_strategy)
+
+def test_run_without_source_saves_no_summary(tmp_path, monkeypatch, caplog):
+    graph, _ = _build(tmp_path, monkeypatch, [_finish(), _end()])
+    with caplog.at_level(logging.WARNING):
+        result = graph.invoke({"messages": [HumanMessage("Review the run.")]})
+
+    [reply] = [
+        m
+        for m in result["messages"]
+        if isinstance(m, ToolMessage) and m.name == "record_execution_summary"
+    ]
+    assert reply.status == "error"
+    assert (
+        reply.content == "The execution summary was not saved: the run has no source."
+    )
+    assert _execution_files(tmp_path) == []
+    assert _warnings(caplog) == [
+        "Subagent memory worker ended without an execution summary (last attempt: "
+        "The execution summary was not saved: the run has no source.)"
+    ]
+
+
+def test_summary_write_leaves_the_observation_parse_cache_alone(tmp_path, monkeypatch):
+    from EvoScientist.memory.observations import store
+
+    generation = store._cache_generation
+    _run_worker(tmp_path, monkeypatch, [_finish(), _end()])
+
+    assert _execution_files(tmp_path)
+    assert store._cache_generation == generation
+
+
+def test_subagent_worker_sends_no_forced_tool_choice_to_openrouter(
+    tmp_path, monkeypatch
+):
+    """The case that broke: OpenRouter's Claude Sonnet 5.5 rejects a forced tool
+    choice, and langchain forced one for structured output on every call."""
+    import httpx
+    import openrouter
+
+    from EvoScientist.llm import get_chat_model
+    from tests.fakes.common import deepseek_tool_call_response
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    bodies: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    **deepseek_tool_call_response(
+                        "record_execution_summary", {"summary": "listed the scripts"}
+                    ),
+                    "system_fingerprint": None,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "gen-2",
+                "object": "chat.completion",
+                "system_fingerprint": None,
+                "created": 1,
+                "model": "anthropic/claude-sonnet-5.5",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Finished."},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    model = get_chat_model("anthropic/claude-sonnet-5.5", provider="openrouter")
+    model.client = openrouter.OpenRouter(
+        api_key="sk-test", client=httpx.Client(transport=httpx.MockTransport(respond))
+    )
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+    graph = memory_worker.build_memory_worker_graph(
+        MemorySourceType.SUBAGENT,
+        workspace=Workspace(tmp_path / "workspace"),
+        memory_dir=tmp_path / "memories",
+    )
+    graph.invoke(
+        {"messages": [HumanMessage("Review the run.")]}, config=_worker_config()
+    )
+
+    assert len(bodies) == 2
+    assert [body.get("tool_choice") for body in bodies] == [None, None]
+    assert all("response_format" not in body for body in bodies)
+    names = [tool["function"]["name"] for tool in bodies[0]["tools"]]
+    assert "record_execution_summary" in names
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("listed the scripts\n")
+
+
+def test_parallel_summary_calls_each_land_whole(tmp_path, monkeypatch):
+    from EvoScientist.memory.observations import store
+
+    moved: list[str] = []
+    replace = store._replace_file
+
+    def spy(source: Path, target: Path) -> None:
+        moved.append(target.name)
+        replace(source, target)
+
+    monkeypatch.setattr(store, "_replace_file", spy)
+    long = "A" * 200_000
+    both = _ai(
+        {"name": "record_execution_summary", "id": "a", "args": {"summary": long}},
+        {"name": "record_execution_summary", "id": "b", "args": {"summary": "B"}},
+    )
+    _run_worker(tmp_path, monkeypatch, [both, _end()])
+
+    [path] = _execution_files(tmp_path)
+    assert moved == [path.name, path.name]
+    body = path.read_text(encoding="utf-8").split("## Summary\n\n", 1)[1]
+    assert body in (f"{long}\n", "B\n")
+
+
+async def test_async_worker_writes_summaries_off_the_event_loop(tmp_path, monkeypatch):
+    from blockbuster import BlockBuster
+
+    from EvoScientist.memory.observations import store
+
+    graph, _ = _build(tmp_path, monkeypatch, [_finish("by tool"), _end()])
+    blocker = BlockBuster(scanned_modules=[memory_worker, store])
+    blocker.activate()
+    try:
+        await _run(graph, use_async=True)
+    finally:
+        blocker.deactivate()
+
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("by tool\n")
+
+
+@SYNC_AND_ASYNC
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_wrap_up_retries_a_summary_the_tool_would_reject(
+    tmp_path, monkeypatch, caplog, use_async, blank
+):
+    scripts = [_search()] * (BUDGET - 1) + [_finish(blank), _finish("the summary")]
+    graph, model = _build(tmp_path, monkeypatch, scripts)
+    with caplog.at_level(logging.WARNING):
+        await _run(graph, use_async=use_async)
+
+    assert model.calls == BUDGET + 1
+    assert model.lasts[BUDGET] == memory_worker._WRAP_UP_RETRY
+    [path] = _execution_files(tmp_path)
+    assert path.read_text(encoding="utf-8").endswith("the summary\n")
+    assert len(_warnings(caplog)) == 1
 
 
 @SYNC_AND_ASYNC
@@ -393,10 +682,9 @@ async def test_wrap_up_call_gets_one_retry_when_it_names_a_tool(
     # 21 API calls, 20 AI messages: the retry replaces the stray reply.
     assert model.calls == BUDGET + 1
     assert sum(isinstance(m, AIMessage) for m in result["messages"]) == BUDGET
-    assert model.bound[BUDGET - 1] == ["SubagentMemoryDecision"]
-    assert model.bound[BUDGET] == ["SubagentMemoryDecision"]
+    assert model.bound[BUDGET - 1] == ["record_execution_summary"]
+    assert model.bound[BUDGET] == ["record_execution_summary"]
     assert model.lasts[BUDGET] == memory_worker._WRAP_UP_RETRY
-    assert result["structured_response"] is not None
     assert _execution_files(tmp_path)
     assert _observation_files(tmp_path) == []
     assert len(_warnings(caplog)) == 1
@@ -482,7 +770,7 @@ def test_replayed_flood_lands_no_placeholder(tmp_path, monkeypatch):
                 )
             )
         )
-    result, _ = _run_worker(tmp_path, monkeypatch, [*scripts, _finish()])
+    result, _ = _run_worker(tmp_path, monkeypatch, [*scripts, _finish(), _end()])
 
     files = _observation_files(tmp_path)
     assert len(files) == 3
@@ -496,7 +784,7 @@ def test_record_call_limit_counts_rejected_attempts(tmp_path, monkeypatch):
     same = [
         _record_call(f"r{i}", "one lesson", body="the same lesson") for i in range(8)
     ]
-    scripts = [_ai(call) for call in same] + [_finish()]
+    scripts = [_ai(call) for call in same] + [_finish(), _end()]
     result, model = _run_worker(tmp_path, monkeypatch, scripts)
 
     results = _record_results(result)
@@ -510,7 +798,11 @@ def test_record_call_limit_counts_rejected_attempts(tmp_path, monkeypatch):
 
 def test_record_call_limit_counts_error_results_too(tmp_path, monkeypatch):
     bad = {**_record_call("bad", "lesson"), "args": {"memory_type": "nonsense"}}
-    scripts = [_ai(bad)] * 6 + [_ai(_record_call("ok", "a real lesson")), _finish()]
+    scripts = [_ai(bad)] * 6 + [
+        _ai(_record_call("ok", "a real lesson")),
+        _finish(),
+        _end(),
+    ]
     result, _ = _run_worker(tmp_path, monkeypatch, scripts)
 
     record_messages = _record_messages(result)
@@ -688,6 +980,7 @@ def test_worker_stub_attempt_is_refused_and_counted(tmp_path, monkeypatch):
         *stubs,
         _ai(_record_call("ok", "a real lesson", body="the real body")),
         _finish(),
+        _end(),
     ]
     result, model = _run_worker(tmp_path, monkeypatch, scripts)
 
@@ -1431,8 +1724,12 @@ def test_worker_index_fills_by_time_alone(tmp_path, monkeypatch, source_type):
     """The share serves the agents doing work; a worker checks what its own,
     newest session already recorded, so its overflowing index goes by time."""
     _write_overflowing_global_memory(tmp_path)
-    script = _finish() if source_type == MemorySourceType.SUBAGENT else _ai(text="done")
-    _, model = _run_worker(tmp_path, monkeypatch, [script], source_type=source_type)
+    scripts = (
+        [_finish(), _end()]
+        if source_type == MemorySourceType.SUBAGENT
+        else [_ai(text="done")]
+    )
+    _, model = _run_worker(tmp_path, monkeypatch, scripts, source_type=source_type)
 
     worker_index = model.systems[0]
     hints = "Search hints:" in worker_index
@@ -1493,99 +1790,7 @@ def test_guardrail_is_mounted_last_on_both_workers(tmp_path, source_type):
     assert guardrail.observation_limit == 3
     assert guardrail.record_call_limit == 6
     assert guardrail.model_call_budget == BUDGET
-    expected_schema = (
-        memory_worker.SubagentMemoryDecision
-        if source_type == MemorySourceType.SUBAGENT
-        else None
+    expected_tool = (
+        "record_execution_summary" if source_type == MemorySourceType.SUBAGENT else None
     )
-    assert guardrail._summary_schema is expected_schema
-
-
-def test_strategy_replica_skips_the_wrap_up_without_the_name_list(monkeypatch):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(memory_worker, "_STRUCTURED_OUTPUT_MODEL_PATTERNS", None)
-    for model_name in ("openai/gpt-5.5", "anthropic/claude-haiku-5.5", None):
-        model = _ScriptedModel(scripts=[_finish()], model_name=model_name)
-        request = SimpleNamespace(
-            model=model, response_format=memory_worker.SubagentMemoryDecision
-        )
-        # Unsure which strategy langchain binds: never force a tool choice.
-        assert memory_worker._tool_strategy_run(request) is False
-
-
-_PROVIDER_KEY_ENV = (
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "MINIMAX_API_KEY",
-    "KIMI_API_KEY",
-    "MIMO_API_KEY",
-    "MIMO_TOKEN_PLAN_API_KEY",
-    "CUSTOM_ANTHROPIC_API_KEY",
-    "CUSTOM_OPENAI_API_KEY",
-    "MOONSHOT_API_KEY",
-    "ZHIPUAI_API_KEY",
-    "DASHSCOPE_API_KEY",
-    "GOOGLE_API_KEY",
-    "SILICONFLOW_API_KEY",
-    "VOLCENGINE_API_KEY",
-    "ARK_API_KEY",
-    "NOVITA_API_KEY",
-    "REQUESTY_API_KEY",
-    "ATLASCLOUD_API_KEY",
-    "NVIDIA_API_KEY",
-)
-
-
-def test_strategy_replica_never_claims_a_tool_strategy_langchain_lacks(monkeypatch):
-    """Across the registry the replica may only err towards skipping a wrap-up:
-    a run it calls tool-strategy must be one langchain binds that way too."""
-    from types import SimpleNamespace
-
-    from langchain.agents.factory import _supports_provider_strategy
-    from langchain.agents.structured_output import ToolStrategy
-    from langchain_core.tools import tool
-    from langchain_nvidia_ai_endpoints._common import _NVIDIABaseClient
-
-    from EvoScientist.llm import get_chat_model
-    from EvoScientist.llm.registry import _MODEL_ENTRIES
-    from EvoScientist.middleware.utils import structured_output_for
-
-    for key in _PROVIDER_KEY_ENV:
-        monkeypatch.setenv(key, "sk-test")
-    monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "http://127.0.0.1:9/anthropic")
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
-    # ChatNVIDIA asks the API about model names outside its static table.
-    monkeypatch.setattr(
-        _NVIDIABaseClient, "available_models", property(lambda self: [])
-    )
-
-    @tool
-    def search_observations(query: str) -> str:
-        """Search."""
-        return ""
-
-    compared = 0
-    unsafe: list[str] = []
-    for _short, model_id, provider in _MODEL_ENTRIES:
-        try:
-            model = get_chat_model(model=model_id, provider=provider)
-            model, response_format = structured_output_for(
-                model, memory_worker.SubagentMemoryDecision
-            )
-        except Exception:
-            continue
-        compared += 1
-        replica = memory_worker._tool_strategy_run(
-            SimpleNamespace(model=model, response_format=response_format)
-        )
-        langchain_tool = isinstance(
-            response_format, ToolStrategy
-        ) or not _supports_provider_strategy(model, tools=[search_observations])
-        if replica and not langchain_tool:
-            unsafe.append(f"{provider}:{model_id}")
-
-    assert compared > 100
-    assert unsafe == []
+    assert guardrail._summary_tool == expected_tool

@@ -34,7 +34,6 @@ def _make_config(
     langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
     webui_host: str = "127.0.0.1",
-    langgraph_dev_keepalive: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -43,8 +42,6 @@ def _make_config(
         webui_port=webui_port,
         webui_host=webui_host,
         langgraph_dev_jobs_per_worker=10,
-        langgraph_dev_file_persistence=True,
-        langgraph_dev_keepalive=langgraph_dev_keepalive,
     )
 
 
@@ -87,23 +84,6 @@ class _RecordingConsole:
         return _Ctx()
 
 
-class _ImmediateEvent:
-    """Exits ``run_webui``'s block loop after a single iteration."""
-
-    def __init__(self):
-        self._called = 0
-
-    def is_set(self) -> bool:
-        self._called += 1
-        return self._called > 1
-
-    def wait(self, timeout: float | None = None):
-        return None
-
-    def set(self):
-        self._called = 99
-
-
 class _InterruptingConsole(_RecordingConsole):
     """Raises ``KeyboardInterrupt`` when a line containing ``trigger`` prints,
     simulating a Ctrl+C that lands while ``run_webui`` renders its output."""
@@ -124,6 +104,9 @@ def _run_webui_once(
     *,
     backend_port_occupied: bool = False,
     interrupt_on: str | None = None,
+    signal_on: tuple[str, int] | None = None,
+    ignored_hangup: bool = False,
+    closed_terminal: bool = False,
 ):
     """Run ``run_webui`` with every external dependency mocked.
 
@@ -132,12 +115,38 @@ def _run_webui_once(
     import atexit
     import os
     import signal
-    import threading
 
     import EvoScientist.config as config_mod
     from EvoScientist.langgraph_dev import manager as lgm
 
     captured: dict[str, Any] = {"printed": [], "node_env": {}, "node_args": []}
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    hangup = getattr(signal, "SIGHUP", None)
+    if hangup is not None:
+        handlers[hangup] = signal.SIG_IGN if ignored_hangup else signal.SIG_DFL
+    captured["original_handlers"] = handlers.copy()
+    captured["handlers"] = handlers
+
+    original_signal = signal.signal
+    original_getsignal = signal.getsignal
+
+    def _signal(sig, handler):
+        if sig not in handlers:
+            return original_signal(sig, handler)
+        previous = handlers[sig]
+        handlers[sig] = handler
+        return previous
+
+    def _deliver(stage):
+        if signal_on is not None and signal_on[0] == stage:
+            handler = handlers[signal_on[1]]
+            assert callable(handler), "shutdown signal has no handler"
+            handler(signal_on[1], None)
+
+    monkeypatch.setattr(signal, "signal", _signal)
+    monkeypatch.setattr(
+        signal, "getsignal", lambda sig: handlers.get(sig, original_getsignal(sig))
+    )
 
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
     console = (
@@ -145,6 +154,18 @@ def _run_webui_once(
         if interrupt_on
         else _RecordingConsole(captured["printed"])
     )
+    original_print = console.print
+    captured["closed_terminal_writes"] = 0
+
+    def _print(*args, **kwargs):
+        if closed_terminal and any("Shutting down" in str(a) for a in args):
+            captured["closed_terminal_writes"] += 1
+            raise OSError("terminal closed")
+        original_print(*args, **kwargs)
+        if "EvoScientist WebUI" in captured["printed"][-1]:
+            _deliver("banner")
+
+    console.print = _print
     monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     # The installed front-end: Node and WebUI provisioning are stubbed; the
@@ -179,22 +200,34 @@ def _run_webui_once(
     monkeypatch.setattr(
         launcher_mod.BundledWebUIRunner, "preflight", lambda _self, _cfg: None
     )
-    monkeypatch.setattr(
-        launcher_mod.WebUILauncher, "wait_ready", lambda self, *a, **k: self._result()
-    )
 
-    monkeypatch.setattr(
-        lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied
-    )
-    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_kw: False)
-    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: None)
+    def _wait_ready(self, *a, **k):
+        _deliver("readiness")
+        return self._result()
 
-    def _fake_start_langgraph_dev(workspace_dir=None, *, port=None, host=None, **_kw):
-        captured["backend_port"] = port
-        captured["backend_host"] = host
-        return SimpleNamespace(pid=99999)
+    monkeypatch.setattr(launcher_mod.WebUILauncher, "wait_ready", _wait_ready)
+    original_start = launcher_mod.WebUILauncher.start
 
-    monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
+    def _start(self):
+        result = original_start(self)
+        _deliver("startup")
+        return result
+
+    monkeypatch.setattr(launcher_mod.WebUILauncher, "start", _start)
+
+    from EvoScientist.langgraph_dev import registration
+    from tests.fakes.langgraph_dev import Server
+
+    server = Server(monkeypatch, pid=99999)
+    if backend_port_occupied:
+        server.occupied.add(int(config.langgraph_dev_port))
+    if registration.register_folder.__module__ == registration.__name__:
+        # Unless the test says how the backend answers the registration.
+        monkeypatch.setattr(
+            registration,
+            "register_folder",
+            lambda workspace, *, url: registration.ServerExposure(),
+        )
 
     captured["stop_calls"] = 0
 
@@ -206,8 +239,13 @@ def _run_webui_once(
     class _FakeProc:
         pid = 12345
 
+        def __init__(self):
+            self.poll_calls = 0
+
         def poll(self):
-            return None
+            self.poll_calls += 1
+            # Run one terminal poll/sleep before reporting the front-end exit.
+            return None if self.poll_calls == 1 else 0
 
         def wait(self, timeout=None):
             return 0
@@ -226,24 +264,40 @@ def _run_webui_once(
 
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     # The front-end runner's stop shells out to taskkill on Windows — neutralize.
-    monkeypatch.setattr(launcher_mod, "_stop_process_tree", lambda _proc: None)
+    captured["frontend_stops"] = 0
+
+    def _stop_frontend(_proc):
+        captured["frontend_stops"] += 1
+
+    monkeypatch.setattr(launcher_mod, "_stop_process_tree", _stop_frontend)
     captured["atexit_fns"] = []
     monkeypatch.setattr(
         atexit, "register", lambda fn, *a, **k: captured["atexit_fns"].append(fn) or fn
     )
-    monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
-    monkeypatch.setattr(threading, "Event", _ImmediateEvent)
+
+    # Patch this module's time reference, not time.sleep globally: readiness
+    # and backend startup use the real module and must keep their own waits.
+    def _sleep(_seconds):
+        _deliver("wait")
+
+    monkeypatch.setattr(webui_mod, "time", SimpleNamespace(sleep=_sleep))
 
     try:
-        if interrupt_on:
+        if interrupt_on or (signal_on and signal_on[0] != "wait"):
             with pytest.raises(KeyboardInterrupt):
                 webui_mod.run_webui(config, workspace_dir="/tmp/ws")
         else:
-            webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+            try:
+                webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+            except KeyboardInterrupt:
+                pytest.fail("a normal WebUI stop must return without an interrupt")
     finally:
         # The registered teardown closes it at exit; the tests never run it.
         if captured.get("node_stdout") is not None:
             captured["node_stdout"].close()
+        if server.spawns:
+            captured["backend_port"] = server.spawns[0]["port"]
+            captured["backend_host"] = server.spawns[0]["host"]
     return captured
 
 
@@ -296,7 +350,7 @@ def test_node_output_goes_to_webui_log_next_to_the_backend_log(
     monkeypatch, runtime_paths
 ):
     captured = _run_webui_once(monkeypatch, _make_config())
-    log = runtime_paths.log_file.parent / "webui.log"
+    log = runtime_paths.webui_log
     assert captured["node_stdout"].name == str(log)
     assert any("webui.log" in line for line in captured["printed"])
 
@@ -320,9 +374,10 @@ def test_a_crashed_webui_points_at_webui_log(monkeypatch):
     monkeypatch.setattr(webui_mod, "WebUILauncher", _CrashingLauncher)
     with pytest.raises(typer.Exit):
         _run_webui_once(monkeypatch, _make_config())
-    panel = webui_mod.console._sink[-1]
+    panel = "\n".join(webui_mod.console._sink)
     assert "Connection reset by peer" in panel
     assert "webui.log" in panel
+    assert "Shutting down" in webui_mod.console._sink[-1]
 
 
 def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
@@ -334,13 +389,14 @@ def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
     with pytest.raises(typer.Exit):
         _run_webui_once(monkeypatch, _make_config())
     panel = webui_mod.console._sink[-1]
+    assert not any("Shutting down" in line for line in webui_mod.console._sink)
     assert "WebUI failed" in panel
     assert "langgraph dev startup failed" in panel
 
 
 def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
-    """While another process holds the server start lock the spinner says so,
-    as EvoSci deploy does, then goes back to starting langgraph dev."""
+    """While another process starts the server the spinner says so, as
+    EvoSci deploy does, then goes back to starting langgraph dev."""
     from tests.fakes.langgraph_dev import LockHolder
 
     holder = LockHolder()
@@ -363,8 +419,8 @@ def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
         holder.done()
     statuses = [p for p in captured["printed"] if p.startswith("status: ")]
     waiting = (
-        "status: [dim]Waiting for another EvoSci process to start langgraph "
-        "dev...[/dim]"
+        "status: [dim]Waiting for another EvoSci process to start or stop "
+        "langgraph dev...[/dim]"
     )
     assert waiting in statuses
     after = statuses[statuses.index(waiting) + 1 :]
@@ -384,7 +440,7 @@ def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
 # =============================================================================
 
 
-def test_backend_host_reaches_start_langgraph_dev(monkeypatch):
+def test_backend_host_reaches_start(monkeypatch):
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
@@ -404,6 +460,13 @@ def test_public_bind_warning_when_backend_exposed(monkeypatch):
     """Users who widen the backend get told every time it is reachable
     off-box — an unauthenticated, shell-capable API deserves a standing
     reminder, not a one-time opt-in prompt."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
@@ -427,7 +490,6 @@ def test_public_bind_warning_when_frontend_exposed(monkeypatch):
 
     banner = "\n".join(captured["printed"])
     assert "WebUI listening on 0.0.0.0" in banner
-    assert "Backend listening" not in banner
 
 
 def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):
@@ -442,8 +504,17 @@ def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatc
     assert "langgraph_dev_host" in banner
 
 
-def test_no_remote_hint_when_both_exposed(monkeypatch):
-    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="0.0.0.0")
+def test_no_remote_hint_when_backend_answers_public(monkeypatch):
+    """A reused backend another session bound to the network: the session's
+    own host setting says nothing about it."""
+    from EvoScientist.langgraph_dev import registration
+
+    monkeypatch.setattr(
+        registration,
+        "register_folder",
+        lambda *_a, **_k: registration.ServerExposure.of("0.0.0.0", False),
+    )
+    config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     banner = "\n".join(captured["printed"])
@@ -451,37 +522,88 @@ def test_no_remote_hint_when_both_exposed(monkeypatch):
 
 
 # =============================================================================
-# Backend keepalive
+# The backend outlives the WebUI
 # =============================================================================
 
 
-def test_backend_default_stops_backend_on_exit(monkeypatch):
-    """Without keepalive the WebUI-started backend dies with the session.
-
-    Teardown moved into ``launcher.stop`` (registered via atexit and also run in
-    the finally block): the contract is now "stop_langgraph_dev is called", not
-    "which callable was handed to atexit"."""
+def test_backend_outlives_webui(monkeypatch):
+    """The backend the WebUI started is shared by every session: closing the
+    WebUI stops only its front-end."""
     captured = _run_webui_once(monkeypatch, _make_config())
-    assert captured["stop_calls"] >= 1
-    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
-
-
-def test_backend_keepalive_leaves_backend_running(monkeypatch):
-    """With keepalive the backend outlives the WebUI session, so the next
-    same-workspace launch reuses it instead of paying the cold boot."""
-    captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
+    assert any("WebUI server exited." in line for line in captured["printed"])
     assert captured["stop_calls"] == 0
+    assert captured["frontend_stops"] == 1
+    assert captured["atexit_fns"] == []
+    assert captured["handlers"] == captured["original_handlers"]
 
 
-def test_teardown_registered_before_output_is_rendered(monkeypatch):
-    """``start()`` has already spawned the backend and the front-end, so a
-    Ctrl+C while the ready lines print must still find the teardown registered;
-    otherwise both processes are left running."""
+def test_teardown_runs_before_output_interrupt_returns(monkeypatch):
+    """Cleanup does not wait for interpreter exit after a banner interrupt."""
     captured = _run_webui_once(
         monkeypatch, _make_config(), interrupt_on="langgraph dev ready"
     )
-    assert len(captured["atexit_fns"]) == 1
-    assert captured["atexit_fns"][0].__name__ == "stop"
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["atexit_fns"] == []
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+@pytest.mark.parametrize("stage", ["startup", "readiness", "banner", "wait"])
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+def test_stop_signals_clean_up_webui(monkeypatch, stage, signal_name):
+    import signal
+
+    signum = getattr(signal, signal_name, None)
+    if signum is None:
+        pytest.skip(f"{signal_name} is unavailable on this platform")
+    captured = _run_webui_once(monkeypatch, _make_config(), signal_on=(stage, signum))
+    assert not any("WebUI server exited." in line for line in captured["printed"])
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+def test_inherited_ignored_hangup_stays_ignored(monkeypatch):
+    import signal
+
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("SIGHUP is unavailable on this platform")
+    captured = _run_webui_once(monkeypatch, _make_config(), ignored_hangup=True)
+    assert captured["handlers"][signal.SIGHUP] is signal.SIG_IGN
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+
+
+def test_closed_terminal_does_not_skip_cleanup(monkeypatch):
+    captured = _run_webui_once(monkeypatch, _make_config(), closed_terminal=True)
+    assert captured["closed_terminal_writes"] == 1
+    assert captured["frontend_stops"] == 1
+    assert captured["stop_calls"] == 0
+    assert captured["handlers"] == captured["original_handlers"]
+
+
+@pytest.mark.parametrize("stage", ["startup", "readiness"])
+def test_unexpected_launcher_error_cleans_up(monkeypatch, stage):
+    stops = []
+
+    class _BrokenLauncher(webui_mod.WebUILauncher):
+        def start(self):
+            result = super().start()
+            if stage == "startup":
+                raise RuntimeError("unexpected launcher failure")
+            return result
+
+        def wait_ready(self, *args, **kwargs):
+            raise RuntimeError("unexpected launcher failure")
+
+        def stop(self):
+            stops.append(True)
+            super().stop()
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _BrokenLauncher)
+    with pytest.raises(RuntimeError, match="unexpected launcher failure"):
+        _run_webui_once(monkeypatch, _make_config())
+    assert stops == [True]
 
 
 def test_missing_python_hint_is_printed_by_the_launcher(monkeypatch):
@@ -501,3 +623,90 @@ def test_warnings_with_brackets_print_as_they_are(monkeypatch):
     monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: warning)
     captured = _run_webui_once(monkeypatch, _make_config())
     assert any(warning in line for line in captured["printed"])
+
+
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("stage", ["message", "stop"])
+def test_first_stop_signal_during_error_cleanup(monkeypatch, signal_name, stage):
+    import signal
+
+    signum = getattr(signal, signal_name, None)
+    if signum is None:
+        pytest.skip(f"{signal_name} is unavailable on this platform")
+    stops = []
+    deliveries = []
+    original_print = _RecordingConsole.print
+
+    def deliver():
+        deliveries.append(stage)
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
+
+    def print_with_signal(self, *args, **kwargs):
+        if stage == "message" and any("Shutting down" in str(a) for a in args):
+            deliver()
+        return original_print(self, *args, **kwargs)
+
+    class BrokenLauncher(webui_mod.WebUILauncher):
+        def wait_ready(self, *args, **kwargs):
+            raise RuntimeError("readiness failed unexpectedly")
+
+        def stop(self):
+            if stage == "stop":
+                deliver()
+            super().stop()
+            stops.append(True)
+
+    monkeypatch.setattr(_RecordingConsole, "print", print_with_signal)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", BrokenLauncher)
+    try:
+        with pytest.raises(RuntimeError, match="readiness failed unexpectedly"):
+            _run_webui_once(monkeypatch, _make_config())
+    except KeyboardInterrupt:
+        pytest.fail("first shutdown signal interrupted error-driven cleanup")
+    assert stops == [True]
+    assert deliveries == [stage]
+
+
+@pytest.mark.parametrize("failure", [SystemExit, RuntimeError])
+def test_shutdown_output_failure_still_stops_frontend(monkeypatch, failure):
+    import signal
+
+    stopped = []
+    original_print = _RecordingConsole.print
+
+    def broken_shutdown_output(self, *args, **kwargs):
+        if any("Shutting down" in str(arg) for arg in args):
+            raise failure("shutdown output failed")
+        return original_print(self, *args, **kwargs)
+
+    class StopRecorder(webui_mod.WebUILauncher):
+        def stop(self):
+            super().stop()
+            stopped.append(True)
+
+    monkeypatch.setattr(_RecordingConsole, "print", broken_shutdown_output)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", StopRecorder)
+    with pytest.raises(failure, match="shutdown output failed"):
+        _run_webui_once(monkeypatch, _make_config(), signal_on=("wait", signal.SIGINT))
+    assert stopped == [True]
+
+
+def test_signal_during_shutdown_shield_setup_still_stops_frontend(monkeypatch):
+    stopped = []
+
+    def interrupted_shield():
+        raise KeyboardInterrupt("shield setup interrupted")
+
+    class StopRecorder(webui_mod.WebUILauncher):
+        def stop(self):
+            super().stop()
+            stopped.append(True)
+
+    from EvoScientist.deploy import stop_signals
+
+    monkeypatch.setattr(stop_signals, "ignore_further_stop_signals", interrupted_shield)
+    monkeypatch.setattr(webui_mod, "WebUILauncher", StopRecorder)
+    _run_webui_once(monkeypatch, _make_config(), interrupt_on="unused trigger")
+    assert stopped == [True]

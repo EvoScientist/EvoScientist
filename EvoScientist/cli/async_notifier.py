@@ -22,7 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
@@ -59,11 +59,12 @@ AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
 
 @dataclass(frozen=True)
 class AsyncTaskNotification:
-    """A completed-async-task signal enqueued by the state reader."""
+    """A signal enqueued by a state reader: a finished async task or background
+    process, or a background process that is no longer tracked."""
 
     task_id: str
     agent_name: str
-    status: str  # one of TERMINAL_STATUSES
+    status: str  # one of TERMINAL_STATUSES, or UNTRACKED_STATUS (bg-process)
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
     kind: str = "agent"  # "agent" (sub-agent) | "bg-process" (background shell)
@@ -74,6 +75,10 @@ class AsyncTaskNotification:
     # find the task_id). ``None`` means "unrouted" — the notification
     # drains for any current_thread_id (back-compat for direct callers).
     origin_cli_thread_id: str | None = None
+    # OS pid and launch time (ISO-8601 UTC) of a background process, for an
+    # ``untracked`` one the agent can only check from its shell.
+    pid: int | None = None
+    started_at: str | None = None
 
 
 # Per-thread routing: notifications with ``origin_cli_thread_id`` land in
@@ -122,8 +127,11 @@ def enqueue_bg_process_notification(
     status: str,
     prompt: str = "",
     origin_cli_thread_id: str | None = None,
+    pid: int | None = None,
+    started_at: str | None = None,
 ) -> None:
-    """Build and enqueue a background-process completion notification.
+    """Build and enqueue a background-process notification (an exit, or an
+    ``untracked`` process).
 
     Called by the ``bg_processes`` state reader
     (:func:`enqueue_bg_process_completions_from_state`) so it never constructs the
@@ -139,6 +147,8 @@ def enqueue_bg_process_notification(
             prompt=prompt,
             kind="bg-process",
             origin_cli_thread_id=origin_cli_thread_id,
+            pid=pid,
+            started_at=started_at,
         )
     )
 
@@ -389,8 +399,31 @@ _reader_enqueued_process_ids: set[str] = set()
 # without this reservation both would observe the same terminal status and
 # enqueue the completion twice.
 _bg_reader_in_flight: set[str] = set()
+# Process ids whose ``untracked`` mark failed to write at least once.
+_bg_mark_failed_ids: set[str] = set()
 _bg_idle_reader_last_poll: dict[str | None, float] = {}
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}
+
+UNTRACKED_STATUS: Final = "untracked"
+"""``bg_processes[*].status`` of a process its registry no longer has.
+
+The reader writes it into thread state when it reports the process, so a later
+EvoSci process that resumes the thread does not report it again. It still polls
+a marked process once: a terminal status from a registry that does track it is
+reported as usual.
+"""
+
+UNTRACKED_HINT: Final = (
+    "(untracked: the process that tracked this background process restarted or "
+    "cannot be reached, so check_process no longer knows it and its exit will not "
+    "be reported. It may still be running. The pid may have been reused: confirm "
+    "it against the command and started_at above. The pid is the shell that ran "
+    "the command, or the command itself; processes the command started have other "
+    "pids and can outlive it. On Windows it is a Windows pid: Git Bash lists it "
+    "with `ps -W`, not `ps`. Its output log is .bg_processes/<task_id>.log in the "
+    "folder it ran in.)"
+)
+"""Closing line of a synthetic message that reports an ``untracked`` process."""
 
 
 async def read_bg_processes_from_gateway(
@@ -414,6 +447,109 @@ async def read_bg_processes_from_gateway(
     return values.get("bg_processes", {})
 
 
+async def _mark_untracked(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+    process_id: str,
+) -> Literal["marked", "retry", "never"]:
+    """Write ``status: "untracked"`` into the thread's record of ``process_id``.
+
+    Returns ``"never"`` for a legacy (non-UUID) thread on the server backend:
+    the gateway refuses every write and every run on it, so neither the mark
+    nor the agent turn a notice starts can happen. Also returns ``"never"`` when
+    the snapshot's record is already ``untracked``: another EvoSci process
+    marked it since the poll read it and reports it itself.
+
+    Returns ``"retry"`` when the mark cannot be written yet, so the caller
+    retries on a later poll and reports the process only once the mark is in
+    state:
+
+    - the thread has pending tasks (``next``) or task writes not yet committed
+      (``tasks``, left by a kill before the step checkpoint): a state write
+      drops a pending interrupt and those writes, so the thread is left alone
+      until the user answers it or the next run commits them;
+    - the record in the snapshot is already terminal (or gone): the next poll
+      skips it, so nothing is retried;
+    - the write fails: the server refuses ``update_state`` while a run is in
+      flight on the thread (409).
+
+    The mark is built from the snapshot's record, not the one read at the top
+    of the poll, so a terminal status stored since is not overwritten. That
+    narrows the window to the gap between the snapshot and the write; the
+    channel's reducer is last-write-per-key, so there is no compare-and-set.
+
+    ``as_node`` is left to the graph, which infers the node that ran last. An
+    ``__end__`` clear counts the tasks it drops as run, and a closed approval and
+    the recovery after a failed run both end with one, so a mark right after
+    them leaves a step pending. It is cleared unless a pause has appeared since,
+    so the server does not show the thread as interrupted until its next run.
+
+    An in-process run has no in-flight check, and the idle reader does not hold
+    the turn lock: a run that starts between the snapshot and the write builds
+    its next checkpoint without the mark, so a later EvoSci process reports the
+    process once more. The clear has the same window: a run that starts before
+    it and fails or is cut before its next checkpoint is left with its step
+    cleared.
+    """
+    from ..gateway.composite import LegacyThreadServerExecutionError
+    from ..stream.events import (
+        _snapshot_has_pending_interrupt,
+        _snapshot_needs_recovery,
+    )
+
+    try:
+        snapshot = await gateway.get_state_snapshot(target, thread_id)
+        if _snapshot_needs_recovery(snapshot):
+            return "retry"
+        # The record read at the top of the poll may be stale by now: another
+        # EvoSci process that tracks the process may have stored its exit.
+        current = ((snapshot.values or {}).get("bg_processes") or {}).get(process_id)
+        if not current or current.get("status") in TERMINAL_STATUSES:
+            return "retry"  # the next poll skips it as terminal
+        if current.get("status") == UNTRACKED_STATUS:
+            return "never"  # marked and reported by another EvoSci process
+        await gateway.update_state_values(
+            target,
+            thread_id,
+            {"bg_processes": {process_id: {**current, "status": UNTRACKED_STATUS}}},
+        )
+    except LegacyThreadServerExecutionError:
+        logger.debug(
+            "Background process %s is not tracked, but thread %s is a legacy "
+            "thread the server backend cannot write; not reporting it",
+            process_id,
+            thread_id,
+        )
+        return "never"
+    except Exception:
+        # The first failure per process is a WARNING: a write that never
+        # succeeds would otherwise keep the notice back with no trail.
+        log = logger.debug if process_id in _bg_mark_failed_ids else logger.warning
+        _bg_mark_failed_ids.add(process_id)
+        log(
+            "Could not mark background process %s untracked; it is reported "
+            "once a later poll writes the mark",
+            process_id,
+            exc_info=True,
+        )
+        return "retry"
+    _bg_mark_failed_ids.discard(process_id)
+    try:
+        written = await gateway.get_state_snapshot(target, thread_id)
+        if written.next and not _snapshot_has_pending_interrupt(written):
+            await gateway.update_state_values(
+                target, thread_id, None, as_node="__end__"
+            )
+    except Exception:
+        logger.debug(
+            "Could not clear the step the untracked mark left on thread %s",
+            thread_id,
+            exc_info=True,
+        )
+    return "marked"
+
+
 async def enqueue_bg_process_completions_from_state(
     gateway: GraphGateway,
     target: GraphTarget,
@@ -427,8 +563,11 @@ async def enqueue_bg_process_completions_from_state(
     means the agent already observed the exit via check/stop/list — nothing to
     proactively surface, which is the state-based dedup), polls
     ``gateway.get_process_status``. Newly-terminal processes are enqueued as
-    ``kind="bg-process"`` notifications via the shared queue. Returns the
-    still-active count for the idle throttle.
+    ``kind="bg-process"`` notifications via the shared queue. A process no
+    registry this EvoSci process can ask has is marked ``untracked`` in state
+    (:func:`_mark_untracked`) and then reported with that status; a marked
+    record is still polled once per EvoSci process, so a terminal status wins
+    over the mark. Returns the still-active count for the idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
     if registry is None:
@@ -461,9 +600,32 @@ async def enqueue_bg_process_completions_from_state(
                 still_active += 1  # gateway unavailable / transient — retry next poll
                 continue
             if status == "unknown":
-                # Process gone from the registry (e.g. a server restart cleared
-                # it) — its exit is unknowable, so stop polling it rather than
-                # spin forever.
+                # No registry this EvoSci process can ask has the process: the
+                # process holding it restarted, or the dev server cannot be
+                # reached. Its exit is unknowable here and it may still be
+                # running. A record already marked was reported once; stay
+                # silent. The mark is not trusted further than that: on the
+                # local backend another EvoSci process on the same thread may
+                # still track the process, and its terminal status still wins.
+                if record.get("status") == UNTRACKED_STATUS:
+                    _reader_enqueued_process_ids.add(process_id)
+                    continue
+                result = await _mark_untracked(gateway, target, thread_id, process_id)
+                if result == "never":
+                    _reader_enqueued_process_ids.add(process_id)  # silent drop
+                    continue
+                if result == "retry":
+                    still_active += 1  # not writable yet — retry next poll
+                    continue
+                enqueue_bg_process_notification(
+                    task_id=process_id,
+                    agent_name=record.get("name", ""),
+                    status=UNTRACKED_STATUS,
+                    prompt=record.get("command", ""),
+                    origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
+                    pid=record.get("pid"),
+                    started_at=record.get("started_at"),
+                )
                 _reader_enqueued_process_ids.add(process_id)
                 continue
             if status not in TERMINAL_STATUSES:
@@ -596,7 +758,7 @@ def _render_notification_group(
             icon, color = "✔", "#e67e22"  # carrot orange (CSS hex; Rich+Textual)
         elif n.status == "error":
             icon, color = "✗", "red"
-        else:  # cancelled, timeout, interrupted
+        else:  # cancelled, timeout, interrupted, untracked
             icon, color = "⚠", "yellow"
         # Collapse newlines, truncate prompt/command preview to 60 chars.
         prompt_preview = (n.prompt or "").replace("\n", " ").strip()
@@ -655,29 +817,37 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
         return ""
     lines = ["[Async tasks update]"]
     for n in notifs:
+        entry = {
+            "agent": n.agent_name,
+            "kind": n.kind,
+            "status": n.status,
+            "task_id": n.task_id,
+        }
+        if n.pid is not None:
+            entry["pid"] = n.pid
+        if n.status == UNTRACKED_STATUS:
+            # What the hint asks the agent to confirm the pid against.
+            entry["command"] = n.prompt
+            if n.started_at:
+                entry["started_at"] = n.started_at
+        lines.append(json.dumps(entry, ensure_ascii=False))
+    # An untracked process has nothing to fetch: check_process no longer knows it.
+    fetchable = [n for n in notifs if n.status != UNTRACKED_STATUS]
+    if fetchable:
+        # bg-process is inspected with check_process; sub-agents with check_async_task.
+        hints: list[str] = []
+        if any(n.kind == "agent" for n in fetchable):
+            hints.append("check_async_task (sub-agents)")
+        if any(n.kind == "bg-process" for n in fetchable):
+            hints.append("check_process (background processes)")
+        # Fallback when a batch has only unrecognized kinds (hints empty).
+        hint_text = " or ".join(hints) if hints else "the appropriate status tool"
         lines.append(
-            json.dumps(
-                {
-                    "agent": n.agent_name,
-                    "kind": n.kind,
-                    "status": n.status,
-                    "task_id": n.task_id,
-                },
-                ensure_ascii=False,
-            )
+            f"(Signal only — fetch full result via {hint_text} if relevant to "
+            "the current step, else acknowledge & continue.)"
         )
-    # bg-process is inspected with check_process; sub-agents with check_async_task.
-    hints: list[str] = []
-    if any(n.kind == "agent" for n in notifs):
-        hints.append("check_async_task (sub-agents)")
-    if any(n.kind == "bg-process" for n in notifs):
-        hints.append("check_process (background processes)")
-    # Fallback when a batch has only unrecognized kinds (hints empty).
-    hint_text = " or ".join(hints) if hints else "the appropriate status tool"
-    lines.append(
-        f"(Signal only — fetch full result via {hint_text} if relevant to "
-        "the current step, else acknowledge & continue.)"
-    )
+    if len(fetchable) < len(notifs):
+        lines.append(UNTRACKED_HINT)
     return "\n".join(lines)
 
 

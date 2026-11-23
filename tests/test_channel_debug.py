@@ -372,7 +372,8 @@ async def test_standalone_agent_construction_runs_off_channel_loop(
     sentinel = object()
 
     def fake_create_cli_agent(**kwargs):
-        assert kwargs == {"workspace": workspace}
+        assert kwargs["workspace"] == workspace
+        assert kwargs["config"] is None
         assert threading.current_thread() is not channel_thread
         try:
             asyncio.get_running_loop()

@@ -44,13 +44,45 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True if binding ``host`` keeps the server unreachable off-box.
+
+    Drives the PUBLIC BIND warning, so it is conservative: anything not
+    provably loopback counts as exposed.
+    """
+    host = host.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host in LOOPBACK_NAMES
+
+
+_WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::"})
+
+
+def is_wildcard_host(host: str) -> bool:
+    """Return True if binding ``host`` listens on every interface."""
+    return host.strip().strip("[]") in _WILDCARD_HOSTS
+
+
 BOUNDARY_ENV = "EVOSCIENTIST_BROWSER_BOUNDARY"
 # What the WebUI reads from responses; a ``cors`` block replaces these defaults.
 _EXPOSE_HEADERS = ["x-pagination-total", "x-pagination-next", "content-location"]
-_WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::"})
 # A quick-tunnel name; ``api`` is cloudflared's own API, which langgraph-api
 # takes for the tunnel URL when the tunnel cannot be created.
 _QUICK_TUNNEL = re.compile(r"[a-z0-9-]+\.trycloudflare\.com")
+
+
+def tunnel_host() -> str | None:
+    """In the server: the host name of its public quick tunnel, or ``None``
+    without one. langgraph dev ``--tunnel`` names it in ``LANGGRAPH_API_URL``
+    once cloudflared reported it; a tunnel that did not come up in time leaves
+    the local URL there, and the boundary refuses requests through it."""
+    tunnel = urlsplit(os.environ.get("LANGGRAPH_API_URL", "")).hostname
+    if tunnel and tunnel != "api.trycloudflare.com" and _QUICK_TUNNEL.fullmatch(tunnel):
+        return tunnel
+    return None
 
 
 def parse_allowed_origins(value: str) -> list[str]:
@@ -129,7 +161,7 @@ def _trusted_names(bind_host: str) -> list[str]:
     bind = bind_host.strip().strip("[]").lower()
     if bind in names:
         return names
-    if bind not in _WILDCARD_HOSTS:
+    if not is_wildcard_host(bind_host):
         # The name our own clients use for a server bound to one interface.
         names.append(bind)
     import psutil
@@ -168,12 +200,7 @@ class Trust:
             )
             names, origins = frozenset(LOOPBACK_NAMES), frozenset()
             hosts = set(names)
-        tunnel = urlsplit(os.environ.get("LANGGRAPH_API_URL", "")).hostname
-        if (
-            tunnel
-            and tunnel != "api.trycloudflare.com"
-            and _QUICK_TUNNEL.fullmatch(tunnel)
-        ):
+        if (tunnel := tunnel_host()) is not None:
             hosts.add(tunnel)
         return cls(names, origins, frozenset(hosts))
 

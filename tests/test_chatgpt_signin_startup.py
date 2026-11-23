@@ -97,7 +97,7 @@ def test_interactive_refusal_or_failure_says_how_to_retry(answer, login_ok):
 
     assert exc_info.value.exit_code == 1
     assert SIGN_IN_AGAIN in _printed(mock_console)
-    assert "Start EvoSci in a terminal" not in _printed(mock_console)
+    assert SIGN_IN_HINT not in _printed(mock_console)
     assert mock_login.called is (answer is True)
 
 
@@ -156,7 +156,6 @@ def _run_until_the_check(monkeypatch, argv):
     import EvoScientist.config as config_module
     from EvoScientist.cli._app import app
     from EvoScientist.config import EvoScientistConfig
-    from EvoScientist.stream.console import console
 
     seen = []
 
@@ -171,11 +170,7 @@ def _run_until_the_check(monkeypatch, argv):
     )
     monkeypatch.setattr(config_module, "apply_config_to_env", lambda config: None)
     monkeypatch.setattr(commands, "_require_chatgpt_sign_in", _check)
-    console_file = console.file
-    try:
-        result = CliRunner().invoke(app, argv, catch_exceptions=True)
-    finally:
-        console.file = console_file
+    result = CliRunner().invoke(app, argv, catch_exceptions=True)
     return seen, result
 
 
@@ -236,7 +231,6 @@ def test_auth_mode_flag_applies_oauth_only_to_providers_in_use(
     import EvoScientist.config as config_module
     from EvoScientist.cli._app import app
     from EvoScientist.config import EvoScientistConfig
-    from EvoScientist.stream.console import console
 
     base = EvoScientistConfig(**stored)
     seen = []
@@ -252,10 +246,6 @@ def test_auth_mode_flag_applies_oauth_only_to_providers_in_use(
     )
     monkeypatch.setattr(config_module, "apply_config_to_env", lambda config: None)
     monkeypatch.setattr(commands, "_require_chatgpt_sign_in", _check)
-    console_file = console.file
-    try:
-        CliRunner().invoke(app, ["--auth-mode", flag, "-p", "hi"])
-    finally:
-        console.file = console_file
+    CliRunner().invoke(app, ["--auth-mode", flag, "-p", "hi"])
 
     assert seen == [modes]

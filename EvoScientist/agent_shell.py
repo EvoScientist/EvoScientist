@@ -106,7 +106,7 @@ def setup_hint() -> str | None:
 
     Names what is missing: a usable ``python`` (any OS), Git Bash (Windows),
     or both, which one ``EvoSci setup`` fixes. For callers that show it
-    themselves (the TUI, ``EvoSci deploy``); not logged here.
+    themselves (``EvoSci deploy``); not logged here.
     """
     from .setup.research_env import agent_python
 
@@ -179,7 +179,7 @@ def shell_drift_message(sidecar: dict) -> str | None:
 @functools.cache
 def log_setup_hint() -> None:
     """Log :func:`setup_hint` once per process where the agent is built, so
-    the Rich CLI, ``-p`` and ``EvoSci serve`` show it."""
+    the Rich CLI, the TUI, ``-p`` and ``EvoSci serve`` show it."""
     hint = setup_hint()
     if hint is not None:
         logger.warning(hint)
@@ -339,8 +339,10 @@ class ShellLaunch:
     @property
     def text_options(self) -> dict[str, str]:
         """``Popen`` decoding options for piped output: UTF-8 under bash, else
-        the locale default as before."""
-        return {"encoding": "utf-8", "errors": "replace"} if self.bash else {}
+        the locale default; a byte that does not decode never fails the call."""
+        if self.bash:
+            return {"encoding": "utf-8", "errors": "replace"}
+        return {"errors": "replace"}
 
     def started(self, process: subprocess.Popen) -> None:
         """Put the suspended bash in a new job object, then let it run.
@@ -549,9 +551,6 @@ def terminate_job(process: subprocess.Popen) -> bool:
         return _job_api().terminate(job)
 
 
-# --------------------------------------------------------------------------- #
-# The server job (issue #604)
-# --------------------------------------------------------------------------- #
 @functools.cache
 def _warn_no_server_job(error: int) -> None:
     logger.warning(
@@ -561,26 +560,9 @@ def _warn_no_server_job(error: int) -> None:
     )
 
 
-def _resume_by_pid(pid: int) -> None:
-    """Resume a suspended process by pid, best effort. Never raises."""
-    try:
-        import psutil
-
-        psutil.Process(pid).resume()
-    except (OSError, AttributeError, psutil.Error) as exc:
-        logger.debug(f"Could not resume pid {pid}: {exc}")
-
-
 def join_server_job(process: subprocess.Popen) -> None:
     """Put the suspended langgraph server in a kill-on-close job whose only
-    handle lives in the server, then let it run: whatever the server started,
-    MSYS programs whose parent bash exited included, ends with it.
-
-    Kill-on-close is only set once the server holds its own copy of the
-    handle: closing ours below would otherwise end the server at once.
-    Never raises — the server is always resumed, by the job API when it
-    loaded or through psutil, so a failed job never leaves it suspended.
-    """
+    handle lives in the server, so all it starts ends with it; then resume it."""
     api: _JobApi | None = None
     try:
         api = _job_api()
@@ -590,8 +572,8 @@ def join_server_job(process: subprocess.Popen) -> None:
             return
         try:
             handle = int(process._handle)
-            # Kill-on-close only once the server holds its own handle:
-            # closing ours below would otherwise end it at once.
+            # Kill-on-close only once the server holds a copy: closing ours
+            # below would otherwise end it at once.
             if not (
                 api.assign(job, handle)
                 and api.share(job, handle)
@@ -603,16 +585,15 @@ def join_server_job(process: subprocess.Popen) -> None:
     except (OSError, AttributeError) as exc:
         logger.debug(f"No server job: {exc}")
     finally:
-        # The server was spawned suspended; whatever happened above, it
-        # must run. Prefer the job API's resume (it holds the handle),
-        # fall back to psutil when the API never loaded; never raise.
-        if api is not None:
-            try:
+        import psutil
+
+        try:
+            if api is not None:
                 api.resume(int(process._handle))
-            except (OSError, AttributeError) as exc:
-                logger.debug(f"Could not resume the server: {exc}")
-        else:
-            _resume_by_pid(process.pid)
+            else:
+                psutil.Process(process.pid).resume()
+        except (OSError, AttributeError, psutil.Error) as exc:
+            logger.debug(f"Could not resume the server: {exc}")
 
 
 class BashMissingError(RuntimeError):

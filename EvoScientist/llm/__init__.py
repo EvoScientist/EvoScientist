@@ -27,6 +27,7 @@ __getattr__, __dir__, __all__ = _lazy.attach(
         # Registry data resolves without the langchain/provider-SDK stack.
         "registry": [
             "DEFAULT_MODEL",
+            "DEFAULT_REASONING_EFFORT",
             "MODELS",
             "get_model_info",
             "get_models_for_provider",

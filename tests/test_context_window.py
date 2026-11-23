@@ -195,9 +195,9 @@ def test_apply_handles_non_dict_profile_safely():
 
 
 def test_lookup_is_case_insensitive():
-    # SiliconFlow uses capitalized IDs like "Pro/moonshotai/Kimi-K2.5"
-    siliconflow = SimpleNamespace(model_name="Pro/moonshotai/Kimi-K2.5", profile=None)
-    assert get_context_window(siliconflow) == 262_000
+    # MiniMax uses capitalized IDs like "MiniMax-M3"
+    minimax = SimpleNamespace(model_name="MiniMax-M3", profile=None)
+    assert get_context_window(minimax) == 1_000_000
 
     # GLM-5 capitalized variant
     glm = SimpleNamespace(model_name="Pro/zai-org/GLM-5", profile=None)

@@ -31,7 +31,7 @@ Examples:
   # Add a stdio server with env vars (hardcoded):
   EvoSci mcp add my-server node --env API_KEY=xxx -- server.js
 
-  # Add a server with runtime env ref (resolved from .env at startup):
+  # Add a server with runtime env ref (resolved from the environment at startup):
   EvoSci mcp add brave-search npx --env-ref BRAVE_API_KEY -- -y @modelcontextprotocol/server-brave-search
 
   # Expose to a specific sub-agent (e.g. research-agent):
@@ -59,11 +59,21 @@ sessions_app = typer.Typer(
 )
 app.add_typer(sessions_app, name="sessions")
 
-# Background langgraph dev server management — the explicit counterpart to
-# langgraph_dev_keepalive: a server that outlives its CLI needs a first-class
-# way to inspect and stop it.
-server_app = typer.Typer(help="Manage the background langgraph dev server")
+# Background langgraph dev server management: the server outlives the sessions
+# that use it, so it needs a first-class way to start, inspect and stop it.
+server_app = typer.Typer(
+    help="Manage the background langgraph dev server (and its ccproxy with "
+    "Anthropic OAuth)"
+)
 app.add_typer(server_app, name="server")
+# ChatGPT sign-in outside the wizard; the desktop app runs it with --json.
+login_app = typer.Typer(help="Sign in with a ChatGPT plan")
+app.add_typer(login_app, name="login")
+logout_app = typer.Typer(help="Remove a stored ChatGPT sign-in")
+app.add_typer(logout_app, name="logout")
+# Projects the background server serves, by folder.
+workspace_app = typer.Typer(help="Manage projects (the folders EvoSci works in)")
+app.add_typer(workspace_app, name="workspace")
 
 # Configure subcommand group — re-run a single onboarding section.
 configure_app = typer.Typer(

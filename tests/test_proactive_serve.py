@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.paths import Workspace
 from EvoScientist.proactive.commit import read_proactive_tag
 from EvoScientist.proactive.serve import (
@@ -112,6 +113,7 @@ def test_reconcile_with_nothing_armed_deletes_leftover_crons(setup, workspace):
     client.crons.rows.append(
         {
             "cron_id": "old",
+            "assistant_id": workspace_assistant_id("proactive", workspace),
             "metadata": {"run_kind": "proactive_check", "workspace_dir": workspace.key},
         }
     )
@@ -508,6 +510,7 @@ def test_push_is_appended_in_one_write_as_the_terminal_node_and_delivered(armed)
     assert message["content"] == "The run finished."
     assert message["id"] == "proactive-p1"
     assert read_proactive_tag(message["additional_kwargs"])["proactive_id"] == "p1"
+    assert message["response_metadata"]["evo_created_at"].endswith("Z")
     assert published == [("t1", "The run finished.")]
 
 

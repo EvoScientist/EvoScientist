@@ -45,11 +45,29 @@ def langgraph_dev_url(
     return f"http://{_format_hostport(selected_host, selected_port)}"
 
 
-def configured_langgraph_dev_url() -> str:
-    """Return the local langgraph-dev URL from the effective application config."""
-    from ..EvoScientist import _ensure_config
+# The address of the server ``ensure_server`` found or started for this
+# process's session: the one its record names. None in the server itself, and
+# before (or without) a server.
+_SERVED_URL: str | None = None
 
-    return langgraph_dev_url(_ensure_config())
+
+def set_served_url(url: str | None) -> None:
+    """Record the address of the server this process's session uses."""
+    global _SERVED_URL
+    _SERVED_URL = url
+
+
+def configured_langgraph_dev_url(config: object | None = None) -> str:
+    """Return the local langgraph-dev URL: the server this process's session
+    uses, else the one *config* (by default the effective application
+    config) names."""
+    if _SERVED_URL is not None:
+        return _SERVED_URL
+    if config is None:
+        from ..EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    return langgraph_dev_url(config)
 
 
 def langgraph_dev_headers(headers: Mapping[str, str] | None = None) -> dict[str, str]:

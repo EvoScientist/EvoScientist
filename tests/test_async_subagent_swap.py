@@ -244,3 +244,22 @@ def test_swap_maps_wildcard_host_to_loopback():
     ):
         out = _maybe_swap_async_subagents(subs)
     assert out[0]["url"] == "http://127.0.0.1:6174"
+
+
+def test_swap_uses_served_url_of_session(monkeypatch):
+    """A session that found its server elsewhere than configured dispatches
+    there."""
+    from EvoScientist.langgraph_dev import sdk
+
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+    monkeypatch.setattr(sdk, "_SERVED_URL", "http://10.0.0.5:7000")
+    subs = [_sub("writing-agent", async_flag=True)]
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+    ):
+        out = _maybe_swap_async_subagents(subs)
+    assert out[0]["url"] == "http://10.0.0.5:7000"

@@ -5,18 +5,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from deepagents.backends.protocol import BackendProtocol
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel
 
 from ... import paths as _paths
 from ...paths import Workspace
+from ..types import MEMORY_AGENT_RECURSION_LIMIT
 
-MEMORY_AGENT_RECURSION_LIMIT = 100
 MEMORY_MAINTENANCE_EXCLUDED_TOOLS = frozenset(
     {
         "delete",
@@ -53,13 +51,23 @@ def resolve_memory_agent_paths(
 def memory_agent_middleware(
     *extra_middleware: AgentMiddleware,
     excluded_tools: Iterable[str] = MEMORY_MAINTENANCE_EXCLUDED_TOOLS,
+    unattended_retry: bool = False,
 ) -> list[AgentMiddleware]:
-    """Compose the standard middleware stack for unattended memory agents."""
+    """Compose the standard middleware stack for the background memory agents."""
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 
+    from ...EvoScientist import _model_retry_middleware
+    from ...middleware.error_normalization import ErrorNormalizationMiddleware
     from ...middleware.tool_error_handler import ToolErrorHandlerMiddleware
 
     middleware: list[AgentMiddleware] = [
+        # Workers and the linker share the server's run slots between turns, so
+        # they keep the short budget; AutoSkills runs alone on a schedule.
+        _model_retry_middleware(
+            unattended=unattended_retry, follow_auto_mode=False, honor_run_key=False
+        ),
+        # Inside the retry: provider-SDK exceptions reach it normalized.
+        ErrorNormalizationMiddleware(),
         ToolErrorHandlerMiddleware(),
         *extra_middleware,
     ]
@@ -78,7 +86,6 @@ def build_memory_agent_graph(
     tools: Sequence[BaseTool],
     middleware: Sequence[AgentMiddleware],
     recursion_limit: int = MEMORY_AGENT_RECURSION_LIMIT,
-    response_format: type[BaseModel] | None = None,
     skills: list[str] | None = None,
     backend: BackendProtocol | None = None,
 ) -> CompiledStateGraph:
@@ -87,12 +94,8 @@ def build_memory_agent_graph(
 
     from ...backends import build_memory_agent_backend
     from ...EvoScientist import _ensure_auxiliary_chat_model
-    from ...middleware.utils import structured_output_for
 
     model = _ensure_auxiliary_chat_model()
-    kwargs: dict[str, Any] = {}
-    if response_format is not None:
-        model, kwargs["response_format"] = structured_output_for(model, response_format)
 
     if backend is None:
         backend = build_memory_agent_backend(
@@ -109,6 +112,5 @@ def build_memory_agent_graph(
         middleware=list(middleware),
         subagents=[],
         skills=skills,
-        **kwargs,
     )
     return agent.with_config({"recursion_limit": recursion_limit})

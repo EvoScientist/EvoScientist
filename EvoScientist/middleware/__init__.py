@@ -29,6 +29,10 @@ from .memory_lifecycle import (
     create_memory_lifecycle_middleware,
     default_memory_scheduler,
 )
+from .message_timestamp import (
+    MessageTimestampMiddleware,
+    SubagentMessageTimestampMiddleware,
+)
 from .model_fallback import ModelFallbackMiddleware
 from .proactive_mode import ProactiveModeMiddleware, create_proactive_mode_middleware
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
@@ -43,6 +47,7 @@ from .tool_error_handler import ToolErrorHandlerMiddleware
 from .tool_history_repair import ToolHistoryRepairMiddleware
 from .tool_selector import create_tool_selector_middleware
 from .utils import disable_thinking
+from .windows_paths import WindowsFilePathMiddleware
 
 __all__ = [
     "ActiveTeamMiddleware",
@@ -55,6 +60,7 @@ __all__ = [
     "ErrorNormalizationMiddleware",
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
+    "MessageTimestampMiddleware",
     "ModelFallbackMiddleware",
     "ProactiveModeMiddleware",
     "Question",
@@ -62,8 +68,10 @@ __all__ = [
     "SchedulerMiddleware",
     "SkillPinMiddleware",
     "SkillsReloadMiddleware",
+    "SubagentMessageTimestampMiddleware",
     "ToolErrorHandlerMiddleware",
     "ToolHistoryRepairMiddleware",
+    "WindowsFilePathMiddleware",
     "compute_context_editing_trigger",
     "create_active_team_middleware",
     "create_code_interpreter_middleware",

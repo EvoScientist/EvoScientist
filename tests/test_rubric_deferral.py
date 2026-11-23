@@ -197,6 +197,17 @@ async def test_unreadable_status_grades_and_warns(tmp_path, caplog):
     assert any("could not read" in r.getMessage() for r in caplog.records)
 
 
+def _rubric_warnings(caplog) -> list:
+    """The rubric's warnings; other loggers (a dependency probe that runs once
+    per process) may warn during the same call."""
+    return [
+        r
+        for r in caplog.records
+        if r.name.startswith("EvoScientist.middleware.rubric")
+        and r.levelno >= logging.WARNING
+    ]
+
+
 async def test_not_found_grades_without_a_warning(tmp_path, caplog):
     gone = NotFoundError(
         "gone",
@@ -209,7 +220,7 @@ async def test_not_found_grades_without_a_warning(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not _rubric_warnings(caplog)
 
 
 async def test_input_mode_ignores_background_work(tmp_path):
@@ -543,7 +554,7 @@ async def test_connect_error_grades_without_a_warning(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not _rubric_warnings(caplog)
 
 
 async def test_refusal_on_one_address_among_other_failures_is_quiet(tmp_path, caplog):
@@ -565,7 +576,7 @@ async def test_refusal_on_one_address_among_other_failures_is_quiet(tmp_path, ca
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not _rubric_warnings(caplog)
 
 
 async def test_connect_error_other_than_refusal_grades_with_a_warning(tmp_path, caplog):
@@ -644,7 +655,7 @@ def test_dev_server_reachable_needs_the_flag_and_the_probe(monkeypatch, caplog):
     answers[0] = (False, None)  # refused: quiet
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         assert asyncio.run(rubric_mod.dev_server_reachable()) is False
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not _rubric_warnings(caplog)
     answers[0] = (False, "health check timed out")  # slow: say so
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         assert asyncio.run(rubric_mod.dev_server_reachable()) is False
