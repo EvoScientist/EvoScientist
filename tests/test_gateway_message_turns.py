@@ -1418,16 +1418,31 @@ _TWO_MESSAGE_RUN = [
     _text("First", "1-0"),
     _text(" part", "1-1"),
     _finish("1-2"),
-    _text("Second", "1-3"),
-    _finish("1-4"),
+    _tool("tool-started", "1-3", tool_name="execute", input={"command": "ls"}),
+    _tool("tool-finished", "1-4", tool_name="execute", output="a.txt"),
+    _text("Second", "1-5"),
+    _finish("1-6"),
     _lifecycle("run-1", "completed"),
 ]
 _TWO_MESSAGE_STATE = {
     "messages": [
         *_EARLIER_STATE["messages"],
         {"type": "human", "content": "hi", "id": "human-1"},
-        {"type": "ai", "content": "First part", "id": "ai-1"},
-        {"type": "tool", "content": "ok", "id": "tool-1"},
+        {
+            "type": "ai",
+            "content": "First part",
+            "id": "ai-1",
+            "tool_calls": [
+                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+            ],
+        },
+        {
+            "type": "tool",
+            "content": "a.txt",
+            "id": "tool-1",
+            "name": "execute",
+            "tool_call_id": "call-1",
+        },
         {"type": "ai", "content": [{"type": "text", "text": "Second"}], "id": "ai-2"},
     ]
 }
@@ -1439,7 +1454,8 @@ _TWO_MESSAGE_STATE = {
 async def test_cut_off_answer_is_completed_from_the_thread_state(
     live_limit, quiet_poll
 ):
-    """Wherever the live envelopes stop, the turn ends with the whole answer."""
+    """Wherever the live envelopes stop, the turn ends like a live one: the
+    whole answer, and each tool call and result once."""
     expected = await _live_events(_TWO_MESSAGE_RUN, values=_EARLIER_STATE)
     stream = FakeLangGraphThreadStream(
         THREAD_ID, events=_TWO_MESSAGE_RUN, live_limit=live_limit, read_back_limit=0
@@ -1450,7 +1466,9 @@ async def test_cut_off_answer_is_completed_from_the_thread_state(
     events = await _turn(gateway, "hi")
 
     assert "".join(_texts(events)) == "".join(_texts(expected))
-    assert events[-1] == expected[-1]
+    assert [e for e in events if e["type"] != "text"] == [
+        e for e in expected if e["type"] != "text"
+    ]
     assert events[-1]["response"] == "First part\n\nSecond"
 
 
@@ -1620,3 +1638,68 @@ async def test_answer_cut_off_after_a_discarded_retry_is_completed(quiet_poll):
         "done",
     ]
     assert events[-1]["response"] == "Hello world"
+
+
+def _thinking(text: str, entry_id: str) -> dict[str, Any]:
+    return {
+        "method": "messages",
+        "params": {
+            "namespace": [],
+            "data": {
+                "event": "content-block-delta",
+                "delta": {"type": "reasoning-delta", "reasoning": text},
+            },
+        },
+        "event_id": entry_id,
+    }
+
+
+_THINKING_RUN = [
+    _lifecycle("run-1", "running"),
+    _text("First", "1-0"),
+    _finish("1-1"),
+    _thinking("weighing it", "1-2"),
+    _text("Second", "1-3"),
+    _text(" ", "1-4"),
+    _text("part", "1-5"),
+    _finish("1-6"),
+    _lifecycle("run-1", "completed"),
+]
+_THINKING_STATE = {
+    "messages": [
+        *_EARLIER_STATE["messages"],
+        {"type": "ai", "content": "First", "id": "ai-1"},
+        {
+            "type": "ai",
+            "content": [
+                {"type": "reasoning", "reasoning": "weighing it"},
+                {"type": "text", "text": "Second part"},
+            ],
+            "id": "ai-2",
+        },
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "live_limit", range(len(_THINKING_RUN)), ids=lambda n: f"{n}-live"
+)
+async def test_state_completion_shows_thinking_once_and_keeps_word_spacing(
+    live_limit, quiet_poll
+):
+    """Thinking of a message the live stream had not begun comes from state;
+    thinking already streamed is not repeated; a space the live stream was
+    holding back for the next word is not doubled."""
+    expected = await _live_events(_THINKING_RUN, values=_EARLIER_STATE)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_THINKING_RUN, live_limit=live_limit, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _THINKING_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert events[-1]["response"] == "First\n\nSecond part"
+    assert [e for e in events if e["type"] != "text"] == [
+        e for e in expected if e["type"] != "text"
+    ]

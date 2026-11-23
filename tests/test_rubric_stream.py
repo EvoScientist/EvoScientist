@@ -194,3 +194,47 @@ async def test_a_subagent_that_only_shares_the_graders_name_is_shown():
         "subagent_tool_result",
         "subagent_end",
     ]
+
+
+@pytest.mark.filterwarnings(_EXPERIMENTAL_STREAM)
+async def test_graded_run_cut_off_anywhere_is_completed_from_its_messages(
+    tmp_path, monkeypatch
+):
+    """A graded turn stores the draft, the grader's feedback (a user-side
+    message) and the revision; the answer shown joins draft and revision with
+    a blank line. Wherever a stream stops, the stored messages complete it to
+    the live answer."""
+    import copy
+
+    from EvoScientist.stream import events as events_mod
+    from EvoScientist.stream.emitter import StreamEventEmitter
+
+    agent, _grader = _deep(
+        tmp_path, [FAIL, PASS], ["a longer draft answer", "the revised final answer"]
+    )
+    envelopes: list[dict] = []
+    process = events_mod._V3EventProcessor.process
+
+    async def recording(self, event):
+        envelopes.append(copy.deepcopy(event))
+        return await process(self, event)
+
+    monkeypatch.setattr(events_mod._V3EventProcessor, "process", recording)
+    live = await _collect(agent, "do it", "t1", rubric="- c1")
+    monkeypatch.setattr(events_mod._V3EventProcessor, "process", process)
+    answer = [e for e in live if e["type"] == "done"][-1]["response"]
+    assert answer == "a longer draft answer\n\nthe revised final answer"
+    messages = agent.get_state({"configurable": {"thread_id": "t1"}}).values["messages"]
+
+    for cut in range(len(envelopes) + 1):
+        processor = events_mod._V3EventProcessor(
+            StreamEventEmitter(),
+            events_mod._SubagentRegistry(),
+            None,
+            [],
+            process_value_messages=True,
+        )
+        for envelope in envelopes[:cut]:
+            await processor.process(copy.deepcopy(envelope))
+        assert processor.complete_turn_from_messages(messages) is not None, cut
+        assert processor.full_response == answer, cut

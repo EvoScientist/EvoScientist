@@ -1831,7 +1831,7 @@ class LangGraphServerGateway:
                     # What the turn has not shown of its answer, matched
                     # against the text shown so far.
                     values = state.get("values")
-                    answer_events = processor.complete_text_from_messages(
+                    answer_events = processor.complete_turn_from_messages(
                         values.get("messages") if isinstance(values, dict) else None
                     )
                     state_events = list(answer_events or [])

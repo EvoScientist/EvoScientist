@@ -13,7 +13,13 @@ from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeAlias
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    ToolMessage,
+    convert_to_messages,
+)
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 from pydantic import ValidationError
@@ -545,6 +551,11 @@ class _V3EventProcessor:
         ] = {}
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
+        # Root tool results emitted, and whether root thinking has streamed
+        # for a message whose text or end has not: a completion from final
+        # state repeats neither.
+        self._shown_tool_results: set[str] = set()
+        self._root_thinking_open = False
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
         # Whitespace each message holds back until its next text (key: sub-agent
         # instance, None for the main agent); no key yet = the message has no text.
@@ -921,52 +932,116 @@ class _V3EventProcessor:
                 self._end_text_message(None)
         return events
 
-    def complete_text_from_messages(
+    def complete_turn_from_messages(
         self, messages: object
     ) -> list[dict[str, Any]] | None:
-        """Emit the part of the turn's answer that was not shown, from final state.
+        """Emit what the turn has not shown, from the thread's final messages.
 
-        *messages* is the thread's message list after the run. The assistant
-        messages that were not there before the turn are matched against the
-        text shown so far, message by message; what follows it is emitted.
-        Returns ``None`` when they cannot be told apart from earlier ones (no
-        pre-run state) or when the shown text is not the start of theirs.
+        The turn's messages start at the first assistant message that was not
+        there before it. Their text is matched against the text shown so far,
+        message by message. The message the shown text stops in gets its tail;
+        every later one is emitted whole (thinking, text, tool calls), and
+        each tool result not shown yet is emitted in its place. Sub-agent
+        activity is not in these messages and stays unshown.
+
+        Returns ``None`` when the turn's messages cannot be told apart from
+        earlier ones (no pre-run state) or when the shown text is not the
+        start of theirs.
         """
         if not self._value_recovery or not isinstance(messages, list):
             return None
-        texts: list[str] = []
-        for message in messages:
-            parsed = self._assistant_value_message(message)
-            if parsed is None or parsed.key in self._baseline_value_message_keys:
-                continue
-            text = _strip_legacy_thinking_tags(_text_from_content(parsed.content))
-            if text.strip():
-                texts.append(text.strip())
+        first = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if (parsed := self._assistant_value_message(message)) is not None
+                and parsed.key not in self._baseline_value_message_keys
+            ),
+            len(messages),
+        )
+        try:
+            turn = list(convert_to_messages(messages[first:]))
+        except Exception:
+            # The caller reports the turn as lost.
+            return None
+
+        def answer_text(message: AIMessage) -> str:
+            return _strip_legacy_thinking_tags(
+                _text_from_content(message.content)
+            ).strip()
+
+        # Where the shown text stops: the message, and how much of it is shown.
         shown = self.full_response
         position = 0
-        events: list[dict[str, Any]] = []
-        for index, text in enumerate(texts):
+        cut: int | None = None
+        cut_shown = 0
+        for index, message in enumerate(turn):
+            if not isinstance(message, AIMessage):
+                continue
+            text = answer_text(message)
             while position < len(shown) and shown[position].isspace():
                 position += 1
             rest = shown[position:]
-            if rest.startswith(text):
+            if text and rest.startswith(text):
                 position += len(text)
+                continue
+            if not text and rest:
                 continue
             if not text.startswith(rest):
                 return None
-            # *text* is the message the shown text stops in: its tail, then
-            # every later message whole.
-            if rest:
-                events.extend(self._emit_text(text[len(rest) :], subagent=None))
-                texts = texts[index + 1 :]
-            else:
-                texts = texts[index:]
-            for whole in texts:
-                self._end_text_message(None)
-                events.extend(self._emit_text(whole, subagent=None))
+            cut, cut_shown = index, len(rest)
+            break
+        if cut is None and shown[position:].strip():
+            return None
+
+        events: list[dict[str, Any]] = []
+        for index, message in enumerate(turn):
+            if isinstance(message, ToolMessage):
+                if message.tool_call_id not in self._shown_tool_results:
+                    events.extend(
+                        self._process_tool_event(
+                            (),
+                            {
+                                "event": "tool-finished",
+                                "tool_call_id": message.tool_call_id,
+                                "tool_name": message.name,
+                                "output": message,
+                            },
+                            None,
+                        )
+                    )
+                continue
+            if not isinstance(message, AIMessage):
+                continue
+            if cut is None or index < cut or cut_shown:
+                # Its text is shown, in full or up to the cut.
+                if index == cut:
+                    # The tail brings its own whitespace: drop what the live
+                    # stream was holding back for the next word.
+                    if None in self._held_space:
+                        self._held_space[None] = ""
+                    events.extend(
+                        self._emit_text(answer_text(message)[cut_shown:], None)
+                    )
+                    cut_shown = 0
+                events.extend(self._emit_tool_calls(message, None, ()))
+                continue
+            # Not started in the shown text. Thinking that streamed before the
+            # cut, or a tool call already shown, means the live stream had
+            # begun this message: its thinking is not repeated.
+            begun = self._root_thinking_open or any(
+                ((), str(call.get("id") or "")) in self._emitted_tool_calls
+                for call in message.tool_calls
+            )
+            self._root_thinking_open = False
             self._end_text_message(None)
-            return events
-        return None if shown[position:].strip() else events
+            if begun:
+                events.extend(self._emit_text(answer_text(message), None))
+                events.extend(self._emit_tool_calls(message, None, ()))
+            else:
+                events.extend(self._process_whole_message(message, None, ()))
+        self._end_text_message(None)
+        return events
 
     def _process_message_event(
         self,
@@ -1153,6 +1228,22 @@ class _V3EventProcessor:
         if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
             self._end_text_message(subagent)
 
+        events.extend(self._emit_tool_calls(msg, subagent, namespace))
+
+        if subagent is None:
+            inp, out = _usage_counts(msg.usage_metadata)
+            if inp or out:
+                events.append(self.emitter.usage_stats(inp, out).data)
+        return events
+
+    def _emit_tool_calls(
+        self,
+        msg: AIMessage,
+        subagent: _SubagentInfo | None,
+        namespace: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        """The message's tool calls that were not emitted yet."""
+        events: list[dict[str, Any]] = []
         if msg.tool_calls:
             events.extend(self._selector.flush_selection())
         for raw_tool_call_block in msg.tool_calls:
@@ -1172,11 +1263,6 @@ class _V3EventProcessor:
                     tool_call_id=tool_call_id,
                 )
             )
-
-        if subagent is None:
-            inp, out = _usage_counts(msg.usage_metadata)
-            if inp or out:
-                events.append(self.emitter.usage_stats(inp, out).data)
         return events
 
     def _process_tool_event(
@@ -1280,6 +1366,7 @@ class _V3EventProcessor:
                     ).data
                 )
                 return events
+            self._shown_tool_results.add(tool_call_id)
             events.append(
                 self.emitter.tool_result(
                     name, content, success, tool_call_id=tool_call_id
@@ -1383,6 +1470,7 @@ class _V3EventProcessor:
         self._held_space.pop(subagent.instance_id if subagent else None, None)
         if subagent is None:
             self._main_message_has_text = False
+            self._root_thinking_open = False
 
     def _append_main_text(self, text: str) -> str:
         # Put the separator in the emitted delta too: stateful frontends and
@@ -1390,6 +1478,7 @@ class _V3EventProcessor:
         if not self._main_message_has_text:
             text = paragraph_break(self.full_response, text) + text
         self._main_message_has_text = True
+        self._root_thinking_open = False
         self.full_response += text
         return text
 
@@ -1437,6 +1526,7 @@ class _V3EventProcessor:
         if suppressed:
             return events
         self._count_thinking(len(text))
+        self._root_thinking_open = True
         events.append(self.emitter.thinking(text).data)
         return events
 
