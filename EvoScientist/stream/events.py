@@ -19,6 +19,7 @@ from langchain_core.messages import (
     BaseMessage,
     ToolMessage,
     convert_to_messages,
+    messages_from_dict,
 )
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
@@ -513,6 +514,37 @@ def _count(value: Any) -> int:
     return max(value, 0)
 
 
+def _message_id(message: object) -> str | None:
+    message_map = _as_raw_map(message)
+    raw_id = (
+        message_map.get("id")
+        if message_map is not None
+        else getattr(message, "id", None)
+    )
+    return str(raw_id) if raw_id else None
+
+
+def _message_ids(messages: object) -> set[str]:
+    if not isinstance(messages, list):
+        return set()
+    return {mid for message in messages if (mid := _message_id(message))}
+
+
+def _as_message(message: object) -> BaseMessage:
+    """A state message as a message object, keeping fields such as ``usage_metadata``.
+
+    ``convert_to_messages`` builds a dict's message from a few fields only.
+    """
+    if isinstance(message, BaseMessage):
+        return message
+    message_map = _as_raw_map(message)
+    if message_map is not None and isinstance(message_map.get("type"), str):
+        return messages_from_dict(
+            [{"type": message_map["type"], "data": dict(message_map)}]
+        )[0]
+    return convert_to_messages([message])[0]
+
+
 class _V3EventProcessor:
     """Translate v3 protocol channel events into EvoScientist UI events."""
 
@@ -533,8 +565,10 @@ class _V3EventProcessor:
             existing_summarization_event
         )
         self._seen_value_message_keys = self._message_keys(existing_messages)
-        # The assistant messages the thread had before this turn.
+        # The assistant messages, and the ids of all messages, the thread had
+        # before this turn.
         self._baseline_value_message_keys = frozenset(self._seen_value_message_keys)
+        self._baseline_message_ids = frozenset(_message_ids(existing_messages))
         # Snapshot recovery delivers messages the transport did not stream. It
         # is suspended once root text streams and resumed when that text is
         # discarded, since the answer that replaces it may not stream.
@@ -950,17 +984,25 @@ class _V3EventProcessor:
         """
         if not self._value_recovery or not isinstance(messages, list):
             return None
-        first = next(
-            (
-                index
-                for index, message in enumerate(messages)
-                if (parsed := self._assistant_value_message(message)) is not None
-                and parsed.key not in self._baseline_value_message_keys
-            ),
-            len(messages),
-        )
+        # The turn starts after the last message the thread had before it, so
+        # a resumed tool call's result is part of it. Without one (state
+        # rewritten by a summary), at the first assistant message not seen.
+        ids = [_message_id(message) for message in messages]
+        known = [i for i, mid in enumerate(ids) if mid in self._baseline_message_ids]
+        if known:
+            first = known[-1] + 1
+        else:
+            first = next(
+                (
+                    index
+                    for index, message in enumerate(messages)
+                    if (parsed := self._assistant_value_message(message)) is not None
+                    and parsed.key not in self._baseline_value_message_keys
+                ),
+                len(messages),
+            )
         try:
-            turn = list(convert_to_messages(messages[first:]))
+            turn = [_as_message(message) for message in messages[first:]]
         except Exception:
             # The caller reports the turn as lost.
             return None
@@ -975,6 +1017,7 @@ class _V3EventProcessor:
         position = 0
         cut: int | None = None
         cut_shown = 0
+        last_shown: int | None = None
         for index, message in enumerate(turn):
             if not isinstance(message, AIMessage):
                 continue
@@ -984,6 +1027,7 @@ class _V3EventProcessor:
             rest = shown[position:]
             if text and rest.startswith(text):
                 position += len(text)
+                last_shown = index
                 continue
             if not text and rest:
                 continue
@@ -993,6 +1037,9 @@ class _V3EventProcessor:
             break
         if cut is None and shown[position:].strip():
             return None
+        # All the text is shown but the last message's end, which carries its
+        # usage, was not.
+        unfinished = last_shown if cut is None and self._main_message_has_text else None
 
         events: list[dict[str, Any]] = []
         for index, message in enumerate(turn):
@@ -1025,6 +1072,9 @@ class _V3EventProcessor:
                     )
                     cut_shown = 0
                 events.extend(self._emit_tool_calls(message, None, ()))
+                if index in (cut, unfinished):
+                    # Its end, which carries the usage, was not shown.
+                    events.extend(self._usage_event(message))
                 continue
             # Not started in the shown text. Thinking that streamed before the
             # cut, or a tool call already shown, means the live stream had
@@ -1038,6 +1088,7 @@ class _V3EventProcessor:
             if begun:
                 events.extend(self._emit_text(answer_text(message), None))
                 events.extend(self._emit_tool_calls(message, None, ()))
+                events.extend(self._usage_event(message))
             else:
                 events.extend(self._process_whole_message(message, None, ()))
         self._end_text_message(None)
@@ -1231,10 +1282,12 @@ class _V3EventProcessor:
         events.extend(self._emit_tool_calls(msg, subagent, namespace))
 
         if subagent is None:
-            inp, out = _usage_counts(msg.usage_metadata)
-            if inp or out:
-                events.append(self.emitter.usage_stats(inp, out).data)
+            events.extend(self._usage_event(msg))
         return events
+
+    def _usage_event(self, msg: AIMessage) -> list[dict[str, Any]]:
+        inp, out = _usage_counts(msg.usage_metadata)
+        return [self.emitter.usage_stats(inp, out).data] if inp or out else []
 
     def _emit_tool_calls(
         self,

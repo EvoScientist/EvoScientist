@@ -1703,3 +1703,110 @@ async def test_state_completion_shows_thinking_once_and_keeps_word_spacing(
     assert [e for e in events if e["type"] != "text"] == [
         e for e in expected if e["type"] != "text"
     ]
+
+
+async def test_resume_turn_completed_from_state_shows_the_resumed_tools_result(
+    quiet_poll,
+):
+    """The paused run's tool call is in the pre-run state; the resumed run adds
+    its result and the answer. Both are this turn's."""
+    paused = [
+        {"type": "human", "content": "list files", "id": "human-0"},
+        {
+            "type": "ai",
+            "content": "",
+            "id": "ai-0",
+            "tool_calls": [
+                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+            ],
+        },
+    ]
+    resumed = [
+        *paused,
+        {
+            "type": "tool",
+            "content": "a.txt",
+            "id": "tool-1",
+            "name": "execute",
+            "tool_call_id": "call-1",
+        },
+        {"type": "ai", "content": "One file", "id": "ai-1"},
+    ]
+    run = [
+        _lifecycle("run-1", "running"),
+        _tool("tool-finished", "1-0", tool_name="execute", output="a.txt"),
+        _text("One file", "1-1"),
+        _finish("1-2"),
+        _lifecycle("run-1", "completed"),
+    ]
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(
+        stream, values={"messages": paused}, interrupts=[{"id": "interrupt-0"}]
+    )
+    respond = stream.run.respond_command
+
+    async def respond_and_finish(params):
+        reply = await respond(params)
+        threads.states[THREAD_ID] = {"values": {"messages": resumed}}
+        return reply
+
+    stream.run.respond_command = respond_and_finish
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert [(e["type"], e.get("content")) for e in events] == [
+        ("tool_result", "a.txt"),
+        ("text", "One file"),
+        ("done", "One file"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "live_limit", [0, 2, 3, 4], ids=["nothing", "cut", "all-text", "finished"]
+)
+async def test_state_completion_reports_the_usage_live_never_got(
+    live_limit, quiet_poll
+):
+    """Usage arrives with a message's end; a message whose end was not shown
+    live gets its usage from the stored message, once."""
+    finish = _finish("1-2")
+    finish["params"]["data"]["usage"] = {"input_tokens": 10, "output_tokens": 5}
+    run = [
+        _lifecycle("run-1", "running"),
+        _text("Hello", "1-0"),
+        _text(" world", "1-1"),
+        finish,
+        _lifecycle("run-1", "completed"),
+    ]
+    state = {
+        "messages": [
+            *_EARLIER_STATE["messages"],
+            {"type": "human", "content": "hi", "id": "human-1"},
+            {
+                "type": "ai",
+                "content": "Hello world",
+                "id": "ai-1",
+                "usage_metadata": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        ]
+    }
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=live_limit, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": state})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] == "usage_stats"] == [
+        {"type": "usage_stats", "input_tokens": 10, "output_tokens": 5}
+    ]
+    assert events[-1]["response"] == "Hello world"
