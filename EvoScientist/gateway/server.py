@@ -1806,6 +1806,9 @@ class LangGraphServerGateway:
                         try:
                             event = await events.next_within(wait)
                         except Exception as exc:
+                            # langgraph-sdk 0.4 ends ``stream.events`` on a
+                            # read error and keeps the error to itself; this
+                            # catches a transport that raises.
                             logger.warning(
                                 "Reading the event stream of run %s on thread "
                                 "%s failed",
@@ -1816,11 +1819,17 @@ class LangGraphServerGateway:
                             stream_error = exc
                             event = None
                     if event is None:
+                        # The count tells a stream that never delivered (a
+                        # rejected open looks like an end) from one that
+                        # dropped mid-run.
                         logger.warning(
-                            "The event stream of run %s on thread %s ended "
-                            "before the run did; waiting for the run to finish",
+                            "The event stream of run %s on thread %s %s after "
+                            "%d of the run's envelopes; waiting for the run "
+                            "to finish",
                             run_id,
                             request.thread_id,
+                            "failed" if stream_error is not None else "ended",
+                            len(live_event_ids),
                         )
                         stream_closed = True
                         quiet_deadline = loop.time()
@@ -1834,7 +1843,7 @@ class LangGraphServerGateway:
                             )
                         except _RunGoneError:
                             raise
-                        except Exception:
+                        except Exception as status_exc:
                             # Keep waiting. A long silent tool call polls
                             # for its whole length: one traceback is enough.
                             status_failures += 1
@@ -1855,13 +1864,15 @@ class LangGraphServerGateway:
                                 if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
                                     # The run cannot be followed any more:
                                     # end the turn with the stream's own
-                                    # error, as before #711.
+                                    # error, as before #711, caused by the
+                                    # status request that failed last (a
+                                    # server that died answers neither).
                                     if stream_error is not None:
-                                        raise stream_error from None
+                                        raise stream_error from status_exc
                                     raise RuntimeError(
                                         "Thread event stream ended before the "
                                         "run finished"
-                                    ) from None
+                                    ) from status_exc
                         else:
                             closed_status_failures = 0
                         run_ended = finished_status is not None

@@ -2975,7 +2975,11 @@ async def test_run_outlives_its_event_stream_and_is_read_back(
     assert events == expected
     assert status.calls == 3
     assert gateway.thread_store.client.runs.cancelled == []
-    assert "ended before the run did" in caplog.text
+    how = "failed" if isinstance(live_end, Exception) else "ended"
+    assert (
+        f"The event stream of run run-1 on thread {THREAD_ID} {how} after "
+        f"{live_limit} of the run's envelopes" in caplog.text
+    )
 
 
 async def test_stream_ending_after_the_run_finished_is_read_back(quiet_poll):
