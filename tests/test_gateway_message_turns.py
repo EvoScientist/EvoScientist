@@ -1407,6 +1407,53 @@ _NEW_STATE = {
 }
 
 
+_OTHER_STATE = {
+    "messages": [
+        *_EARLIER_STATE["messages"],
+        {"type": "ai", "content": "Something else", "id": "ai-1"},
+    ]
+}
+_TWO_MESSAGE_RUN = [
+    _lifecycle("run-1", "running"),
+    _text("First", "1-0"),
+    _text(" part", "1-1"),
+    _finish("1-2"),
+    _text("Second", "1-3"),
+    _finish("1-4"),
+    _lifecycle("run-1", "completed"),
+]
+_TWO_MESSAGE_STATE = {
+    "messages": [
+        *_EARLIER_STATE["messages"],
+        {"type": "human", "content": "hi", "id": "human-1"},
+        {"type": "ai", "content": "First part", "id": "ai-1"},
+        {"type": "tool", "content": "ok", "id": "tool-1"},
+        {"type": "ai", "content": [{"type": "text", "text": "Second"}], "id": "ai-2"},
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "live_limit", range(len(_TWO_MESSAGE_RUN)), ids=lambda n: f"{n}-live"
+)
+async def test_cut_off_answer_is_completed_from_the_thread_state(
+    live_limit, quiet_poll
+):
+    """Wherever the live envelopes stop, the turn ends with the whole answer."""
+    expected = await _live_events(_TWO_MESSAGE_RUN, values=_EARLIER_STATE)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TWO_MESSAGE_RUN, live_limit=live_limit, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _TWO_MESSAGE_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert "".join(_texts(events)) == "".join(_texts(expected))
+    assert events[-1] == expected[-1]
+    assert events[-1]["response"] == "First part\n\nSecond"
+
+
 async def test_failed_read_back_falls_back_to_the_thread_state(quiet_poll, caplog):
     stream = FakeLangGraphThreadStream(
         THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=1
@@ -1444,8 +1491,8 @@ async def test_failed_read_back_of_a_pause_shows_the_prompt_from_state(quiet_pol
     [
         pytest.param(0, "success", {"values": {}}, "$", id="empty-state"),
         pytest.param(0, "success", None, "$", id="state-read-fails"),
-        # A reply that was cut off cannot be completed from state.
-        pytest.param(2, "success", {"values": _NEW_STATE}, "$", id="cut"),
+        # The text shown is not the start of the state's answer.
+        pytest.param(2, "success", {"values": _OTHER_STATE}, "$", id="other-text"),
         pytest.param(0, "interrupted", {"values": _NEW_STATE}, "status interrupted"),
         pytest.param(0, "error", {"values": _NEW_STATE}, "status error"),
     ],
@@ -1457,7 +1504,7 @@ async def test_turn_raises_when_read_back_and_state_both_fail(
         THREAD_ID, events=_TEXT_RUN, live_limit=live_limit, read_back_limit=0
     )
     stream.run.status = status
-    gateway, threads = _gateway(stream)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
     if state is not None:
         _state_after_start(stream, threads, state)
     else:
@@ -1533,3 +1580,43 @@ async def test_recovered_turn_without_a_frontend_sink_only_logs(quiet_poll):
     events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello", " world"]
+
+
+def _model_call(call: str, phase: str, entry_id: str, **data: Any) -> dict[str, Any]:
+    return {
+        "method": "custom",
+        "params": {
+            "namespace": [],
+            "data": {"type": "model_call", "call": call, "phase": phase, **data},
+        },
+        "event_id": entry_id,
+    }
+
+
+async def test_answer_cut_off_after_a_discarded_retry_is_completed(quiet_poll):
+    """Text a failed provider call streamed is rolled back before the match:
+    state only has the answer of the call that replaced it."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _model_call("call-1", "start", "1-0"),
+        _text("A draft that fails", "1-1"),
+        _model_call("call-1", "end", "1-2", status="error"),
+        _model_call("call-2", "start", "1-3"),
+        _text("Hello", "1-4"),
+        _text(" world", "1-5"),
+        _finish("1-6"),
+        _lifecycle("run-1", "completed"),
+    ]
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=6, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert [event["type"] for event in events if event["type"] != "text"] == [
+        "model_output_discarded",
+        "done",
+    ]
+    assert events[-1]["response"] == "Hello world"

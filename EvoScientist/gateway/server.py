@@ -1828,25 +1828,20 @@ class LangGraphServerGateway:
                         )
                     except Exception as exc:
                         raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
-                    # The processor shows messages from a snapshot only while
-                    # no root text has streamed: a reply that was cut off
-                    # cannot be completed from state.
-                    state_events = await processor.process(
-                        {
-                            "method": "values",
-                            "params": {
-                                "namespace": [],
-                                "data": state.get("values") or {},
-                            },
-                        }
+                    # What the turn has not shown of its answer, matched
+                    # against the text shown so far.
+                    values = state.get("values")
+                    answer_events = processor.complete_text_from_messages(
+                        values.get("messages") if isinstance(values, dict) else None
                     )
+                    state_events = list(answer_events or [])
                     for interrupt in _state_interrupts(state):
                         state_events.extend(
                             await processor.process(
                                 _input_requested_event_from_interrupt(interrupt)
                             )
                         )
-                    if not state_events:
+                    if answer_events is None and not state_events:
                         raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
                     for turn_event in state_events:
                         emitted_interrupt = emitted_interrupt or _is_interrupt_event(

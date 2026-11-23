@@ -527,6 +527,8 @@ class _V3EventProcessor:
             existing_summarization_event
         )
         self._seen_value_message_keys = self._message_keys(existing_messages)
+        # The assistant messages the thread had before this turn.
+        self._baseline_value_message_keys = frozenset(self._seen_value_message_keys)
         # Snapshot recovery delivers messages the transport did not stream. It
         # is suspended once root text streams and resumed when that text is
         # discarded, since the answer that replaces it may not stream.
@@ -918,6 +920,53 @@ class _V3EventProcessor:
                 events.extend(self._emit_text(text, subagent=None))
                 self._end_text_message(None)
         return events
+
+    def complete_text_from_messages(
+        self, messages: object
+    ) -> list[dict[str, Any]] | None:
+        """Emit the part of the turn's answer that was not shown, from final state.
+
+        *messages* is the thread's message list after the run. The assistant
+        messages that were not there before the turn are matched against the
+        text shown so far, message by message; what follows it is emitted.
+        Returns ``None`` when they cannot be told apart from earlier ones (no
+        pre-run state) or when the shown text is not the start of theirs.
+        """
+        if not self._value_recovery or not isinstance(messages, list):
+            return None
+        texts: list[str] = []
+        for message in messages:
+            parsed = self._assistant_value_message(message)
+            if parsed is None or parsed.key in self._baseline_value_message_keys:
+                continue
+            text = _strip_legacy_thinking_tags(_text_from_content(parsed.content))
+            if text.strip():
+                texts.append(text.strip())
+        shown = self.full_response
+        position = 0
+        events: list[dict[str, Any]] = []
+        for index, text in enumerate(texts):
+            while position < len(shown) and shown[position].isspace():
+                position += 1
+            rest = shown[position:]
+            if rest.startswith(text):
+                position += len(text)
+                continue
+            if not text.startswith(rest):
+                return None
+            # *text* is the message the shown text stops in: its tail, then
+            # every later message whole.
+            if rest:
+                events.extend(self._emit_text(text[len(rest) :], subagent=None))
+                texts = texts[index + 1 :]
+            else:
+                texts = texts[index:]
+            for whole in texts:
+                self._end_text_message(None)
+                events.extend(self._emit_text(whole, subagent=None))
+            self._end_text_message(None)
+            return events
+        return None if shown[position:].strip() else events
 
     def _process_message_event(
         self,
