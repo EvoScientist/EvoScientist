@@ -243,7 +243,6 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "workspace_dir": key,
         "created_at": proposal.created_at,
         "updated_at": proposal.updated_at,
-        "expected_updated_at": proposal.updated_at,
         "approved_at": proposal.approved_at,
         "approved_by": (
             proposal.approved_by if proposal.approved_by in _APPROVERS else None
@@ -440,6 +439,9 @@ def _apply(
     payload: dict[str, Any] = {"error": code}
     if code == "revert_failed":
         payload["detail"] = str(result.get("detail") or "")
+    elif result.get("detail"):
+        # Why an Undo is unavailable: the only thing the client can tell the user.
+        payload["detail"] = str(result["detail"])
     if code == "draft_changed":
         payload["updated_at"] = result.get("updated_at")
     return _REVERT_STATUS.get(code, 409), payload

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -194,9 +193,7 @@ def test_list_inlines_texts_and_lists_files(server, served):
     assert draft["source_observation_ids"] == ["O-1", "O-2", "O-3"]
     assert draft["approved_by"] is None
     assert draft["approved_skill_present"] is None
-    assert draft["expected_updated_at"] == draft["updated_at"]
     assert len(draft["content_digest"]) == 64
-    assert "review_token" not in draft
 
 
 def test_list_orders_files_by_path_text(server, served):
@@ -392,7 +389,7 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
         "rationale_md", "rationale_md_truncated", "contents", "content_digest",
-        "review_incomplete", "expected_updated_at", "files", "install_target",
+        "review_incomplete", "files", "install_target",
         "install_base", "install_error",
     }  # fmt: skip
 
@@ -811,17 +808,8 @@ def _file(server, name: str, path: str, **params):
     )
 
 
-def test_file_route_returns_text_digest_without_recording_a_review(
-    server, served, monkeypatch
-):
-    from EvoScientist.memory.autoskills import proposals
-
+def test_file_route_returns_text(server, served):
     _draft(served, "focused-validation", files={"scripts/check.py": "print(1)\n"})
-    monkeypatch.setattr(
-        proposals,
-        "_write_manifest",
-        lambda *_args, **_kwargs: pytest.fail("the file route wrote review state"),
-    )
 
     response = _file(server, "focused-validation", "scripts/check.py")
 
@@ -829,11 +817,6 @@ def test_file_route_returns_text_digest_without_recording_a_review(
     assert response.headers["content-type"].startswith("text/plain")
     assert "charset=utf-8" in response.headers["content-type"]
     assert response.text == "print(1)\n"
-    assert (
-        response.headers["X-EvoScientist-Content-Digest"]
-        == hashlib.sha256(response.content).hexdigest()
-    )
-    assert "X-EvoScientist-Review-Token" not in response.headers
 
 
 @pytest.mark.parametrize(
@@ -1101,7 +1084,7 @@ def test_approve_route_matching_digest_installs_into_the_drafts_project(
         "focused-validation",
         "approve",
         secret,
-        expected_updated_at=shown["expected_updated_at"],
+        expected_updated_at=shown["updated_at"],
         expected_content_digest=shown["content_digest"],
     )
 
@@ -1136,7 +1119,7 @@ def test_approve_route_stale_digest_is_refused_as_draft_changed(
         "focused-validation",
         "approve",
         secret,
-        expected_updated_at=shown["expected_updated_at"],
+        expected_updated_at=shown["updated_at"],
         expected_content_digest=shown["content_digest"],
     )
 
@@ -1657,6 +1640,30 @@ def test_revert_route_reports_a_failed_removal(server, served, secret, monkeypat
 
     assert response.status_code == 409
     assert response.json() == {"error": "revert_failed", "detail": "file in use"}
+
+
+def test_revert_route_says_why_an_undo_is_unavailable(
+    server, served, secret, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    reason = "Nothing records the files this approval installed"
+    monkeypatch.setattr(
+        autoskills_api,
+        "revert_skill_proposal",
+        lambda _memory_dir, proposal_id, **_: {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "revert_unavailable",
+            "detail": reason,
+        },
+    )
+
+    response = _decide(server, "focused-validation", "revert", secret)
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "revert_unavailable", "detail": reason}
 
 
 @pytest.mark.parametrize("action", ["approve", "reject", "revert"])

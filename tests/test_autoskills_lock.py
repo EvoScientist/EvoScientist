@@ -330,12 +330,18 @@ def test_approval_refuses_a_workspace_move_between_lookup_and_lock(
     real_lock = module._draft_lock
     monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
     moved = False
+    moving = False
 
     def move_then_lock(proposal_dir):
-        nonlocal moved
+        nonlocal moved, moving
         assert proposal_dir == draft
-        if not moved:
-            assert module.move_proposals(memory_dir, old_key, new_key, {}) == 1
+        if not moved and not moving:
+            # The move takes each draft's lock itself; those must not come back here.
+            moving = True
+            try:
+                assert module.move_proposals(memory_dir, old_key, new_key, {}) == 1
+            finally:
+                moving = False
             moved = True
         return real_lock(proposal_dir)
 
@@ -480,6 +486,174 @@ def test_the_skill_index_is_told_once_the_draft_lock_is_released(tmp_path, monke
 
     assert result["approved"] is True, result
     assert told == [True]
+
+
+def test_the_skill_index_is_told_once_the_revert_lock_is_released(
+    tmp_path, monkeypatch
+):
+    """A callback that reads the draft must not wait on the revert's own lock.
+
+    The skill index is told after an Undo as well, and it was told under the
+    draft's lock until the approval and the revert were made to agree.
+    """
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    folder = _write_draft(memory_dir, name)
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=name,
+        cluster_hash="cluster-original",
+        source_observation_ids=["O-1"],
+        rationale="Exercise the revert lock.",
+        skills_dir=skills_dir,
+        workspace_dir=skills_dir.parent,
+    )
+    assert result["submitted"] is True, result
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    approved = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+    assert approved["approved"] is True, approved
+    monkeypatch.setattr(module, "_DRAFT_LOCK_TIMEOUT", 0.01)
+    told = []
+
+    def notify():
+        with _draft_lock(folder):
+            told.append(True)
+
+    monkeypatch.setattr(module, "_notify_approved_skill", notify)
+
+    reverted = revert_skill_proposal(memory_dir, name)
+
+    assert reverted["reverted"] is True, reverted
+    assert told == [True]
+
+
+def test_the_skill_index_is_told_when_the_manifest_write_fails(tmp_path, monkeypatch):
+    """A skill that is gone has to be told about, even if the Undo fails after.
+
+    The removal happens before the manifest is written, so a write that fails
+    leaves the skill gone and the draft decided. The index still has to hear
+    about the removal, or it keeps listing a skill that is no longer there.
+    """
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "focused-validation"
+    _write_draft(memory_dir, name)
+    result = submit_autoskill_proposal(
+        memory_dir=memory_dir,
+        skill_name=name,
+        cluster_hash="cluster-original",
+        source_observation_ids=["O-1"],
+        rationale="Exercise the revert lock.",
+        skills_dir=skills_dir,
+        workspace_dir=skills_dir.parent,
+    )
+    assert result["submitted"] is True, result
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    approved = approve_skill_proposal(memory_dir, name, skills_dir=skills_dir)
+    assert approved["approved"] is True, approved
+    told = []
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: told.append(True))
+    real_write = module._write_manifest
+
+    def failing_write(path, payload):
+        if payload.get("status") == "pending":
+            raise OSError("disk full")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(module, "_write_manifest", failing_write)
+
+    reverted = revert_skill_proposal(memory_dir, name)
+
+    assert reverted["reverted"] is False, reverted
+    assert reverted["error"] == "revert_failed"
+    assert told == [True]
+    assert not (skills_dir / name).exists()
+
+
+def test_a_move_does_not_overwrite_an_approval_committed_after_its_listing(
+    tmp_path, monkeypatch
+):
+    old, new = tmp_path / "old", tmp_path / "new"
+    new.mkdir()
+    memory_dir, skills_dir = old / "memories", old / "skills"
+    name = "focused-validation"
+    _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    old_key = _manifest(memory_dir, name)["workspace_dir"]
+    new_key = module._normalize_workspace_dir(new)
+    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
+    listed = module._proposal_manifests
+
+    def approve_after_listing(memory, workspace_key):
+        candidates = list(listed(memory, workspace_key))
+        # The approval commits between the move's read and its write.
+        decision = approve_skill_proposal(
+            memory_dir, name, skills_dir=skills_dir, workspace_dir=old
+        )
+        assert decision["approved"] is True, decision
+        return candidates
+
+    monkeypatch.setattr(module, "_proposal_manifests", approve_after_listing)
+
+    assert module.move_proposals(memory_dir, old_key, new_key, {}) == 1
+
+    # Written from the listing, this would be the pending manifest without Undo.
+    manifest = _manifest(memory_dir, name)
+    assert manifest["status"] == "approved"
+    assert manifest["workspace_dir"] == new_key
+    assert manifest["approved_skill_path"] == str(new / "skills" / name)
+
+
+def test_a_move_leaves_a_draft_reached_through_a_link_alone(tmp_path, monkeypatch):
+    """A folder that resolves outside the proposals root is not served.
+
+    Its lock would follow the link, so neither a move nor the upgrade may
+    take one for it: the lock file would be created outside the proposals
+    area. The project only such a draft was made under is left alone as well,
+    since the draft that names it stays where it is.
+    """
+    old, new = tmp_path / "old", tmp_path / "new"
+    new.mkdir()
+    memory_dir, skills_dir = old / "memories", old / "skills"
+    name = "focused-validation"
+    _write_draft(memory_dir, name)
+    _submit(memory_dir, skills_dir, name, "cluster-original")
+    old_key = _manifest(memory_dir, name)["workspace_dir"]
+    new_key = module._normalize_workspace_dir(new)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = autoskill_proposals_dir(memory_dir) / "linked"
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(outside), str(linked))
+    else:
+        linked.symlink_to(outside, target_is_directory=True)
+    unserved = json.dumps(
+        {
+            **_manifest(memory_dir, name),
+            "proposal_id": "linked",
+            "project_id": "linked-project",
+        }
+    )
+    (outside / "manifest.json").write_text(unserved, encoding="utf-8")
+    locked = []
+    real_lock = module._draft_lock
+
+    def observed_lock(proposal_dir):
+        locked.append(Path(proposal_dir).name)
+        return real_lock(proposal_dir)
+
+    monkeypatch.setattr(module, "_draft_lock", observed_lock)
+
+    # The linked draft is the only one that names a project.
+    assert module.proposal_project_ids(memory_dir, old_key) == set()
+
+    assert module.move_proposals(memory_dir, old_key, new_key, {}) == 1
+    assert module.upgrade_proposal_workspaces(memory_dir) == 0
+
+    assert module.proposal_project_ids(memory_dir, old_key) == set()
+    assert locked == [name, name]
+    assert (outside / "manifest.json").read_text(encoding="utf-8") == unserved
 
 
 def test_rejection_sticks_to_the_draft_selected_before_locking(tmp_path, monkeypatch):

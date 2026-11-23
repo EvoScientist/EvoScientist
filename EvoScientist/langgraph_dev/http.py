@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -466,12 +465,7 @@ async def get_autoskill_proposal_file(request: Request) -> Response:
         installed=request.query_params.get("installed") == "1",
     )
     if isinstance(body, str):
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        return Response(
-            body,
-            media_type="text/plain; charset=utf-8",
-            headers={"X-EvoScientist-Content-Digest": digest},
-        )
+        return Response(body, media_type="text/plain; charset=utf-8")
     return JSONResponse(body, status_code=status)
 
 

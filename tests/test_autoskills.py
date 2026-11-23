@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1302,6 +1301,16 @@ def test_revert_without_a_processed_mark(tmp_path):
 
 def test_revert_approved_create_removes_installed_skill(tmp_path):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    approved = _manifest(memory_dir, "focused-validation")
+    assert approved["approved_content_digests"]
+    # The draft stays the agent's to rewrite; the approval's digests do not.
+    draft_script = (
+        autoskill_proposals_dir(memory_dir)
+        / "focused-validation"
+        / "scripts"
+        / "check.py"
+    )
+    draft_script.write_text("the live draft is not the approval\n", encoding="utf-8")
 
     with patch(
         "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
@@ -1314,93 +1323,47 @@ def test_revert_approved_create_removes_installed_skill(tmp_path):
     assert "cluster-1" not in processed_cluster_hashes(memory_dir)
     manifest = _manifest(memory_dir, "focused-validation")
     assert manifest["status"] == "pending"
-    for key in ("approved_by", "approved_at", "approved_skill_path"):
+    for key in (
+        "approved_by",
+        "approved_at",
+        "approved_skill_path",
+        "approved_content_digests",
+    ):
         assert key not in manifest
     assert manifest["scope"] == "workspace"
 
 
-def test_undo_uses_manifest_install_facts_in_another_process(tmp_path):
+def test_undo_of_an_approval_that_recorded_no_digests_says_so(tmp_path):
     memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
-    approved = _manifest(memory_dir, "focused-validation")
-    assert approved["approved_content_digests"]
-    draft_script = (
-        autoskill_proposals_dir(memory_dir)
-        / "focused-validation"
-        / "scripts"
-        / "check.py"
-    )
-    draft_script.write_text("the live draft is not the approval\n", encoding="utf-8")
-    child = tmp_path / "undo_in_fresh_process.py"
-    child.write_text(
-        """import json
-import sys
-from pathlib import Path
+    # An approval made before the digests were recorded keeps none.
+    _edit_manifest(memory_dir, "focused-validation", approved_content_digests=None)
 
-from EvoScientist.memory.autoskills import proposals
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = revert_skill_proposal(memory_dir, "focused-validation")
 
-memory_dir = Path(sys.argv[1])
-proposals._notify_approved_skill = lambda: None
-result = proposals.revert_skill_proposal(memory_dir, "focused-validation")
-print(json.dumps(result), flush=True)
-""",
-        encoding="utf-8",
-    )
-    environment = os.environ.copy()
-    repository = str(Path(__file__).resolve().parents[1])
-    environment["PYTHONPATH"] = os.pathsep.join(
-        [repository, environment.get("PYTHONPATH", "")]
-    )
-    process = subprocess.run(
-        [sys.executable, str(child), str(memory_dir)],
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=30,
-    )
-    assert process.returncode == 0, process.stderr
-    output = process.stdout
+    assert result["reverted"] is False
+    assert result["error"] == "revert_unavailable"
+    assert "delete it by hand" in result["detail"]
+    assert str(installed) in result["detail"]
+    assert (installed / "SKILL.md").is_file()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "approved"
 
-    result = json.loads(output.strip().splitlines()[-1])
+
+def test_undo_of_an_old_approval_whose_skill_is_already_gone_still_reverts(tmp_path):
+    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
+    # An approval made before the digests were recorded keeps none.
+    _edit_manifest(memory_dir, "focused-validation", approved_content_digests=None)
+    # The user removed the installed skill by hand before undoing the approval.
+    shutil.rmtree(installed)
+
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
+    ) as notify:
+        result = revert_skill_proposal(memory_dir, "focused-validation")
+
     assert result["reverted"] is True, result
-    assert not installed.exists()
-    reverted = _manifest(memory_dir, "focused-validation")
-    assert reverted["status"] == "pending"
-    assert "approved_content_digests" not in reverted
-
-
-def test_fresh_process_undo_bounds_the_wait_for_a_silent_child(tmp_path, monkeypatch):
-    from threading import Timer
-
-    real_popen = subprocess.Popen
-    watchdog = None
-    deadlines = []
-
-    class SilentChild(real_popen):
-        def __init__(self, args, **kwargs):
-            nonlocal watchdog
-            super().__init__(
-                [args[0], "-c", "from threading import Event; Event().wait()"],
-                **kwargs,
-            )
-            # Bound even the broken launcher, whose first read has no deadline.
-            watchdog = Timer(5, self.kill)
-            watchdog.start()
-
-        def communicate(self, input=None, timeout=None):
-            deadlines.append(timeout)
-            return super().communicate(
-                input, timeout=0.2 if timeout is not None else None
-            )
-
-    monkeypatch.setattr(subprocess, "Popen", SilentChild)
-    try:
-        with pytest.raises(subprocess.TimeoutExpired):
-            test_undo_uses_manifest_install_facts_in_another_process(tmp_path)
-        assert deadlines[0] == 30
-    finally:
-        if watchdog is not None:
-            watchdog.cancel()
-            watchdog.join()
+    assert _manifest(memory_dir, "focused-validation")["status"] == "pending"
+    notify.assert_called_once_with()
 
 
 def test_revert_of_an_auto_approval_rejects_the_draft(tmp_path):

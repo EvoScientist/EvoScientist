@@ -240,42 +240,66 @@ def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
         return text
 
 
+def _in_proposals_root(manifest_path: Path, resolved_root: Path) -> bool:
+    """Whether a manifest's draft folder resolves inside the proposals root.
+
+    A folder that resolves outside it is reached through a link, so it is not
+    a draft this process serves. Rewriting it would write through the link,
+    and locking it would create its lock file two levels above wherever the
+    link points, outside the proposals area.
+    """
+    return _resolves_within_root(manifest_path.parent, resolved_root)
+
+
 def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
     """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
 
     Proposals made by ``--mode=run`` sessions named the run folder; they
     belong to its workspace. Other proposals, and folders that cannot be
-    resolved, are left as they are. Part of the one-time upgrade of stored
+    resolved or are reached through a link, are left as they are. Each
+    manifest is read again under its draft's lock, so a decision that commits
+    during the loop is not overwritten. A draft a writer holds for longer than
+    the lock timeout raises ``FileLockTimeout``; the caller logs it and the
+    next start runs the upgrade again. Part of the one-time upgrade of stored
     values (see ``sessions._upgrade_stored_dirs``). Returns the number
     rewritten.
     """
     root = _proposal_root(memory_dir)
     if not root.exists():
         return 0
+    resolved_root = root.resolve()
     rewritten = 0
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        manifest = _read_manifest(manifest_path)
-        stored = manifest.get("workspace_dir") if manifest else None
-        if not isinstance(stored, str) or not stored.strip():
+        if not _in_proposals_root(manifest_path, resolved_root):
             continue
-        try:
-            dirs = paths.SessionDirs.from_legacy(stored.strip())
-        except (ValueError, OSError, RuntimeError):
-            continue
-        if dirs.run_dir is not None:
-            manifest["workspace_dir"] = dirs.workspace.key
-            _write_manifest(manifest_path, manifest)
-            rewritten += 1
+        # The lock a decision holds: writing a manifest read before a decision
+        # committed would put the draft back to how it was before the decision.
+        with _draft_lock(manifest_path.parent):
+            manifest = _read_manifest(manifest_path)
+            stored = manifest.get("workspace_dir") if manifest else None
+            if not isinstance(stored, str) or not stored.strip():
+                continue
+            try:
+                dirs = paths.SessionDirs.from_legacy(stored.strip())
+            except (ValueError, OSError, RuntimeError):
+                continue
+            if dirs.run_dir is not None:
+                manifest["workspace_dir"] = dirs.workspace.key
+                _write_manifest(manifest_path, manifest)
+                rewritten += 1
     return rewritten
 
 
 def _proposal_manifests(memory_dir: str | Path, workspace_key: str):
     """The manifests of *workspace_key*'s proposals, every status: (path,
-    manifest) pairs."""
+    manifest) pairs, for the drafts this process serves."""
     root = _proposal_root(memory_dir)
     if not root.exists():
         return
+    resolved_root = root.resolve()
     for manifest_path in sorted(root.glob("*/manifest.json")):
+        if not _in_proposals_root(manifest_path, resolved_root):
+            continue
         manifest = _read_manifest(manifest_path)
         stored = manifest.get("workspace_dir") if manifest else None
         if not isinstance(stored, str) or not stored.strip():
@@ -306,22 +330,33 @@ def move_proposals(
     """Give every proposal of the project *old_key* (every status, so
     ``/autoskills list`` keeps its history) to the project *new_key*, with
     its memory project id mapped through *project_ids*. Returns the number
-    rewritten; running it again rewrites none."""
+    rewritten; running it again rewrites none.
+
+    Each manifest is read again under its draft's lock, so a decision that
+    commits during the loop is not overwritten. A draft a writer holds for
+    longer than the lock timeout raises ``FileLockTimeout``, which fails the
+    move; the next server start, or running the move again, finishes it.
+    """
     moved = 0
-    for manifest_path, manifest in list(_proposal_manifests(memory_dir, old_key)):
-        if manifest.get("workspace_dir") == new_key:
-            continue
-        manifest["workspace_dir"] = new_key
-        project_id = manifest.get("project_id")
-        if isinstance(project_id, str) and project_id in project_ids:
-            manifest["project_id"] = project_ids[project_id]
-        # The list and Undo read where an approval installed, so it moves too.
-        for key in ("approved_skill_path", "workspace_shadow"):
-            moved_path = _moved_path(manifest.get(key), old_key, new_key)
-            if moved_path is not None:
-                manifest[key] = moved_path
-        _write_manifest(manifest_path, manifest)
-        moved += 1
+    for manifest_path, _listed in list(_proposal_manifests(memory_dir, old_key)):
+        # The listing only names candidates. Each manifest is read again under
+        # its draft's lock: a decision can commit between the two reads, and
+        # writing the stale manifest would drop ``approved_skill_path``.
+        with _draft_lock(manifest_path.parent):
+            manifest = _read_manifest(manifest_path)
+            if manifest is None or manifest.get("workspace_dir") == new_key:
+                continue
+            manifest["workspace_dir"] = new_key
+            project_id = manifest.get("project_id")
+            if isinstance(project_id, str) and project_id in project_ids:
+                manifest["project_id"] = project_ids[project_id]
+            # The list and Undo read where an approval installed, so it moves too.
+            for key in ("approved_skill_path", "workspace_shadow"):
+                moved_path = _moved_path(manifest.get(key), old_key, new_key)
+                if moved_path is not None:
+                    manifest[key] = moved_path
+            _write_manifest(manifest_path, manifest)
+            moved += 1
     return moved
 
 
@@ -2101,22 +2136,30 @@ def _unlink_checked(path: Path) -> None:
         path.unlink()
 
 
-def _remove_unchanged_copy(installed: Path, approved_digests: object) -> bool:
+def _approval_digests(manifest: dict[str, Any]) -> dict[str, str] | None:
+    """The per-file digests an approval recorded, or None when it kept none that
+    can be compared: the skill was approved before they were recorded, or its
+    manifest was edited by hand."""
+    recorded = manifest.get("approved_content_digests")
+    if not isinstance(recorded, dict) or not recorded:
+        return None
+    if any(
+        not isinstance(name, str)
+        or not isinstance(digest, str)
+        or not _DIGEST_RE.fullmatch(digest)
+        for name, digest in recorded.items()
+    ):
+        return None
+    return recorded
+
+
+def _remove_unchanged_copy(installed: Path, approved_digests: dict[str, str]) -> bool:
     """Delete a new skill only while it matches its approval digests."""
     try:
         top = installed.lstat()
     except FileNotFoundError:
         return True
     if not _plain(top, directory=True):
-        return False
-    if not isinstance(approved_digests, dict) or not approved_digests:
-        return False
-    if any(
-        not isinstance(name, str)
-        or not isinstance(digest, str)
-        or not _DIGEST_RE.fullmatch(digest)
-        for name, digest in approved_digests.items()
-    ):
         return False
     present = _regular_files(installed)
     if present is None or not all(
@@ -2175,7 +2218,7 @@ def revert_skill_proposal(
         return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
     try:
         with _draft_lock(proposal.path):
-            return _revert_skill_proposal_locked(
+            result, notify = _revert_skill_proposal_locked(
                 memory_dir,
                 proposal_id,
                 expected_updated_at=expected_updated_at,
@@ -2193,6 +2236,11 @@ def revert_skill_proposal(
             "error": "revert_failed",
             "detail": f"Could not lock the proposal: {exc}",
         }
+    if notify:
+        # The skill index is told once the draft's lock has been released, so a
+        # callback that reads the draft never waits on this lock.
+        _notify_approved_skill()
+    return result
 
 
 def _revert_skill_proposal_locked(
@@ -2200,54 +2248,86 @@ def _revert_skill_proposal_locked(
     proposal_id: str,
     *,
     expected_updated_at: str | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """Put a rejected draft, or a new skill's approval, back to pending; an
     approval auto mode made becomes a rejection, so the agent cannot reinstall it.
     With ``expected_updated_at``, a draft decided or reverted since is refused.
 
     An approved update, in place or as a project fork, is refused: nothing
-    records the installed skill it started from. Each step can be retried: the
+    records the installed skill it started from. So is an approval that kept
+    no digests of what it installed, as long as the skill is still there: Undo
+    cannot tell which files are its own. Each step can be retried: the
     manifest keeps its decision until the skill is gone and the mark is settled.
+
+    Returns the result, and whether the skill index has to be told: the caller
+    does that once the draft's lock has been released.
     """
     proposal = find_skill_proposal(memory_dir, proposal_id)
     manifest_path = proposal.path / "manifest.json" if proposal else None
     manifest = _read_manifest(manifest_path) if manifest_path else None
     if proposal is None or manifest_path is None or manifest is None:
-        return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "not_found",
+        }, False
     if (
         expected_updated_at is not None
         and manifest.get("updated_at") != expected_updated_at
     ):
-        return {
-            "reverted": False,
-            "proposal_id": proposal.proposal_id,
-            "updated_at": manifest.get("updated_at"),
-            "error": "draft_changed",
-        }
+        return (
+            {
+                "reverted": False,
+                "proposal_id": proposal.proposal_id,
+                "updated_at": manifest.get("updated_at"),
+                "error": "draft_changed",
+            },
+            False,
+        )
 
     def refused(code: str) -> dict[str, Any]:
         return {"reverted": False, "proposal_id": proposal.proposal_id, "error": code}
 
     status = manifest.get("status")
     if status not in ("approved", "rejected"):
-        return refused("not_decided")
+        return refused("not_decided"), False
     if status == "approved" and proposal.operation != "create":
-        return refused("revert_unavailable")
+        return refused("revert_unavailable"), False
     installed = manifest.get("approved_skill_path") if status == "approved" else None
     if installed is not None and not isinstance(installed, str):
-        return refused("skill_changed")
+        return refused("skill_changed"), False
     # Submit never overwrites a rejected draft, so a resubmit cannot bring it back.
     rejects = status == "approved" and manifest.get("approved_by") == "auto"
+    # The index is told about a removed skill once the lock is released; until
+    # the removal has happened there is nothing to tell it about.
+    notify = False
     try:
         if installed:
             if not _installed_in_its_tier(manifest, Path(installed)):
-                return refused("skill_changed")
-            if not _remove_unchanged_copy(
-                Path(installed), manifest.get("approved_content_digests")
-            ):
-                return refused("skill_changed")
-        if status == "approved":
-            _notify_approved_skill()
+                return refused("skill_changed"), False
+            # A skill the user removed by hand leaves nothing to compare, so an
+            # approval that recorded no digests can still be undone.
+            if not _gone(Path(installed)):
+                approved_digests = _approval_digests(manifest)
+                if approved_digests is None:
+                    # Nothing says which files this approval wrote, so none are removed.
+                    return (
+                        {
+                            "reverted": False,
+                            "proposal_id": proposal.proposal_id,
+                            "error": "revert_unavailable",
+                            "detail": (
+                                "Nothing records the files this approval installed, so "
+                                f"Undo leaves the skill alone; delete it by hand: {installed}"
+                            ),
+                        },
+                        False,
+                    )
+                if not _remove_unchanged_copy(Path(installed), approved_digests):
+                    return refused("skill_changed"), False
+        # The skill is gone, so the index has to hear about it even if the
+        # writes below fail: the caller tells it once the lock is released.
+        notify = status == "approved"
         cluster_hash = str(manifest.get("cluster_hash", ""))
         shared = any(
             other.cluster_hash == cluster_hash
@@ -2278,13 +2358,16 @@ def _revert_skill_proposal_locked(
             manifest["rejected_at"] = manifest["updated_at"]
         _write_manifest(manifest_path, manifest)
     except OSError as exc:
-        return {**refused("revert_failed"), "detail": str(exc)}
-    return {
-        "reverted": True,
-        "proposal_id": proposal.proposal_id,
-        "status": manifest["status"],
-        "updated_at": manifest["updated_at"],
-    }
+        return {**refused("revert_failed"), "detail": str(exc)}, notify
+    return (
+        {
+            "reverted": True,
+            "proposal_id": proposal.proposal_id,
+            "status": manifest["status"],
+            "updated_at": manifest["updated_at"],
+        },
+        notify,
+    )
 
 
 def reject_skill_proposal(
