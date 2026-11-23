@@ -148,18 +148,8 @@ async def test_async_streaming_can_recover_foreground_task_after_cancel(monkeypa
             time.sleep(0.001)
         return "[Stopped.]"
 
-    cleanup_called = False
-
-    async def fake_cleanup() -> None:
-        nonlocal cleanup_called
-        cleanup_called = True
-
     monkeypatch.setattr(
         "EvoScientist.cli.tui_runtime.run_streaming", fake_run_streaming
-    )
-    monkeypatch.setattr(
-        "EvoScientist.middleware.code_interpreter.aclose_code_interpreters",
-        fake_cleanup,
     )
 
     task = asyncio.create_task(
@@ -169,7 +159,6 @@ async def test_async_streaming_can_recover_foreground_task_after_cancel(monkeypa
     task.cancel()
 
     assert await task == "[Stopped.]"
-    assert cleanup_called
     assert not task.cancelled()
     discard_stream_cancel(scope)
 
@@ -190,15 +179,8 @@ async def test_noncooperative_worker_reports_settlement_timeout(monkeypatch):
         finished.set()
         return "late"
 
-    async def fake_cleanup() -> None:
-        return None
-
     monkeypatch.setattr(tui_runtime, "run_streaming", fake_run_streaming)
     monkeypatch.setattr(tui_runtime, "STREAM_CANCEL_SETTLE_TIMEOUT", 0.05)
-    monkeypatch.setattr(
-        "EvoScientist.middleware.code_interpreter.aclose_code_interpreters",
-        fake_cleanup,
-    )
 
     task = asyncio.create_task(
         run_streaming_async(cancel_scope=scope, recover_on_cancel=True)

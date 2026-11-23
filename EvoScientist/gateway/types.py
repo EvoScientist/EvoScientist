@@ -314,3 +314,11 @@ class GraphGateway(Protocol):
         ``running`` / ``success`` / ``error`` / ``interrupted`` / ``unknown``;
         a failed read is treated as "not yet terminal" by the reader.
         """
+
+
+def runs_in_process(graph_gateway: Any) -> bool:
+    """Whether a session's runs execute in-process (the local gateway)."""
+    from .server import LangGraphServerGateway
+
+    execute_gateway = getattr(graph_gateway, "execute_gateway", graph_gateway)
+    return not isinstance(execute_gateway, LangGraphServerGateway)

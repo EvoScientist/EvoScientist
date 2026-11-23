@@ -14,15 +14,17 @@ the routes run them in a thread.
   changes a base URL only together with its stored key.
 - :func:`capture_restart_baseline` records the file when the server starts,
   before it builds any graph; :func:`pending_restart` names the fields that
-  changed since then. Graphs are also built later (another project, a new
-  run folder, one the cache dropped), and those can already use part of a
-  saved change; a restart applies it to every graph.
+  changed since then, except :data:`LIVE_FIELDS`, which apply at once.
+  Graphs are also built later (another project, a new run folder, one the
+  cache dropped), and those can already use part of a saved change; a
+  restart applies it to every graph.
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import logging
 import os
 import re
 from dataclasses import fields
@@ -57,6 +59,8 @@ from EvoScientist.config.settings import (
     set_config_values,
     validate_setting,
 )
+
+logger = logging.getLogger(__name__)
 
 # Fields that decide what the agent may run and who can reach the server.
 # The WebUI may be reachable from other machines, so they change only with
@@ -166,11 +170,24 @@ def capture_restart_baseline() -> None:
     _baseline = _file_digests(mapping)
 
 
+# Read anew at every AutoSkills submission and run, and the save itself
+# reconciles each project's cron, so the server needs no restart for them.
+LIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "memory_skill_synthesis_enabled",
+        "memory_skill_synthesis_mode",
+        "memory_skill_synthesis_cadence",
+        "memory_skill_synthesis_time",
+    }
+)
+
+
 def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     """Fields whose saved value changed since the server started.
 
     ``shadowed`` fields are left out: the environment overrides them, so a
-    restart would not apply the saved value either. Outside a server (no
+    restart would not apply the saved value either. So are
+    :data:`LIVE_FIELDS`, which apply without one. Outside a server (no
     baseline taken), the first call takes it.
     """
     capture_restart_baseline()
@@ -179,7 +196,9 @@ def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     return sorted(
         name
         for name, digest in now.items()
-        if digest != _baseline.get(name) and name not in shadowed
+        if digest != _baseline.get(name)
+        and name not in shadowed
+        and name not in LIVE_FIELDS
     )
 
 
@@ -338,7 +357,20 @@ def read_settings() -> dict[str, Any]:
         "revision": store.revision_of(raw),
         "config_error": config_error,
         "instance": local_secret.instance_id(),
+        "chatgpt": _chatgpt_view(),
     }
+
+
+def _chatgpt_view() -> dict[str, Any]:
+    """Whether a ChatGPT plan is signed in on this machine; never the token."""
+    try:
+        from ..llm import chatgpt_oauth
+
+        state = chatgpt_oauth.status()
+    except Exception:  # the sign-in module does not load; the page still does
+        logger.debug("ChatGPT sign-in state unavailable", exc_info=True)
+        return {"signed_in": False, "plan": None, "problem": "sign-in is unavailable"}
+    return {"signed_in": state.signed_in, "plan": state.plan, "problem": state.problem}
 
 
 # =============================================================================

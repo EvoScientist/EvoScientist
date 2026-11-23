@@ -119,14 +119,14 @@ def _shorten_path(path: str) -> str:
 
 
 def _agent_shell_notices(backend: str | None = None) -> list[str]:
-    """The agent shell's setup hint, the server's drift warnings, a server
+    """The server's ccproxy missing, the server's drift warnings, a server
     unavailable for this project, one reachable from other machines and where
     a ``--dangerous`` flag applies (for turns on *backend*), when they apply.
 
-    They also go to the terminal or the log, which Textual hides while the
-    app runs, so the TUI shows them as notifications.
+    They also go to the terminal, which Textual hides while the app runs, so
+    the TUI shows them as notifications. The agent shell's setup hint is
+    logged when the agent is built, and the TUI shows logged warnings.
     """
-    from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
     from ..langgraph_dev.registration import exposure_messages
     from .commands import dangerous_flag_note
@@ -148,7 +148,7 @@ def _agent_shell_notices(backend: str | None = None) -> list[str]:
     )
     older = lg_manager.OLDER_SERVER
     notices = [
-        setup_hint(),
+        lg_manager.CCPROXY_MISSING,
         older,
         drift,
         lg_manager.AGENT_SHELL_DRIFT,
@@ -340,6 +340,7 @@ async def _sync_tui_command_completion(
         update_model = getattr(app, "update_status_after_model_change", None)
         if callable(update_model):
             update_model(cfg.model, cfg.provider)
+        app._schedule_channel_start()
 
     # Rebind the runtime whenever the agent OR thread_id may have moved
     # — ``/new`` and ``/resume`` rotate ``app._conversation_tid``
@@ -725,8 +726,10 @@ def run_textual_interactive(
             self._resumed = resumed
             self._resume_warning = resume_warning
             self._channel_timer: Any = None
+            self._channel_start_task: asyncio.Task[None] | None = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
+            self._channel_autostart_done = False
             self._busy = False
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
@@ -817,6 +820,7 @@ def run_textual_interactive(
             task = asyncio.ensure_future(self._refresh_rubric_badge())
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+            self._schedule_channel_start()
 
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
@@ -1162,8 +1166,9 @@ def run_textual_interactive(
                 self._check_agent_shell, exclusive=True, group="agent-shell"
             )
 
-            # Auto-start channels — needs the agent, so defer to after load
+            # Poll queues once the initial agent load has settled.
             async def _deferred_start_channels():
+                """Start queue polling when the initial load settles."""
                 try:
                     await self._await_agent_ready()
                 except Exception:
@@ -1171,8 +1176,16 @@ def run_textual_interactive(
                         "Skipping channel auto-start because agent load failed",
                         exc_info=True,
                     )
-                    return
-                await self._start_channels()
+                finally:
+                    if (
+                        not self._exiting
+                        and not self._channel_start_stop.is_set()
+                        and self._channel_timer is None
+                    ):
+                        self._channel_timer = self.set_interval(
+                            0.1,
+                            self._poll_channel_queue,
+                        )
 
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
@@ -1220,9 +1233,31 @@ def run_textual_interactive(
 
         # ── Channel integration ────────────────────────────────
 
+        def _schedule_channel_start(self) -> None:
+            """Start channels in the background for a newly available agent."""
+            if self._exiting or self._channel_start_stop.is_set():
+                return
+            if (
+                self._channel_start_task is not None
+                and not self._channel_start_task.done()
+            ):
+                return
+            task = asyncio.create_task(self._start_channels())
+            self._channel_start_task = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
         async def _start_channels(self) -> None:
             """Auto-start channels if enabled in config."""
+            # Once per session, and only after an agent exists. The flag
+            # flips before the attempt, so a failed start is not retried
+            # and /channel stop is not undone by /new, /resume, or /model.
+            if self._channel_autostart_done:
+                return
             try:
+                if self._exiting or self._agent_loader.agent is None:
+                    return
+                self._channel_autostart_done = True
                 from ..config import load_config
 
                 cfg = await asyncio.to_thread(load_config)
@@ -1251,16 +1286,6 @@ def run_textual_interactive(
                 raise
             except Exception as e:
                 _channel_logger.debug(f"Channel auto-start failed: {e}")
-            finally:
-                if (
-                    not self._exiting
-                    and not self._channel_start_stop.is_set()
-                    and self._channel_timer is None
-                ):
-                    self._channel_timer = self.set_interval(
-                        0.1,
-                        self._poll_channel_queue,
-                    )
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
@@ -1732,6 +1757,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
+            received_media: list[str] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1767,9 +1793,13 @@ def run_textual_interactive(
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
             """
+            from ..EvoScientist import file_tool_routes
+            from ..gateway.runtime import sandbox_dangerous_mode
             from ..stream.display import (
+                forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
+                received_media_state,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1832,6 +1862,12 @@ def run_textual_interactive(
             _thinking_sent = False
             _todo_sent = False
             _media_sent: set[str] = set()
+            # Media paths resolve as the sandbox resolves them.
+            _media_dangerous = on_media_cb is not None and sandbox_dangerous_mode(
+                self._runtime_gateways.graph_gateway, config
+            )
+            _media_routes = file_tool_routes(self._dirs.workspace)
+            _received_files = received_media_state(received_media)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
@@ -2087,6 +2123,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                    _todo_sent = False
                 _hitl_round += 1
                 events = None
                 try:
@@ -2174,8 +2211,9 @@ def run_textual_interactive(
                         if (
                             on_todo_cb
                             and not _todo_sent
-                            and event_type == "tool_call"
+                            and event_type == "tool_result"
                             and event.get("name") == "write_todos"
+                            and event.get("success", True)
                             and state.todo_items
                         ):
                             if (
@@ -2189,20 +2227,18 @@ def run_textual_interactive(
                             on_todo_cb(state.todo_items)
                             _todo_sent = True
 
-                        if (
-                            on_media_cb
-                            and event_type == "tool_result"
-                            and event.get("success")
-                        ):
-                            tool_name = event.get("name", "")
-                            if tool_name in ("write_file", "read_file"):
-                                _forward_media_to_channel(
-                                    state,
-                                    tool_name,
-                                    _media_sent,
-                                    on_media_cb,
-                                    str(self._dirs.work_dir),
-                                )
+                        if on_media_cb:
+                            forward_media_result(
+                                state,
+                                event,
+                                _media_sent,
+                                on_media_cb,
+                                str(self._dirs.work_dir),
+                                media_dir=self._dirs.sandbox_media_dir,
+                                dangerous=_media_dangerous,
+                                routes=_media_routes,
+                                received_files=_received_files,
+                            )
 
                         # -- Remove loading spinner on first content event --
                         if not loading_removed and event_type in (
@@ -2319,21 +2355,6 @@ def run_textual_interactive(
                                     w = ToolCallWidget(tool_name, tool_args, tool_id)
                                     await container.mount(w)
                                     tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
 
                         elif event_type == "tool_result":
                             result_name = event.get("name", "unknown")
@@ -2353,14 +2374,17 @@ def run_textual_interactive(
                             ):
                                 completed_tool_order.append(matched_tid)
                                 await _collapse_completed_tools()
-                            # Update todo from results
-                            if (
-                                result_name in ("write_todos", "read_todos")
-                                and state.todo_items
+                            # Update todo from results; the first Task List
+                            # panel goes above its call.
+                            if result_name in ("write_todos", "read_todos") and (
+                                state.todo_items or todo_w is not None
                             ):
                                 if todo_w is None:
                                     todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
+                                    if tw is not None:
+                                        await container.mount(todo_w, before=tw)
+                                    else:
+                                        await container.mount(todo_w)
                                 else:
                                     todo_w.update_items(state.todo_items)
                             # Show "Analyzing results..." if all tools done, no text yet
@@ -2647,11 +2671,11 @@ def run_textual_interactive(
                                     except Exception:
                                         pass
                                     _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
+                                from ..backends import build_ask_user_resume
 
-                                _stream_input = Command(resume=result)
+                                _stream_input = build_ask_user_resume(
+                                    event.get("interrupt_id"), result
+                                )
                                 _approve_all_carry = (
                                     _turn_granted or self._hitl_auto_approve
                                 )
@@ -3257,17 +3281,6 @@ def run_textual_interactive(
                     on_request_sent=on_request_sent,
                 )
             except asyncio.CancelledError:
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup after cancellation failed",
-                        exc_info=True,
-                    )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
                 self._status_phase = ResearchPhase.IDLE
@@ -3438,6 +3451,7 @@ def run_textual_interactive(
                         else None,
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
+                        received_media=msg.media,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
@@ -4471,57 +4485,6 @@ def run_textual_interactive(
                     # Fallback for busy state with no specific phase (e.g. slash commands)
                     return f"Working...{elapsed}", busy_style
 
-    # ── Media forwarding helper (module-level) ──────────────
-
-    _MEDIA_EXTENSIONS = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".bmp",
-        ".webp",
-        ".svg",
-        ".pdf",
-        ".mp3",
-        ".wav",
-        ".mp4",
-    }
-
-    def _forward_media_to_channel(
-        state: StreamState,
-        tool_name: str,
-        media_sent: set[str],
-        send_fn: Any,
-        work_dir: str | None,
-    ) -> None:
-        """Check tool calls for media files and forward to channel.
-
-        Virtual paths resolve against ``work_dir``, the folder the agent
-        works in.
-        """
-        import os
-
-        from ..paths import resolve_virtual_path
-
-        arg_key = "path" if tool_name == "write_file" else "file_path"
-        for tc in reversed(state.tool_calls):
-            if tc.get("name") == tool_name:
-                p = tc.get("args", {}).get(arg_key, "")
-                if not p:
-                    p = tc.get("args", {}).get("path", "")
-                if p and p not in media_sent:
-                    ext = os.path.splitext(p)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = (
-                            str(resolve_virtual_path(work_dir, p)) if work_dir else p
-                        )
-                        if not os.path.isfile(real_path) and os.path.isfile(p):
-                            real_path = p
-                        if os.path.isfile(real_path):
-                            media_sent.add(p)
-                            send_fn(real_path)
-                break
-
     # ── Entry point ─────────────────────────────────────────
 
     async def _amain() -> None:
@@ -4611,22 +4574,15 @@ def run_textual_interactive(
                 resumed=resumed,
                 resume_warning=resume_warning,
             )
+            from .tui_logging import tui_warning_notifications
+
             try:
-                await app.run_async()
+                # Around run_async: only after _shutdown closes the driver is the
+                # alternate screen surely left, and buffered records print after that.
+                with tui_warning_notifications(app):
+                    await app.run_async()
             finally:
                 from .resume_hint import print_resume_hint
-
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup failed",
-                        exc_info=True,
-                    )
 
                 # Best-effort resume hint — guarded so failures here (e.g.
                 # DB teardown race during abnormal shutdown) cannot shadow

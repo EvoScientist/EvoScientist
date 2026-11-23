@@ -4,8 +4,8 @@ The langgraph-api host supports a top-level ``http`` key in
 ``langgraph.json`` that names an ASGI app to mount on the same
 process as the graph. It hosts the project registry and registration
 (``/api/workspaces``), the settings and local-secret routes, the
-AutoSkills reconcile, and the model registry the WebUI's ``/model``
-picker needs.
+AutoSkills reconcile, draft review and Run now, and the model registry the
+WebUI's ``/model`` picker needs.
 
 Why this lives here and not as a separate sidecar: the WebUI talks to
 ``EvoSci deploy``'s langgraph endpoint anyway, so one server keeps the
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -41,7 +42,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev import server_home, server_record, workspace_setup
+from EvoScientist.langgraph_dev import (
+    server_ccproxy,
+    server_home,
+    server_record,
+    workspace_move,
+    workspace_setup,
+)
 from EvoScientist.langgraph_dev.boundary import (
     BOUNDARY_ENV,
     BrowserBoundary,
@@ -71,9 +78,12 @@ async def get_models(_request: Request) -> JSONResponse:
     Ollama models when ``ollama_base_url`` is configured — same
     ``discover_ollama_models()`` call, same 1.5-s timeout, same
     fail-soft semantics (the probe returns ``[]`` on any error, never
-    raises). The TUI's "Custom Ollama model…" sentinel is intentionally
-    omitted — that's a widget-specific input affordance, not part of
-    the registry surface.
+    raises) — and by listing the models a configured ``custom-openai``
+    endpoint actually serves (``GET {base_url}/models``). A successful
+    listing replaces the static ``custom-openai`` defaults in place; a
+    failed or empty probe leaves them. The TUI's "Custom Ollama
+    model…" sentinel is intentionally omitted — that's a widget-specific
+    input affordance, not part of the registry surface.
 
     ``default`` reflects the deployment's currently-configured fallback
     (``config.yaml``'s ``model`` / ``provider`` — what ``/model reset``
@@ -81,8 +91,9 @@ async def get_models(_request: Request) -> JSONResponse:
     the registry, so the picker can still label it.
 
     Uses ``get_effective_config()`` (not ``load_config()``) so env-var
-    overrides like ``OLLAMA_BASE_URL`` from ``_ENV_MAPPINGS`` are
-    honored — matching the deploy's actual model-building behavior.
+    overrides like ``OLLAMA_BASE_URL`` and ``CUSTOM_OPENAI_BASE_URL``
+    from ``_ENV_MAPPINGS`` are honored — matching the deploy's actual
+    model-building behavior.
     Offloaded to a thread because ``get_effective_config()`` reads the
     config file, blocking I/O that langgraph-dev's ``blockbuster``
     middleware refuses on the async event loop (would surface as a 500).
@@ -93,6 +104,8 @@ async def get_models(_request: Request) -> JSONResponse:
         for name, model_id, provider in await list_model_picker_entries(
             getattr(cfg, "ollama_base_url", None),
             include_custom_ollama=False,
+            custom_openai_base_url=getattr(cfg, "custom_openai_base_url", None),
+            custom_openai_api_key=getattr(cfg, "custom_openai_api_key", None),
         )
     ]
     return JSONResponse(
@@ -315,6 +328,8 @@ async def register_workspace(request: Request) -> JSONResponse:
     exposure = {"host": cfg.langgraph_dev_host, "tunnel": tunnel_host() is not None}
     try:
         async with workspace_setup.registration_lock():
+            if (refused := await _moving_away(workspace)) is not None:
+                return refused
             await workspace_setup.register_workspace(SessionDirs(workspace))
     except workspace_setup.FolderMissingError:
         return JSONResponse({"error": "folder_missing"}, status_code=400)
@@ -324,6 +339,90 @@ async def register_workspace(request: Request) -> JSONResponse:
             {"error": "setup_failed", "detail": str(exc)}, status_code=500
         )
     return JSONResponse({"workspace_dir": workspace.key} | exposure)
+
+
+async def _moving_away(workspace: Workspace) -> JSONResponse | None:
+    """``409 move_pending`` for the folder a move not done yet leaves."""
+    from EvoScientist.langgraph_dev.registry import REGISTRY
+
+    pending = await asyncio.to_thread(REGISTRY.pending_move)
+    if pending is None or not workspace_move.same_key(pending[0], workspace.key):
+        return None
+    return JSONResponse(
+        {
+            "error": "move_pending",
+            "detail": f"{pending[0]} is being moved to {pending[1]}; finish the "
+            "move first.",
+        },
+        status_code=409,
+    )
+
+
+async def move_workspace(request: Request) -> JSONResponse:
+    """Move the registered project ``old`` to the folder ``new`` (the body's
+    fields), or finish its move when one was cut short: its threads,
+    scheduled tasks, assistants, memory and AutoSkills proposals follow it
+    (see :mod:`~EvoScientist.langgraph_dev.workspace_move`). Answers once it
+    is done with ``{"workspace_dir", "threads", "tasks", "memory",
+    "proposals", "warnings", "resumed", "moved"}`` (``resumed``: it
+    finished, or repeated, a move asked before; ``moved`` False: it moved
+    nothing, as the old folder is a project again). A move that cannot be made answers
+    ``409`` with ``error`` naming why and ``detail``; a folder that cannot be
+    read ``400 invalid_path``; a failure ``500 move_failed`` with ``detail``
+    and, when it could be read, ``pending`` (whether the move waits to be
+    finished). Needs the local secret.
+    """
+    from EvoScientist.langgraph_dev.folder_check import read_workspace_or_none
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    fields = body if isinstance(body, dict) else {}
+    old = await asyncio.to_thread(read_workspace_or_none, fields.get("old"))
+    new = await asyncio.to_thread(read_workspace_or_none, fields.get("new"))
+    if old is None or new is None:
+        return JSONResponse({"error": "invalid_path"}, status_code=400)
+    try:
+        async with workspace_setup.registration_lock():
+            report = await workspace_move.move_project(old, new)
+    except workspace_move.MoveRefusedError as exc:
+        return JSONResponse({"error": exc.code, "detail": str(exc)}, status_code=409)
+    except Exception as exc:
+        from EvoScientist.langgraph_dev.registry import REGISTRY
+
+        logger.exception("Could not move %s to %s.", old.key, new.key)
+        failed: dict[str, object] = {"error": "move_failed", "detail": str(exc)}
+        # Whether a move waits to be finished; unknown when the registry
+        # cannot be read either, and the client says it may.
+        with contextlib.suppress(Exception):
+            pending = await asyncio.to_thread(REGISTRY.pending_move)
+            failed["pending"] = pending is not None
+        return JSONResponse(failed, status_code=500)
+    return JSONResponse(
+        {
+            "workspace_dir": report.workspace_dir,
+            "threads": report.threads,
+            "tasks": report.tasks,
+            "memory": report.memory,
+            "proposals": report.proposals,
+            "warnings": report.warnings,
+            "resumed": report.resumed,
+            "moved": report.moved,
+        }
+    )
+
+
+async def ensure_ccproxy(request: Request) -> JSONResponse:
+    """Start the server's ccproxy for a session that found nothing answering
+    on ``ccproxy_port``: ``{"serving": <bool>, "detail": <why not, or
+    null>}``. Needs the local secret."""
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    detail = await asyncio.to_thread(server_ccproxy.ensure_for_session)
+    return JSONResponse({"serving": detail is None, "detail": detail})
 
 
 async def reconcile_autoskills(request: Request) -> JSONResponse:
@@ -341,6 +440,92 @@ async def reconcile_autoskills(request: Request) -> JSONResponse:
             {"error": "reconcile_failed", "detail": str(exc)}, status_code=500
         )
     return JSONResponse({"projects": count, "failed": failed})
+
+
+async def list_autoskill_proposals(request: Request) -> Response:
+    """Every served project's AutoSkills drafts, with their files and a pending
+    draft's texts (:func:`~EvoScientist.langgraph_dev.autoskills_api.list_drafts`)."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    status, body = await asyncio.to_thread(
+        autoskills_api.list_drafts_body, request.query_params.get("status") or None
+    )
+    return Response(body, status_code=status, media_type="application/json")
+
+
+async def get_autoskill_proposal_file(request: Request) -> Response:
+    """One file of a draft as text; ``installed=1`` reads the installed copy
+    the approval would start from, for an update's diff."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    status, body = await asyncio.to_thread(
+        autoskills_api.read_draft_file,
+        request.path_params["proposal_id"],
+        request.query_params.get("path", ""),
+        installed=request.query_params.get("installed") == "1",
+    )
+    if isinstance(body, str):
+        return Response(body, media_type="text/plain; charset=utf-8")
+    return JSONResponse(body, status_code=status)
+
+
+async def _json_object(request: Request) -> dict | None:
+    """The request's JSON object (an empty body counts as one), or None."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except (ValueError, RecursionError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
+    """Approve, reject or revert one AutoSkills draft; needs the local secret.
+
+    See :func:`~EvoScientist.langgraph_dev.autoskills_api.decide`.
+    """
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    body = await _json_object(request)
+    if body is None:
+        return JSONResponse({"error": "invalid_body"}, status_code=400)
+    status, payload = await asyncio.to_thread(
+        autoskills_api.decide,
+        request.path_params["proposal_id"],
+        action,
+        scope=body.get("scope"),
+        expected_updated_at=body.get("expected_updated_at"),
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+async def approve_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "approve")
+
+
+async def reject_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "reject")
+
+
+async def revert_autoskill_proposal(request: Request) -> JSONResponse:
+    return await _decide_on_proposal(request, "revert")
+
+
+async def post_autoskills_run(request: Request) -> JSONResponse:
+    """Run AutoSkills now for the project in the body's ``workspace_dir``;
+    needs the local secret. See
+    :func:`~EvoScientist.langgraph_dev.autoskills_api.run_now`."""
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    body = await _json_object(request)
+    if body is None:
+        return JSONResponse({"error": "invalid_body"}, status_code=400)
+    status, payload = await autoskills_api.run_now(body.get("workspace_dir"))
+    return JSONResponse(payload, status_code=status)
 
 
 async def _unregister(workspace: Workspace) -> JSONResponse:
@@ -495,10 +680,23 @@ async def _lifespan(_app: Starlette):
     # graphs and started its cron scheduler and run workers, and before it
     # serves requests; the file I/O goes to a thread because blockbuster
     # refuses it on the event loop.
+    # First: runs that start meanwhile wait for it, and the server marks
+    # itself serving only once ccproxy serves.
+    await asyncio.to_thread(server_ccproxy.start_serving)
     await asyncio.to_thread(load_local_secret)
+    # Before the setups: a move cut short re-points the threads and tasks
+    # they set up.
+    async with workspace_setup.registration_lock():
+        await workspace_move.resume_pending_move()
     await workspace_setup.set_up_at_start()
+    async with workspace_setup.registration_lock():
+        await workspace_move.move_again_where_lost()
     await asyncio.to_thread(server_record.mark_serving)
-    yield
+    try:
+        yield
+    finally:
+        if server_ccproxy.needed():
+            await asyncio.to_thread(server_ccproxy.request_stop)
 
 
 def _build_app() -> Starlette:
@@ -525,7 +723,33 @@ def _build_app() -> Starlette:
             Route("/api/workspaces", list_workspaces, methods=["GET"]),
             Route("/api/workspaces", register_workspace, methods=["POST"]),
             Route("/api/workspaces", unregister_workspace, methods=["DELETE"]),
+            Route("/api/workspaces/move", move_workspace, methods=["POST"]),
             Route("/api/autoskills/reconcile", reconcile_autoskills, methods=["POST"]),
+            Route("/api/autoskills/run", post_autoskills_run, methods=["POST"]),
+            Route(
+                "/api/autoskills/proposals", list_autoskill_proposals, methods=["GET"]
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/file",
+                get_autoskill_proposal_file,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/approve",
+                approve_autoskill_proposal,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/reject",
+                reject_autoskill_proposal,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/autoskills/proposals/{proposal_id}/revert",
+                revert_autoskill_proposal,
+                methods=["POST"],
+            ),
+            Route("/api/ccproxy/ensure", ensure_ccproxy, methods=["POST"]),
             Route("/api/instance", get_instance, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
             Route("/api/settings", get_settings, methods=["GET"]),
@@ -540,10 +764,11 @@ def _build_app() -> Starlette:
 
 # langgraph-api imports this app before its runtime loads the store, so the
 # server (the process working in the server home) takes its data folder's lock,
-# records itself for its clients and backs the store up first; anything else
+# records itself for its clients, ends a ccproxy its predecessor left and backs
+# the store up first (quickly: langgraph-api times this import); anything else
 # importing this module does not.
 if server_home.serves_from_home():
     server_home.hold_server_lock()
-    server_record.write_record()
+    server_ccproxy.start(server_record.write_record())
     server_home.back_up_store()
 app = _build_app()

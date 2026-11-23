@@ -19,6 +19,7 @@
 | [Grading a run against a rubric](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/rubric.md#grading-a-run-against-a-rubric)   | Acceptance criteria for single-shot runs (`--rubric`) and for threads in the TUI / interactive CLI (`/rubric`): what the grader checks, when grading is deferred, exit codes and limits |
 | [Working toward a goal](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/goal.md#working-toward-a-goal) | `/goal` in the TUI / interactive CLI: an objective with drafted acceptance criteria you review, graded every turn until met; amend, pause, resume and clear |
 | [Retrying transient model failures](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/model-retry.md#retrying-transient-model-failures) | What a transient provider failure is, the per-call wait budget for interactive and unattended runs and how a call that uses it up ends retries for the rest of its run (`model_retry_wait_seconds`, `auto_mode_retry_wait_seconds`), and what each surface shows |
+| [Custom OpenAI- and Anthropic-compatible endpoints](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/custom-endpoints.md#custom-openai--and-anthropic-compatible-endpoints) | Point the `custom-openai` / `custom-anthropic` providers at a gateway, vLLM, LM Studio or an internal proxy: the four settings and their env vars (and which one wins), which model id actually reaches the endpoint, and how keys are handled when the endpoint needs none |
 
 ## Contributing a Recipe
 

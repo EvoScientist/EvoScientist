@@ -203,6 +203,19 @@ class TestOAuthModeReconcile:
 
         assert config.openai_auth_mode == "oauth"
 
+    def test_reconcile_preserves_fallback_anthropic_oauth(self):
+        from EvoScientist.config.onboard.wizard import _reconcile_oauth_modes
+
+        config = EvoScientistConfig(
+            provider="minimax",
+            model_fallbacks="claude-sonnet-4-5:anthropic",
+            anthropic_auth_mode="oauth",
+        )
+
+        _reconcile_oauth_modes(config)
+
+        assert config.anthropic_auth_mode == "oauth"
+
 
 # =============================================================================
 # Test render_progress
@@ -1160,6 +1173,108 @@ class TestStepModel:
             mock_q.select.return_value.ask.return_value = None
             with pytest.raises(KeyboardInterrupt):
                 _step_model(config, "anthropic")
+
+    def test_custom_openai_offers_discovered_names(self, monkeypatch):
+        """The probe prefers the environment key and offers the listed IDs verbatim."""
+        from EvoScientist.config.onboard.steps import _step_model
+
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "sk-from-env")
+        monkeypatch.delenv("CUSTOM_OPENAI_BASE_URL", raising=False)
+        config = EvoScientistConfig(
+            custom_openai_base_url="https://llm.test/v1",
+            custom_openai_api_key="sk-from-config",
+        )
+        seen: dict[str, object] = {}
+
+        def fake_list(base_url, api_key=None, *, timeout=5.0):
+            seen["base_url"] = base_url
+            seen["api_key"] = api_key
+            return ["fake-agent", "other-model"]
+
+        with (
+            patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
+            patch(
+                "EvoScientist.config.onboard.steps.list_custom_openai_models",
+                side_effect=fake_list,
+            ),
+        ):
+            mock_q.select.return_value.ask.return_value = "fake-agent"
+            result = _step_model(config, "custom-openai")
+
+        assert result == "fake-agent"
+        assert seen == {
+            "base_url": "https://llm.test/v1",
+            "api_key": "sk-from-env",
+        }
+        choices = mock_q.select.call_args.kwargs["choices"]
+        assert [choice.value for choice in choices] == [
+            "fake-agent",
+            "other-model",
+            "__custom__",
+        ]
+        assert [choice.title for choice in choices[:-1]] == [
+            "fake-agent",
+            "other-model",
+        ]
+
+    @pytest.mark.parametrize(
+        ("names", "message"),
+        [
+            (["custom-model"], "✓ The endpoint listed 1 model(s)"),
+            ([], "✗ No models listed, showing the defaults"),
+        ],
+    )
+    def test_custom_openai_reports_progress_before_probe_and_result_after(
+        self, names, message
+    ):
+        from EvoScientist.config.onboard import steps
+
+        events = []
+
+        def print_status(text, **kwargs):
+            events.append(text)
+
+        def discover(*args):
+            events.append("probe")
+            return names
+
+        config = EvoScientistConfig(custom_openai_base_url="https://llm.test/v1")
+        with (
+            patch.object(steps.console, "print", side_effect=print_status),
+            patch.object(steps, "list_custom_openai_models", side_effect=discover),
+            patch.object(steps, "questionary") as choices,
+        ):
+            choices.select.return_value.ask.return_value = "custom-model"
+            steps._step_model(config, "custom-openai")
+
+        assert len(events) == 3
+        assert "Checking endpoint for models..." in events[0]
+        assert events[1] == "probe"
+        assert message in events[2]
+
+    def test_custom_openai_keeps_registry_defaults_when_discovery_empty(self):
+        from EvoScientist.config.onboard.steps import _step_model
+        from EvoScientist.llm.models import get_models_for_provider
+
+        config = EvoScientistConfig(
+            custom_openai_base_url="https://llm.test/v1",
+            custom_openai_api_key="sk-test",
+        )
+        with (
+            patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
+            patch(
+                "EvoScientist.config.onboard.steps.list_custom_openai_models",
+                return_value=[],
+            ),
+        ):
+            mock_q.select.return_value.ask.return_value = "gpt-6-luna"
+            result = _step_model(config, "custom-openai")
+
+        assert result == "gpt-6-luna"
+        choices = mock_q.select.call_args.kwargs["choices"]
+        assert [choice.value for choice in choices] == [
+            name for name, _ in get_models_for_provider("custom-openai")
+        ] + ["__custom__"]
 
 
 class TestStepWorkspace:
@@ -2253,6 +2368,10 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.steps.console"),
             patch("EvoScientist.config.onboard.channels.console"),
             patch("EvoScientist.config.onboard.helpers.console"),
+            patch(
+                "EvoScientist.config.onboard.steps.list_custom_openai_models",
+                return_value=[],
+            ),
         ):
             mock_load.return_value = EvoScientistConfig()
             mock_q.select.return_value.ask.side_effect = [

@@ -23,30 +23,25 @@ class _ToolSelectionSuppressor:
         self._sink = sink
         self._buffering = False
         self._buffer = ""
-        self._was_active = False
 
-    def snapshot(self) -> tuple[bool, str, bool]:
-        return (self._buffering, self._buffer, self._was_active)
+    def snapshot(self) -> tuple[bool, str]:
+        return (self._buffering, self._buffer)
 
-    def restore(self, snapshot: tuple[bool, str, bool]) -> None:
-        self._buffering, self._buffer, self._was_active = snapshot
+    def restore(self, snapshot: tuple[bool, str]) -> None:
+        self._buffering, self._buffer = snapshot
 
     def observe_tool_block(self, name: str) -> bool:
-        if name == "ToolSelectionResponse":
-            self._was_active = True
-            return True
-        return False
+        return name == "ToolSelectionResponse"
 
     def process_text(self, text: str) -> tuple[bool, list[dict[str, Any]], str]:
-        events = self._emit_selection_if_ready(text)
+        events = self.flush_selection()
         if not text:
             return False, events, ""
 
         if self._buffering:
             self._buffer += text
             json_kind = self._json_buffer_kind(self._buffer)
-            if json_kind == "selector" and self._selector_context_active():
-                self._was_active = True
+            if json_kind == "selector" and self._selector_call_active():
                 self._buffering = False
                 self._buffer = ""
                 return True, events, ""
@@ -64,13 +59,12 @@ class _ToolSelectionSuppressor:
 
         stripped = text.strip()
         if (
-            self._selector_context_active()
+            self._selector_call_active()
             and stripped.startswith("{")
             and ('"tools"' in stripped or len(stripped) <= 10)
         ):
             json_kind = self._json_buffer_kind(stripped)
             if json_kind == "selector":
-                self._was_active = True
                 return True, events, ""
             if json_kind == "complete":
                 return False, events, text
@@ -82,13 +76,10 @@ class _ToolSelectionSuppressor:
 
     def process_thinking(self, text: str) -> tuple[bool, list[dict[str, Any]]]:
         """Suppress selector-model reasoning while preserving pending UI events."""
-        events = self._emit_selection_if_ready(text)
+        events = self.flush_selection()
         if not text:
             return False, events
-        if self._selector_call_active():
-            self._was_active = True
-            return True, events
-        return False, events
+        return self._selector_call_active(), events
 
     @staticmethod
     def _json_buffer_kind(text: str) -> str:
@@ -105,19 +96,16 @@ class _ToolSelectionSuppressor:
             return "selector"
         return "complete"
 
-    def _selector_context_active(self) -> bool:
-        if self._was_active:
-            return True
-        return self._selector_call_active() or self._selection_pending()
-
     def _selector_call_active(self) -> bool:
         return bool(self._sink.tool_selection_active)
 
-    def _selection_pending(self) -> bool:
-        return bool(self._sink.tool_selection_pending())
-
     def flush_selection(self) -> list[dict[str, Any]]:
-        return self._emit_selection_if_ready("")
+        # The sink alone says when a selection is ready: the selector's own
+        # model output is kept out of the stream, so it cannot be waited for.
+        _had_pending, render = self._sink.consume_tool_selection()
+        if render is None:
+            return []
+        return [self._emitter.tool_selection(render).data]
 
     def flush_pending_text(self) -> str:
         if not self._buffering:
@@ -126,17 +114,3 @@ class _ToolSelectionSuppressor:
         self._buffering = False
         self._buffer = ""
         return replay
-
-    def _emit_selection_if_ready(self, text: str) -> list[dict[str, Any]]:
-        if not self._was_active:
-            return []
-        had_pending, render = self._sink.consume_tool_selection()
-        if had_pending:
-            # Pending consumed (once) — clear our observation flag regardless of
-            # whether the sink chose to render it (dedup / kept-all cases).
-            self._was_active = False
-            if render is not None:
-                return [self._emitter.tool_selection(render).data]
-        elif text:
-            self._was_active = False
-        return []

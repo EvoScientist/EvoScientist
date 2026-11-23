@@ -41,6 +41,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.exceptions import ModelAuthenticationError
 
 if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
@@ -319,6 +320,10 @@ def _normalize(
         err_type=_extract_error_type(exc),
         request_id=request_id,
     )
+
+
+class MissingApiKeyError(ModelAuthenticationError, ValueError):
+    """The chat model has no API key, so the request cannot authenticate."""
 
 
 class ErrorNormalizationMiddleware(AgentMiddleware):

@@ -228,10 +228,6 @@ class ToolSelectionView(Protocol):
         """Whether a selection LLM call is currently in flight."""
         ...
 
-    def tool_selection_pending(self) -> bool:
-        """Whether an unconsumed selection result is waiting to render."""
-        ...
-
     def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
         """Consume the pending selection once, applying dedup-vs-last-emitted.
 
@@ -242,6 +238,10 @@ class ToolSelectionView(Protocol):
           should not render (it kept every tool, or duplicates the last one
           shown). ``None`` with ``had_pending=True`` still counts as consumed.
         """
+        ...
+
+    def discard_tool_selection(self) -> None:
+        """Drop a pending selection without showing it or counting it as shown."""
         ...
 
 
@@ -278,11 +278,11 @@ class NoOpSink:
     def tool_selection_active(self) -> bool:
         return False
 
-    def tool_selection_pending(self) -> bool:
-        return False
-
     def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
         return (False, None)
+
+    def discard_tool_selection(self) -> None:
+        pass
 
 
 NO_OP_SINK = NoOpSink()

@@ -38,6 +38,16 @@ def config_file() -> Path:
 
 @pytest.fixture
 def server(monkeypatch, no_workspace_setup):
+    from EvoScientist.langgraph_dev import workspace_setup
+
+    async def no_reconcile():
+        return 0, []
+
+    # A saved AutoSkills setting reconciles every project's cron in the
+    # background, which needs the runtime's store.
+    monkeypatch.setattr(
+        workspace_setup, "reconcile_autoskills_everywhere", no_reconcile
+    )
     monkeypatch.setattr(local_secret, "_value", None)
     # As the server's start does (langgraph_dev.checkpointer).
     settings_api.capture_restart_baseline()
@@ -143,6 +153,7 @@ class TestGet:
             "revision",
             "config_error",
             "instance",
+            "chatgpt",
         }
         assert body["revision"] is None
         assert "dangerous_mode" in body["read_only"]
@@ -195,6 +206,65 @@ class TestGet:
         assert "sk-x" not in str(body["config_error"])
         assert body["setup_needed"] is False
         assert body["restart_required"] is False
+
+
+class TestChatGPTSignIn:
+    """The page shows whether a ChatGPT plan is signed in, never the token."""
+
+    def test_not_signed_in(self, server, monkeypatch, tmp_path):
+        monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+        body = server.get("/api/settings").json()
+        assert body["chatgpt"] == {"signed_in": False, "plan": None, "problem": None}
+
+    def test_signed_in_shows_the_plan_and_no_token(self, server, monkeypatch, tmp_path):
+        from datetime import UTC, datetime, timedelta
+
+        from langchain_openai.chatgpt_oauth import (
+            _ChatGPTToken,
+            _FileChatGPTOAuthTokenProvider,
+        )
+
+        from EvoScientist.llm import chatgpt_oauth
+
+        monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+        path = chatgpt_oauth.token_path()
+        path.parent.mkdir(parents=True)
+        _FileChatGPTOAuthTokenProvider(path=path).save(
+            _ChatGPTToken(
+                access_token="tok-access-secret",
+                refresh_token="tok-refresh-secret",
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+                account_id="acct_1",
+                plan_type="plus",
+            )
+        )
+
+        response = server.get("/api/settings")
+
+        assert response.json()["chatgpt"] == {
+            "signed_in": True,
+            "plan": "plus",
+            "problem": None,
+        }
+        assert "tok-access-secret" not in response.text
+        assert "tok-refresh-secret" not in response.text
+
+    def test_page_loads_when_the_sign_in_module_does_not(self, server, monkeypatch):
+        import sys
+
+        import EvoScientist.llm as llm_pkg
+
+        monkeypatch.delattr(llm_pkg, "chatgpt_oauth", raising=False)
+        monkeypatch.setitem(sys.modules, "EvoScientist.llm.chatgpt_oauth", None)
+
+        response = server.get("/api/settings")
+
+        assert response.status_code == 200
+        assert response.json()["chatgpt"] == {
+            "signed_in": False,
+            "plan": None,
+            "problem": "sign-in is unavailable",
+        }
 
 
 class TestSetupNeeded:
@@ -316,6 +386,37 @@ class TestPatch:
         assert response.status_code == 200
         assert response.json()["restart_required"] is True
         assert field in response.json()["restart_fields"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("memory_skill_synthesis_enabled", False),
+            ("memory_skill_synthesis_mode", "auto"),
+            ("memory_skill_synthesis_cadence", "nightly"),
+            ("memory_skill_synthesis_time", "04:30"),
+        ],
+    )
+    def test_autoskills_fields_apply_without_restart(
+        self, server, secret, field, value
+    ):
+        with _no_checks():
+            response = server.patch(
+                "/api/settings", json={field: value}, headers=secret
+            )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] is False
+        assert field not in server.get("/api/settings").json()["restart_fields"]
+
+    def test_scheduler_timezone_still_needs_a_restart(self, server, secret):
+        """Scheduled tasks read it from the server's cached configuration."""
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                json={"scheduler_default_timezone": "Asia/Tokyo"},
+                headers=secret,
+            )
+        assert response.status_code == 200
+        assert "scheduler_default_timezone" in response.json()["restart_fields"]
 
     def test_default_workdir_needs_no_restart(self, server, secret):
         """The server serves every registered project; only clients read it."""

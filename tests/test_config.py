@@ -808,6 +808,25 @@ class TestPriorityChain:
             == 300
         )
 
+    def test_code_interpreter_timeout_invalid_falls_back(self):
+        """A non-positive value would stop every agent build."""
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=0).code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=-5).code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout="abc").code_interpreter_timeout
+            == 60
+        )
+        assert (
+            EvoScientistConfig(code_interpreter_timeout=2.5).code_interpreter_timeout
+            == 2.5
+        )
+
     def test_backend_allowed_origins_yaml_list_normalized_to_csv(self):
         config = EvoScientistConfig(
             backend_allowed_origins=["https://a.example", "https://b.example"]
@@ -1099,6 +1118,19 @@ class TestApplyConfigToEnv:
         apply_config_to_env(config)
 
         assert os.environ.get("OLLAMA_BASE_URL") == "http://existing:11434"
+
+    def test_anthropic_auth_mode_flag_reaches_fresh_resolve(
+        self, clean_env, temp_config_dir
+    ):
+        """The server re-resolves config from file + env only, and starts
+        ccproxy by what it finds."""
+        save_config(EvoScientistConfig(anthropic_auth_mode="api_key"))
+        resolved = get_effective_config()
+        resolved.anthropic_auth_mode = "oauth"
+
+        apply_config_to_env(resolved)
+
+        assert get_effective_config().anthropic_auth_mode == "oauth"
 
     def test_openai_auth_mode_oauth_is_exported(self, clean_env):
         apply_config_to_env(EvoScientistConfig(openai_auth_mode="oauth"))

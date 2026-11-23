@@ -31,7 +31,9 @@ Events:
     the port), ``other_data_folder`` (an EvoScientist backend of another data
     folder answers on it) or ``older_server`` (a backend too old to say whose
     it is answers on it).
-  - ``ccproxy_failed``: empty.
+  - ``ccproxy_failed``: ``log_file`` (and ``exit_code`` when it exited):
+    the started backend could not start the ccproxy Anthropic's OAuth goes
+    through, so it did not serve.
   - ``backend_start_failed``: ``lock_file``, ``log_file``, or neither.
     ``lock_file``: the start lock another EvoScientist process held too
     long or that could not be used, or the data folder's server lock, held
@@ -83,15 +85,14 @@ How a program runs the command:
   quitting. A terminal, ``/dev/null``, ``NUL`` or a file as stdin is ignored;
   the command then stops on Ctrl+C or SIGTERM.
 - When the program exits without closing stdin, the command still stops: on
-  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend,
-  and a ccproxy this command started, run in a job object that ends them
-  together with this command.
+  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend
+  (and the ccproxy it starts) runs in a job object that ends it together with
+  this command.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import signal
@@ -105,7 +106,7 @@ from typing import Any
 from ..langgraph_dev.assistants import chat_assistant_id
 from ..langgraph_dev.registration import ServerExposure, exposure_messages
 from ..paths import Workspace
-from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe
+from ..setup.protocol import PROTOCOL, JsonEmitter, stdin_is_pipe, watch_stdin
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ ERROR_CODES = frozenset(
 
 _LAUNCHER_CODES = {
     "port_conflict": "port_conflict",
+    "ccproxy_failed": "ccproxy_failed",
     "backend_start_failed": "backend_start_failed",
     "folder_missing": "folder_missing",
     "server_outdated": "server_outdated",
@@ -140,8 +142,6 @@ HEALTH_INTERVAL = 2.0
 HEALTH_FAILURES = 3
 # How often the wait loop looks at the stop request and the owned process.
 _TICK = 0.5
-# A stdin line longer than this is not a command and is dropped.
-_MAX_LINE = 65536
 _STDIN_THREAD = "deploy-json-stdin"
 # How long ``--tunnel`` waits for cloudflared's URL, as ``read_tunnel_url``.
 _TUNNEL_WAIT = 35.0
@@ -242,39 +242,6 @@ def _take_stdin() -> int:
     return private
 
 
-def _watch_stdin(fd: int, stop: threading.Event) -> None:
-    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
-
-    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
-    buffer lock, which interpreter shutdown may need.
-    """
-    pending = b""
-    try:
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            if any(_is_stop(line) for line in lines):
-                break
-            if len(pending) > _MAX_LINE:
-                pending = b""  # not a command line; drop it
-    except OSError as exc:
-        logger.debug(f"stdin read failed: {exc}")
-    finally:
-        os.close(fd)
-    stop.set()
-
-
-def _is_stop(line: bytes) -> bool:
-    try:
-        message = json.loads(line)
-    except ValueError:
-        return False
-    return isinstance(message, dict) and message.get("command") == "stop"
-
-
 class _Run:
     def __init__(self, events: _Events, stop: threading.Event) -> None:
         self.events = events
@@ -286,7 +253,6 @@ class _Run:
         # The log of the backend this command uses (an attached older
         # release's writes its own).
         self.log_file: Any = None
-        self.ccproxy: Any = None
         self.job: Any = None
 
     def start(
@@ -408,7 +374,7 @@ class _Run:
             tunnel=tunnel,
             job=lambda: self.job,
             any_port=True,
-            before_start=lambda: self._before_start(config),
+            before_start=self._before_start,
             cancelled=self.stop.is_set,
         )
         if result.started:
@@ -421,25 +387,11 @@ class _Run:
         self.log_file = lgm.log_file_of(result.record)
         return result
 
-    def _before_start(self, config: Any) -> None:
-        """Right before this command starts a backend: the job it joins and,
-        with Anthropic OAuth, the ccproxy it routes through (another
-        session's running one is reused and left alone)."""
+    def _before_start(self) -> None:
+        """Right before this command starts a backend: the job it joins."""
         from .backend_job import backend_job
 
-        # First, so ccproxy joins it too: Node's job lets children break away,
-        # so a ccproxy outside ours would outlive a killed app.
         self.job = backend_job()
-        if config.anthropic_auth_mode != "oauth":
-            return
-        from ..ccproxy_manager import maybe_start_ccproxy
-
-        try:
-            self.ccproxy = maybe_start_ccproxy(config)
-        except RuntimeError as exc:
-            raise _Failure("ccproxy_failed", f"ccproxy startup failed: {exc}") from exc
-        if self.ccproxy is not None and self.job is not None:
-            self.job.adopt(self.ccproxy)
 
     def _wait_for_tunnel_url(self) -> str | None:
         """The tunnel URL, in short waits that check for a stop between them;
@@ -504,9 +456,9 @@ class _Run:
                 )
 
     def cleanup(self) -> None:
-        """Stop what this command started: the backend, then ccproxy, then
-        close the job (which would end a backend the stop missed). Each step
-        runs even when the one before raised; ``run_json`` reports the error."""
+        """Stop what this command started: the backend, then close the job
+        (which would end a backend the stop missed). Each step runs even when
+        the one before raised; ``run_json`` reports the error."""
         from ..langgraph_dev import manager as lgm
 
         try:
@@ -517,14 +469,8 @@ class _Run:
                 if proc is not None:
                     lgm.stop_langgraph_dev(proc, clean=self.proc is not None)
         finally:
-            try:
-                if self.ccproxy is not None:
-                    from ..ccproxy_manager import stop_ccproxy
-
-                    stop_ccproxy(self.ccproxy)
-            finally:
-                if self.job is not None:
-                    self.job.close()
+            if self.job is not None:
+                self.job.close()
 
 
 def _check_sign_in(config: Any) -> None:
@@ -576,7 +522,7 @@ def run_json(
     # stops it as soon as the start returns.
     if stdin_is_pipe():
         threading.Thread(
-            target=_watch_stdin,
+            target=watch_stdin,
             args=(_take_stdin(), stop),
             name=_STDIN_THREAD,
             daemon=True,

@@ -69,7 +69,7 @@ fields beyond `type` are listed below.
 
 ```jsonl
 {"type": "thinking", "content": "I should write the notes file.", "id": 0}
-{"type": "tool_call", "name": "write_file", "args": {"path": "notes.md", "content": "..."}, "id": "call_1"}
+{"type": "tool_call", "name": "write_file", "args": {"file_path": "notes.md", "content": "..."}, "id": "call_1"}
 {"type": "tool_result", "name": "write_file", "content": "wrote 412 bytes", "success": true, "id": "call_1"}
 {"type": "text", "content": "Done — notes.md now summarizes attention."}
 {"type": "usage_stats", "input_tokens": 5123, "output_tokens": 388}

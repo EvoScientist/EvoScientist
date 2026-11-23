@@ -272,6 +272,13 @@ class TestValidateSetting:
         with pytest.raises(ValueError, match="expected one of"):
             validate_setting("mirror", "eu")
 
+    @pytest.mark.parametrize("key", ["openai_auth_mode", "anthropic_auth_mode"])
+    def test_auth_mode_accepts_only_api_key_or_oauth(self, key):
+        assert validate_setting(key, "oauth") == ("oauth", None)
+        assert validate_setting(key, "api_key") == ("api_key", None)
+        with pytest.raises(ValueError, match="expected one of"):
+            validate_setting(key, "bogus")
+
     def test_int_field(self):
         with pytest.raises(ValueError, match="expected int"):
             validate_setting("langgraph_dev_port", "abc")
@@ -282,6 +289,8 @@ class TestValidateSetting:
         [
             ("sandbox_execute_timeout", 0, "greater than 0"),
             ("sandbox_execute_timeout", True, "expected a number"),
+            ("code_interpreter_timeout", 0, "greater than 0"),
+            ("code_interpreter_timeout", -5, "greater than 0"),
             ("memory_skill_synthesis_time", "25:00", "HH:MM"),
             ("proactive_idle_minutes", -1, "0 or more"),
             ("proactive_quiet_hours", "late", "HH:MM-HH:MM"),
@@ -442,6 +451,11 @@ class TestWizard:
             assert run_onboard() is True
         assert seen == {"locked": True}
         assert _mapping(config_file)["model"] == "from-wizard"
+
+
+def test_stored_invalid_auth_mode_loads_as_api_key(config_file):
+    config_file.write_text("openai_auth_mode: bogus\n", encoding="utf-8")
+    assert load_config().openai_auth_mode == "api_key"
 
 
 @pytest.mark.parametrize("value", ["inf", "-inf", "nan"])

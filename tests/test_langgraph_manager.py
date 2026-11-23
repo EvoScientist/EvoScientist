@@ -287,6 +287,18 @@ class TestEnsureServer:
         cfg.gateway_backend = "langgraph_server"
         assert manager.needs_langgraph_dev(cfg) is True
 
+    def test_needs_langgraph_dev_for_anthropic_oauth(self):
+        """Anthropic's OAuth goes through the server's ccproxy."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        cfg.anthropic_auth_mode = "oauth"
+        # Whatever is configured: /model may pick an Anthropic model.
+        cfg.provider = "openai"
+        assert manager.needs_langgraph_dev(cfg) is True
+
     def test_needs_langgraph_dev_explicit_backend_overrides_global(self):
         """The explicit ``backend`` param wins over ``config.gateway_backend``.
 

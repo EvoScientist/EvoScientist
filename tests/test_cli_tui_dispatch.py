@@ -316,21 +316,18 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
     assert callable(kwargs["create_run_dir"])
 
 
-def test_main_callback_ccproxy_failure_keeps_install_hint(monkeypatch):
-    """The hint's ``[oauth]`` extra is text, not markup."""
+def test_main_callback_with_anthropic_oauth_uses_server_ccproxy(monkeypatch):
+    """The server starts ccproxy; the session only points at it."""
     import EvoScientist.ccproxy_manager as ccproxy_mod
-    import EvoScientist.cli.commands as cmds
 
-    def missing(config, *, lasting):
-        raise RuntimeError("Install it with: pip install 'evoscientist[oauth]'")
-
-    monkeypatch.setattr(cmds, "uses_oauth", lambda _config: True)
-    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", missing)
+    pointed: list[int] = []
+    monkeypatch.setattr(ccproxy_mod, "uses_oauth", lambda _config: True)
+    monkeypatch.setattr(ccproxy_mod, "setup_ccproxy_env", pointed.append)
 
     _calls, result = _invoke_main(monkeypatch, [])
 
-    assert result.exit_code == 1
-    assert "evoscientist[oauth]" in result.output
+    assert result.exit_code == 0
+    assert len(pointed) == 1
 
 
 @pytest.mark.parametrize(

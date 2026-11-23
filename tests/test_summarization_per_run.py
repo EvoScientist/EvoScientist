@@ -474,7 +474,7 @@ async def test_summary_keeps_upstream_retry_policy():
     construction = failing(responses=["CONSTRUCTION"])
     construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
     mw = create_per_run_summarization_middleware(construction, MagicMock())
-    upstream = mw._lc_helper._summary_model
+    upstream = mw._upstream_summary_model
     run_model = failing(responses=["SUMMARY"])
     run_model.profile = {"max_input_tokens": 20_000}
     _sync_to(mw, run_model)
@@ -487,12 +487,12 @@ async def test_summary_keeps_upstream_retry_policy():
 
 
 def test_racing_shim_install_keeps_upstream_retry_policy():
-    """A second installer that passed the guard must not wrap the first shim."""
+    """A repeated window-shim install leaves the summary shim's retry policy."""
     failing, _ = _failing_model_cls()
     construction = failing(responses=["CONSTRUCTION"])
     construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
     mw = create_per_run_summarization_middleware(construction, MagicMock())
-    upstream = mw._lc_helper._summary_model
+    upstream = mw._upstream_summary_model
     run_model = failing(responses=["SUMMARY"])
     run_model.profile = {"max_input_tokens": 20_000}
     _sync_to(mw, run_model)
@@ -522,6 +522,7 @@ def test_default_middleware_registers_subclass_exactly_once(
         profile={"max_input_tokens": CONSTRUCTION_WINDOW}
     )
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     cfg.auxiliary_model = ""
@@ -561,6 +562,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
         profile={"max_input_tokens": CONSTRUCTION_WINDOW}
     )
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.enable_ask_user = False
     cfg.auto_approve = False
     cfg.auxiliary_model = ""
@@ -623,6 +625,7 @@ def test_explicit_general_purpose_spec_gets_per_run_summarization(workspace):
 def _factory_cfg_mock() -> MagicMock:
     """Config stub covering both ``_get_default_middleware`` and the factory."""
     cfg = MagicMock()
+    cfg.code_interpreter_timeout = 60
     cfg.recursion_limit = 1_000_000
     cfg.enable_ask_user = False
     cfg.auto_mode = False
@@ -928,7 +931,7 @@ def test_summary_overflow_retry_fits_the_run_window():
 
 def test_shim_install_publishes_the_readiness_marker_last():
     """A thread that sees the window shim on ``model`` skips the install, so
-    the summary shims must already be in place by then."""
+    the summary call's window shim must already be in place by then."""
     mw, _ = _make_mw(window=1_000_000)
     helper = mw._lc_helper
     order: list[str] = []
@@ -942,4 +945,65 @@ def test_shim_install_publishes_the_readiness_marker_last():
     helper.__class__ = _Recording
     _sync_to(mw, _UnhashableModel(100_000))
     assert order[-1] == "model"
-    assert set(order) == {"model", "_summary_model", "_summary_chat_model"}
+    assert set(order) == {"model", "_summary_chat_model"}
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+
+async def _thread_due_for_a_summary(tmp_path):
+    """An agent on a 20k-window model and a thread whose next turn summarizes."""
+    from deepagents.backends import FilesystemBackend
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = GenericFakeChatModel(
+        messages=iter([AIMessage("summary of the turns"), AIMessage("the reply")])
+    )
+    model.profile = {"max_input_tokens": 20_000}
+    mw = create_per_run_summarization_middleware(
+        model, FilesystemBackend(root_dir=tmp_path)
+    )
+    agent = create_agent(model, middleware=[mw], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "summary-stream"}}
+    await agent.aupdate_state(config, {"messages": _e2e_messages()})
+    return agent, config
+
+
+async def test_the_summary_streams_before_the_reply(tmp_path):
+    """The summary's text reaches the stream while it is written."""
+    from EvoScientist.stream.events import stream_agent_events
+
+    agent, _ = await _thread_due_for_a_summary(tmp_path)
+
+    events = [
+        event
+        async for event in stream_agent_events(agent, "next question", "summary-stream")
+    ]
+
+    kinds = [event["type"] for event in events]
+    summary = [e["content"] for e in events if e["type"] == "summarization"]
+    assert "".join(summary) == "summary of the turns"
+    assert len(summary) > 1  # in pieces, not whole once the reply is over
+    assert kinds.index("summarization") < kinds.index("text")
+
+
+async def test_a_server_run_keeps_the_summary_out_of_its_stream(tmp_path, monkeypatch):
+    """The server's clients would read a streamed summary as reply text."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "SERVER_PROCESS", True)
+    agent, config = await _thread_due_for_a_summary(tmp_path)
+
+    streamed = [
+        (chunk.content, metadata.get("lc_source"))
+        async for chunk, metadata in agent.astream(
+            {"messages": [("user", "next question")]}, config, stream_mode="messages"
+        )
+    ]
+
+    assert "".join(text for text, _ in streamed) == "the reply"
+    assert {source for _, source in streamed} == {None}
