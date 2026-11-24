@@ -475,8 +475,8 @@ async def test_consume_notifications_no_op_when_queue_empty():
 @pytest.mark.parametrize(
     "status", ["success", "error", "interrupted", "running", "untracked"]
 )
-def test_serve_dedups_a_queued_exit_against_thread_state(monkeypatch, status):
-    """A server-side check after enqueue must suppress the pending notice."""
+def test_serve_drops_or_marks_a_queued_exit(monkeypatch, status):
+    """A recorded exit drops the queued notice; any other record is marked."""
     from EvoScientist.cli.commands import _serve_drain_notifications
     from EvoScientist.gateway import RuntimeGateways
     from EvoScientist.runtime import AsyncRuntime
@@ -535,7 +535,10 @@ def test_bg_dedup_uses_the_thread_record(monkeypatch, status):
     assert survivors == ([] if status == "success" else [notice])
 
 
-async def test_bg_dedup_read_failure_keeps_the_notification(monkeypatch):
+@pytest.mark.parametrize(
+    "read", [{"return_value": None}, {"side_effect": RuntimeError("offline")}]
+)
+async def test_bg_dedup_read_failure_keeps_the_notification(monkeypatch, read):
     monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
     notice = _untracked("proc-689")
     async_notifier.enqueue_task_notification(notice)
@@ -543,7 +546,7 @@ async def test_bg_dedup_read_failure_keeps_the_notification(monkeypatch):
     await async_notifier.consume_notifications(
         runner,
         AsyncMock(return_value={}),
-        read_bg_processes_state=AsyncMock(side_effect=RuntimeError("offline")),
+        read_bg_processes_state=AsyncMock(**read),
     )
     assert runner.await_args.args[1] == [notice]
     assert runner.await_args.kwargs == {}
@@ -611,7 +614,7 @@ async def test_exit_notice_checkpoint_survives_a_fresh_reader(
         checkpointer=saver,
     )
     config = {"configurable": {"thread_id": "legacy"}}
-    # An old thread with no notification-specific state or new fields.
+    # A record without origin_thread_id, as older threads hold.
     records = _bg_running_registry()["bg_processes"]
     records["proc-1"].pop("origin_thread_id")
     await agent.ainvoke({"messages": [], "bg_processes": records}, config)
@@ -662,7 +665,7 @@ async def test_exit_notice_checkpoint_survives_a_fresh_reader(
             notice = any(m.type == "human" for m in snapshot.values.get("messages", []))
             assert notice == (record.get("status") == "success")
     _reset_notifier_state(async_notifier)
-    background._PROCESSES.clear()  # Both modules start as in a fresh CLI process.
+    background._PROCESSES.clear()  # Neither module remembers, as after a restart.
     await async_notifier.enqueue_bg_process_completions_from_state(
         gateway, target, "legacy"
     )

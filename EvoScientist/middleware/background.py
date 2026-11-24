@@ -36,18 +36,28 @@ from langgraph.types import Command
 from .. import agent_shell, background, paths
 from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
+_EXIT_STATUSES = frozenset({"success", "error", "interrupted"})
+
 
 def _bg_processes_reducer(
     existing: "dict[str, BgProcessRecord] | None",
     update: "dict[str, BgProcessRecord]",
 ) -> "dict[str, BgProcessRecord]":
-    """Merge per process, preserving a checked exit over an older notice snapshot."""
+    """Merge per process, keeping a recorded exit over an older snapshot."""
     merged = dict(existing or {})
     for process_id, record in update.items():
         current = merged.get(process_id, {})
-        # A check_process may have stored the exit after the notification
-        # consumer read state. Its returncode must survive that stale input.
-        if current.get("returncode") is not None and record.get("returncode") is None:
+        if record.get("returncode") is None and (
+            # A tool may have stored the exit after the notification consumer
+            # read state. Its returncode must survive that stale input.
+            current.get("returncode") is not None
+            # A notice mark has no returncode, and an ``untracked`` mark built
+            # from an older snapshot must not undo it.
+            or (
+                current.get("status") in _EXIT_STATUSES
+                and record.get("status") not in _EXIT_STATUSES
+            )
+        ):
             continue
         merged[process_id] = record
     return merged
@@ -61,7 +71,8 @@ class BgProcessRecord(TypedDict, total=False):
     command: str
     pid: int
     # "running" | terminal (success/error/interrupted) | "untracked" (written by
-    # the client reader when no registry it can ask has the process)
+    # the client reader when no registry it can ask has the process). A notice
+    # turn can set a terminal status without a returncode.
     status: str
     returncode: int | None
     started_at: str

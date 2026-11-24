@@ -126,12 +126,25 @@ def test_middleware_declares_bg_processes_state_channel():
     )
 
     assert BackgroundExecutionMiddleware.state_schema is BackgroundState
-    # dict-merge reducer: last write per key wins, existing keys preserved.
+    # dict-merge reducer: existing keys are preserved.
     merged = _bg_processes_reducer({"a": {"status": "running"}}, {"b": {"status": "x"}})
     assert set(merged) == {"a", "b"}
     assert _bg_processes_reducer(None, {"a": {"status": "running"}}) == {
         "a": {"status": "running"}
     }
+
+
+@pytest.mark.parametrize("returncode", [0, None])
+@pytest.mark.parametrize("stale", ["running", "untracked"])
+def test_reducer_keeps_a_recorded_exit_over_a_stale_write(returncode, stale):
+    from EvoScientist.middleware.background import _bg_processes_reducer
+
+    done = {"a": {"status": "success", "returncode": returncode}}
+    stale_write = {"a": {"status": stale, "returncode": None}}
+    assert _bg_processes_reducer(done, stale_write) == done
+    # Nothing is recorded yet: the same write goes through, and an exit follows it.
+    assert _bg_processes_reducer({}, stale_write) == stale_write
+    assert _bg_processes_reducer(stale_write, done) == done
 
 
 def test_bg_command_builds_state_update_with_runtime():

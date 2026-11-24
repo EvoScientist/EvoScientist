@@ -42,7 +42,7 @@ from tests.fakes.stream_v3 import (
 )
 
 
-async def test_process_marks_are_only_added_to_new_message_input():
+async def test_process_marks_are_added_to_message_input_not_to_a_resume():
     from langgraph.graph import END, START, MessagesState, StateGraph
 
     from EvoScientist.stream.events import build_agent_stream_input
@@ -57,7 +57,7 @@ async def test_process_marks_are_only_added_to_new_message_input():
     assert "bg_processes" not in await build_agent_stream_input("hello")
     resume = Command(resume={"ok": True})
     assert await build_agent_stream_input(resume, bg_processes=marks) is resume
-    # A graph without BackgroundMiddleware ignores unknown input keys.
+    # A graph without BackgroundExecutionMiddleware ignores unknown input keys.
     builder = StateGraph(MessagesState)
     builder.add_node("reply", lambda _: {})
     builder.add_edge(START, "reply")

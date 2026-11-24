@@ -391,8 +391,8 @@ async def enqueue_completions_from_state_throttled(
 # --- Background-process reader (mirror of the async-task reader above) --------
 # Process ids the bg-process reader has already surfaced an exit for. The mirrored
 # ``bg_processes[*].status`` goes terminal when a tool observes the exit or a
-# notification turn records it. This set prevents repeat enqueues before that
-# turn, mirroring ``_reader_enqueued_task_ids``.
+# notification turn records it. This set keeps one enqueue per CLI process,
+# whether or not that turn completes, mirroring ``_reader_enqueued_task_ids``.
 _reader_enqueued_process_ids: set[str] = set()
 # Process ids a reader invocation is currently awaiting a status for. The
 # idle tick and a turn-boundary read can interleave at the status await;
@@ -475,9 +475,9 @@ async def _mark_untracked(
       flight on the thread (409).
 
     The mark is built from the snapshot's record, not the one read at the top
-    of the poll, so a terminal status stored since is not overwritten. That
-    narrows the window to the gap between the snapshot and the write; the
-    channel's reducer is last-write-per-key, so there is no compare-and-set.
+    of the poll, so a terminal status stored since is not overwritten. In
+    the gap between the snapshot and the write, the channel's reducer keeps a
+    terminal status over this mark.
 
     ``as_node`` is left to the graph, which infers the node that ran last. An
     ``__end__`` clear counts the tasks it drops as run, and a closed approval and
@@ -706,7 +706,7 @@ def dedup_notifications(
 ) -> list[AsyncTaskNotification]:
     """Filter notifications the agent has already seen via a check.
 
-    Async tasks require a terminal status checked at or after its last update.
+    Async tasks require a terminal status checked at or after the task's last update.
     Background processes use a terminal thread record or a local observation.
     An ``untracked`` mark alone does not suppress a notice: the reader stores
     that mark before enqueueing its first delivery.
@@ -718,11 +718,10 @@ def dedup_notifications(
     survivors: list[AsyncTaskNotification] = []
     for n in notifs:
         if n.kind == "bg-process":
-            # Background process: skip if the launching session already inspected it
-            # after it finished (check_process / list_processes) — mirrors the task
-            # dedup below. Per-thread: another session's check doesn't suppress this.
-            # A server-owned process's check writes thread state, not this
-            # client's registry. It may have been checked after enqueueing.
+            # Skip an exit this thread already records as terminal (a check from
+            # any client, or an earlier notice turn), or one this process's
+            # registry shows was checked from the launching thread. A
+            # server-owned process is absent from that registry.
             if bg_processes.get(n.task_id, {}).get("status") in TERMINAL_STATUSES or (
                 background.was_observed_done(n.task_id, n.origin_cli_thread_id)
             ):
@@ -877,12 +876,13 @@ async def consume_notifications(
             ``llm_text`` is the full structured message for the LLM
             (from ``format_batch_message``).  ``notifs_list`` is the
             survivors list so callers can render per-task visual lines
-            without re-parsing the text. When available, ``bg_processes`` is
-            passed as a keyword to checkpoint terminal records with the message.
+            without re-parsing the text. ``bg_processes`` is passed by keyword
+            only when the thread's records need a terminal mark; it is
+            checkpointed with the message.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
-        read_bg_processes_state: optional reader of ``bg_processes`` for
-            checks performed outside this client's process registry.
+        read_bg_processes_state: optional reader of ``bg_processes``, for dedup
+            and for the records to mark; ``None`` or a failed read marks nothing.
         current_thread_id: the active CLI thread id. When given, only
             notifications whose ``origin_cli_thread_id`` matches (or that
             were enqueued unrouted) are drained — notifications belonging

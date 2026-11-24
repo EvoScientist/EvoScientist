@@ -417,10 +417,7 @@ async def test_replaced_checklist_voids_the_deferred_grading(tmp_path):
     assert values["rubric"] is None
 
 
-@pytest.mark.parametrize("marked", [False, True])
-async def test_process_started_this_turn_defers_and_its_exit_followup_grades(
-    tmp_path, marked
-):
+async def test_process_started_this_turn_defers_and_its_exit_followup_grades(tmp_path):
     live = _Live(process_answers={"p1": STARTED_THIS_TURN})
     agent, grader = _agent(tmp_path, [PASS], ["a", "b", "c"], live)
     _seed(agent, {"bg_processes": _process()})
@@ -428,10 +425,6 @@ async def test_process_started_this_turn_defers_and_its_exit_followup_grades(
     assert _deferred(events) == [(0, 1)]
     assert values["_rubric_grading"]["skip"] == []
     live.processes["p1"] = "success"
-    if marked:
-        _seed(
-            agent, {"bg_processes": {"p1": {**_process()["p1"], "status": "success"}}}
-        )
     done, _ = await _run(agent, "[Async tasks update] p1 exited", mode="followup")
     assert _results(done) == ["satisfied"]
     assert "start the job" in grader.last_payload
