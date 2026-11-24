@@ -690,6 +690,7 @@ class FakeLangGraphThreadStream:
         self.run = FakeLangGraphRunModule()
         self.entered = False
         self.exited = False
+        self.closes = 0
         # ``events`` only: earlier runs' envelopes sent first on every new
         # connection, and whether the SSE stays open after the queued run.
         self.replay = list(replay or [])
@@ -713,6 +714,10 @@ class FakeLangGraphThreadStream:
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.exited = True
+
+    async def close(self) -> None:
+        """``AsyncThreadStream.close``: what ``__aexit__`` does, callable early."""
+        self.closes += 1
 
     async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
         for event in self.queued_events:

@@ -345,10 +345,9 @@ class _ThreadEvents:
     async def aclose(self) -> None:
         """Stop reading the stream and drop what is queued."""
         self._reader.cancel()
-        try:
-            await self._reader
-        except asyncio.CancelledError:
-            pass
+        # ``wait`` does not raise the reader's cancellation, so a cancel of
+        # the caller still reaches it.
+        await asyncio.wait([self._reader])
         while not self._queue.empty():
             self._queue.get_nowait()
 
@@ -1817,7 +1816,10 @@ class LangGraphServerGateway:
                 if past_replay_cap is not None:
                     # Nothing reads this connection any more: stop it from
                     # buffering the rest of the replay while the run works.
-                    # Closing it does not stop the run.
+                    # Closing it does not stop the run. The SDK stream goes
+                    # first: unread, its bounded queue fills up, and closing
+                    # it then fails.
+                    await stream.close()
                     await events.aclose()
                 # Envelopes without a run id (model tokens) belong to the run
                 # of the last tagged one: behind a busy run, wait for this

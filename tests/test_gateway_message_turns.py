@@ -3407,11 +3407,11 @@ async def test_past_the_replay_cap_the_live_connection_stops_reading(
     _state_after_start(stream, threads, {"values": _NEW_STATE})
     runs = gateway.thread_store.client.runs
     real_get = runs.get
-    seen: list[tuple[bool, int]] = []
+    seen: list[tuple[int, bool, int]] = []
 
     async def get(thread_id: str, run_id: str) -> dict[str, Any]:
         live = opened[0]
-        seen.append((live._reader.done(), live._queue.qsize()))
+        seen.append((stream.closes, live._reader.done(), live._queue.qsize()))
         return await real_get(thread_id, run_id)
 
     runs.get = get
@@ -3420,7 +3420,8 @@ async def test_past_the_replay_cap_the_live_connection_stops_reading(
         events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello world"]
-    assert seen == [(True, 0)]
+    # The SDK stream is closed too: its own bounded queue stops filling.
+    assert seen == [(1, True, 0)]
 
 
 async def test_past_the_replay_cap_the_first_status_request_comes_at_once(
@@ -3469,3 +3470,24 @@ async def test_thread_events_aclose_stops_the_reader_and_drops_the_queue():
 
     assert events._reader.done()
     assert events._queue.qsize() == 0
+
+
+async def test_thread_events_aclose_lets_a_cancel_of_its_caller_through():
+    """Only the reader's cancellation is absorbed: a turn cancelled while it
+    waits for the reader to stop is cancelled."""
+
+    async def slow_to_stop() -> AsyncIterator[dict[str, Any]]:
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            await asyncio.sleep(0.2)
+
+    events = _ThreadEvents(slow_to_stop())
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(events.aclose())
+    await asyncio.sleep(0.05)
+    closing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
