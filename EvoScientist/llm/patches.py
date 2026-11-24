@@ -307,6 +307,7 @@ class _OpenAICompatContent:
         profile: Mapping[str, object] | None,
         hoist_tool_media: bool,
     ) -> None:
+        self.profile = profile
         self.hoist_tool_media = hoist_tool_media
         self.blocked: set[str] = set()
         if profile is not None:
@@ -460,61 +461,10 @@ class _OpenAICompatContent:
 
 def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> None:
     """Normalize content for OpenAI-compatible models lacking a native adapter."""
-    import functools
+    # Imported here: openai_compat imports this module for the normalizer.
+    from .openai_compat import as_content_compat_model
 
-    profile = getattr(model, "profile", None)
-    compat = _OpenAICompatContent(
-        profile if isinstance(profile, Mapping) else None,
-        hoist_tool_media,
-    )
-
-    orig_generate = getattr(model, "_generate", None)
-    if orig_generate is None:
-        return
-
-    @functools.wraps(orig_generate)
-    def _patched_generate(
-        messages: list[BaseMessage], *args: Any, **kwargs: Any
-    ) -> Any:
-        return compat.invoke(orig_generate, messages, *args, **kwargs)
-
-    model._generate = _patched_generate
-
-    orig_agenerate = getattr(model, "_agenerate", None)
-    if orig_agenerate is not None:
-
-        @functools.wraps(orig_agenerate)
-        async def _patched_agenerate(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return await compat.ainvoke(orig_agenerate, messages, *args, **kwargs)
-
-        model._agenerate = _patched_agenerate
-
-    # Also patch streaming paths — CLI/agent uses _stream/_astream, so without
-    # these the content flattening is bypassed during normal streaming calls.
-    orig_stream = getattr(model, "_stream", None)
-    if orig_stream is not None:
-
-        @functools.wraps(orig_stream)
-        def _patched_stream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            yield from compat.stream(orig_stream, messages, *args, **kwargs)
-
-        model._stream = _patched_stream
-
-    orig_astream = getattr(model, "_astream", None)
-    if orig_astream is not None:
-
-        @functools.wraps(orig_astream)
-        async def _patched_astream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            async for chunk in compat.astream(orig_astream, messages, *args, **kwargs):
-                yield chunk
-
-        model._astream = _patched_astream
+    as_content_compat_model(model, hoist_tool_media=hoist_tool_media)
 
 
 # ---------------------------------------------------------------------------

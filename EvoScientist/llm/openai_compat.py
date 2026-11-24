@@ -19,12 +19,15 @@ class OpenAICompatContentMixin:
     """Normalize message content before calling an OpenAI-compatible model."""
 
     def _content_compat(self) -> _OpenAICompatContent:
+        profile = getattr(self, "profile", None)
+        effective = profile if isinstance(profile, Mapping) else None
         compat = self.__dict__.get("_evosci_content_compat")
-        if not isinstance(compat, _OpenAICompatContent):
-            profile = getattr(self, "profile", None)
+        # A copy carries the profile it was made with, so the compat is
+        # rebuilt when the copy's profile differs from the one it holds.
+        if not isinstance(compat, _OpenAICompatContent) or compat.profile != effective:
             compat = _OpenAICompatContent(
-                profile if isinstance(profile, Mapping) else None,
-                hoist_tool_media=True,
+                effective,
+                hoist_tool_media=self.__dict__.get("_evosci_hoist_tool_media", True),
             )
             self.__dict__["_evosci_content_compat"] = compat
         return compat
@@ -92,3 +95,24 @@ class OpenAICompatContentMixin:
             **kwargs,
         ):
             yield chunk
+
+
+def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any:
+    """Give *model* the OpenAI-compatible content normalization.
+
+    The normalization is a mixin whose methods read ``self``, so a copy of
+    the model sends its own settings: a copy of a model whose methods were
+    replaced by closures over the original's bound methods sends the
+    original's.
+    """
+    cls = type(model)
+    if getattr(cls, "_generate", None) is None:
+        # Not a chat model, or one whose methods live on the instance: a
+        # mixin cannot take those over.
+        return model
+    if not issubclass(cls, OpenAICompatContentMixin):
+        model.__class__ = type(
+            f"Evo{cls.__name__}", (OpenAICompatContentMixin, cls), {}
+        )
+    model.__dict__["_evosci_hoist_tool_media"] = hoist_tool_media
+    return model
