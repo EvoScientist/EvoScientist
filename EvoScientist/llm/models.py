@@ -30,7 +30,6 @@ from .patches import (
     _patch_anthropic_structured_output,
     _patch_anthropic_thinking_binding,
     _patch_openai_compat_content,
-    _patch_openai_responses_whole_tool_args,
     _patch_openrouter_structured_output,
 )
 from .registry import (
@@ -770,7 +769,6 @@ def get_chat_model(
     elif _chatgpt_signin:
         from .chatgpt_oauth import build_model
 
-        _patch_openai_responses_whole_tool_args()
         chat_model = build_model(model_id, **kwargs)
     else:
         chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)

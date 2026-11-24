@@ -106,6 +106,8 @@ EvoSci
 
 Your browser opens OpenAI's sign-in page and returns to a local callback on `localhost:1455`. You stay signed in afterwards: the token refreshes itself before a request needs it.
 
+To sign in or out on its own, outside the wizard: `EvoSci login chatgpt` signs in, and `EvoSci logout chatgpt` removes the stored sign-in from this machine (it is not revoked at OpenAI). For programs such as the desktop app, `EvoSci login chatgpt --json` prints one JSON object per line instead (a `url` to open, then `signed_in` or an `error`) and never opens a browser itself; the event list is in the docstring of `EvoScientist/cli/login_cmd.py`.
+
 ### 2. Configure EvoScientist
 
 ```bash
@@ -177,7 +179,7 @@ print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly:
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Start EvoSci in a terminal to sign in.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Start `EvoSci` in a terminal and confirm the sign-in prompt |
+| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Sign in with EvoSci login chatgpt, or from Settings in the desktop app.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Run `EvoSci login chatgpt` (or start `EvoSci` in a terminal and confirm the sign-in prompt); in the desktop app, sign in from Settings |
 | `ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again to sign in, ...` | The sign-in prompt was declined or did not complete | Run `EvoSci` again and confirm the prompt, or switch to an API key with `EvoSci config set openai_auth_mode api_key` |
 | `Port 1455 is in use (another sign-in may be running). Close it and try again.` | Another sign-in, or a Codex CLI login, holds the callback port | Finish or close it, then retry |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account.` | Your ChatGPT plan does not include that model | Pick a model your plan serves |

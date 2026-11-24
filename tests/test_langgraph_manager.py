@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from EvoScientist import agent_shell
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.langgraph_dev import manager
 from EvoScientist.langgraph_dev.boundary import is_loopback_host
@@ -741,7 +742,8 @@ class TestStartLanggraphDevSpawnFlags:
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
-        assert kw.get("creationflags") == flags
+        # Suspended until it joins its server job.
+        assert kw.get("creationflags") == flags | agent_shell._CREATE_SUSPENDED
         assert "start_new_session" not in kw
 
     def test_posix_uses_new_session(self, spawn_capture, monkeypatch):

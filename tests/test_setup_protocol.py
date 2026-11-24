@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 
 import pytest
 
@@ -567,3 +568,110 @@ def test_heartbeat_tick_waits_for_the_interval():
     now["t"] = HEARTBEAT_INTERVAL
     report.tick()
     assert lines == ["Unpacking", "Unpacking"]
+
+
+# --- stdin watcher (shared by deploy --json and login --json) -----------------
+
+
+def _watch(read_fd):
+    import threading
+
+    from EvoScientist.setup import protocol
+
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=protocol.watch_stdin, args=(read_fd, stop), daemon=True
+    )
+    thread.start()
+    return stop, thread
+
+
+def test_watch_stdin_stops_on_a_stop_line():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.write(write, b'{"command": "stop"}\n')
+    try:
+        assert stop.wait(5)
+    finally:
+        os.close(write)
+    thread.join(5)
+
+
+def test_watch_stdin_stops_at_end_of_input():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.close(write)
+    assert stop.wait(5)
+    thread.join(5)
+
+
+def test_watch_stdin_survives_a_line_too_deep_to_parse():
+    import os
+
+    from EvoScientist.setup import protocol
+
+    deep = b"[" * 60000
+    try:
+        json.loads(deep)
+    except RecursionError:
+        pass
+    except ValueError:
+        pytest.skip("this Python parses the nesting without a RecursionError")
+    assert protocol._is_stop(deep) is False
+    read, write = os.pipe()
+    # The line is larger than a pipe buffer, so a thread writes it; the pipe
+    # stays open, so only the stop line can end the watcher.
+    writer = threading.Thread(
+        target=os.write, args=(write, deep + b'\n{"command": "stop"}\n')
+    )
+    writer.start()
+    stop = threading.Event()
+    try:
+        protocol.watch_stdin(read, stop)  # a dead watcher raises here
+        assert stop.is_set()
+    finally:
+        writer.join(5)
+        os.close(write)
+
+
+def test_watch_stdin_stops_even_when_closing_fails(monkeypatch):
+    import os
+
+    from EvoScientist.setup import protocol
+
+    read, write = os.pipe()
+    os.close(write)
+    real_close = os.close
+
+    def _close(fd):
+        if fd == read:
+            raise OSError("close failed")
+        real_close(fd)
+
+    monkeypatch.setattr(protocol.os, "close", _close)
+    stop = threading.Event()
+    try:
+        with pytest.raises(OSError, match="close failed"):
+            protocol.watch_stdin(read, stop)
+    finally:
+        monkeypatch.undo()
+        os.close(read)
+    assert stop.is_set()
+
+
+def test_watch_stdin_ignores_other_lines():
+    import os
+
+    read, write = os.pipe()
+    stop, thread = _watch(read)
+    os.write(write, b'{"command": "status"}\nhello\n')
+    try:
+        assert not stop.wait(0.3)
+    finally:
+        os.close(write)
+    assert stop.wait(5)
+    thread.join(5)

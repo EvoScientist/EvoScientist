@@ -114,6 +114,15 @@ def test_a_final_tool_call_is_not_a_reply():
         ({"stop_reason": "max_tokens"}, False),
         ({"finish_reason": "content_filter"}, False),
         ({"status": "completed"}, True),
+        ({"status": "completed", "finish_reason": "completed"}, True),
+        (
+            {
+                "status": "incomplete",
+                "finish_reason": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            False,
+        ),
         (
             {
                 "status": "incomplete",

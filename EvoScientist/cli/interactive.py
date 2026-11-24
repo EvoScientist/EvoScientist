@@ -1763,17 +1763,6 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup failed",
-                        exc_info=True,
-                    )
                 # Best-effort: guard so a DB lookup failure here can't
                 # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")
