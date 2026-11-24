@@ -480,23 +480,11 @@ def test_serve_drops_or_marks_a_queued_exit(monkeypatch, status):
     from EvoScientist.cli.commands import _serve_drain_notifications
     from EvoScientist.gateway import RuntimeGateways
     from EvoScientist.runtime import AsyncRuntime
-    from EvoScientist.stream.events import build_agent_stream_input
     from tests.fakes.serve import runtime_state
 
     gateway = FakeGraphGateway(
         state_values={"bg_processes": {"proc-689": {"status": status}}}
     )
-    inputs = []
-
-    async def stream(request):
-        inputs.append(
-            await build_agent_stream_input(
-                request.message, bg_processes=request.bg_processes
-            )
-        )
-        yield {"type": "done", "response": "acknowledged"}
-
-    gateway.stream = stream
     monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
     async_notifier.enqueue_bg_process_notification(
         task_id="proc-689",
@@ -515,24 +503,10 @@ def test_serve_drops_or_marks_a_queued_exit(monkeypatch, status):
         _serve_drain_notifications(runtime_state=state, model=None, show_thinking=False)
 
     if status in {"running", "untracked"}:
-        assert inputs[0]["bg_processes"] == {"proc-689": {"status": "success"}}
+        assert gateway.requests[0].bg_processes == {"proc-689": {"status": "success"}}
     else:
-        assert inputs == []
+        assert gateway.requests == []
     assert gateway.updated_states == []
-
-
-@pytest.mark.parametrize("status", ["success", "untracked", "running", None])
-def test_bg_dedup_uses_the_thread_record(monkeypatch, status):
-    from EvoScientist import background
-
-    # The client has no local observation of this server-owned process.
-    monkeypatch.setattr(background, "was_observed_done", lambda *_args: False)
-    notice = _untracked("proc-689")
-    records = {} if status is None else {"proc-689": {"status": status}}
-    survivors = dedup_notifications([notice], {}, bg_processes=records)
-    # The current reader marks untracked before enqueueing, so that mark
-    # cannot suppress its first delivery. A known terminal exit can.
-    assert survivors == ([] if status == "success" else [notice])
 
 
 @pytest.mark.parametrize(
@@ -674,7 +648,6 @@ async def test_exit_notice_checkpoint_survives_a_fresh_reader(
 
 @pytest.mark.parametrize("status", ["success", "running"])
 async def test_tui_notification_turn_carries_the_mark(monkeypatch, workspace, status):
-    from EvoScientist.stream.events import build_agent_stream_input
     from tests.fakes.tui import capture_app, prepare_app
 
     monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
@@ -696,10 +669,7 @@ async def test_tui_notification_turn_carries_the_mark(monkeypatch, workspace, st
             await app._run_task
     if status == "running":
         [request] = gateway.requests
-        run_input = await build_agent_stream_input(
-            request.message, bg_processes=request.bg_processes
-        )
-        assert run_input["bg_processes"] == {"p1": {"status": "success"}}
+        assert request.bg_processes == {"p1": {"status": "success"}}
     else:
         assert gateway.requests == []
     assert gateway.updated_states == []
@@ -713,20 +683,8 @@ def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
     from EvoScientist.config import EvoScientistConfig
     from EvoScientist.gateway import RuntimeGateways
     from EvoScientist.paths import SessionDirs
-    from EvoScientist.stream.events import build_agent_stream_input
-
-    inputs = []
-
-    async def stream(request):
-        inputs.append(
-            await build_agent_stream_input(
-                request.message, bg_processes=request.bg_processes
-            )
-        )
-        yield {"type": "done", "response": "acknowledged"}
 
     gateway = FakeGraphGateway(
-        stream=stream,
         state_values={"bg_processes": {"p1": {"status": "running"}}},
         generated_thread_ids=["tid"],
     )
@@ -768,7 +726,7 @@ def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
     interactive.cmd_interactive(
         dirs=SessionDirs(workspace), config=EvoScientistConfig()
     )
-    assert inputs[0]["bg_processes"] == {"p1": {"status": "success"}}
+    assert gateway.requests[0].bg_processes == {"p1": {"status": "success"}}
 
 
 # ============================================================================

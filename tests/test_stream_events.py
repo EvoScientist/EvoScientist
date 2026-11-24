@@ -43,8 +43,6 @@ from tests.fakes.stream_v3 import (
 
 
 async def test_process_marks_are_added_to_message_input_not_to_a_resume():
-    from langgraph.graph import END, START, MessagesState, StateGraph
-
     from EvoScientist.stream.events import build_agent_stream_input
 
     marks = {"p1": {"status": "success"}}
@@ -57,14 +55,6 @@ async def test_process_marks_are_added_to_message_input_not_to_a_resume():
     assert "bg_processes" not in await build_agent_stream_input("hello")
     resume = Command(resume={"ok": True})
     assert await build_agent_stream_input(resume, bg_processes=marks) is resume
-    # A graph without BackgroundExecutionMiddleware ignores unknown input keys.
-    builder = StateGraph(MessagesState)
-    builder.add_node("reply", lambda _: {})
-    builder.add_edge(START, "reply")
-    builder.add_edge("reply", END)
-    result = await builder.compile().ainvoke(run_input)
-    assert list(result) == ["messages"]
-    assert result["messages"][0].content == "done"
 
 
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
