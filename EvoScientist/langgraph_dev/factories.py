@@ -145,7 +145,9 @@ class GraphCache:
     built; graphs built for a run folder are dropped, least recently used
     first, past ``RUN_FOLDER_GRAPHS``. An unregistered project's graphs stay
     too: resolving an access refuses that project before its graph is asked
-    for.
+    for. An ``mcp.yaml`` edit drops every cached graph: builds bind the MCP
+    tools loaded at build time, so the next access rebuilds lazily with the
+    new file.
     """
 
     RUN_FOLDER_GRAPHS = 32
@@ -154,6 +156,51 @@ class GraphCache:
         self._build_lock = threading.Lock()
         self._lock = threading.Lock()
         self._graphs: OrderedDict[tuple[str, str, str | None], Any] = OrderedDict()
+        # ``(mtime_ns, size, digest)`` of the ``mcp.yaml`` the cached graphs
+        # were built against, or None when there is none.
+        self._mcp_stamp: tuple[int, int, str] | None = None
+
+    def _mcp_yaml_changed(self) -> bool:
+        """Whether ``mcp.yaml`` changed since the cached graphs were built.
+
+        Compared by modification time and size; the content is read and
+        digested only when those differ. A file that does not parse (a
+        half-saved edit reads as ``{}`` through ``load_mcp_config`` and would
+        drop every MCP tool) keeps the graphs the server has; the next access
+        checks again. Called under ``self._lock``.
+        """
+        import hashlib
+
+        import yaml
+
+        from ..mcp.client import USER_MCP_CONFIG
+
+        try:
+            stat = USER_MCP_CONFIG.stat()
+        except OSError:
+            changed = self._mcp_stamp is not None
+            self._mcp_stamp = None
+            return changed
+        if self._mcp_stamp is not None and (
+            stat.st_mtime_ns,
+            stat.st_size,
+        ) == self._mcp_stamp[:2]:
+            return False
+        try:
+            data = USER_MCP_CONFIG.read_bytes()
+        except OSError:
+            return False
+        try:
+            yaml.safe_load(data)
+        except Exception:
+            return False
+        digest = hashlib.sha256(data).hexdigest()
+        stamp = (stat.st_mtime_ns, stat.st_size, digest)
+        if self._mcp_stamp is not None and digest == self._mcp_stamp[2]:
+            self._mcp_stamp = stamp
+            return False
+        self._mcp_stamp = stamp
+        return True
 
     def _cached(self, key: tuple[str, str, str | None]) -> Any:
         with self._lock:
@@ -168,6 +215,9 @@ class GraphCache:
             dirs = SessionDirs(dirs.workspace)
         run_dir = dirs.run_dir.as_posix() if dirs.run_dir is not None else None
         key = (graph_id, dirs.workspace.key, run_dir)
+        with self._lock:
+            if self._mcp_yaml_changed():
+                self._graphs.clear()
         if (graph := self._cached(key)) is not None:
             return graph
         with self._build_lock:
@@ -175,6 +225,12 @@ class GraphCache:
                 return graph
             graph = _build(graph_id, dirs)
             with self._lock:
+                # An ``mcp.yaml`` edit during the build is not in this graph:
+                # drop the cache instead of caching it, so the next access
+                # rebuilds. The built graph still goes back to its access.
+                if self._mcp_yaml_changed():
+                    self._graphs.clear()
+                    return graph
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]
                 for stale in run_folder_keys[: -self.RUN_FOLDER_GRAPHS]:

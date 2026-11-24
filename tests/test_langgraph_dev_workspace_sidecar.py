@@ -528,6 +528,20 @@ def test_server_config_fingerprint_ignores_port():
     assert manager._server_config_fingerprint(cfg) == base
 
 
+def test_server_config_fingerprint_ignores_mcp_yaml():
+    """An ``mcp.yaml`` edit is applied by the running server's graph cache,
+    so it is no longer drift."""
+    from EvoScientist.mcp import client as mcp_client
+
+    cfg = manager.EvoScientistConfig()
+    mcp_yaml = mcp_client.USER_MCP_CONFIG
+    mcp_yaml.parent.mkdir(parents=True, exist_ok=True)
+    mcp_yaml.write_text("servers: {}\n", encoding="utf-8")
+    base = manager._server_config_fingerprint(cfg)
+    mcp_yaml.write_text("servers: {fs: {}}\n", encoding="utf-8")
+    assert manager._server_config_fingerprint(cfg) == base
+
+
 def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
     """The fingerprint covers launch settings only; a PATH difference is
     reported on its own (``AGENT_SHELL_DRIFT``)."""
@@ -1526,7 +1540,9 @@ def test_server_config_fingerprint_ignores_gateway_backend():
     assert manager._server_config_fingerprint(cfg) == base
 
 
-def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch):
+def test_server_config_fingerprint_ignores_mcp_yaml_content(tmp_path, monkeypatch):
+    """``mcp.yaml`` used to be folded in; the running server applies its
+    edits through ``GraphCache`` now, so the file no longer counts."""
     from EvoScientist.config import settings as settings_mod
 
     monkeypatch.setattr(settings_mod, "get_config_dir", lambda: tmp_path)
@@ -1534,9 +1550,9 @@ def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch
     base = manager._server_config_fingerprint(cfg)
     (tmp_path / "mcp.yaml").write_text("server-a:\n  transport: stdio\n")
     changed = manager._server_config_fingerprint(cfg)
-    assert changed != base
+    assert changed == base
     (tmp_path / "mcp.yaml").write_text("server-b:\n  transport: http\n")
-    assert manager._server_config_fingerprint(cfg) != changed
+    assert manager._server_config_fingerprint(cfg) == changed
 
 
 def test_server_config_fingerprint_tracks_subagent_yaml_content(tmp_path, monkeypatch):

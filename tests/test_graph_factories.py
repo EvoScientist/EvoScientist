@@ -136,3 +136,131 @@ def test_build_failure_names_the_graph(monkeypatch, tmp_path):
     monkeypatch.setitem(factories.BUILDERS, "scheduler", fail)
     with pytest.raises(RuntimeError, match=r"'scheduler' failed to build.*bad yaml"):
         factories._build("scheduler", SessionDirs(Workspace(tmp_path)))
+
+
+# ---------------------------------------------------------------------------
+# mcp.yaml edits drop the cached graphs
+# ---------------------------------------------------------------------------
+
+
+def _mcp_yaml():
+    """The mcp.yaml the server reads (its config folder, isolated per test)."""
+    from EvoScientist.mcp import client as mcp_client
+
+    return mcp_client.USER_MCP_CONFIG
+
+
+def _write_mcp_yaml(text: str, tick: int):
+    """Write *text* with an mtime of *tick* seconds, so consecutive writes
+    differ in modification time however coarse the filesystem's clock is."""
+    import os
+
+    path = _mcp_yaml()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, ns=(tick * 10**9, tick * 10**9))
+    return path
+
+
+def test_graph_cache_rebuilds_after_an_mcp_yaml_edit(builds, tmp_path):
+    """An edit applies to the next access: the cached graph is dropped and
+    the next ``get`` builds again with the new file's tools."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    _write_mcp_yaml("servers: {fs: {}}\n", 2)
+    assert graphs.get("EvoScientist", dirs) is not first
+    assert builds == [("EvoScientist", dirs), ("EvoScientist", dirs)]
+
+
+def test_graph_cache_keeps_graphs_while_mcp_yaml_is_unchanged(builds, tmp_path):
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    graph = graphs.get("EvoScientist", dirs)
+    assert graphs.get("EvoScientist", dirs) is graph
+    assert builds == [("EvoScientist", dirs)]
+
+
+def test_graph_cache_rebuilds_lazily_after_an_edit(builds, tmp_path):
+    """A project not accessed since the edit is not rebuilt."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    a = SessionDirs(Workspace(tmp_path / "a"))
+    b = SessionDirs(Workspace(tmp_path / "b"))
+    graphs.get("EvoScientist", a)
+    graphs.get("EvoScientist", b)
+    _write_mcp_yaml("servers: {fs: {}}\n", 2)
+    builds.clear()
+    graphs.get("EvoScientist", a)
+    assert builds == [("EvoScientist", a)]
+
+
+def test_graph_cache_drops_run_folder_graphs_on_an_edit(builds, tmp_path):
+    workspace = Workspace(tmp_path)
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    run_a = SessionDirs(workspace, workspace.runs_dir / "a")
+    graphs.get("writing-agent", run_a)
+    _write_mcp_yaml("servers: {fs: {}}\n", 2)
+    builds.clear()
+    graphs.get("writing-agent", run_a)
+    assert builds == [("writing-agent", run_a)]
+
+
+def test_graph_cache_catches_a_same_size_edit(builds, tmp_path):
+    """An edit that keeps the file's size is caught by the modification
+    time, and the content digest then tells it from a bare touch."""
+    _write_mcp_yaml("servers: {fs: 1}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    _write_mcp_yaml("servers: {fs: 2}\n", 2)
+    assert graphs.get("EvoScientist", dirs) is not first
+
+
+def test_graph_cache_keeps_graphs_while_mcp_yaml_does_not_parse(
+    builds, tmp_path
+):
+    """A half-saved mcp.yaml keeps the graphs the server has (rebuilding
+    would read it as ``{}`` and drop every MCP tool); once the file parses,
+    the next access rebuilds."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    _write_mcp_yaml("servers: [unclosed\n", 2)
+    assert graphs.get("EvoScientist", dirs) is first
+    _write_mcp_yaml("servers: {fs: {}}\n", 3)
+    assert graphs.get("EvoScientist", dirs) is not first
+
+
+def test_graph_cache_rebuilds_when_mcp_yaml_is_removed(builds, tmp_path):
+    """Removing the file drops the MCP tools too."""
+    path = _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    path.unlink()
+    assert graphs.get("EvoScientist", dirs) is not first
+
+
+def test_graph_cache_edit_during_a_build_is_not_cached(builds, monkeypatch, tmp_path):
+    """A build that reads the file before an edit must not be cached under
+    the edit's stamp: it is returned to its access but the next access
+    builds again."""
+    _write_mcp_yaml("servers: {}\n", 1)
+
+    def build_during_edit(graph_id, dirs):
+        _write_mcp_yaml("servers: {fs: {}}\n", 2)
+        builds.append((graph_id, dirs))
+        return object()
+
+    monkeypatch.setattr(factories, "_build", build_during_edit)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    graphs.get("EvoScientist", dirs)
+    builds.clear()
+    graphs.get("EvoScientist", dirs)
+    assert builds == [("EvoScientist", dirs)]

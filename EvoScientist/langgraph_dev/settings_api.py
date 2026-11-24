@@ -51,7 +51,6 @@ from EvoScientist.config.settings import (
     _config_to_dict,
     config_from_mapping,
     env_origin,
-    get_config_dir,
     get_effective_config,
     is_client_only,
     load_config,
@@ -119,17 +118,12 @@ def _reaches_server(name: str) -> bool:
 
 def _file_digests(mapping: dict[str, Any]) -> dict[str, str]:
     """Per-field digests of the file's values (defaults for what it lacks),
-    plus ``mcp.yaml``, the packaged sub-agent specs and the version."""
+    plus the packaged sub-agent specs and the version. ``mcp.yaml`` is left
+    out: the server applies its edits without a restart (``GraphCache``)."""
     values = _config_to_dict(config_from_mapping(mapping))
     digests = {
         name: _digest(value) for name, value in values.items() if _reaches_server(name)
     }
-    mcp_yaml = os.path.join(get_config_dir(), "mcp.yaml")
-    try:
-        with open(mcp_yaml, "rb") as f:
-            digests["mcp.yaml"] = _digest(f.read())
-    except OSError:
-        digests["mcp.yaml"] = _digest(None)
     specs = hashlib.sha256()
     try:
         for name in sorted(os.listdir(_SUBAGENTS_DIR)):
@@ -320,9 +314,10 @@ def _provider_view(spec: KeySpec) -> dict[str, Any]:
 def read_settings() -> dict[str, Any]:
     """The ``GET /api/settings`` body.
 
-    Besides setting names, ``restart_fields`` can name three things that are
-    not settings: ``mcp.yaml`` (the MCP server file), ``subagents`` (the
-    bundled sub-agent definitions) and ``version`` (the installed package).
+    Besides setting names, ``restart_fields`` can name two things that are
+    not settings: ``subagents`` (the bundled sub-agent definitions) and
+    ``version`` (the installed package). ``mcp.yaml`` is never one: the
+    server applies its edits without a restart.
     """
     # The same config reads the graphs do, so ``sources`` sees what they see.
     effective = get_effective_config()
