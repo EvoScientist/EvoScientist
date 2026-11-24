@@ -1443,6 +1443,33 @@ class LangGraphServerGateway:
                 exc_info=True,
             )
 
+    async def _run_start_messages(
+        self, thread_id: str, run_id: str
+    ) -> list[Any] | None:
+        """The thread's messages when the run started, from its input checkpoint.
+
+        The pre-run read can be stale: a run the new one queued behind adds its
+        messages after it. ``None`` when the run has no input checkpoint (a
+        resumed run writes none) or it cannot be read (logged).
+        """
+        try:
+            history = await self.thread_store.client.threads.get_history(
+                thread_id, limit=1, metadata={"run_id": run_id, "source": "input"}
+            )
+        except Exception:
+            logger.warning(
+                "Could not read the input checkpoint of run %s on thread %s",
+                run_id,
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        if not history:
+            return None
+        values = history[0].get("values")
+        messages = values.get("messages") if isinstance(values, dict) else None
+        return messages if isinstance(messages, list) else []
+
     def _notify_recovered_turn(self) -> None:
         """Tell an attended frontend that this turn's result arrives late.
 
@@ -1817,6 +1844,16 @@ class LangGraphServerGateway:
                     request.thread_id,
                     finished_status,
                 )
+                # A new message's run starts at its input checkpoint: what
+                # the thread had then is not this turn's, also in the value
+                # snapshots the read-back replays.
+                start_messages = (
+                    None
+                    if isinstance(request.message, Command)
+                    else await self._run_start_messages(request.thread_id, run_id)
+                )
+                if start_messages is not None:
+                    processor.mark_messages_seen(start_messages)
                 # The new connection replays earlier runs first. Its
                 # events are held until the turn knows it can end with
                 # a result, so the notice is never followed by a loss.
@@ -1851,6 +1888,11 @@ class LangGraphServerGateway:
                         f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
                         f"status {finished_status}"
                     )
+                if isinstance(request.message, Command):
+                    # A resumed run has no input checkpoint, and a run it
+                    # queued behind can add messages after the pre-run read:
+                    # its own cannot be told apart.
+                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
                 # The run's last checkpoint, not the thread's latest state: a
                 # later run on the thread may already have added its own.
                 try:
@@ -1865,8 +1907,13 @@ class LangGraphServerGateway:
                 # What the turn has not shown of its answer, matched
                 # against the text shown so far.
                 values = state.get("values")
-                answer_events = processor.complete_turn_from_messages(
-                    values.get("messages") if isinstance(values, dict) else None
+                answer_events = (
+                    None
+                    if start_messages is None
+                    else processor.complete_turn_from_messages(
+                        values.get("messages") if isinstance(values, dict) else None,
+                        start_messages,
+                    )
                 )
                 state_events = list(answer_events or [])
                 for interrupt in _state_interrupts(state):
@@ -1875,9 +1922,16 @@ class LangGraphServerGateway:
                             _input_requested_event_from_interrupt(interrupt)
                         )
                     )
-                if answer_events is None and not state_events:
+                # A prompt the read-back already holds is a result too: the
+                # state's copy of it is not emitted twice.
+                if (
+                    answer_events is None
+                    and not state_events
+                    and not any(_is_interrupt_event(e) for e in recovered)
+                ):
                     raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
-                self._notify_recovered_turn()
+                if recovered or state_events:
+                    self._notify_recovered_turn()
                 for turn_event in [*recovered, *state_events]:
                     emitted_interrupt = emitted_interrupt or _is_interrupt_event(
                         turn_event

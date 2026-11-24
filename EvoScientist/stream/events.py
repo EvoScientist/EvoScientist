@@ -565,10 +565,6 @@ class _V3EventProcessor:
             existing_summarization_event
         )
         self._seen_value_message_keys = self._message_keys(existing_messages)
-        # The assistant messages, and the ids of all messages, the thread had
-        # before this turn.
-        self._baseline_value_message_keys = frozenset(self._seen_value_message_keys)
-        self._baseline_message_ids = frozenset(_message_ids(existing_messages))
         # Snapshot recovery delivers messages the transport did not stream. It
         # is suspended once root text streams and resumed when that text is
         # discarded, since the answer that replaces it may not stream.
@@ -973,13 +969,17 @@ class _V3EventProcessor:
                 self._end_text_message(None)
         return events
 
-    def complete_turn_from_messages(
-        self, messages: object
-    ) -> list[dict[str, Any]] | None:
-        """Emit what the turn has not shown, from the thread's final messages.
+    def mark_messages_seen(self, messages: object) -> None:
+        """Count ``messages`` as shown: value snapshots do not emit them."""
+        self._seen_value_message_keys |= self._message_keys(messages)
 
-        The turn's messages start after the last message the thread had
-        before it, so a resumed tool call's result is part of them. Their text
+    def complete_turn_from_messages(
+        self, messages: object, start_messages: object
+    ) -> list[dict[str, Any]] | None:
+        """Emit what the turn has not shown, from the run's final messages.
+
+        ``start_messages`` are the thread's messages when the run started
+        (its input checkpoint); the turn's messages follow them. Their text
         is matched against the text shown so far, message by message. The
         message the shown text stops in gets its tail; every later one is
         emitted whole (thinking, text, tool calls, usage), except the thinking
@@ -988,17 +988,17 @@ class _V3EventProcessor:
         live gets its usage. Sub-agent activity is not in these messages and
         stays unshown.
 
-        Returns ``None`` when the pre-run state read failed (the turn's
-        messages cannot be told apart from earlier ones) or when the shown
-        text is not the start of theirs.
+        Returns ``None`` when the shown text is not the start of theirs.
         """
-        if not self._value_recovery or not isinstance(messages, list):
+        if not isinstance(messages, list) or not isinstance(start_messages, list):
             return None
-        # The turn starts after the last message the thread had before it, so
-        # a resumed tool call's result is part of it. Without one (state
-        # rewritten by a summary), at the first assistant message not seen.
+        # The turn starts after the last message the thread had when the run
+        # started. Without one (state rewritten by a summary), at the first
+        # assistant message the start did not have.
+        start_ids = _message_ids(start_messages)
+        start_keys = self._message_keys(start_messages)
         ids = [_message_id(message) for message in messages]
-        known = [i for i, mid in enumerate(ids) if mid in self._baseline_message_ids]
+        known = [i for i, mid in enumerate(ids) if mid in start_ids]
         if known:
             first = known[-1] + 1
         else:
@@ -1007,7 +1007,7 @@ class _V3EventProcessor:
                     index
                     for index, message in enumerate(messages)
                     if (parsed := self._assistant_value_message(message)) is not None
-                    and parsed.key not in self._baseline_value_message_keys
+                    and parsed.key not in start_keys
                 ),
                 len(messages),
             )
@@ -1100,9 +1100,15 @@ class _V3EventProcessor:
             owns_thinking = thinking_open and thinking_owner in (None, message.id)
             if owns_thinking:
                 thinking_open = False
-            begun = owns_thinking or any(
-                ((), str(call.get("id") or "")) in self._emitted_tool_calls
-                for call in message.tool_calls
+            # A message whose end arrived live has begun too, also without
+            # text or a tool call (thinking only).
+            begun = (
+                owns_thinking
+                or message.id in self._root_finished_message_ids
+                or any(
+                    ((), str(call.get("id") or "")) in self._emitted_tool_calls
+                    for call in message.tool_calls
+                )
             )
             self._root_thinking_open = False
             self._end_text_message(None)

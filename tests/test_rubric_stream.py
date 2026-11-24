@@ -236,5 +236,6 @@ async def test_graded_run_cut_off_anywhere_is_completed_from_its_messages(
         )
         for envelope in envelopes[:cut]:
             await processor.process(copy.deepcopy(envelope))
-        assert processor.complete_turn_from_messages(messages) is not None, cut
+        # A new thread: the run started with no messages.
+        assert processor.complete_turn_from_messages(messages, []) is not None, cut
         assert processor.full_response == answer, cut

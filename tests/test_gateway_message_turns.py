@@ -1401,11 +1401,12 @@ def _state_after_start(
     state: dict[str, Any],
 ) -> None:
     """Thread state as the run leaves it, also its last checkpoint; the
-    pre-run read sees the old one."""
+    pre-run read and the run's input checkpoint see the old one."""
     start = stream.run.start
 
     async def start_and_write(**kwargs: Any) -> dict[str, Any]:
         reply = await start(**kwargs)
+        threads.input_states[(THREAD_ID, reply["run_id"])] = threads.states[THREAD_ID]
         threads.states[THREAD_ID] = state
         threads.run_states[(THREAD_ID, reply["run_id"])] = state
         return reply
@@ -1724,66 +1725,87 @@ async def test_state_completion_shows_thinking_once_and_keeps_word_spacing(
     ]
 
 
-async def test_resume_turn_completed_from_state_shows_the_resumed_tools_result(
-    quiet_poll,
-):
-    """The paused run's tool call is in the pre-run state; the resumed run adds
-    its result and the answer. Both are this turn's."""
-    paused = [
-        {"type": "human", "content": "list files", "id": "human-0"},
-        {
-            "type": "ai",
-            "content": "",
-            "id": "ai-0",
-            "tool_calls": [
-                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
-            ],
-        },
-    ]
-    resumed = [
-        *paused,
-        {
-            "type": "tool",
-            "content": "a.txt",
-            "id": "tool-1",
-            "name": "execute",
-            "tool_call_id": "call-1",
-        },
-        {"type": "ai", "content": "One file", "id": "ai-1"},
-    ]
-    run = [
-        _lifecycle("run-1", "running"),
-        _tool("tool-finished", "1-0", tool_name="execute", output="a.txt"),
-        _text("One file", "1-1"),
-        _finish("1-2"),
-        _lifecycle("run-1", "completed"),
-    ]
+_PAUSED_ON_A_TOOL = [
+    {"type": "human", "content": "list files", "id": "human-0"},
+    {
+        "type": "ai",
+        "content": "",
+        "id": "ai-0",
+        "tool_calls": [{"name": "execute", "args": {"command": "ls"}, "id": "call-1"}],
+    },
+]
+_RESUMED_RUN = [
+    _lifecycle("run-1", "running"),
+    _tool("tool-finished", "1-0", tool_name="execute", output="a.txt"),
+    _text("One file", "1-1"),
+    _finish("1-2"),
+    _lifecycle("run-1", "completed"),
+]
+_RESUME = Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+
+
+def _resumed_gateway(
+    read_back_limit: int | None,
+) -> tuple[LangGraphServerGateway, FakeLangGraphThreadsClient]:
+    """A thread paused on a tool call; the resumed run adds the tool's result
+    and the answer, and its live envelopes are lost."""
     stream = FakeLangGraphThreadStream(
-        THREAD_ID, events=run, live_limit=0, read_back_limit=0
+        THREAD_ID, events=_RESUMED_RUN, live_limit=0, read_back_limit=read_back_limit
     )
     gateway, threads = _gateway(
-        stream, values={"messages": paused}, interrupts=[{"id": "interrupt-0"}]
+        stream,
+        values={"messages": _PAUSED_ON_A_TOOL},
+        interrupts=[{"id": "interrupt-0"}],
     )
     respond = stream.run.respond_command
 
     async def respond_and_finish(params):
         reply = await respond(params)
+        resumed = [
+            *_PAUSED_ON_A_TOOL,
+            {
+                "type": "tool",
+                "content": "a.txt",
+                "id": "tool-1",
+                "name": "execute",
+                "tool_call_id": "call-1",
+            },
+            {"type": "ai", "content": "One file", "id": "ai-1"},
+        ]
         state = {"values": {"messages": resumed}}
         threads.states[THREAD_ID] = state
         threads.run_states[(THREAD_ID, stream.run.run_id)] = state
         return reply
 
     stream.run.respond_command = respond_and_finish
+    return gateway, threads
 
-    events = await _turn(
-        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
-    )
+
+async def test_resume_turn_read_back_in_full_shows_the_resumed_tools_result_once(
+    quiet_poll,
+):
+    gateway, _ = _resumed_gateway(read_back_limit=None)
+
+    events = await _turn(gateway, _RESUME)
 
     assert [(e["type"], e.get("content")) for e in events] == [
         ("tool_result", "a.txt"),
         ("text", "One file"),
         ("done", "One file"),
     ]
+
+
+async def test_resume_turn_is_not_completed_from_state(quiet_poll):
+    """A resumed run has no input checkpoint, and a run it queued behind can
+    add messages after the pre-run read: the turn cannot tell its own apart."""
+    gateway, threads = _resumed_gateway(read_back_limit=0)
+
+    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+        await _turn(gateway, _RESUME)
+
+    assert gateway.thread_store.client.runs.cancelled == []
+    # Neither checkpoint is read.
+    assert threads.history_gets == []
 
 
 @pytest.mark.parametrize(
@@ -2087,7 +2109,10 @@ async def test_state_completion_uses_the_runs_own_checkpoint(quiet_poll):
     events = await _turn(gateway, "hi")
 
     assert events[-1]["response"] == "Hello world"
-    assert threads.history_gets == [(THREAD_ID, 1, {"run_id": "run-1"})]
+    assert threads.history_gets == [
+        (THREAD_ID, 1, {"run_id": "run-1", "source": "input"}),
+        (THREAD_ID, 1, {"run_id": "run-1"}),
+    ]
 
 
 async def test_state_completion_without_a_checkpoint_of_the_run_raises(quiet_poll):
@@ -2329,3 +2354,252 @@ async def test_state_completion_reports_each_replys_usage_once(
         e for e in expected if e["type"] != "text"
     ]
     assert events[-1]["response"] == "First\n\nSecond"
+
+
+# Another run answered on the thread after the pre-run read and before this
+# turn's run started (it queued behind that run).
+_OTHER_RUN_MESSAGES = [
+    {"type": "human", "content": "other question", "id": "human-b"},
+    {"type": "ai", "content": "Other answer", "id": "ai-b"},
+]
+_AFTER_THE_OTHER_RUN = {"messages": [*_EARLIER_STATE["messages"], *_OTHER_RUN_MESSAGES]}
+_THIS_RUN_DONE = {
+    "messages": [
+        *_AFTER_THE_OTHER_RUN["messages"],
+        {"type": "human", "content": "hi", "id": "human-1"},
+        {"type": "ai", "content": "Hello world", "id": "ai-1"},
+    ]
+}
+
+
+def _start_after_another_run(
+    stream: FakeLangGraphThreadStream,
+    threads: FakeLangGraphThreadsClient,
+    *,
+    input_checkpoint: dict[str, Any] | None,
+) -> None:
+    """The pre-run read saw ``_EARLIER_STATE``; the run starts at
+    ``input_checkpoint`` and leaves ``_THIS_RUN_DONE``."""
+    start = stream.run.start
+
+    async def start_and_write(**kwargs: Any) -> dict[str, Any]:
+        reply = await start(**kwargs)
+        if input_checkpoint is not None:
+            threads.input_states[(THREAD_ID, reply["run_id"])] = input_checkpoint
+        threads.states[THREAD_ID] = {"values": _THIS_RUN_DONE}
+        threads.run_states[(THREAD_ID, reply["run_id"])] = {"values": _THIS_RUN_DONE}
+        return reply
+
+    stream.run.start = start_and_write
+
+
+async def test_state_completion_starts_at_the_runs_input_checkpoint(quiet_poll):
+    """The other run's answer is after the pre-run read but before this run's
+    start: it is not this turn's."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _start_after_another_run(
+        stream, threads, input_checkpoint={"values": _AFTER_THE_OTHER_RUN}
+    )
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+    assert events[-1]["response"] == "Hello world"
+
+
+def _values(messages: list[dict[str, Any]], entry_id: str) -> dict[str, Any]:
+    return {
+        "method": "values",
+        "params": {"namespace": [], "data": {"messages": messages}},
+        "event_id": entry_id,
+    }
+
+
+async def test_read_back_value_snapshots_start_at_the_runs_input_checkpoint(
+    quiet_poll,
+):
+    """A run whose answer arrives only in value snapshots: the read-back shows
+    it, not the other run's answer the snapshots also hold."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _values(_THIS_RUN_DONE["messages"][:-1], "1-0"),
+        _values(_THIS_RUN_DONE["messages"], "1-1"),
+        _lifecycle("run-1", "completed"),
+    ]
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=run, live_limit=0)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _start_after_another_run(
+        stream, threads, input_checkpoint={"values": _AFTER_THE_OTHER_RUN}
+    )
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+
+
+async def test_state_completion_without_an_input_checkpoint_raises(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _start_after_another_run(stream, threads, input_checkpoint=None)
+
+    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+        await _turn(gateway, "hi")
+
+
+async def test_state_completion_after_a_summary_rewrote_the_start(quiet_poll):
+    """None of the start's messages is left (a summary replaced them): the
+    turn starts at the first assistant message the start did not have."""
+    summarized = {
+        "messages": [
+            {"type": "human", "content": "Summary of the conversation", "id": "sum-1"},
+            {"type": "human", "content": "hi", "id": "human-1"},
+            {"type": "ai", "content": "Hello world", "id": "ai-1"},
+        ]
+    }
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": summarized})
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+
+
+async def test_finished_reply_with_only_thinking_is_not_repeated(quiet_poll):
+    """Its end arrived live: neither its thinking nor its usage again."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _message_start("ai-1", "1-0"),
+        _thinking("weighing it", "1-1"),
+        _finish_with_usage("1-2", 10, 5),
+        _message_start("ai-2", "1-3"),
+        _text("Done", "1-4"),
+        _finish_with_usage("1-5", 20, 7),
+        _lifecycle("run-1", "completed"),
+    ]
+    state = {
+        "messages": [
+            *_EARLIER_STATE["messages"],
+            {"type": "human", "content": "hi", "id": "human-1"},
+            {
+                "type": "ai",
+                "content": [{"type": "reasoning", "reasoning": "weighing it"}],
+                "id": "ai-1",
+                "usage_metadata": _usage(10, 5),
+            },
+            {
+                "type": "ai",
+                "content": "Done",
+                "id": "ai-2",
+                "usage_metadata": _usage(20, 7),
+            },
+        ]
+    }
+    expected = await _live_events(run, values=_EARLIER_STATE)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=4, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": state})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] != "text"] == [
+        e for e in expected if e["type"] != "text"
+    ]
+
+
+async def test_finished_reply_whose_tool_call_was_not_shown_gets_it(quiet_poll):
+    """A finish does not mean every tool call was shown: the stored one is."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _message_start("ai-1", "1-0"),
+        _finish_with_usage("1-1", 10, 5),
+        _tool("tool-started", "1-2", tool_name="execute", input={"command": "ls"}),
+        _tool("tool-finished", "1-3", tool_name="execute", output="a.txt"),
+        _lifecycle("run-1", "completed"),
+    ]
+    state = {
+        "messages": [
+            *_EARLIER_STATE["messages"],
+            {"type": "human", "content": "hi", "id": "human-1"},
+            {
+                "type": "ai",
+                "content": "",
+                "id": "ai-1",
+                "tool_calls": [
+                    {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+                ],
+                "usage_metadata": _usage(10, 5),
+            },
+            {
+                "type": "tool",
+                "content": "a.txt",
+                "id": "tool-1",
+                "name": "execute",
+                "tool_call_id": "call-1",
+            },
+        ]
+    }
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=3, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": state})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e["type"] for e in events] == [
+        "usage_stats",
+        "tool_call",
+        "tool_result",
+        "done",
+    ]
+
+
+async def test_prompt_held_by_the_read_back_is_shown_without_a_boundary(
+    quiet_poll,
+):
+    """No input checkpoint, and the read-back stops after the prompt but
+    before the run's end: the prompt it holds still ends the turn."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_PAUSE_RUN, live_limit=0, read_back_limit=4
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    start = stream.run.start
+
+    async def start_and_pause(**kwargs: Any) -> dict[str, Any]:
+        reply = await start(**kwargs)
+        paused = {"values": _EARLIER_STATE, "interrupts": [_STATE_INTERRUPT]}
+        threads.states[THREAD_ID] = paused
+        threads.run_states[(THREAD_ID, reply["run_id"])] = paused
+        return reply
+
+    stream.run.start = start_and_pause
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] == "interrupt"] == [_INTERRUPT_EVENT]
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_nothing_to_show_from_state_shows_no_line(quiet_poll):
+    """The live stream showed the whole answer; only the run's end was lost."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=4, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+    gateway.events = _Notices()
+
+    events = await _turn(gateway, "hi")
+
+    assert events[-1]["response"] == "Hello world"
+    assert gateway.events.lines == []
