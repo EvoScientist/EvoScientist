@@ -1746,11 +1746,14 @@ _RESUME = Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
 
 def _resumed_gateway(
     read_back_limit: int | None,
+    interrupts: list[dict[str, Any]] | None = None,
+    run: list[dict[str, Any]] = _RESUMED_RUN,
 ) -> tuple[LangGraphServerGateway, FakeLangGraphThreadsClient]:
     """A thread paused on a tool call; the resumed run adds the tool's result
-    and the answer, and its live envelopes are lost."""
+    and the answer, and pauses again on ``interrupts``; its live envelopes
+    are lost."""
     stream = FakeLangGraphThreadStream(
-        THREAD_ID, events=_RESUMED_RUN, live_limit=0, read_back_limit=read_back_limit
+        THREAD_ID, events=run, live_limit=0, read_back_limit=read_back_limit
     )
     gateway, threads = _gateway(
         stream,
@@ -1772,7 +1775,9 @@ def _resumed_gateway(
             },
             {"type": "ai", "content": "One file", "id": "ai-1"},
         ]
-        state = {"values": {"messages": resumed}}
+        state: dict[str, Any] = {"values": {"messages": resumed}}
+        if interrupts:
+            state["interrupts"] = interrupts
         threads.states[THREAD_ID] = state
         threads.run_states[(THREAD_ID, stream.run.run_id)] = state
         return reply
@@ -1804,8 +1809,56 @@ async def test_resume_turn_is_not_completed_from_state(quiet_poll):
         await _turn(gateway, _RESUME)
 
     assert gateway.thread_store.client.runs.cancelled == []
-    # Neither checkpoint is read.
-    assert threads.history_gets == []
+    # Only the run's own last checkpoint, for its prompts.
+    assert [metadata for _, _, metadata in threads.history_gets] == [
+        {"run_id": "run-1"}
+    ]
+
+
+async def test_resume_turn_that_paused_again_shows_its_prompt_from_state(
+    quiet_poll,
+):
+    """The prompts in the run's own checkpoint are its own: the turn ends
+    with them, without rebuilding the answer from the messages."""
+    gateway, _ = _resumed_gateway(read_back_limit=0, interrupts=[_STATE_INTERRUPT])
+
+    events = await _turn(gateway, _RESUME)
+
+    assert [e["type"] for e in events] == ["interrupt", "done"]
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_resume_turn_shows_a_prompt_the_read_back_held_once(quiet_poll):
+    """The read-back holds the new prompt but not the run's end, and the run's
+    checkpoint has it too: it is shown once."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _tool("tool-finished", "1-0", tool_name="execute", output="a.txt"),
+        _input_requested([]),
+        _lifecycle("run-1", "interrupted"),
+    ]
+    gateway, _ = _resumed_gateway(
+        read_back_limit=3, interrupts=[_STATE_INTERRUPT], run=run
+    )
+
+    events = await _turn(gateway, _RESUME)
+
+    assert [e for e in events if e["type"] == "interrupt"] == [_INTERRUPT_EVENT]
+
+
+async def test_resume_turn_takes_no_prompt_from_another_runs_checkpoint(
+    quiet_poll,
+):
+    """Only this run's checkpoint is read: a later run's prompt is not this
+    turn's."""
+    gateway, threads = _resumed_gateway(read_back_limit=0)
+    threads.run_states[(THREAD_ID, "run-9")] = {
+        "values": {"messages": _PAUSED_ON_A_TOOL},
+        "interrupts": [_STATE_INTERRUPT],
+    }
+
+    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+        await _turn(gateway, _RESUME)
 
 
 @pytest.mark.parametrize(

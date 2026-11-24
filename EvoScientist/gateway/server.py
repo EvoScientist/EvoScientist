@@ -1888,11 +1888,6 @@ class LangGraphServerGateway:
                         f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
                         f"status {finished_status}"
                     )
-                if isinstance(request.message, Command):
-                    # A resumed run has no input checkpoint, and a run it
-                    # queued behind can add messages after the pre-run read:
-                    # its own cannot be told apart.
-                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
                 # The run's last checkpoint, not the thread's latest state: a
                 # later run on the thread may already have added its own.
                 try:
@@ -1905,7 +1900,10 @@ class LangGraphServerGateway:
                     raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
                 state = history[0]
                 # What the turn has not shown of its answer, matched
-                # against the text shown so far.
+                # against the text shown so far. A resumed run has no input
+                # checkpoint, and a run it queued behind can add messages
+                # after the pre-run read: only its prompts, which are its
+                # own, are taken.
                 values = state.get("values")
                 answer_events = (
                     None
