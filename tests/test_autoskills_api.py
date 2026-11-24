@@ -295,20 +295,21 @@ def test_list_issues_no_digest_for_a_file_whose_bytes_are_not_its_text(
     assert draft["review_incomplete"] == "unavailable"
 
 
-def test_the_file_route_finds_a_nul_byte_past_the_preview_window(
-    server, served, monkeypatch
-):
-    """The preview window is short and the NUL byte is past it, but the read
-    still goes far enough to find it."""
+def test_list_reads_past_the_preview_to_find_a_nul_byte(server, served, monkeypatch):
+    """The NUL byte is past the preview window, and the read still goes far
+    enough to find it: the file is binary, so the row says so."""
     from EvoScientist.langgraph_dev import autoskills_api
 
     _draft(served, "focused-validation")
     folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
-    (folder / "table.dat").write_bytes(b"x" * 64 + b"\x00")
-    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 3)
+    # Past the preview window, and past a read that stopped at the window.
+    (folder / "table.dat").write_bytes(b"x" * 2000 + b"\x00")
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 200)
 
-    _only_draft(server)
+    draft = _only_draft(server)
 
+    assert draft["content_digest"] is None
+    assert draft["review_incomplete"] == "unavailable"
     assert server.get(
         "/api/autoskills/proposals/focused-validation/file?path=table.dat"
     ).json() == {"error": "binary_file"}
