@@ -152,10 +152,14 @@ def _stop_own_server(proc: subprocess.Popen | None) -> None:
         return
     previous = {sig: signal.signal(sig, ignore_stop_signal) for sig in stop_signals()}
     try:
-        say("\n[dim]Stopping langgraph dev...[/dim]", to=console)
-        # A server that never became ready has no run to put back in the
-        # queue, and on Windows would only finish loading first.
-        lgm.stop_langgraph_dev(server, clean=proc is not None)
+        # Piped to a program that has exited, rich ends the print with
+        # ``SystemExit``: the stop runs before deploy exits with it.
+        try:
+            say("\n[dim]Stopping langgraph dev...[/dim]", to=console)
+        finally:
+            # A server that never became ready has no run to put back in the
+            # queue, and on Windows would only finish loading first.
+            lgm.stop_langgraph_dev(server, clean=proc is not None)
         say("[dim]Stopped.[/dim]", to=console)
     finally:
         for sig, handler in previous.items():

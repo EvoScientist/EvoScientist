@@ -903,6 +903,28 @@ def test_deploy_stops_its_server_when_the_terminal_is_gone(monkeypatch):
     assert stops == [(proc, True)]
 
 
+def test_deploy_stops_its_server_when_its_pipe_is_gone(monkeypatch):
+    """With no reader on the pipe, rich ends the print with ``SystemExit``:
+    the stop still runs."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    class _GonePipe:
+        def print(self, *_a, **_k):
+            raise SystemExit(1)
+
+    proc = object()
+    stops: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda p, *, clean: stops.append((p, clean))
+    )
+    monkeypatch.setattr(deploy_server, "console", _GonePipe())
+
+    with pytest.raises(SystemExit):
+        deploy_server._stop_own_server(proc)
+
+    assert stops == [(proc, True)]
+
+
 @pytest.mark.parametrize(
     "ending",
     [
