@@ -2160,10 +2160,21 @@ def _serve_drain_notifications(
         return registry or {}
 
     async def _consume() -> None:
+        async def _read_bg_processes() -> dict[str, dict] | None:
+            return await async_notifier.read_bg_processes_from_gateway(
+                runtime_state.runtime_gateways.graph_gateway,
+                GraphTarget(
+                    local_graph=runtime_state.agent,
+                    **runtime_state.dirs.metadata(),
+                ),
+                runtime_state.thread_id,
+            )
+
         await async_notifier.consume_notifications(
             run_message=_run_notification_message_async,
             read_async_tasks_state=_read_async_tasks,
             current_thread_id=runtime_state.thread_id,
+            read_bg_processes_state=_read_bg_processes,
         )
 
     try:

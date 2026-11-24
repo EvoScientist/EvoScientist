@@ -701,24 +701,31 @@ def drain_notifications(
 def dedup_notifications(
     notifs: list[AsyncTaskNotification],
     async_tasks: AsyncTasksState | None,
+    *,
+    bg_processes: dict[str, dict] | None = None,
 ) -> list[AsyncTaskNotification]:
-    """Filter notifications the agent has already 'seen' via prior check.
+    """Filter notifications the agent has already seen via a check.
 
-    Logic: skip a notification if `async_tasks[task_id]` exists with a TERMINAL
-    status and `last_checked_at >= last_updated_at` (timestamps are ISO-8601
-    so lexicographic comparison is correct). Also skip if `last_checked_at`
-    is empty (brand-new task where agent hasn't checked yet).
+    Async tasks require a terminal status checked at or after its last update.
+    Background processes use a terminal thread record or a local observation.
+    An ``untracked`` mark alone does not suppress a notice: the reader stores
+    that mark before enqueueing its first delivery.
     """
     from .. import background  # cli -> core import; lazy to avoid import-order issues
 
     async_tasks = async_tasks or {}
+    bg_processes = bg_processes or {}
     survivors: list[AsyncTaskNotification] = []
     for n in notifs:
         if n.kind == "bg-process":
             # Background process: skip if the launching session already inspected it
             # after it finished (check_process / list_processes) — mirrors the task
             # dedup below. Per-thread: another session's check doesn't suppress this.
-            if background.was_observed_done(n.task_id, n.origin_cli_thread_id):
+            # A server-owned process's check writes thread state, not this
+            # client's registry. It may have been checked after enqueueing.
+            if bg_processes.get(n.task_id, {}).get("status") in TERMINAL_STATUSES or (
+                background.was_observed_done(n.task_id, n.origin_cli_thread_id)
+            ):
                 logger.debug("Dedup: skipping shell notification for %s", n.task_id)
                 continue
             survivors.append(n)
@@ -859,6 +866,9 @@ async def consume_notifications(
     run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
     read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
+    *,
+    read_bg_processes_state: Callable[[], Awaitable[dict[str, dict] | None]]
+    | None = None,
 ) -> None:
     """Drain queue, dedup, batch, and inject as a synthetic user message.
 
@@ -870,6 +880,8 @@ async def consume_notifications(
             without re-parsing the text.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
+        read_bg_processes_state: optional reader of ``bg_processes`` for
+            checks performed outside this client's process registry.
         current_thread_id: the active CLI thread id. When given, only
             notifications whose ``origin_cli_thread_id`` matches (or that
             were enqueued unrouted) are drained — notifications belonging
@@ -891,7 +903,16 @@ async def consume_notifications(
         logger.warning("Failed to read async_tasks state for dedup", exc_info=True)
         async_tasks = {}
 
-    survivors = dedup_notifications(notifs, async_tasks)
+    bg_processes = None
+    if read_bg_processes_state is not None and any(
+        n.kind == "bg-process" for n in notifs
+    ):
+        try:
+            bg_processes = await read_bg_processes_state()
+        except Exception:
+            logger.warning("Failed to read bg_processes state for dedup", exc_info=True)
+
+    survivors = dedup_notifications(notifs, async_tasks, bg_processes=bg_processes)
     if not survivors:
         logger.info(
             "All %d notifications deduped (already known to agent)", len(notifs)

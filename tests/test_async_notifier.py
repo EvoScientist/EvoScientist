@@ -472,6 +472,95 @@ async def test_consume_notifications_no_op_when_queue_empty():
     assert called is False
 
 
+@pytest.mark.parametrize(
+    "status", ["success", "error", "interrupted", "running", "untracked"]
+)
+def test_serve_dedups_a_queued_exit_against_thread_state(monkeypatch, status):
+    """A server-side check after enqueue must suppress the pending notice."""
+    from EvoScientist.cli.commands import _serve_drain_notifications
+    from EvoScientist.gateway import RuntimeGateways
+    from EvoScientist.runtime import AsyncRuntime
+    from tests.fakes.serve import runtime_state
+
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {"proc-689": {"status": status}}}
+    )
+    runner = MagicMock(return_value="acknowledged")
+    monkeypatch.setattr("EvoScientist.cli.tui_runtime.run_streaming", runner)
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    async_notifier.enqueue_bg_process_notification(
+        task_id="proc-689",
+        agent_name="training",
+        status="success",
+        origin_cli_thread_id="tid",
+    )
+    with AsyncRuntime(thread_name="test-notifier-dedup") as runtime:
+        state = runtime_state(
+            runtime_gateways=RuntimeGateways(
+                thread_store=gateway.thread_store, graph_gateway=gateway
+            ),
+            async_runtime=runtime,
+        )
+        state.agent = None  # The server executes this thread's graph.
+        _serve_drain_notifications(runtime_state=state, model=None, show_thinking=False)
+
+    assert runner.call_count == (1 if status in {"running", "untracked"} else 0)
+    assert gateway.updated_states == []
+
+
+@pytest.mark.parametrize("status", ["success", "untracked", "running", None])
+def test_bg_dedup_uses_the_thread_record(monkeypatch, status):
+    from EvoScientist import background
+
+    # The client has no local observation of this server-owned process.
+    monkeypatch.setattr(background, "was_observed_done", lambda *_args: False)
+    notice = _untracked("proc-689")
+    records = {} if status is None else {"proc-689": {"status": status}}
+    survivors = dedup_notifications([notice], {}, bg_processes=records)
+    # The current reader marks untracked before enqueueing, so that mark
+    # cannot suppress its first delivery. A known terminal exit can.
+    assert survivors == ([] if status == "success" else [notice])
+
+
+async def test_bg_dedup_read_failure_keeps_the_notification(monkeypatch):
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    notice = _untracked("proc-689")
+    async_notifier.enqueue_task_notification(notice)
+    runner = AsyncMock()
+    await async_notifier.consume_notifications(
+        runner,
+        AsyncMock(return_value={}),
+        read_bg_processes_state=AsyncMock(side_effect=RuntimeError("offline")),
+    )
+    assert runner.await_args.args[1] == [notice]
+
+
+@pytest.mark.parametrize("status", ["success", "running"])
+async def test_tui_dedups_a_queued_exit_against_thread_state(
+    monkeypatch, workspace, status
+):
+    from tests.fakes.tui import capture_app, prepare_app
+
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    app = await capture_app(monkeypatch, workspace)
+    tid = app._conversation_tid
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {"proc-689": {"status": status}}}
+    )
+    prepare_app(app, workspace, gateway)
+    app._inject_notification_tui = AsyncMock()
+    async_notifier.enqueue_bg_process_notification(
+        task_id="proc-689",
+        agent_name="training",
+        status="success",
+        origin_cli_thread_id=tid,
+    )
+    await app._consume_notifications_tui()
+
+    assert app._inject_notification_tui.await_count == (1 if status == "running" else 0)
+    assert gateway.updated_states == []
+
+
 # ============================================================================
 # Tests for TUI consumer reentry guard (_notification_consuming flag)
 # Exercises Fix 2: the flag prevents two overlapping consume coroutines from

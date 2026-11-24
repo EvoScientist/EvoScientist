@@ -67,6 +67,7 @@ from .async_notifier import (
     enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
+    read_bg_processes_from_gateway,
 )
 from .channel import (
     ChannelMessage,
@@ -1346,6 +1347,17 @@ def run_textual_interactive(
             and silently kill notification + channel dispatch.
             """
             target_tid = self._conversation_tid
+
+            async def _read_bg_processes() -> dict[str, dict] | None:
+                return await read_bg_processes_from_gateway(
+                    self._graph_gateway(),
+                    GraphTarget(
+                        local_graph=self._agent_loader.agent,
+                        **self._dirs.metadata(),
+                    ),
+                    target_tid,
+                )
+
             try:
                 if self._busy:
                     # The poll found the app free, but input handled since then
@@ -1360,6 +1372,7 @@ def run_textual_interactive(
                             target_tid
                         ),
                         current_thread_id=target_tid,
+                        read_bg_processes_state=_read_bg_processes,
                     )
                 except Exception:
                     import logging

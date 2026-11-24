@@ -1380,6 +1380,20 @@ def cmd_interactive(
                 except Exception:
                     return {}
 
+            async def _read_current_bg_processes(
+                target_thread_id: str | None,
+            ) -> dict[str, dict] | None:
+                if not target_thread_id:
+                    return {}
+                return await async_notifier.read_bg_processes_from_gateway(
+                    runtime_gateways.graph_gateway,
+                    GraphTarget(
+                        local_graph=agent_loader.agent,
+                        **state["dirs"].metadata(),
+                    ),
+                    target_thread_id,
+                )
+
             async def _check_channel_queue() -> None:
                 """Poll the channel + notification queues and dispatch."""
                 while True:
@@ -1446,6 +1460,11 @@ def cmd_interactive(
                                 ),
                                 read_async_tasks_state=read_async_tasks_state,
                                 current_thread_id=current_tid,
+                                read_bg_processes_state=(
+                                    lambda _tid=current_tid: _read_current_bg_processes(
+                                        _tid
+                                    )
+                                ),
                             )
                         except Exception:
                             _channel_logger.warning(
