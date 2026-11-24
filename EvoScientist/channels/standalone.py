@@ -371,9 +371,10 @@ def run_standalone(
     from ..paths import process_workspace
 
     # Keep channel credentials out of HTTP request logs.
-    from .logging_caps import quiet_credential_url_loggers
+    from .logging_caps import quiet_credential_url_loggers, redact_root_handlers
 
     quiet_credential_url_loggers()
+    redact_root_handlers()
 
     config = None
     backend = None

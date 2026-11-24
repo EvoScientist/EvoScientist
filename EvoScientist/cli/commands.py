@@ -3601,6 +3601,11 @@ def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
 
+    from ..channels.logging_caps import (
+        quiet_credential_url_loggers,
+        redact_root_handlers,
+        scrub_url_secrets,
+    )
     from ..config import get_effective_config
 
     def _resolve_log_level() -> int:
@@ -3624,7 +3629,8 @@ def _configure_logging():
                 record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
-                msg = record.getMessage()
+                # Printed directly, so the formatter's scrub never sees it.
+                msg = scrub_url_secrets(record.getMessage())
                 console.print(
                     f"[dim yellow]\u26a0\ufe0f  Warning:[/dim yellow] [dim]{escape(msg)}[/dim]"
                 )
@@ -3653,6 +3659,5 @@ def _configure_logging():
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
 
     # Keep channel credentials out of HTTP request logs.
-    from ..channels.logging_caps import quiet_credential_url_loggers
-
     quiet_credential_url_loggers()
+    redact_root_handlers()

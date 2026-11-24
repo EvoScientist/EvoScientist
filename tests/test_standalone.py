@@ -1005,3 +1005,20 @@ def test_sigint_forces_shutdown_after_channel_worker_exits(tmp_path, caplog):
 
     asyncio.run(_run())
     assert "Signal received during shutdown, forcing exit" in caplog.text
+
+
+def test_run_standalone_scrubs_url_secrets_from_root_handlers(monkeypatch):
+    """The per-channel serve.py basicConfig handler keeps its format, minus secrets."""
+    import io
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+    logging.getLogger("lib").error("timeout to wss://gw/connect?ticket=t-secret")
+
+    assert stream.getvalue().startswith("[ERROR] timeout to wss://gw/connect")
+    assert "t-secret" not in stream.getvalue()

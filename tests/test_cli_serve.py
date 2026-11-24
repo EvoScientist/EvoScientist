@@ -394,3 +394,42 @@ def test_configure_logging_caps_credential_url_loggers(monkeypatch):
     finally:
         root.handlers[:] = root_handlers
         root.setLevel(root_level)
+
+
+def test_configure_logging_scrubs_url_secrets_from_errors_and_warnings(monkeypatch):
+    """Exception text from a library can quote a ticketed URL at ERROR level."""
+    import io
+    import logging
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    import EvoScientist.cli.commands as commands
+    import EvoScientist.config as cfg_mod
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buffer, width=500))
+    monkeypatch.setattr(
+        cfg_mod,
+        "get_effective_config",
+        lambda *_a: SimpleNamespace(log_level="DEBUG"),
+    )
+    root = logging.getLogger()
+    root_handlers, root_level = root.handlers[:], root.level
+    try:
+        commands._configure_logging()
+        log = logging.getLogger("slack_sdk.socket_mode.aiohttp")
+        try:
+            raise TimeoutError("Connection timeout to host wss://gw/link?ticket=t1")
+        except TimeoutError as e:
+            log.exception(f"Failed to connect (error: {e}); Retrying...")
+        log.warning("proxy http://user:proxy-secret@proxy:3128 is slow")
+    finally:
+        root.handlers[:] = root_handlers
+        root.setLevel(root_level)
+
+    output = buffer.getvalue()
+    assert "Failed to connect" in output
+    assert "is slow" in output
+    assert "ticket=t1" not in output
+    assert "proxy-secret" not in output
