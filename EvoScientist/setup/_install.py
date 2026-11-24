@@ -135,6 +135,24 @@ def which_on_path(
     return None
 
 
+def clean_path(path: str | None = None) -> str:
+    """``PATH`` (or ``path``) without empty or relative entries, so a child's
+    ``#!/usr/bin/env node`` never searches the current directory. Other entries
+    are kept as written and in order. When no absolute entry remains, returns
+    ``/dev/null`` on POSIX so an empty PATH never resolves against the current
+    directory."""
+    if path is None:
+        path = os.environ.get("PATH", "")
+    parts = [
+        entry
+        for entry in path.split(os.pathsep)
+        if (directory := clean_path_entry(entry)) and os.path.isabs(directory)
+    ]
+    if not parts and not _WINDOWS:
+        return "/dev/null"
+    return os.pathsep.join(parts)
+
+
 # Pauses between attempts to move an unpacked tool into place (about 4 s).
 _MOVE_RETRY_DELAYS = (0.1, 0.2, 0.5, 1.0, 2.0)
 

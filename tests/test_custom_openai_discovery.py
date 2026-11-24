@@ -238,6 +238,30 @@ class TestDiscoverCustomOpenaiModels:
             ]
         assert parse_threads == [threading.current_thread()]
 
+    async def test_a_parse_that_crosses_the_deadline_still_returns(self, monkeypatch):
+        """A parse that ends past the deadline is still a result.
+
+        The parse runs inline and cannot be interrupted, so once it has
+        finished the listing is known; discarding it would drop a valid
+        listing for no saving.
+        """
+        loop = asyncio.get_running_loop()
+        clock = [100.0]
+        monkeypatch.setattr(loop, "time", lambda: clock[0])
+        original = discovery._picker_names
+
+        def slow_parse(body):
+            names = original(body)
+            # The parse ends well after the deadline the caller set.
+            clock[0] += 5.0
+            return names
+
+        monkeypatch.setattr(discovery, "_picker_names", slow_parse)
+        patcher, _ = _patch_request(_response())
+        with patcher:
+            names = await discover_custom_openai_models("https://llm.test/v1")
+        assert names == ["fake-agent", "other-model"]
+
 
 async def test_settings_and_picker_list_the_same_normalized_ids(monkeypatch):
     import openai

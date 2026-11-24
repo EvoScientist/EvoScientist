@@ -497,6 +497,7 @@ async def _decide_on_proposal(request: Request, action: str) -> JSONResponse:
         action,
         scope=body.get("scope"),
         expected_updated_at=body.get("expected_updated_at"),
+        expected_content_digest=body.get("expected_content_digest"),
     )
     return JSONResponse(payload, status_code=status)
 

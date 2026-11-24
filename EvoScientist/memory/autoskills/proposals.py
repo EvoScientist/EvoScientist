@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import os
 import re
@@ -12,7 +13,7 @@ import stat
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -21,11 +22,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from ... import paths
 
 AUTOSKILL_PROPOSALS_DIR = "autoskills/proposals"
 AUTOSKILL_PROCESSED_DIR = "autoskills/processed"
+AUTOSKILL_LOCKS_DIR = "autoskills/locks"
+AUTOSKILL_SNAPSHOTS_DIR = "autoskills/snapshots"
+_DRAFT_LOCK_TIMEOUT = 10.0
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _CLUSTER_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -101,6 +108,25 @@ def _proposal_root(memory_dir: str | Path) -> Path:
 
 def _processed_root(memory_dir: str | Path) -> Path:
     return Path(memory_dir).expanduser() / AUTOSKILL_PROCESSED_DIR
+
+
+def _draft_lock(proposal_dir: Path) -> FileLock:
+    """The lock every writer of *proposal_dir* takes."""
+    resolved_dir = proposal_dir.resolve()
+    lock_root = resolved_dir.parent.parent / Path(AUTOSKILL_LOCKS_DIR).name
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Real paths make symlinks share a lock; normcase also folds Windows aliases.
+    key = os.fsencode(os.path.normcase(str(resolved_dir)))
+    lock_path = lock_root / f"{hashlib.sha256(key).hexdigest()}.lock"
+    return FileLock(str(lock_path), timeout=_DRAFT_LOCK_TIMEOUT)
+
+
+def _snapshots_root(memory_dir: str | Path) -> Path:
+    """Where an approval keeps the copies it makes: of the draft it installs,
+    and of the skill it is about to overwrite."""
+    root = Path(memory_dir).expanduser().resolve() / AUTOSKILL_SNAPSHOTS_DIR
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root
 
 
 def autoskill_proposals_dir(memory_dir: str | Path) -> Path:
@@ -214,42 +240,64 @@ def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
         return text
 
 
+def _in_proposals_root(manifest_path: Path, resolved_root: Path) -> bool:
+    """Whether a manifest's draft folder resolves inside the proposals root.
+
+    A folder that resolves outside it is reached through a link, so it is not
+    a draft this process serves. Rewriting it would write through the link,
+    and locking it would create its lock file two levels above wherever the
+    link points, outside the proposals area.
+    """
+    return _resolves_within_root(manifest_path.parent, resolved_root)
+
+
 def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
     """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
 
     Proposals made by ``--mode=run`` sessions named the run folder; they
     belong to its workspace. Other proposals, and folders that cannot be
-    resolved, are left as they are. Part of the one-time upgrade of stored
+    resolved or are reached through a link, are left as they are. A draft
+    locked for longer than the timeout raises ``FileLockTimeout``, and the
+    next start runs the upgrade again. Part of the one-time upgrade of stored
     values (see ``sessions._upgrade_stored_dirs``). Returns the number
     rewritten.
     """
     root = _proposal_root(memory_dir)
     if not root.exists():
         return 0
+    resolved_root = root.resolve()
     rewritten = 0
     for manifest_path in sorted(root.glob("*/manifest.json")):
-        manifest = _read_manifest(manifest_path)
-        stored = manifest.get("workspace_dir") if manifest else None
-        if not isinstance(stored, str) or not stored.strip():
+        if not _in_proposals_root(manifest_path, resolved_root):
             continue
-        try:
-            dirs = paths.SessionDirs.from_legacy(stored.strip())
-        except (ValueError, OSError, RuntimeError):
-            continue
-        if dirs.run_dir is not None:
-            manifest["workspace_dir"] = dirs.workspace.key
-            _write_manifest(manifest_path, manifest)
-            rewritten += 1
+        # The lock a decision holds: writing a manifest read before a decision
+        # committed would put the draft back to how it was before the decision.
+        with _draft_lock(manifest_path.parent):
+            manifest = _read_manifest(manifest_path)
+            stored = manifest.get("workspace_dir") if manifest else None
+            if not isinstance(stored, str) or not stored.strip():
+                continue
+            try:
+                dirs = paths.SessionDirs.from_legacy(stored.strip())
+            except (ValueError, OSError, RuntimeError):
+                continue
+            if dirs.run_dir is not None:
+                manifest["workspace_dir"] = dirs.workspace.key
+                _write_manifest(manifest_path, manifest)
+                rewritten += 1
     return rewritten
 
 
 def _proposal_manifests(memory_dir: str | Path, workspace_key: str):
     """The manifests of *workspace_key*'s proposals, every status: (path,
-    manifest) pairs."""
+    manifest) pairs, for the drafts this process serves."""
     root = _proposal_root(memory_dir)
     if not root.exists():
         return
+    resolved_root = root.resolve()
     for manifest_path in sorted(root.glob("*/manifest.json")):
+        if not _in_proposals_root(manifest_path, resolved_root):
+            continue
         manifest = _read_manifest(manifest_path)
         stored = manifest.get("workspace_dir") if manifest else None
         if not isinstance(stored, str) or not stored.strip():
@@ -280,22 +328,29 @@ def move_proposals(
     """Give every proposal of the project *old_key* (every status, so
     ``/autoskills list`` keeps its history) to the project *new_key*, with
     its memory project id mapped through *project_ids*. Returns the number
-    rewritten; running it again rewrites none."""
+    rewritten; running it again rewrites none. A draft locked for longer
+    than the timeout raises ``FileLockTimeout``, which fails the move; the
+    next server start, or running the move again, finishes it."""
     moved = 0
-    for manifest_path, manifest in list(_proposal_manifests(memory_dir, old_key)):
-        if manifest.get("workspace_dir") == new_key:
-            continue
-        manifest["workspace_dir"] = new_key
-        project_id = manifest.get("project_id")
-        if isinstance(project_id, str) and project_id in project_ids:
-            manifest["project_id"] = project_ids[project_id]
-        # The list and Undo read where an approval installed, so it moves too.
-        for key in ("approved_skill_path", "workspace_shadow"):
-            moved_path = _moved_path(manifest.get(key), old_key, new_key)
-            if moved_path is not None:
-                manifest[key] = moved_path
-        _write_manifest(manifest_path, manifest)
-        moved += 1
+    for manifest_path, _listed in list(_proposal_manifests(memory_dir, old_key)):
+        # The listing only names candidates. Each manifest is read again under
+        # its draft's lock: a decision can commit between the two reads, and
+        # writing the stale manifest would drop ``approved_skill_path``.
+        with _draft_lock(manifest_path.parent):
+            manifest = _read_manifest(manifest_path)
+            if manifest is None or manifest.get("workspace_dir") == new_key:
+                continue
+            manifest["workspace_dir"] = new_key
+            project_id = manifest.get("project_id")
+            if isinstance(project_id, str) and project_id in project_ids:
+                manifest["project_id"] = project_ids[project_id]
+            # The list and Undo read where an approval installed, so it moves too.
+            for key in ("approved_skill_path", "workspace_shadow"):
+                moved_path = _moved_path(manifest.get(key), old_key, new_key)
+                if moved_path is not None:
+                    manifest[key] = moved_path
+            _write_manifest(manifest_path, manifest)
+            moved += 1
     return moved
 
 
@@ -552,6 +607,12 @@ def _validate_skill_proposal_dir(
         errors.append("Proposal files must resolve inside /autoskill-proposals")
         return False, errors, None
 
+    resolved_dir = proposal_dir.resolve()
+    try:
+        skill_md = _draft_source(proposal_dir, resolved_dir, Path("SKILL.md"))
+    except OSError as exc:
+        errors.append(str(exc))
+        return False, errors, None
     content, error = _read_skill_markdown(skill_md)
     if error is not None:
         errors.append(error)
@@ -597,17 +658,15 @@ def _validate_skill_proposal_dir(
 
     # An approval copies a linked file's target; one outside the draft would be
     # installed without being part of what is reviewed.
-    resolved_dir = proposal_dir.resolve()
     try:
         for relative in copied_files(proposal_dir):
-            if not _resolves_within_root(proposal_dir / relative, resolved_dir):
-                errors.append(
-                    f"Proposal file links outside its folder: {relative.as_posix()}"
-                )
-            else:
-                # A file the copy could not read would stop an in-place update
-                # halfway; non-blocking, so a FIFO swapped in cannot hang the check.
-                os.close(os.open(proposal_dir / relative, _OPEN_FLAGS))
+            try:
+                source = _draft_source(proposal_dir, resolved_dir, relative)
+            except OSError as exc:
+                errors.append(str(exc))
+                continue
+            # Non-blocking so a FIFO swapped in cannot hang validation.
+            os.close(os.open(source, _OPEN_FLAGS))
     except OSError as exc:
         errors.append(f"Cannot read proposal files: {exc}")
 
@@ -826,15 +885,153 @@ def copied_files(proposal_dir: Path) -> list[Path]:
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
         base = Path(dirpath)
-        for name in filenames:
-            source_path = base / name
+        for filename in filenames:
+            source_path = base / filename
             if not _is_regular_file(source_path):
                 continue
             relative = source_path.relative_to(proposal_dir)
-            if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+            name = relative.as_posix()
+            if name in {"manifest.json", "RATIONALE.md"} or _is_cache(name):
                 continue
             files.append(relative)
     return sorted(files, key=lambda relative: relative.as_posix())
+
+
+def _draft_source(root: Path, resolved_root: Path, relative: Path) -> Path:
+    try:
+        source = (root / relative).resolve()
+    except RuntimeError as exc:
+        raise OSError(f"Cannot resolve proposal file: {relative.as_posix()}") from exc
+    if not source.is_relative_to(resolved_root):
+        raise OSError(f"Proposal file links outside its folder: {relative.as_posix()}")
+    return source
+
+
+def _copied_contents(root: Path) -> dict[str, bytes]:
+    resolved_root = root.resolve()
+    contents: dict[str, bytes] = {}
+    for relative in copied_files(root):
+        data = _read_regular(_draft_source(root, resolved_root, relative))
+        if data is None:
+            raise OSError(f"Cannot read proposal file: {relative.as_posix()}")
+        contents[relative.as_posix()] = data
+    return contents
+
+
+def _hash_regular(path: Path) -> str | None:
+    """The sha256 of *path* if it is a regular file, read in chunks, else None."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _file_digests(root: Path) -> dict[str, str]:
+    """The sha256 of each file an approval copies from *root*."""
+    resolved_root = root.resolve()
+    digests: dict[str, str] = {}
+    for relative in copied_files(root):
+        digest = _hash_regular(_draft_source(root, resolved_root, relative))
+        if digest is None:
+            raise OSError(f"Cannot read proposal file: {relative.as_posix()}")
+        digests[relative.as_posix()] = digest
+    return digests
+
+
+def _digest_of_files(file_digests: Mapping[str, str]) -> str:
+    """One digest over a draft's file names and their sha256 digests."""
+    digest = hashlib.sha256()
+    for name in sorted(file_digests):
+        encoded_name = name.encode("utf-8")
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(bytes.fromhex(file_digests[name]))
+    return digest.hexdigest()
+
+
+def _content_digest(contents: Mapping[str, bytes]) -> str:
+    """The digest of a draft whose files are already read."""
+    return _digest_of_files(
+        {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+    )
+
+
+def _backup_destination(
+    memory_dir: str | Path, destination: Path, names: Iterable[str]
+) -> Path:
+    """Copy the installed files an update is about to overwrite.
+
+    The copy lives under the memory folder, not beside the skill: one left
+    behind by a crash or a failed restore must not show up among the skills.
+    """
+    resolved_destination = destination.resolve()
+    backup_parent = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.backup-", dir=_snapshots_root(memory_dir)
+        )
+    )
+    backup = backup_parent / destination.name
+    try:
+        backup.mkdir()
+        for name in names:
+            source = destination / name
+            # A path that leaves the skill is refused before anything is written.
+            if _resolves_within_root(source, resolved_destination) and _is_regular_file(
+                source
+            ):
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, backup / name)
+    except BaseException:
+        shutil.rmtree(backup_parent, ignore_errors=True)
+        raise
+    return backup
+
+
+def _restore_destination(
+    destination: Path, backup: Path, installed_digests: dict[str, str]
+) -> None:
+    """Put back the files an install overwrote, leaving newer edits alone.
+
+    Only a file that still holds what the install wrote is replaced; one the
+    user changed since is left as it is, because the refusal is not a reason
+    to discard their edit.
+    """
+    current = _regular_files(destination)
+    original = _regular_files(backup)
+    if current is None or original is None:
+        raise OSError(f"Could not read the install folder: {destination}")
+    for name, path in current.items():
+        if name not in installed_digests:
+            continue
+        with path.open("rb") as handle:
+            current_digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if current_digest != installed_digests[name]:
+            # The user changed this file after the install wrote it.
+            continue
+        if name in original:
+            _copy_file_atomic(original[name], path)
+        else:
+            # The install added this file.
+            with contextlib.suppress(OSError):
+                path.unlink()
+    # The folders the install created for those files go with them.
+    for name in set(installed_digests) - set(original):
+        parent = (destination / name).parent
+        while parent != destination and parent.is_dir():
+            if any(parent.iterdir()):
+                break
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+            parent = parent.parent
 
 
 def _create_destination(destination: Path, *, must_create: bool) -> bool:
@@ -904,8 +1101,12 @@ def _remove_created(folder: Path) -> bool:
 
 def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     """Copy proposal files, returning a blocked path before any unsafe write."""
+    resolved_source = proposal_dir.resolve()
     copies = [
-        (proposal_dir / relative, destination / relative)
+        (
+            _draft_source(proposal_dir, resolved_source, relative),
+            destination / relative,
+        )
         for relative in copied_files(proposal_dir)
     ]
     resolved_destination = destination.resolve()
@@ -923,7 +1124,84 @@ def _copy_proposed_skill(proposal_dir: Path, destination: Path) -> Path | None:
     return None
 
 
+def _copy_draft_snapshot(proposal_dir: Path, snapshot: Path) -> None:
+    """Copy a draft into a snapshot folder, refusing a file that links out.
+
+    The snapshot is a private folder the approval hashes, so the source is
+    what needs checking: a copied file must not reach outside the draft.
+    """
+    resolved_source = proposal_dir.resolve()
+    resolved_snapshot = snapshot.resolve()
+    for relative in copied_files(proposal_dir):
+        source = _draft_source(proposal_dir, resolved_source, relative)
+        target = snapshot / relative
+        if not _resolves_within_root(target.parent, resolved_snapshot):
+            raise OSError(
+                f"Skill snapshot path escapes its folder: {relative.as_posix()}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _copy_file_atomic(source, target)
+
+
 def submit_autoskill_proposal(
+    *,
+    memory_dir: str | Path,
+    skill_name: str,
+    cluster_hash: str,
+    source_observation_ids: list[str],
+    rationale: str,
+    operation: str = "create",
+    target_skill_name: str | None = None,
+    skills_dir: str | Path,
+    workspace_dir: str | Path | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate and register a skill proposal under its per-draft lock."""
+    if sanitize_skill_name(skill_name) != skill_name:
+        return {
+            "submitted": False,
+            "error": "skill_name must be lowercase kebab-case",
+            "skill_name": skill_name,
+        }
+    root = _proposal_root(memory_dir)
+    proposal_dir = root / skill_name
+    try:
+        # The lock location follows the canonical draft, so validate its root first.
+        if not _resolves_within_root(proposal_dir, root.resolve()):
+            return {
+                "submitted": False,
+                "skill_name": skill_name,
+                "error": "Proposal validation failed",
+                "errors": ["Proposal files must resolve inside /autoskill-proposals"],
+            }
+        with _draft_lock(proposal_dir):
+            return _submit_autoskill_proposal_locked(
+                memory_dir=memory_dir,
+                skill_name=skill_name,
+                cluster_hash=cluster_hash,
+                source_observation_ids=source_observation_ids,
+                rationale=rationale,
+                operation=operation,
+                target_skill_name=target_skill_name,
+                skills_dir=skills_dir,
+                workspace_dir=workspace_dir,
+                project_id=project_id,
+            )
+    except FileLockTimeout:
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "error": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "submitted": False,
+            "proposal_id": skill_name,
+            "error": f"Could not write the proposal: {exc}",
+        }
+
+
+def _submit_autoskill_proposal_locked(
     *,
     memory_dir: str | Path,
     skill_name: str,
@@ -1092,6 +1370,7 @@ def submit_autoskill_proposal(
         "updated_at": _version_stamp(existing.get("updated_at") if existing else None),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
+        "content_digest": _digest_of_files(_file_digests(proposal_dir)),
     }
     if normalized_operation == "update":
         manifest["target_skill_name"] = skill_name
@@ -1118,6 +1397,7 @@ def submit_autoskill_proposal(
         "target_skill_name": skill_name if normalized_operation == "update" else None,
         "scope": target_scope,
         "submitted_scope": target_scope,
+        "content_digest": manifest["content_digest"],
         "upstream_source": (
             upstream_provenance.get("source") if upstream_provenance else None
         ),
@@ -1128,13 +1408,14 @@ def submit_autoskill_proposal(
     }
 
 
-def _proposal_dir_by_id(
+def resolve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
     *,
     workspace_dir: str | Path | None = None,
     exact: bool = False,
-) -> Path | None:
+) -> SkillProposal | None:
+    """Resolve an exact id before considering unique prefixes in the workspace."""
     requested = proposal_id.strip()
     if not requested:
         return None
@@ -1143,20 +1424,21 @@ def _proposal_dir_by_id(
     if found is not None and (
         wanted is None or _normalize_workspace_dir(found.workspace_dir) == wanted
     ):
-        return found.path
+        return found
     if exact:
         return None
-    proposals = list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
-    # A folder find_skill_proposal refuses still wins by its exact id, so a
-    # draft stays reachable when another one's name extends it.
+    root = _proposal_root(memory_dir).resolve()
+    proposals = [
+        proposal
+        for proposal in list_skill_proposals(memory_dir, workspace_dir=workspace_dir)
+        if _resolves_within_root(proposal.path / "manifest.json", root)
+        and _resolves_within_root(proposal.path, root)
+    ]
+    # A malformed draft still wins by exact id instead of acting on another draft.
     for proposal in proposals:
         if proposal.proposal_id == requested and proposal.path.name == requested:
-            return proposal.path
-    matches = [
-        proposal.path
-        for proposal in proposals
-        if proposal.proposal_id.startswith(requested)
-    ]
+            return proposal
+    matches = [p for p in proposals if p.proposal_id.startswith(requested)]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -1496,6 +1778,24 @@ def proposal_install_target(
     return target
 
 
+def _snapshot_proposal(
+    memory_dir: str | Path, proposal_dir: Path
+) -> tuple[Path, str, dict[str, str]]:
+    """Copy a draft and return its snapshot digest and per-file digests."""
+    snapshot = Path(
+        tempfile.mkdtemp(
+            prefix=f"{proposal_dir.name}-", dir=_snapshots_root(memory_dir)
+        )
+    )
+    try:
+        _copy_draft_snapshot(proposal_dir, snapshot)
+        approved_digests = _file_digests(snapshot)
+        return snapshot, _digest_of_files(approved_digests), approved_digests
+    except Exception:
+        _remove_created(snapshot)
+        raise
+
+
 def _record_approval(
     manifest: dict[str, Any],
     *,
@@ -1504,6 +1804,7 @@ def _record_approval(
     scope: str,
     workspace_shadow: Path | None,
     provenance: dict[str, str] | None,
+    approved_digests: dict[str, str],
 ) -> None:
     if provenance:
         manifest["upstream_source"] = provenance["source"]
@@ -1519,6 +1820,7 @@ def _record_approval(
     manifest["approved_by"] = approved_by
     manifest["approved_at"] = manifest["updated_at"]
     manifest["approved_skill_path"] = str(destination)
+    manifest["approved_content_digests"] = approved_digests
     # The tier the skill was actually installed into, which an approval may
     # override.
     manifest["scope"] = scope
@@ -1538,152 +1840,275 @@ def approve_skill_proposal(
     approved_by: Literal["user", "auto"] = "user",
     exact: bool = False,
     expected_updated_at: str | None = None,
+    expected_content_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Promote one pending proposal into the tier its manifest records.
-
-    The tier is resolved once, when the proposal is submitted, and read back
-    here; the approval re-checks that the skill is still installed there and
-    never falls back to another tier. ``scope`` overrides the recorded tier
-    explicitly, which is how a proposal written before scopes existed is
-    confirmed to install into the global tier. An approval that fails leaves
-    no folder it created behind, and the manifest is written last. With
-    ``expected_updated_at``, a pending draft resubmitted since is refused.
-    """
-    proposal_dir = _proposal_dir_by_id(
+    """Approve a verified snapshot; ``scope`` explicitly overrides its tier."""
+    proposal = resolve_skill_proposal(
         memory_dir,
         proposal_id,
         workspace_dir=workspace_dir,
         exact=exact,
     )
-    if proposal_dir is None:
+    if proposal is None:
         return {
             "approved": False,
             "error": f"No unique proposal matching {proposal_id!r}",
         }
+    proposal_dir = proposal.path
     manifest_path = proposal_dir / "manifest.json"
-    manifest = _read_manifest(manifest_path)
-    if manifest is None:
-        return {"approved": False, "error": "Proposal manifest is missing or invalid"}
-    if (
-        expected_updated_at is not None
-        and manifest.get("status") == "pending"
-        and manifest.get("updated_at") != expected_updated_at
-    ):
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "updated_at": manifest.get("updated_at"),
-            "error": "Proposal changed since it was read",
-        }
+    snapshot: Path | None = None
+    destination_backup: Path | None = None
+    wanted_workspace = _normalize_workspace_dir(workspace_dir)
     try:
-        target, failure = _resolve_install(
-            memory_dir, proposal_dir, manifest, skills_dir=skills_dir, scope=scope
-        )
-    except (OSError, ValueError, RecursionError) as exc:
-        return {
-            "approved": False,
-            "proposal_id": manifest.get("proposal_id"),
-            "error": f"Could not read the skill folders: {exc}",
-        }
-    if failure is not None:
-        return failure
-    assert target.path is not None
-    assert target.scope is not None
-    skill_name = str(manifest["skill_name"]).strip()
-    operation = _normalize_operation(manifest.get("operation")) or "create"
-    destination = target.path
-    target_scope = target.scope
-    workspace_shadow = target.workspace_shadow
-    # A fork copies the global skill first; an in-place update starts from itself.
-    base_skill_dir = target.base_path if target.base_path != destination else None
-
-    def install_failed(
-        error: str, *, changed: bool, leftover: Path | None, mark_left: bool = False
-    ) -> dict[str, Any]:
-        if changed:
-            error += " (the installed skill may already be changed)"
-        if leftover is not None:
-            error += f"; the partly installed folder {leftover} could not be removed"
-        if mark_left:
-            error += "; the processed mark could not be removed"
-        return {
-            "approved": False,
-            "proposal_id": manifest["proposal_id"],
-            "error": error,
-            "scope": target_scope,
-        }
-
-    provenance_path = (
-        destination if operation == "update" and base_skill_dir is None else None
-    )
-    cluster_hash = str(manifest["cluster_hash"])
-    mark_left = False
-    try:
-        upstream_provenance = _installed_provenance(provenance_path)
-        created = _create_destination(
-            destination, must_create=target.base_path != destination
-        )
-    except (OSError, ValueError, RecursionError) as exc:
-        return install_failed(
-            f"Could not install the skill: {exc}", changed=False, leftover=None
-        )
-    try:
-        if created and base_skill_dir is not None:
-            shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
-        blocked_path = _copy_proposed_skill(proposal_dir, destination)
-        if blocked_path is None:
-            _record_approval(
-                manifest,
-                approved_by=approved_by,
-                destination=destination,
-                scope=target_scope,
-                workspace_shadow=workspace_shadow,
-                provenance=upstream_provenance,
-            )
-            had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
-            mark_cluster_processed(memory_dir, cluster_hash)
+        with contextlib.ExitStack() as locks:
             try:
-                # The manifest is the commit point, so it is written last.
-                _write_manifest(manifest_path, manifest)
-            except (OSError, ValueError):
-                if not had_mark:
+                locks.enter_context(_draft_lock(proposal_dir))
+            except FileLockTimeout:
+                return {
+                    "approved": False,
+                    "proposal_id": proposal_id,
+                    "error": "Proposal is busy; timed out waiting for another writer",
+                }
+            except OSError as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": proposal_id,
+                    "error": f"Could not lock the proposal: {exc}",
+                }
+            # Held from the read to the commit, so nothing can change the draft
+            # between the snapshot that is hashed and the manifest that records it.
+            manifest = _read_manifest(manifest_path)
+            if manifest is None:
+                return {
+                    "approved": False,
+                    "error": "Proposal manifest is missing or invalid",
+                }
+            decision_workspace = _normalize_workspace_dir(manifest.get("workspace_dir"))
+            if wanted_workspace is not None and decision_workspace != wanted_workspace:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": "Proposal moved to a different workspace; reopen it there",
+                }
+            if (
+                expected_updated_at is not None
+                and manifest.get("status") == "pending"
+                and manifest.get("updated_at") != expected_updated_at
+            ):
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "updated_at": manifest.get("updated_at"),
+                    "error": "Proposal changed since it was read",
+                }
+            try:
+                target, failure = _resolve_install(
+                    memory_dir,
+                    proposal_dir,
+                    manifest,
+                    skills_dir=skills_dir,
+                    scope=scope,
+                )
+            except (OSError, ValueError, RecursionError) as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": f"Could not read the skill folders: {exc}",
+                }
+            if failure is not None:
+                return failure
+            recorded_digest = manifest.get("content_digest")
+            if not isinstance(recorded_digest, str) or not _DIGEST_RE.fullmatch(
+                recorded_digest
+            ):
+                # A draft submitted before the digest was recorded has none.
+                recorded_digest = None
+            if approved_by == "auto" and recorded_digest is None:
+                # A preview cannot substitute for the submission in AUTO mode.
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
+                }
+            compared: str | None = None
+            changed = ""
+            if approved_by == "auto" or expected_content_digest is None:
+                # The comparison point is the submission, as in AUTO mode: a
+                # draft rewritten in place since then has to be resubmitted.
+                compared = recorded_digest
+                changed = "Proposal changed since it was submitted; resubmit it"
+            else:
+                # The client's digest is of what it was shown.
+                compared = expected_content_digest
+                changed = "Proposal changed since it was shown"
+            try:
+                snapshot, snapshot_digest, approved_digests = _snapshot_proposal(
+                    memory_dir, proposal_dir
+                )
+            except (OSError, ValueError, RecursionError) as exc:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "error": f"Could not snapshot the skill: {exc}",
+                }
+            if compared is not None and compared != snapshot_digest:
+                return {
+                    "approved": False,
+                    "proposal_id": manifest.get("proposal_id"),
+                    "updated_at": manifest.get("updated_at"),
+                    "content_digest": snapshot_digest,
+                    "error": changed,
+                }
+            assert snapshot is not None
+            assert target.path is not None
+            assert target.scope is not None
+            skill_name = str(manifest["skill_name"]).strip()
+            recorded_proposal_id = str(manifest["proposal_id"])
+            operation = _normalize_operation(manifest.get("operation")) or "create"
+            destination = target.path
+            target_scope = target.scope
+            workspace_shadow = target.workspace_shadow
+            # A fork copies the global skill first; an in-place update starts from itself.
+            base_skill_dir = (
+                target.base_path if target.base_path != destination else None
+            )
+
+            def install_failed(
+                error: str,
+                *,
+                changed: bool,
+                leftover: Path | None,
+                mark_left: bool = False,
+            ) -> dict[str, Any]:
+                nonlocal destination_backup
+                if changed and destination_backup is not None:
                     try:
-                        unmark_cluster_processed(memory_dir, cluster_hash)
-                    except OSError:
-                        mark_left = True
-                raise
-    except (OSError, ValueError) as exc:
-        leftover = destination if created and not _remove_created(destination) else None
-        return install_failed(
-            f"Could not install the skill: {exc}",
-            changed=not created,
-            leftover=leftover,
-            mark_left=mark_left,
-        )
-    if blocked_path is not None:
-        leftover = destination if created and not _remove_created(destination) else None
-        return install_failed(
-            f"Skill install path escapes its destination: {blocked_path}",
-            changed=False,
-            leftover=leftover,
-        )
-    _notify_approved_skill()
-    return {
-        "approved": True,
-        "proposal_id": manifest["proposal_id"],
-        "skill_name": skill_name,
-        "operation": operation,
-        "path": str(destination),
-        "scope": target_scope,
-        "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
-        "upstream_source": (
-            upstream_provenance.get("source") if upstream_provenance else None
-        ),
-        "upstream_commit": (
-            upstream_provenance.get("commit") if upstream_provenance else None
-        ),
-        "updated_at": manifest["updated_at"],
-    }
+                        _restore_destination(
+                            destination, destination_backup, approved_digests
+                        )
+                        shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                        destination_backup = None
+                        changed = False
+                    except OSError as exc:
+                        error += (
+                            f" (could not restore the installed skill: {exc}; "
+                            f"backup retained at {destination_backup})"
+                        )
+                if destination_backup is not None and not changed:
+                    shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                    destination_backup = None
+                if changed:
+                    error += " (the installed skill may already be changed)"
+                if leftover is not None:
+                    error += (
+                        f"; the partly installed folder {leftover} could not be removed"
+                    )
+                if mark_left:
+                    error += "; the processed mark could not be removed"
+                return {
+                    "approved": False,
+                    "proposal_id": recorded_proposal_id,
+                    "error": error,
+                    "scope": target_scope,
+                }
+
+            provenance_path = (
+                destination
+                if operation == "update" and base_skill_dir is None
+                else None
+            )
+            mark_left = False
+            try:
+                upstream_provenance = _installed_provenance(provenance_path)
+                created = _create_destination(
+                    destination, must_create=target.base_path != destination
+                )
+                if not created:
+                    destination_backup = _backup_destination(
+                        memory_dir, destination, approved_digests
+                    )
+            except (OSError, ValueError, RecursionError) as exc:
+                return install_failed(
+                    f"Could not install the skill: {exc}",
+                    changed=False,
+                    leftover=None,
+                )
+            try:
+                if created and base_skill_dir is not None:
+                    shutil.copytree(base_skill_dir, destination, dirs_exist_ok=True)
+                # Only the snapshot that was hashed is installed: the agent's
+                # file writes take no lock, so the live draft was never verified.
+                blocked_path = _copy_proposed_skill(snapshot, destination)
+                if blocked_path is None:
+                    cluster_hash = str(manifest["cluster_hash"])
+                    _record_approval(
+                        manifest,
+                        approved_by=approved_by,
+                        destination=destination,
+                        scope=target_scope,
+                        workspace_shadow=workspace_shadow,
+                        provenance=upstream_provenance,
+                        approved_digests=approved_digests,
+                    )
+                    had_mark = cluster_hash in processed_cluster_hashes(memory_dir)
+                    mark_cluster_processed(memory_dir, cluster_hash)
+                    try:
+                        # The manifest is the commit point, so it is written last.
+                        _write_manifest(manifest_path, manifest)
+                    except (OSError, ValueError):
+                        if not had_mark:
+                            try:
+                                unmark_cluster_processed(memory_dir, cluster_hash)
+                            except OSError:
+                                mark_left = True
+                        raise
+            except (OSError, ValueError) as exc:
+                leftover = (
+                    destination
+                    if created and not _remove_created(destination)
+                    else None
+                )
+                return install_failed(
+                    f"Could not install the skill: {exc}",
+                    changed=not created,
+                    leftover=leftover,
+                    mark_left=mark_left,
+                )
+            if blocked_path is not None:
+                leftover = (
+                    destination
+                    if created and not _remove_created(destination)
+                    else None
+                )
+                return install_failed(
+                    f"Skill install path escapes its destination: {blocked_path}",
+                    changed=False,
+                    leftover=leftover,
+                )
+            if destination_backup is not None:
+                shutil.rmtree(destination_backup.parent, ignore_errors=True)
+                destination_backup = None
+            result = {
+                "approved": True,
+                "proposal_id": manifest["proposal_id"],
+                "skill_name": skill_name,
+                "operation": operation,
+                "path": str(destination),
+                "scope": target_scope,
+                "workspace_shadow": str(workspace_shadow) if workspace_shadow else None,
+                "upstream_source": (
+                    upstream_provenance.get("source") if upstream_provenance else None
+                ),
+                "upstream_commit": (
+                    upstream_provenance.get("commit") if upstream_provenance else None
+                ),
+                "updated_at": manifest["updated_at"],
+            }
+        _notify_approved_skill()
+        return result
+    finally:
+        if snapshot is not None:
+            _remove_created(snapshot)
 
 
 def _raise(error: OSError) -> None:
@@ -1717,24 +2142,9 @@ def _regular_files(root: Path) -> dict[str, Path] | None:
     return files
 
 
-_COMPARE_CHUNK = 1 << 20
-
-
-def _same_bytes(installed: Path, copied: Path) -> bool:
-    if installed.lstat().st_size != copied.stat().st_size:
-        return False
-    # In chunks: a skill may carry a large data file, and revert runs in the server.
-    with installed.open("rb") as left, copied.open("rb") as right:
-        while True:
-            chunk = left.read(_COMPARE_CHUNK)
-            if chunk != right.read(_COMPARE_CHUNK):
-                return False
-            if not chunk:
-                return True
-
-
-# Files a skill gains by being used or browsed (Finder's ``._<name>`` too), which
-# Undo removes with it; compared without case, as Windows and macOS names are.
+# Files a folder gains by being used or browsed (Finder's ``._<name>`` too): an
+# approval leaves them out of the copy and Undo removes them with the skill;
+# compared without case, as Windows and macOS names are.
 _CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
 
@@ -1758,31 +2168,44 @@ def _unlink_checked(path: Path) -> None:
         path.unlink()
 
 
-def _remove_unchanged_copy(installed: Path, proposal_dir: Path) -> bool:
-    """Delete a new skill's files if every one is still one the approval copied.
+def _approval_digests(manifest: dict[str, Any]) -> dict[str, str] | None:
+    """The per-file digests an approval recorded, or None when it kept none that
+    can be compared: the skill was approved before they were recorded, or its
+    manifest was edited by hand."""
+    recorded = manifest.get("approved_content_digests")
+    if not isinstance(recorded, dict) or not recorded:
+        return None
+    if any(
+        not isinstance(name, str)
+        or not isinstance(digest, str)
+        or not _DIGEST_RE.fullmatch(digest)
+        for name, digest in recorded.items()
+    ):
+        return None
+    return recorded
 
-    Files already gone count as removed, so a revert cut short can run again;
-    caches go too, but a file added or edited since keeps the whole folder.
-    """
+
+def _remove_unchanged_copy(installed: Path, approved_digests: dict[str, str]) -> bool:
+    """Delete a new skill only while it matches its approval digests."""
     try:
         top = installed.lstat()
     except FileNotFoundError:
         return True
     if not _plain(top, directory=True):
         return False
-    copied = {
-        relative.as_posix(): proposal_dir / relative
-        for relative in copied_files(proposal_dir)
-    }
     present = _regular_files(installed)
     if present is None or not all(
-        name in copied or _is_cache(name) for name in present
+        name in approved_digests or _is_cache(name) for name in present
     ):
         return False
 
     def unchanged(name: str, path: Path) -> bool:
         # A cache may differ from a copied one: Finder rewrites .DS_Store freely.
-        return name not in copied or _is_cache(name) or _same_bytes(path, copied[name])
+        if _is_cache(name):
+            return True
+        with path.open("rb") as handle:
+            actual = hashlib.file_digest(handle, "sha256").hexdigest()
+        return actual == approved_digests[name]
 
     if not all(unchanged(name, path) for name, path in present.items()):
         return False
@@ -1821,51 +2244,123 @@ def revert_skill_proposal(
     *,
     expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
+    """Undo a decision using the install facts stored in its manifest."""
+    proposal = find_skill_proposal(memory_dir, proposal_id)
+    if proposal is None:
+        return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+    try:
+        with _draft_lock(proposal.path):
+            result, notify = _revert_skill_proposal_locked(
+                memory_dir,
+                proposal_id,
+                expected_updated_at=expected_updated_at,
+            )
+    except FileLockTimeout:
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "revert_failed",
+            "detail": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "revert_failed",
+            "detail": f"Could not lock the proposal: {exc}",
+        }
+    if notify:
+        # The skill index is told once the draft's lock has been released, so a
+        # callback that reads the draft never waits on this lock.
+        _notify_approved_skill()
+    return result
+
+
+def _revert_skill_proposal_locked(
+    memory_dir: str | Path,
+    proposal_id: str,
+    *,
+    expected_updated_at: str | None = None,
+) -> tuple[dict[str, Any], bool]:
     """Put a rejected draft, or a new skill's approval, back to pending; an
     approval auto mode made becomes a rejection, so the agent cannot reinstall it.
     With ``expected_updated_at``, a draft decided or reverted since is refused.
 
     An approved update, in place or as a project fork, is refused: nothing
-    records the installed skill it started from. Each step can be retried: the
+    records the installed skill it started from. So is an approval that kept
+    no digests of what it installed, as long as the skill is still there: Undo
+    cannot tell which files are its own. Each step can be retried: the
     manifest keeps its decision until the skill is gone and the mark is settled.
+
+    Returns the result, and whether the skill index has to be told: the caller
+    does that once the draft's lock has been released.
     """
     proposal = find_skill_proposal(memory_dir, proposal_id)
     manifest_path = proposal.path / "manifest.json" if proposal else None
     manifest = _read_manifest(manifest_path) if manifest_path else None
     if proposal is None or manifest_path is None or manifest is None:
-        return {"reverted": False, "proposal_id": proposal_id, "error": "not_found"}
+        return {
+            "reverted": False,
+            "proposal_id": proposal_id,
+            "error": "not_found",
+        }, False
     if (
         expected_updated_at is not None
         and manifest.get("updated_at") != expected_updated_at
     ):
-        return {
-            "reverted": False,
-            "proposal_id": proposal.proposal_id,
-            "updated_at": manifest.get("updated_at"),
-            "error": "draft_changed",
-        }
+        return (
+            {
+                "reverted": False,
+                "proposal_id": proposal.proposal_id,
+                "updated_at": manifest.get("updated_at"),
+                "error": "draft_changed",
+            },
+            False,
+        )
 
     def refused(code: str) -> dict[str, Any]:
         return {"reverted": False, "proposal_id": proposal.proposal_id, "error": code}
 
     status = manifest.get("status")
     if status not in ("approved", "rejected"):
-        return refused("not_decided")
+        return refused("not_decided"), False
     if status == "approved" and proposal.operation != "create":
-        return refused("revert_unavailable")
+        return refused("revert_unavailable"), False
     installed = manifest.get("approved_skill_path") if status == "approved" else None
     if installed is not None and not isinstance(installed, str):
-        return refused("skill_changed")
+        return refused("skill_changed"), False
     # Submit never overwrites a rejected draft, so a resubmit cannot bring it back.
     rejects = status == "approved" and manifest.get("approved_by") == "auto"
+    # The index is told about a removed skill once the lock is released; until
+    # the removal has happened there is nothing to tell it about.
+    notify = False
     try:
         if installed:
             if not _installed_in_its_tier(manifest, Path(installed)):
-                return refused("skill_changed")
-            if not _remove_unchanged_copy(Path(installed), proposal.path):
-                return refused("skill_changed")
-        if status == "approved":
-            _notify_approved_skill()
+                return refused("skill_changed"), False
+            # A skill the user removed by hand leaves nothing to compare, so an
+            # approval that recorded no digests can still be undone.
+            if not _gone(Path(installed)):
+                approved_digests = _approval_digests(manifest)
+                if approved_digests is None:
+                    # Nothing says which files this approval wrote, so none are removed.
+                    return (
+                        {
+                            "reverted": False,
+                            "proposal_id": proposal.proposal_id,
+                            "error": "revert_unavailable",
+                            "detail": (
+                                "Nothing records the files this approval installed, so "
+                                f"Undo leaves the skill alone; delete it by hand: {installed}"
+                            ),
+                        },
+                        False,
+                    )
+                if not _remove_unchanged_copy(Path(installed), approved_digests):
+                    return refused("skill_changed"), False
+        # The skill is gone, so the index has to hear about it even if the
+        # writes below fail: the caller tells it once the lock is released.
+        notify = status == "approved"
         cluster_hash = str(manifest.get("cluster_hash", ""))
         shared = any(
             other.cluster_hash == cluster_hash
@@ -1876,7 +2371,13 @@ def revert_skill_proposal(
         if _CLUSTER_HASH_RE.fullmatch(cluster_hash) and not shared and not rejects:
             unmark_cluster_processed(memory_dir, cluster_hash)
 
-        for key in ("approved_by", "approved_at", "approved_skill_path", "rejected_at"):
+        for key in (
+            "approved_by",
+            "approved_at",
+            "approved_skill_path",
+            "approved_content_digests",
+            "rejected_at",
+        ):
             manifest.pop(key, None)
         if status == "approved":
             manifest.pop("workspace_shadow", None)
@@ -1890,13 +2391,16 @@ def revert_skill_proposal(
             manifest["rejected_at"] = manifest["updated_at"]
         _write_manifest(manifest_path, manifest)
     except OSError as exc:
-        return {**refused("revert_failed"), "detail": str(exc)}
-    return {
-        "reverted": True,
-        "proposal_id": proposal.proposal_id,
-        "status": manifest["status"],
-        "updated_at": manifest["updated_at"],
-    }
+        return {**refused("revert_failed"), "detail": str(exc)}, notify
+    return (
+        {
+            "reverted": True,
+            "proposal_id": proposal.proposal_id,
+            "status": manifest["status"],
+            "updated_at": manifest["updated_at"],
+        },
+        notify,
+    )
 
 
 def reject_skill_proposal(
@@ -1907,23 +2411,63 @@ def reject_skill_proposal(
     exact: bool = False,
     expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
-    """Mark one pending proposal rejected; with ``expected_updated_at``, a
-    draft resubmitted since is refused, as an approval refuses it."""
-    proposal_dir = _proposal_dir_by_id(
+    """Reject a pending proposal under its per-draft lock."""
+    proposal = resolve_skill_proposal(
         memory_dir,
         proposal_id,
         workspace_dir=workspace_dir,
         exact=exact,
     )
-    if proposal_dir is None:
+    if proposal is None:
         return {
             "rejected": False,
             "error": f"No unique proposal matching {proposal_id!r}",
         }
+    proposal_dir = proposal.path
+    try:
+        with _draft_lock(proposal_dir):
+            return _reject_skill_proposal_locked(
+                memory_dir,
+                proposal_dir,
+                workspace_dir=workspace_dir,
+                expected_updated_at=expected_updated_at,
+            )
+    except FileLockTimeout:
+        return {
+            "rejected": False,
+            "proposal_id": proposal_id,
+            "error": "Proposal is busy; timed out waiting for another writer",
+        }
+    except OSError as exc:
+        return {
+            "rejected": False,
+            "proposal_id": proposal_id,
+            "error": f"Could not lock the proposal: {exc}",
+        }
+
+
+def _reject_skill_proposal_locked(
+    memory_dir: str | Path,
+    proposal_dir: Path,
+    *,
+    workspace_dir: str | Path | None = None,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
+    """Reject the draft selected before taking the lock."""
     manifest_path = proposal_dir / "manifest.json"
     manifest = _read_manifest(manifest_path)
     if manifest is None:
         return {"rejected": False, "error": "Proposal manifest is missing or invalid"}
+    wanted_workspace = _normalize_workspace_dir(workspace_dir)
+    if (
+        wanted_workspace is not None
+        and _normalize_workspace_dir(manifest.get("workspace_dir")) != wanted_workspace
+    ):
+        return {
+            "rejected": False,
+            "proposal_id": manifest.get("proposal_id"),
+            "error": "Proposal moved to a different workspace; reopen it there",
+        }
     if manifest.get("status") != "pending":
         return {
             "rejected": False,
