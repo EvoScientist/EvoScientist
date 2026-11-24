@@ -1047,9 +1047,12 @@ class _V3EventProcessor:
             break
         if cut is None and shown[position:].strip():
             return None
-        # All the text is shown but the last message's end, which carries its
-        # usage, was not.
-        unfinished = last_shown if cut is None and self._main_message_has_text else None
+        # The last message whose text is all shown did not get its end, which
+        # carries the usage: live text is still open and none of the cut's
+        # message is shown, also when a later message holds the cut.
+        unfinished = (
+            last_shown if self._main_message_has_text and not cut_shown else None
+        )
         # Thinking that streamed with no text or end after it, and its message
         # when the stream named it.
         thinking_open = self._root_thinking_open

@@ -786,7 +786,7 @@ class FakeLangGraphThreadsClient:
         self.gets: list[str] = []
         self.state_gets: list[str] = []
         # Checkpoints ``get_history`` returns for a run id, and its calls.
-        self.run_states: dict[str, dict[str, Any]] = {}
+        self.run_states: dict[tuple[str, str], dict[str, Any]] = {}
         self.history_gets: list[tuple[str, int, dict[str, Any] | None]] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
@@ -897,16 +897,18 @@ class FakeLangGraphThreadsClient:
         limit: int = 10,
         metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """A run's last checkpoint from ``run_states``, else the thread's state."""
+        """The thread's state, or with a ``run_id`` filter that run's last
+        checkpoint from ``run_states`` (none: an empty list)."""
         from langgraph_sdk.errors import NotFoundError
 
         self.history_gets.append((thread_id, limit, metadata))
+        if thread_id not in self.states:
+            raise NotFoundError("not found", response=_not_found_response(), body=None)
         run_id = (metadata or {}).get("run_id")
-        if run_id in self.run_states:
-            return [self.run_states[run_id]][:limit]
-        if thread_id in self.states:
+        if run_id is None:
             return [self.states[thread_id]][:limit]
-        raise NotFoundError("not found", response=_not_found_response(), body=None)
+        checkpoint = self.run_states.get((thread_id, run_id))
+        return [checkpoint][:limit] if checkpoint is not None else []
 
     async def update_state(
         self,

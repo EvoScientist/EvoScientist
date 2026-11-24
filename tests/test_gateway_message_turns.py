@@ -1200,7 +1200,7 @@ _PAUSE_RUN = [
 ]
 _SUBAGENT_RUN = [
     _lifecycle("run-1", "running"),
-    _lifecycle("run-1", "running", ["research:task-1"]),
+    _lifecycle("run-1", "started", ["research:task-1"]),
     {
         "method": "custom",
         "params": {
@@ -1266,6 +1266,11 @@ async def test_finished_run_with_lost_live_events_is_read_back(
         events = await _turn(gateway, "hi")
 
     assert events == expected
+    if run is _SUBAGENT_RUN:
+        assert [e["type"] for e in events if e["type"].startswith("subagent_")] == [
+            "subagent_start",
+            "subagent_end",
+        ]
     assert stream.event_streams_opened == 2
     assert gateway.thread_store.client.runs.cancelled == []
     assert "Lost the live events of run run-1" in caplog.text
@@ -1390,12 +1395,14 @@ def _state_after_start(
     threads: FakeLangGraphThreadsClient,
     state: dict[str, Any],
 ) -> None:
-    """Thread state as the run leaves it; the pre-run read sees the old one."""
+    """Thread state as the run leaves it, also its last checkpoint; the
+    pre-run read sees the old one."""
     start = stream.run.start
 
     async def start_and_write(**kwargs: Any) -> dict[str, Any]:
         reply = await start(**kwargs)
         threads.states[THREAD_ID] = state
+        threads.run_states[(THREAD_ID, reply["run_id"])] = state
         return reply
 
     stream.run.start = start_and_write
@@ -1756,7 +1763,9 @@ async def test_resume_turn_completed_from_state_shows_the_resumed_tools_result(
 
     async def respond_and_finish(params):
         reply = await respond(params)
-        threads.states[THREAD_ID] = {"values": {"messages": resumed}}
+        state = {"values": {"messages": resumed}}
+        threads.states[THREAD_ID] = state
+        threads.run_states[(THREAD_ID, stream.run.run_id)] = state
         return reply
 
     stream.run.respond_command = respond_and_finish
@@ -2061,7 +2070,14 @@ async def test_state_completion_uses_the_runs_own_checkpoint(quiet_poll):
     )
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
     _state_after_start(stream, threads, _two_runs_state(later=True))
-    threads.run_states["run-1"] = _two_runs_state(later=False)
+    start = stream.run.start
+
+    async def start_then_a_later_run(**kwargs: Any) -> dict[str, Any]:
+        reply = await start(**kwargs)
+        threads.run_states[(THREAD_ID, reply["run_id"])] = _two_runs_state(later=False)
+        return reply
+
+    stream.run.start = start_then_a_later_run
 
     events = await _turn(gateway, "hi")
 
@@ -2074,11 +2090,15 @@ async def test_state_completion_without_a_checkpoint_of_the_run_raises(quiet_pol
         THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
     )
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    start = stream.run.start
 
-    async def no_history(thread_id: str, **kwargs: Any) -> list[dict[str, Any]]:
-        return []
+    async def start_without_a_checkpoint(**kwargs: Any) -> dict[str, Any]:
+        # The thread has a state, but no checkpoint of this run.
+        reply = await start(**kwargs)
+        threads.states[THREAD_ID] = {"values": _NEW_STATE}
+        return reply
 
-    threads.get_history = no_history  # type: ignore[method-assign]
+    stream.run.start = start_without_a_checkpoint
 
     with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
         await _turn(gateway, "hi")
@@ -2192,3 +2212,52 @@ async def test_state_completion_after_a_tool_only_message_repeats_nothing(
         e for e in expected if e["type"] != "text"
     ]
     assert events[-1]["response"] == "One file"
+
+
+_TWO_REPLIES_RUN = [
+    _lifecycle("run-1", "running"),
+    _text("First", "1-0"),
+    _finish_with_usage("1-1", 10, 5),
+    _text("Second", "1-2"),
+    _finish_with_usage("1-3", 20, 7),
+    _lifecycle("run-1", "completed"),
+]
+_TWO_REPLIES_STATE = {
+    "messages": [
+        *_EARLIER_STATE["messages"],
+        {"type": "human", "content": "hi", "id": "human-1"},
+        {
+            "type": "ai",
+            "content": "First",
+            "id": "ai-1",
+            "usage_metadata": _usage(10, 5),
+        },
+        {
+            "type": "ai",
+            "content": "Second",
+            "id": "ai-2",
+            "usage_metadata": _usage(20, 7),
+        },
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "live_limit", range(len(_TWO_REPLIES_RUN)), ids=lambda n: f"{n}-live"
+)
+async def test_state_completion_reports_each_replys_usage_once(live_limit, quiet_poll):
+    """A reply whose text all arrived live but whose end did not gets its
+    usage, also when the next reply holds the cut."""
+    expected = await _live_events(_TWO_REPLIES_RUN, values=_EARLIER_STATE)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TWO_REPLIES_RUN, live_limit=live_limit, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _TWO_REPLIES_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] != "text"] == [
+        e for e in expected if e["type"] != "text"
+    ]
+    assert events[-1]["response"] == "First\n\nSecond"
