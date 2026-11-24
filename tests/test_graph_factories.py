@@ -220,9 +220,7 @@ def test_graph_cache_catches_a_same_size_edit(builds, tmp_path):
     assert graphs.get("EvoScientist", dirs) is not first
 
 
-def test_graph_cache_keeps_graphs_while_mcp_yaml_does_not_parse(
-    builds, tmp_path
-):
+def test_graph_cache_keeps_graphs_while_mcp_yaml_does_not_parse(builds, tmp_path):
     """A half-saved mcp.yaml keeps the graphs the server has (rebuilding
     would read it as ``{}`` and drop every MCP tool); once the file parses,
     the next access rebuilds."""

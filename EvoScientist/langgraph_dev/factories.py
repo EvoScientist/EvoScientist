@@ -181,10 +181,14 @@ class GraphCache:
             changed = self._mcp_stamp is not None
             self._mcp_stamp = None
             return changed
-        if self._mcp_stamp is not None and (
-            stat.st_mtime_ns,
-            stat.st_size,
-        ) == self._mcp_stamp[:2]:
+        if (
+            self._mcp_stamp is not None
+            and (
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
+            == self._mcp_stamp[:2]
+        ):
             return False
         try:
             data = USER_MCP_CONFIG.read_bytes()
