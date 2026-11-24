@@ -2148,11 +2148,14 @@ async def test_stream_ending_after_a_finished_status_reads_the_run_back(quiet_po
         return run
 
     runs.get = get_and_end
+    gateway.events = _Notices()
 
     events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello", " world"]
     assert stream.event_streams_opened == 2
+    # The run had finished when the stream ended: no wait to announce.
+    assert gateway.events.lines == [server_mod._RECOVERED_TURN_NOTICE]
 
 
 def _two_runs_state(later: bool) -> dict[str, Any]:
@@ -2973,11 +2976,14 @@ async def test_run_outlives_its_event_stream_and_is_read_back(
     )
     gateway, _ = _gateway(stream, interrupts=interrupts)
     status = _StatusAfter(gateway, stream, n=2)
+    gateway.events = _Notices()
 
     with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
         events = await _turn(gateway, "hi")
 
     assert events == expected
+    # Said when the stream closed, not again with the result.
+    assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]
     assert status.calls == 3
     assert not status.read_back_early
     assert gateway.thread_store.client.runs.cancelled == []
@@ -3155,3 +3161,20 @@ async def test_giving_up_keeps_the_last_status_error_as_the_cause(quiet_poll):
         await _turn(gateway, "hi")
 
     assert isinstance(caught.value.__cause__, ConnectionError)
+
+
+async def test_closed_stream_completed_from_the_state_says_it_once(quiet_poll):
+    """The line shown when the stream closed covers a result that comes from
+    the run's checkpoint too."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=2, read_back_limit=0, live_end=True
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+    _StatusAfter(gateway, stream, n=1)
+    gateway.events = _Notices()
+
+    events = await _turn(gateway, "hi")
+
+    assert events[-1]["response"] == "Hello world"
+    assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]
