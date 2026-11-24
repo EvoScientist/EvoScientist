@@ -56,6 +56,8 @@ _ACTIVE_RUN_STATUSES = ("pending", "running")
 _REPLAY_QUIET_SECONDS = 2.0
 _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
+# A read-back of a finished run ends when no envelope arrives for this long.
+_READ_BACK_FIRST_EVENT_SECONDS = 5.0
 # A turn asks for its run's status once it has had none of the run's envelopes
 # for this long, and again at this interval while that lasts.
 _QUIET_POLL_SECONDS = 5.0
@@ -1429,7 +1431,7 @@ class LangGraphServerGateway:
             async with stream, _ThreadEvents(stream.events) as events:
                 while (left := deadline - loop.time()) > 0:
                     event = await events.next_within(
-                        min(_REPLAY_FIRST_EVENT_SECONDS, left)
+                        min(_READ_BACK_FIRST_EVENT_SECONDS, left)
                     )
                     if event is _QUIET or event is None:
                         return

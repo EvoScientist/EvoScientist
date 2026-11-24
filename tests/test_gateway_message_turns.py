@@ -1160,9 +1160,13 @@ def test_synth_event_run_id_parses_server_lifecycle_ids(monkeypatch):
 
 @pytest.fixture
 def quiet_poll(monkeypatch):
-    """Short quiet and grace windows, so a silent stream is noticed at once."""
-    monkeypatch.setattr(server_mod, "_QUIET_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(server_mod, "_FINISHED_GRACE_SECONDS", 0.02)
+    """Short quiet and grace windows, so a silent stream is noticed soon.
+
+    Well above a busy runner's scheduling gaps: a window that runs out early
+    sends the turn down the recovery path while envelopes are still coming.
+    """
+    monkeypatch.setattr(server_mod, "_QUIET_POLL_SECONDS", 0.2)
+    monkeypatch.setattr(server_mod, "_FINISHED_GRACE_SECONDS", 0.2)
 
 
 def _tool(phase: str, entry_id: str, **data: Any) -> dict[str, Any]:
