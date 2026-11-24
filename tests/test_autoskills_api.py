@@ -233,7 +233,6 @@ def test_list_inlines_no_text_for_a_decided_draft(
         "skill_md_truncated",
         "rationale_md",
         "rationale_md_truncated",
-        "contents",
         "content_digest",
     ):
         assert draft[field] is None
@@ -261,16 +260,13 @@ def test_list_only_issues_a_decision_digest_for_complete_previews(
     _draft(served, name, files={relative: script})
     complete = _only_draft(server)
     payload = {"SKILL.md": complete["skill_md"].encode("utf-8")}
-    payload.update(
-        {path: text.encode("utf-8") for path, text in complete["contents"].items()}
-    )
+    payload[relative] = script.encode("utf-8")
     assert complete["content_digest"] == _content_digest(payload)
 
     monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 200)
     partial = _only_draft(server)
     assert partial["skill_md_truncated"] is False
     assert partial["rationale_md_truncated"] is False
-    assert partial["contents"][relative] == script[:200]
     decision = {"expected_updated_at": partial["updated_at"]}
     if partial["content_digest"] is not None:
         decision["expected_content_digest"] = partial["content_digest"]
@@ -284,12 +280,9 @@ def test_list_only_issues_a_decision_digest_for_complete_previews(
     assert (served.skills_dir / name / relative).read_bytes() == script.encode("utf-8")
 
 
-@pytest.mark.parametrize(
-    ("data", "shown"),
-    [(b"\x89PNG\x00\x01", ""), (b"caf\xe9\n", "caf\ufffd\n")],
-)
-def test_list_issues_no_digest_for_a_file_it_cannot_show_as_it_is(
-    server, served, data, shown
+@pytest.mark.parametrize("data", [b"\x89PNG\x00\x01", b"caf\xe9\n"])
+def test_list_issues_no_digest_for_a_file_whose_bytes_are_not_its_text(
+    server, served, data
 ):
     _draft(served, "focused-validation")
     folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
@@ -298,14 +291,15 @@ def test_list_issues_no_digest_for_a_file_it_cannot_show_as_it_is(
 
     draft = _only_draft(server)
 
-    assert draft["contents"] == {"assets/logo.bin": shown}
     assert draft["content_digest"] is None
     assert draft["review_incomplete"] == "unavailable"
 
 
-def test_list_does_not_inline_a_file_whose_nul_byte_is_past_the_preview(
+def test_the_file_route_finds_a_nul_byte_past_the_preview_window(
     server, served, monkeypatch
 ):
+    """The preview window is short and the NUL byte is past it, but the read
+    still goes far enough to find it."""
     from EvoScientist.langgraph_dev import autoskills_api
 
     _draft(served, "focused-validation")
@@ -313,9 +307,8 @@ def test_list_does_not_inline_a_file_whose_nul_byte_is_past_the_preview(
     (folder / "table.dat").write_bytes(b"x" * 64 + b"\x00")
     monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 3)
 
-    draft = _only_draft(server)
+    _only_draft(server)
 
-    assert draft["contents"] == {"table.dat": ""}
     assert server.get(
         "/api/autoskills/proposals/focused-validation/file?path=table.dat"
     ).json() == {"error": "binary_file"}
@@ -425,7 +418,7 @@ def test_list_has_exactly_the_contract_fields(server, served):
         "approved_by", "rejected_at", "approved_skill_path",
         "approved_skill_present", "upstream_source", "workspace_shadow",
         "source_observation_ids", "skill_md", "skill_md_truncated",
-        "rationale_md", "rationale_md_truncated", "contents", "content_digest",
+        "rationale_md", "rationale_md_truncated", "content_digest",
         "review_incomplete", "files", "install_target",
         "install_base", "install_error",
     }  # fmt: skip

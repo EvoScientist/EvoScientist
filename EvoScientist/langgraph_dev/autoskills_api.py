@@ -176,13 +176,11 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     # polled and decided drafts only grow in number.
     skill_md: tuple[str | None, bool | None] = (None, None)
     rationale_md = skill_md
-    contents: dict[str, str] | None = None
     content_digest = None
     review_incomplete = None
     target: InstallTarget | None = None
     install_error = None
     if proposal.status == "pending":
-        contents = {}
         skill = _read_inline(folder / "SKILL.md", folder)
         skill_md = (skill[0], skill[1])
         rationale = _read_inline(folder / "RATIONALE.md", folder)
@@ -196,9 +194,7 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
             name = relative.as_posix()
             if name == "SKILL.md":
                 continue
-            capture = _read_inline(folder / relative, folder)
-            contents[name] = capture[0]
-            captures[name] = capture
+            captures[name] = _read_inline(folder / relative, folder)
         previews = (*captures.values(), rationale)
         if any(truncated for _, truncated, _ in previews):
             review_incomplete = "truncated"
@@ -252,7 +248,6 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "skill_md_truncated": skill_md[1],
         "rationale_md": rationale_md[0],
         "rationale_md_truncated": rationale_md[1],
-        "contents": contents,
         "content_digest": content_digest,
         "review_incomplete": review_incomplete,
         "files": _files(folder, base),
