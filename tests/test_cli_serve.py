@@ -372,11 +372,9 @@ def test_configure_logging_caps_credential_url_loggers(monkeypatch):
 
     root = logging.getLogger()
     root_handlers, root_level = root.handlers[:], root.level
-    loggers = [logging.getLogger(name) for name in CREDENTIAL_URL_LOGGERS]
-    saved_levels = [lg.level for lg in loggers]
     try:
-        for lg in loggers:
-            lg.setLevel(logging.NOTSET)
+        for name in CREDENTIAL_URL_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
 
         monkeypatch.setattr(
             cfg_mod,
@@ -394,7 +392,5 @@ def test_configure_logging_caps_credential_url_loggers(monkeypatch):
         for name, level in url_log_levels.items():
             assert not logging.getLogger(name).isEnabledFor(level)
     finally:
-        for lg, level in zip(loggers, saved_levels, strict=True):
-            lg.setLevel(level)
         root.handlers[:] = root_handlers
         root.setLevel(root_level)

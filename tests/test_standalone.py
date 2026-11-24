@@ -21,16 +21,6 @@ from EvoScientist.paths import Workspace
 from tests.fakes.common import QueueFakeChannel
 
 
-@pytest.fixture(autouse=True)
-def _restore_http_log_levels():
-    """Reset the process-global logger levels run_standalone sets after every test."""
-    loggers = [logging.getLogger(n) for n in ("httpx", "httpcore", "telegram")]
-    saved = [lg.level for lg in loggers]
-    yield
-    for lg, level in zip(loggers, saved, strict=False):
-        lg.setLevel(level)
-
-
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
     """Stub the dev-server spawn + workspace helpers; return (config, ensure_calls).
 
