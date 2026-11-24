@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.4.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -162,6 +162,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 11 月 20 日]** **[v0.4.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.4)** — 新增模型：GPT-6.2 Sol 与 Astra（OpenAI 与 OpenRouter）、Gemini 4 Neon、HY4 Flash 与 Qwen 4 Max（OpenRouter）；`EvoSci login chatgpt` 可在配置向导之外登录 ChatGPT 订阅；自定义 OpenAI 兼容端点会列出它提供的模型；shell 沙箱更严格；deepagents 0.7.41。
 - **[2026 年 11 月 14 日]** **[v0.4.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.3)** — 新增模型：Claude Fable 5.2（Anthropic 与 OpenRouter）、Gemini 4 Carbon 与 Gemini 4 Hydrogen（Google 与 OpenRouter）；`EvoSci workspace move` 迁移移动或改名后的项目；Claude Pro/Max 登录所用的 ccproxy 改由后台服务器运行，`EvoSci server` 取代 `EvoSci service` 与 `EvoSci ccproxy`；智能体写出或读取的媒体文件会发到聊天中；deepagents 0.7.38。
 - **[2026 年 11 月 6 日]** **[v0.4.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.2)** — Claude、OpenAI、OpenRouter 与 DeepSeek 共用一个 `reasoning_effort`，默认 `high`；新增模型：腾讯 HY4（OpenRouter），取代 HY4 Preview 与 HY3；失去跟踪的后台进程会被报告，而不是静默丢失；移除项目时会停止它在服务器上的工作；失败的命令显示为失败；deepagents 0.7.34。
 - **[2026 年 11 月 3 日]** **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** — WebUI 与桌面应用可在任意项目中共用同一个后台服务器（WebUI 0.5）；Windows 上被服务器停止打断的运行会在下次启动时重新运行；在服务器上取消运行会停止它启动的 shell 命令；工具报错更清晰；修复恢复定时任务、后台进程查询和 `EvoSci deploy --tunnel` 的问题；移除 v0.3.8 之前数据的兼容代码。

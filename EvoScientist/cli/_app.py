@@ -66,9 +66,11 @@ server_app = typer.Typer(
     "Anthropic OAuth)"
 )
 app.add_typer(server_app, name="server")
-# What `server` was called in 0.4.0 to 0.4.2, kept for one release.
-service_app = typer.Typer(help="Deprecated: use EvoSci server")
-app.add_typer(service_app, name="service")
+# ChatGPT sign-in outside the wizard; the desktop app runs it with --json.
+login_app = typer.Typer(help="Sign in with a ChatGPT plan")
+app.add_typer(login_app, name="login")
+logout_app = typer.Typer(help="Remove a stored ChatGPT sign-in")
+app.add_typer(logout_app, name="logout")
 # Projects the background server serves, by folder.
 workspace_app = typer.Typer(help="Manage projects (the folders EvoSci works in)")
 app.add_typer(workspace_app, name="workspace")

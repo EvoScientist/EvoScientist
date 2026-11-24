@@ -28,15 +28,19 @@ Event fields:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TextIO, TypeVar
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 PROTOCOL = 1
 
@@ -154,6 +158,45 @@ def stdin_is_pipe() -> bool:
     except (OSError, ValueError, AttributeError):
         return False
     return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+# A stdin line longer than this is not a command and is dropped.
+_MAX_LINE = 65536
+
+
+def watch_stdin(fd: int, stop: threading.Event) -> None:
+    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
+
+    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
+    buffer lock, which interpreter shutdown may need.
+    """
+    pending = b""
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            if any(_is_stop(line) for line in lines):
+                break
+            if len(pending) > _MAX_LINE:
+                pending = b""  # not a command line; drop it
+    except OSError as exc:
+        logger.debug("stdin read failed: %s", exc)
+    finally:
+        try:
+            os.close(fd)
+        finally:
+            stop.set()
+
+
+def _is_stop(line: bytes) -> bool:
+    try:
+        message = json.loads(line)
+    except (ValueError, RecursionError):  # deep nesting raises RecursionError
+        return False
+    return isinstance(message, dict) and message.get("command") == "stop"
 
 
 # How often a silent step repeats its last ``running`` event, so a reader

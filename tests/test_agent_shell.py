@@ -305,17 +305,35 @@ class FakeProcess:
 
 
 class FakeJobApi:
-    def __init__(self, *, assign_ok: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        create_ok: bool = True,
+        assign_ok: bool = True,
+        share_ok: bool = True,
+        kill_on_close_ok: bool = True,
+    ) -> None:
+        self.create_ok = create_ok
         self.assign_ok = assign_ok
+        self.share_ok = share_ok
+        self.kill_on_close_ok = kill_on_close_ok
         self.calls: list[tuple] = []
 
     def create(self):
         self.calls.append(("create",))
-        return 77
+        return 77 if self.create_ok else None
 
     def assign(self, job, process):
         self.calls.append(("assign", job, process))
         return self.assign_ok
+
+    def share(self, job, process):
+        self.calls.append(("share", job, process))
+        return self.share_ok
+
+    def kill_on_close(self, job):
+        self.calls.append(("kill_on_close", job))
+        return self.kill_on_close_ok
 
     def last_error(self):
         return 5
@@ -444,6 +462,83 @@ def test_started_does_nothing_without_bash_or_off_windows(monkeypatch):
         FakeProcess(1)
     )
     assert api.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# The langgraph server's job
+# --------------------------------------------------------------------------- #
+def _server_job(monkeypatch, api):
+    monkeypatch.setattr(agent_shell, "_job_api", lambda: api)
+    agent_shell._warn_no_server_job.cache_clear()
+
+
+def test_server_job_handle_lives_only_in_the_server(monkeypatch):
+    api = FakeJobApi()
+    _server_job(monkeypatch, api)
+    agent_shell.join_server_job(FakeProcess(9))
+    assert api.calls == [
+        ("create",),
+        ("assign", 77, 9),
+        ("share", 77, 9),
+        ("kill_on_close", 77),
+        ("close", 77),
+        ("resume", 9),
+    ]
+
+
+@pytest.mark.parametrize("failing", ["assign", "share", "kill_on_close"])
+def test_server_job_failure_warns_and_resumes(monkeypatch, caplog, failing):
+    """Kill-on-close is set only once the server holds a copy of the handle:
+    closing ours would otherwise end the server at once."""
+    api = FakeJobApi(**{f"{failing}_ok": False})
+    _server_job(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="EvoScientist.agent_shell"):
+        agent_shell.join_server_job(FakeProcess(9))
+    if failing != "kill_on_close":
+        assert ("kill_on_close", 77) not in api.calls
+    assert api.calls[-2:] == [("close", 77), ("resume", 9)]
+    assert "kill-on-close Windows job (error 5)" in caplog.text
+
+
+def test_server_job_none_created_still_resumes(monkeypatch, caplog):
+    api = FakeJobApi(create_ok=False)
+    _server_job(monkeypatch, api)
+    with caplog.at_level("WARNING", logger="EvoScientist.agent_shell"):
+        agent_shell.join_server_job(FakeProcess(9))
+    assert api.calls == [("create",), ("resume", 9)]
+    assert "(error 5)" in caplog.text
+
+
+def test_server_job_raising_call_still_closes_and_resumes(monkeypatch):
+    api = FakeJobApi()
+
+    def boom(job, process):
+        raise OSError("no")
+
+    api.assign = boom
+    _server_job(monkeypatch, api)
+    agent_shell.join_server_job(FakeProcess(9))
+    assert api.calls[-2:] == [("close", 77), ("resume", 9)]
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_server_job_without_the_api_resumes_through_psutil(monkeypatch, gone):
+    def no_api():
+        raise OSError("kernel32 missing")
+
+    resumed = []
+
+    def process_of(pid):
+        if gone:
+            raise psutil.NoSuchProcess(pid)
+        return SimpleNamespace(resume=lambda: resumed.append(pid))
+
+    monkeypatch.setattr(agent_shell, "_job_api", no_api)
+    monkeypatch.setattr(psutil, "Process", process_of)
+    process = FakeProcess(9)
+    process.pid = 42
+    agent_shell.join_server_job(process)
+    assert resumed == ([] if gone else [42])
 
 
 # --------------------------------------------------------------------------- #
@@ -955,6 +1050,67 @@ def test_windows_background_job_runs_in_bash_and_stops(real_bash, tmp_path):
         for p in _marked(tag):
             p.kill()
         bg._PROCESSES.clear()
+
+
+def _exact_sleeps(secs: int) -> list[psutil.Process]:
+    """MSYS ``sleep secs`` processes, matched on the whole argument."""
+    found = []
+    for p in _sleeps(secs):
+        try:
+            if p.cmdline()[-1:] == [str(secs)]:
+                found.append(p)
+        except psutil.Error:
+            pass
+    return found
+
+
+def _orphan_of(secs: int) -> psutil.Process | None:
+    """The one ``sleep secs`` whose Windows parent is gone; ``parent()``
+    checks the creation time, so a reused parent pid does not count."""
+    found = _exact_sleeps(secs)
+    try:
+        return found[0] if len(found) == 1 and found[0].parent() is None else None
+    except psutil.Error:
+        return None
+
+
+@windows_bash
+def test_windows_server_job_ends_msys_orphans_the_tree_walk_misses(tmp_path):
+    """The orphan's Windows parent is gone, so the stop paths' tree walk does
+    not reach it; ending the server, which holds the only job handle, does."""
+    secs = 6106
+    bash = _SYSTEM_GIT / "bin" / "bash.exe"
+    ready = tmp_path / "ready"
+    script = tmp_path / "fake_server.py"
+    script.write_text(
+        "import pathlib, subprocess, time\n"
+        f"subprocess.Popen([{str(bash)!r}, '-c', 'sleep {secs} & disown'])\n"
+        f"pathlib.Path({str(ready)!r}).write_text('ready')\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    server = subprocess.Popen(
+        [sys.executable, str(script)], creationflags=agent_shell._CREATE_SUSPENDED
+    )
+    try:
+        agent_shell.join_server_job(server)
+        assert _wait(ready.exists)
+        orphan = None
+        deadline = time.time() + 10
+        while orphan is None and time.time() < deadline:
+            orphan = _orphan_of(secs)
+            time.sleep(0.2)
+        assert orphan is not None
+        tree = psutil.Process(server.pid).children(recursive=True)
+        assert orphan.pid not in {p.pid for p in tree}
+        assert orphan.is_running()
+        server.kill()
+        assert _wait(lambda: not orphan.is_running())
+    finally:
+        if server.poll() is None:
+            server.kill()
+        for p in _exact_sleeps(secs):
+            p.kill()
 
 
 # --------------------------------------------------------------------------- #

@@ -1441,10 +1441,20 @@ def _spawn_server(
         _spawn_kwargs = {"creationflags": flags}
     else:
         _spawn_kwargs = {"start_new_session": True}
+    server_job = False
     if job is not None:
         _spawn_kwargs["creationflags"] = (
             _spawn_kwargs.get("creationflags", 0) | job.creationflags
         )
+    elif os.name == "nt":
+        # Suspended until it joins its server job; ``deploy --json``'s
+        # kill-on-close job already ends every member.
+        from EvoScientist.agent_shell import _CREATE_SUSPENDED
+
+        _spawn_kwargs["creationflags"] = (
+            _spawn_kwargs.get("creationflags", 0) | _CREATE_SUSPENDED
+        )
+        server_job = True
 
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
@@ -1483,6 +1493,10 @@ def _spawn_server(
     _PROCESS = proc
     if os.name == "nt":
         _BREAK_GROUP_PIDS.add(proc.pid)
+    if server_job:
+        from EvoScientist.agent_shell import join_server_job
+
+        join_server_job(proc)
     if job is not None:
         job.started(proc)
     logger.info("Started langgraph dev (pid=%d)", proc.pid)
