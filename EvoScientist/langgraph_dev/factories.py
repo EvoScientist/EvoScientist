@@ -159,6 +159,12 @@ class GraphCache:
         # ``(mtime_ns, size, digest)`` of the ``mcp.yaml`` the cached graphs
         # were built against, or None when there is none.
         self._mcp_stamp: tuple[int, int, str] | None = None
+        # False while ``mcp.yaml`` reads but does not parse: a graph built
+        # then binds the empty config, so it is served but never cached.
+        self._mcp_readable = True
+        # Bumped on every invalidation, so a build that overlapped an
+        # ``mcp.yaml`` edit can tell its result is stale.
+        self._generation = 0
 
     def _mcp_yaml_changed(self) -> bool:
         """Whether ``mcp.yaml`` changed since the cached graphs were built.
@@ -167,7 +173,9 @@ class GraphCache:
         digested only when those differ. A file that does not parse (a
         half-saved edit reads as ``{}`` through ``load_mcp_config`` and would
         drop every MCP tool) keeps the graphs the server has; the next access
-        checks again. Called under ``self._lock``.
+        checks again. Called under ``self._lock``; also refreshes
+        ``_mcp_readable`` so a build finished while the file cannot be parsed
+        is served but not cached.
         """
         import hashlib
 
@@ -180,6 +188,7 @@ class GraphCache:
         except OSError:
             changed = self._mcp_stamp is not None
             self._mcp_stamp = None
+            self._mcp_readable = True
             return changed
         if (
             self._mcp_stamp is not None
@@ -197,7 +206,9 @@ class GraphCache:
         try:
             yaml.safe_load(data)
         except Exception:
+            self._mcp_readable = False
             return False
+        self._mcp_readable = True
         digest = hashlib.sha256(data).hexdigest()
         stamp = (stat.st_mtime_ns, stat.st_size, digest)
         if self._mcp_stamp is not None and digest == self._mcp_stamp[2]:
@@ -213,27 +224,46 @@ class GraphCache:
                 self._graphs.move_to_end(key)
             return graph
 
+    def _drop_graphs_if_mcp_yaml_changed(self) -> bool:
+        """Drop the cached graphs when ``mcp.yaml`` changed on disk.
+
+        The generation bump also tells a build in flight that its result is
+        stale. Returns whether the graphs were dropped.
+        """
+        with self._lock:
+            if not self._mcp_yaml_changed():
+                return False
+            self._generation += 1
+            self._graphs.clear()
+            return True
+
     def get(self, graph_id: str, dirs: SessionDirs) -> Any:
         """The graph for *dirs*, built on a miss. Blocking."""
         if graph_id not in FOLDER_GRAPH_IDS:
             dirs = SessionDirs(dirs.workspace)
         run_dir = dirs.run_dir.as_posix() if dirs.run_dir is not None else None
         key = (graph_id, dirs.workspace.key, run_dir)
-        with self._lock:
-            if self._mcp_yaml_changed():
-                self._graphs.clear()
+        self._drop_graphs_if_mcp_yaml_changed()
         if (graph := self._cached(key)) is not None:
             return graph
         with self._build_lock:
             if (graph := self._cached(key)) is not None:
                 return graph
+            with self._lock:
+                generation = self._generation
             graph = _build(graph_id, dirs)
             with self._lock:
                 # An ``mcp.yaml`` edit during the build is not in this graph:
                 # drop the cache instead of caching it, so the next access
                 # rebuilds. The built graph still goes back to its access.
                 if self._mcp_yaml_changed():
+                    self._generation += 1
                     self._graphs.clear()
+                    return graph
+                if self._generation != generation or not self._mcp_readable:
+                    # Another access invalidated while this built, or the
+                    # file could not be parsed so the build bound the empty
+                    # config: serve the graph but do not cache it.
                     return graph
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]

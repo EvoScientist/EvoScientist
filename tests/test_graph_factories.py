@@ -262,3 +262,53 @@ def test_graph_cache_edit_during_a_build_is_not_cached(builds, monkeypatch, tmp_
     builds.clear()
     graphs.get("EvoScientist", dirs)
     assert builds == [("EvoScientist", dirs)]
+
+
+def test_graph_cache_never_caches_a_graph_built_on_unparsable_mcp_yaml(
+    builds, tmp_path
+):
+    """A graph built while ``mcp.yaml`` cannot be parsed binds the empty
+    MCP config: it is served to its access but never cached, so restoring
+    the same bytes later cannot leave a tool-less graph behind."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    other = SessionDirs(Workspace(tmp_path / "other"))
+    _write_mcp_yaml("servers: [unclosed\n", 2)
+    tool_less = graphs.get("EvoScientist", other)
+    assert tool_less is not first
+    # The graphs the server already had are still served while the file
+    # does not parse.
+    assert graphs.get("EvoScientist", dirs) is first
+    _write_mcp_yaml("servers: {}\n", 3)
+    # The restored file digests to the original stamp; the tool-less build
+    # must still not have been cached under ``other``'s key.
+    builds.clear()
+    assert graphs.get("EvoScientist", other) is not tool_less
+    assert builds == [("EvoScientist", other)]
+
+
+def test_graph_cache_invalidation_during_a_build_is_not_cached(
+    builds, monkeypatch, tmp_path
+):
+    """A concurrent access can observe an ``mcp.yaml`` edit first and
+    invalidate the cache itself: the overlapping build's closing file check
+    then sees no change, so only the generation says its result is stale."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    graphs.get("EvoScientist", dirs)
+
+    def build_during_invalidation(graph_id, build_dirs):
+        _write_mcp_yaml("servers: {fs: {}}\n", 2)
+        graphs._drop_graphs_if_mcp_yaml_changed()
+        builds.append((graph_id, build_dirs))
+        return object()
+
+    monkeypatch.setattr(factories, "_build", build_during_invalidation)
+    other = SessionDirs(Workspace(tmp_path / "other"))
+    stale = graphs.get("EvoScientist", other)
+    builds.clear()
+    assert graphs.get("EvoScientist", other) is not stale
+    assert builds == [("EvoScientist", other)]
