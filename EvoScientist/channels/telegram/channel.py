@@ -52,6 +52,7 @@ class TelegramChannel(Channel):
             raise ChannelError("Telegram bot token is required")
 
         try:
+            from telegram.error import InvalidToken
             from telegram.ext import (
                 ApplicationBuilder,
                 MessageHandler,
@@ -87,7 +88,16 @@ class TelegramChannel(Channel):
 
         self._app.add_handler(MessageHandler(media_filter, self._on_message))
 
-        await self._app.initialize()
+        try:
+            await self._app.initialize()
+        except InvalidToken:
+            # initialize() opened the bot's HTTP clients before getMe failed,
+            # and Application.shutdown() skips an app that never initialized.
+            await self._app.bot.shutdown()
+            # The library's message quotes the rejected token in full.
+            raise ChannelError(
+                "Telegram rejected the bot token; check telegram_bot_token"
+            ) from None
         # Cache bot username for @mention detection in groups
         bot_info = await self._app.bot.get_me()
         self._bot_username = (bot_info.username or "").lower()

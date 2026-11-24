@@ -1,7 +1,10 @@
 """Tests for Telegram channel implementation."""
 
+import asyncio
 import importlib.util
+import logging
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -167,12 +170,16 @@ class TestTelegramChannel:
             LOCATION=false_filter,
         )
         telegram_module = ModuleType("telegram")
+        error_module = ModuleType("telegram.error")
+        error_module.InvalidToken = type("InvalidToken", (Exception,), {})
         ext_module = ModuleType("telegram.ext")
         ext_module.ApplicationBuilder = FakeApplicationBuilder
         ext_module.MessageHandler = FakeMessageHandler
         ext_module.filters = fake_filters
         telegram_module.ext = ext_module
+        telegram_module.error = error_module
         monkeypatch.setitem(sys.modules, "telegram", telegram_module)
+        monkeypatch.setitem(sys.modules, "telegram.error", error_module)
         monkeypatch.setitem(sys.modules, "telegram.ext", ext_module)
 
         channel = TelegramChannel(
@@ -365,3 +372,60 @@ class TestTelegramRetryDelay:
             response=httpx.Response(429, headers={"Retry-After": "3"}),
         )
         assert ch._extract_retry_delay(exc) == 3.0
+
+
+@pytest.fixture
+async def rejected_token(monkeypatch):
+    """Make getMe reject the token; yield ``(token, bots, shut_down)``.
+
+    ``bots`` holds every bot whose getMe was called and ``shut_down`` the bots
+    whose shutdown() ran. Teardown shuts down every bot in case the code under
+    test did not.
+    """
+    telegram = pytest.importorskip("telegram")
+    from telegram.error import InvalidToken
+
+    bots, shut_down = [], []
+    real_shutdown = telegram.Bot.shutdown
+
+    async def _reject(self, *_args, **_kwargs):
+        bots.append(self)
+        raise InvalidToken("Unauthorized")
+
+    async def _record_shutdown(self):
+        shut_down.append(self)
+        await real_shutdown(self)
+
+    monkeypatch.setattr(telegram.Bot, "get_me", _reject)
+    monkeypatch.setattr(telegram.Bot, "shutdown", _record_shutdown)
+    yield "123456:rejected-token-secret", bots, shut_down
+    for bot in bots:
+        await real_shutdown(bot)
+
+
+async def test_start_rejected_token_stays_out_of_the_error(rejected_token):
+    """python-telegram-bot quotes the rejected token in its InvalidToken message."""
+    token, bots, shut_down = rejected_token
+    channel = TelegramChannel(TelegramConfig(bot_token=token))
+
+    with pytest.raises(ChannelError, match="rejected the bot token") as raised:
+        await channel.start()
+
+    assert token not in "".join(traceback.format_exception(raised.value))
+    assert shut_down == bots
+
+
+async def test_run_rejected_token_stops_without_logging_it(rejected_token, caplog):
+    from EvoScientist.channels.logging_caps import quiet_credential_url_loggers
+
+    token, bots, _shut_down = rejected_token
+    channel = TelegramChannel(TelegramConfig(bot_token=token))
+    # Every entry point caps the loggers that print the token-bearing Bot API URL.
+    quiet_credential_url_loggers()
+    caplog.set_level(logging.DEBUG)
+
+    await asyncio.wait_for(channel.run(), timeout=5)
+
+    assert len(bots) == 1
+    assert "rejected the bot token" in caplog.text
+    assert token not in caplog.text
