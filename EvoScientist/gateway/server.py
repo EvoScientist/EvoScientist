@@ -396,10 +396,15 @@ class _ThreadEvents:
 
     async def next_within(self, seconds: float) -> Any:
         """The next envelope, ``_QUIET`` when none arrives in time, ``None`` at the end."""
+        # ``wait_for`` with no time left times out before ``get`` runs, even
+        # with an envelope queued: take a queued one first.
         try:
-            event = await self._wait_for(self._queue.get(), seconds)
-        except TimeoutError:
-            return _QUIET
+            event = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            try:
+                event = await self._wait_for(self._queue.get(), seconds)
+            except TimeoutError:
+                return _QUIET
         if event is None:
             self._queue.put_nowait(None)
             return None
@@ -1748,6 +1753,9 @@ class LangGraphServerGateway:
                         max(0.0, quiet_deadline - loop.time())
                     )
                     if event is None:
+                        if finished_status is not None:
+                            # The run has finished: read it back.
+                            break
                         raise RuntimeError(
                             "Thread event stream ended before the run finished"
                         )
@@ -1822,7 +1830,9 @@ class LangGraphServerGateway:
                             end_event = event_map
                             break
                 if end_event is not None:
-                    self._notify_recovered_turn()
+                    # A failed run ends the turn with its error, not a result.
+                    if _root_lifecycle_phase(end_event) != "failed":
+                        self._notify_recovered_turn()
                     for turn_event in recovered:
                         yield turn_event
             if end_event is None:
@@ -1839,12 +1849,17 @@ class LangGraphServerGateway:
                         f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
                         f"status {finished_status}"
                     )
+                # The run's last checkpoint, not the thread's latest state: a
+                # later run on the thread may already have added its own.
                 try:
-                    state = await self.thread_store.client.threads.get_state(
-                        request.thread_id
+                    history = await self.thread_store.client.threads.get_history(
+                        request.thread_id, limit=1, metadata={"run_id": run_id}
                     )
                 except Exception as exc:
                     raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
+                if not history:
+                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
+                state = history[0]
                 # What the turn has not shown of its answer, matched
                 # against the text shown so far.
                 values = state.get("values")

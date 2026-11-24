@@ -590,6 +590,13 @@ class _V3EventProcessor:
         # state repeats neither.
         self._shown_tool_results: set[str] = set()
         self._root_thinking_open = False
+        # Root messages by the id their ``message-start`` gives: the one
+        # streaming, the one the open thinking belongs to, and those whose
+        # end (with its usage) arrived. Without ids, a completion from final
+        # state matches messages by their text alone.
+        self._root_message_id: str | None = None
+        self._root_thinking_message_id: str | None = None
+        self._root_finished_message_ids: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
         # Whitespace each message holds back until its next text (key: sub-agent
         # instance, None for the main agent); no key yet = the message has no text.
@@ -1043,6 +1050,10 @@ class _V3EventProcessor:
         # All the text is shown but the last message's end, which carries its
         # usage, was not.
         unfinished = last_shown if cut is None and self._main_message_has_text else None
+        # Thinking that streamed with no text or end after it, and its message
+        # when the stream named it.
+        thinking_open = self._root_thinking_open
+        thinking_owner = self._root_thinking_message_id
 
         events: list[dict[str, Any]] = []
         for index, message in enumerate(turn):
@@ -1081,8 +1092,12 @@ class _V3EventProcessor:
                 continue
             # Not started in the shown text. Thinking that streamed before the
             # cut, or a tool call already shown, means the live stream had
-            # begun this message: its thinking is not repeated.
-            begun = self._root_thinking_open or any(
+            # begun this message: its thinking is not repeated. Thinking the
+            # stream did not tie to a message belongs to the first one here.
+            owns_thinking = thinking_open and thinking_owner in (None, message.id)
+            if owns_thinking:
+                thinking_open = False
+            begun = owns_thinking or any(
                 ((), str(call.get("id") or "")) in self._emitted_tool_calls
                 for call in message.tool_calls
             )
@@ -1091,7 +1106,9 @@ class _V3EventProcessor:
             if begun:
                 events.extend(self._emit_text(answer_text(message), None))
                 events.extend(self._emit_tool_calls(message, None, ()))
-                events.extend(self._usage_event(message))
+                if message.id not in self._root_finished_message_ids:
+                    # Its end, which carries the usage, was not shown.
+                    events.extend(self._usage_event(message))
             else:
                 events.extend(self._process_whole_message(message, None, ()))
         self._end_text_message(None)
@@ -1157,6 +1174,8 @@ class _V3EventProcessor:
 
         if event_type == "message-start":
             self._end_text_message(subagent)
+            if subagent is None and payload.get("role", "ai") == "ai":
+                self._root_message_id = str(payload.get("id") or "") or None
             return []
 
         if event_type == "message-finish":
@@ -1177,6 +1196,8 @@ class _V3EventProcessor:
                 self._count_text(len(pending))
             self._end_text_message(subagent)
             if subagent is None:
+                if self._root_message_id is not None:
+                    self._root_finished_message_ids.add(self._root_message_id)
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
                 if inp or out:
@@ -1583,6 +1604,7 @@ class _V3EventProcessor:
             return events
         self._count_thinking(len(text))
         self._root_thinking_open = True
+        self._root_thinking_message_id = self._root_message_id
         events.append(self.emitter.thinking(text).data)
         return events
 

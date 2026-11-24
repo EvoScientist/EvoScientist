@@ -1321,11 +1321,14 @@ async def test_lost_failed_run_raises_its_own_error(quiet_poll):
     )
     stream.run.status = "error"
     gateway, _ = _gateway(stream)
+    gateway.events = _Notices()
 
     with pytest.raises(RuntimeError, match="Run failed: boom"):
         await _turn(gateway, "hi")
 
     assert gateway.thread_store.client.runs.cancelled == []
+    # The turn ends with the run's error, not a result.
+    assert gateway.events.lines == []
 
 
 @pytest.mark.parametrize(
@@ -1992,3 +1995,200 @@ async def test_repeated_status_failures_log_one_traceback(quiet_poll, caplog):
     failures = [r for r in caplog.records if "Could not read the status" in r.message]
     assert [r.levelname for r in failures] == ["WARNING", "DEBUG", "DEBUG"]
     assert [bool(r.exc_info) for r in failures] == [True, False, False]
+
+
+async def test_next_within_returns_a_queued_envelope_with_no_time_left():
+    async with _ThreadEvents(_source([{"n": 1}], then_wait=True)) as events:
+        while events._queue.empty():
+            await asyncio.sleep(0)
+
+        assert await events.next_within(0) == {"n": 1}
+
+
+class _EndAfterStatusStream(FakeLangGraphThreadStream):
+    """The live connection carries the run's first envelopes and ends once the
+    turn has asked for the status; a new connection replays the whole run."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.status_asked = asyncio.Event()
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        if self.event_streams_opened > 1:
+            for event in self.queued_events:
+                yield event
+            await asyncio.Event().wait()
+        await self.run.started.wait()
+        yield self.queued_events[0]
+        yield self.queued_events[1]
+        await self.status_asked.wait()
+
+
+async def test_stream_ending_after_a_finished_status_reads_the_run_back(quiet_poll):
+    stream = _EndAfterStatusStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    get = runs.get
+
+    async def get_and_end(thread_id: str, run_id: str) -> dict[str, Any]:
+        run = await get(thread_id, run_id)
+        stream.status_asked.set()
+        return run
+
+    runs.get = get_and_end
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert stream.event_streams_opened == 2
+
+
+def _two_runs_state(later: bool) -> dict[str, Any]:
+    messages = [*_NEW_STATE["messages"]]
+    if later:
+        messages += [
+            {"type": "human", "content": "next", "id": "human-2"},
+            {"type": "ai", "content": "Next answer", "id": "ai-2"},
+        ]
+    return {"values": {"messages": messages}}
+
+
+async def test_state_completion_uses_the_runs_own_checkpoint(quiet_poll):
+    """Another run may already have answered on the thread: the turn shows
+    only what this run wrote."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, _two_runs_state(later=True))
+    threads.run_states["run-1"] = _two_runs_state(later=False)
+
+    events = await _turn(gateway, "hi")
+
+    assert events[-1]["response"] == "Hello world"
+    assert threads.history_gets == [(THREAD_ID, 1, {"run_id": "run-1"})]
+
+
+async def test_state_completion_without_a_checkpoint_of_the_run_raises(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+
+    async def no_history(thread_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    threads.get_history = no_history  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+        await _turn(gateway, "hi")
+
+
+def _message_start(message_id: str, entry_id: str) -> dict[str, Any]:
+    return {
+        "method": "messages",
+        "params": {
+            "namespace": [],
+            "data": {"event": "message-start", "role": "ai", "id": message_id},
+        },
+        "event_id": entry_id,
+    }
+
+
+def _finish_with_usage(entry_id: str, inp: int, out: int) -> dict[str, Any]:
+    finish = _finish(entry_id)
+    finish["params"]["data"]["usage"] = {"input_tokens": inp, "output_tokens": out}
+    return finish
+
+
+def _usage(inp: int, out: int) -> dict[str, int]:
+    return {"input_tokens": inp, "output_tokens": out, "total_tokens": inp + out}
+
+
+# A tool-only message, then an answer that thinks first; ids as the server
+# sends them in ``message-start``.
+_TOOL_THEN_THINKING_RUN = [
+    _lifecycle("run-1", "running"),
+    _message_start("ai-1", "1-0"),
+    {
+        "method": "messages",
+        "params": {
+            "namespace": [],
+            "data": {
+                "event": "content-block-finish",
+                "content": {
+                    "type": "tool_call",
+                    "id": "call-1",
+                    "name": "execute",
+                    "args": {"command": "ls"},
+                },
+            },
+        },
+        "event_id": "1-1",
+    },
+    _finish_with_usage("1-2", 10, 5),
+    _tool("tool-started", "1-3", tool_name="execute", input={"command": "ls"}),
+    _tool("tool-finished", "1-4", tool_name="execute", output="a.txt"),
+    _message_start("ai-2", "1-5"),
+    _thinking("weighing it", "1-6"),
+    _text("One file", "1-7"),
+    _finish_with_usage("1-8", 20, 7),
+    _lifecycle("run-1", "completed"),
+]
+_TOOL_THEN_THINKING_STATE = {
+    "messages": [
+        *_EARLIER_STATE["messages"],
+        {"type": "human", "content": "hi", "id": "human-1"},
+        {
+            "type": "ai",
+            "content": "",
+            "id": "ai-1",
+            "tool_calls": [
+                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+            ],
+            "usage_metadata": _usage(10, 5),
+        },
+        {
+            "type": "tool",
+            "content": "a.txt",
+            "id": "tool-1",
+            "name": "execute",
+            "tool_call_id": "call-1",
+        },
+        {
+            "type": "ai",
+            "content": [
+                {"type": "reasoning", "reasoning": "weighing it"},
+                {"type": "text", "text": "One file"},
+            ],
+            "id": "ai-2",
+            "usage_metadata": _usage(20, 7),
+        },
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "live_limit", range(len(_TOOL_THEN_THINKING_RUN)), ids=lambda n: f"{n}-live"
+)
+async def test_state_completion_after_a_tool_only_message_repeats_nothing(
+    live_limit, quiet_poll
+):
+    """A tool-only message whose end arrived live does not get its usage
+    again, and thinking streamed for the next message is not repeated."""
+    expected = await _live_events(_TOOL_THEN_THINKING_RUN, values=_EARLIER_STATE)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=_TOOL_THEN_THINKING_RUN,
+        live_limit=live_limit,
+        read_back_limit=0,
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _TOOL_THEN_THINKING_STATE})
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] != "text"] == [
+        e for e in expected if e["type"] != "text"
+    ]
+    assert events[-1]["response"] == "One file"
