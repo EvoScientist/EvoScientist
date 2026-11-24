@@ -273,7 +273,8 @@ formatter = ToolResultFormatter()
 
 
 class _StreamCancelEvent(threading.Event):
-    # Count requests so a close started by a stop can still honor a later stop.
+    # Count requests so a parked-turn close can ignore stops made before it
+    # began and still honor one made while it runs.
     request_count: int = 0
 
 
@@ -403,6 +404,12 @@ def _run_owned_questionary_prompt(
 def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
     event = _get_stream_cancel_event(cancel_scope)
     return event.is_set() if event is not None else False
+
+
+def _stream_cancel_request_count(cancel_scope: str | None) -> int | None:
+    """How many stops a scope has seen, for telling earlier stops from later ones."""
+    event = _get_stream_cancel_event(cancel_scope)
+    return event.request_count if event is not None else None
 
 
 def clear_stream_cancel(cancel_scope: str | None = None) -> None:
@@ -2047,15 +2054,10 @@ def _run_streaming(
 
         Such a stop is a refusal, as Ctrl+C on the prompt is: the next message must not land on it.
         """
-        with _stream_cancel_lock:
-            event = _get_stream_cancel_event(cancel_scope)
-            ignored_request = event.request_count if event is not None else None
-        _close_parked_turn("rejected", ignored_request=ignored_request)
+        _close_parked_turn("rejected")
         return _stopped_response()
 
-    def _close_parked_turn(
-        reason: "ParkedCloseReason", *, ignored_request: int | None = None
-    ) -> str:
+    def _close_parked_turn(reason: "ParkedCloseReason") -> str:
         """End the turn at a pause that will not be answered.
 
         Closes the parked interrupt without resuming the agent (a rejecting
@@ -2064,6 +2066,9 @@ def _run_streaming(
         notice is printed, and channel callers (``hitl_outcome_fn``) also get
         it in the returned text, because the console line never reaches them.
         """
+        # Stops made before the close begins must not cancel it; only a stop
+        # made while it runs does.
+        ignored_request = _stream_cancel_request_count(cancel_scope)
         at_limit = reason == "round_limit"
         if at_limit:
             from ..channels.hitl_budget import (

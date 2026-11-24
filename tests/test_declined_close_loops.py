@@ -244,6 +244,24 @@ class TestRichLoopClosesAtADecline:
         gateway = self._stopped_run(agent, _stream, hitl_prompt_fn=_never_asked)
         self._assert_closed_as_rejected(agent, gateway)
 
+    def test_a_stop_after_the_approval_at_the_round_limit_closes_as_round_limit(
+        self, monkeypatch
+    ):
+        """The stop that ended the turn must not cancel the close it leads to."""
+        from EvoScientist.channels import hitl_budget
+
+        monkeypatch.setattr(hitl_budget, "MAX_HITL_TOTAL_ROUNDS", 1)
+        agent = _parked_agent()
+
+        async def _stream(_request):
+            yield {"type": "text", "content": "partial"}
+            yield interrupt_event(1)
+            display_mod.request_stream_cancel("scope-stop")
+
+        self._stopped_run(agent, _stream)
+        assert _closed(agent) == [ROUND_LIMIT]
+        assert agent.next == ()
+
     def test_a_stop_at_an_open_question_closes_nothing(self):
         """Only an approval is refused by a stop; a question keeps its pause."""
         question = {"name": "ask_user", "args": {}, "id": "q-1", "type": "tool_call"}
