@@ -370,9 +370,7 @@ def run_standalone(
     """
     from ..paths import process_workspace
 
-    # Keep channel credentials out of the log: cap the loggers that print
-    # credential-bearing HTTP URLs. Shared with `EvoSci serve` via the same
-    # helper (issue #666), so a cap change needs a single edit.
+    # Keep channel credentials out of HTTP request logs.
     from .logging_caps import quiet_credential_url_loggers
 
     quiet_credential_url_loggers()
