@@ -102,6 +102,7 @@ async def test_a_stop_before_the_run_removes_the_spinner(monkeypatch, workspace)
     """A /stop that lands before the run's first event leaves no spinner."""
     app = await capture_app(monkeypatch, workspace)
     gateway = FakeGraphGateway()  # must never be asked for a stream
+    scope = "test-channel:chat-1"
     try:
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
@@ -111,14 +112,14 @@ async def test_a_stop_before_the_run_removes_the_spinner(monkeypatch, workspace)
             monkeypatch.setattr(
                 app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
             )
-            display_mod.request_stream_cancel()
-            response = await app._stream_with_widgets("hello")
+            display_mod.request_stream_cancel(scope)
+            response = await app._stream_with_widgets("hello", cancel_scope=scope)
             await pilot.pause()
             assert response == "[Stopped.]"
             assert gateway.requests == []
             assert not list(app.query(LoadingWidget))
     finally:
-        display_mod.discard_stream_cancel()
+        display_mod.discard_stream_cancel(scope)
 
 
 async def test_an_agent_wait_error_removes_the_spinner(monkeypatch, workspace):

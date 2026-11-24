@@ -1822,6 +1822,9 @@ def run_textual_interactive(
             # correct position (between user input and model response).
             for w in file_warnings or []:
                 self._append_system(f"⚠ {w}", style="yellow")
+            # The wait runs before the spinner mounts, so an error or a stop
+            # here has no spinner to leave behind.
+            agent = await self._await_agent_ready()
             loading = LoadingWidget()
             await container.mount(loading)
             container.scroll_end(animate=False)
@@ -1872,17 +1875,6 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._dirs, self._current_model)
             response = ""
-            try:
-                agent = await self._await_agent_ready()
-            except BaseException:
-                # A load failure or a stop during the wait ends the turn
-                # before its run starts; none of the cleanup below is
-                # reached, so the spinner goes with the wait that ended it.
-                try:
-                    await loading.cleanup()
-                except Exception:
-                    pass
-                raise
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -2112,7 +2104,7 @@ def run_textual_interactive(
             _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
-                    # A stop before the round's stream starts never enters
+                    # A stop before the turn's first stream never enters
                     # the try/finally that removes the spinner, so it goes
                     # with the turn here.
                     if not loading_removed:
@@ -3019,6 +3011,7 @@ def run_textual_interactive(
                                     await loading.cleanup()
                                 except Exception:
                                     pass
+                                loading_removed = True
                             # Clean up transient indicators. Inline narration is
                             # transcript content, so finalize it without removing
                             # the widget.
