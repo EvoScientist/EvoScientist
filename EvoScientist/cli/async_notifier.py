@@ -409,8 +409,7 @@ UNTRACKED_STATUS: Final = "untracked"
 
 The reader writes it into thread state when it reports the process, so a later
 EvoSci process that resumes the thread does not report it again. It still polls
-a marked process once: a terminal status from a registry that does track it is
-reported as usual.
+a marked process until its status is unknown, or terminal and so reported.
 """
 
 UNTRACKED_HINT: Final = (
@@ -566,8 +565,9 @@ async def enqueue_bg_process_completions_from_state(
     ``kind="bg-process"`` notifications via the shared queue. A process no
     registry this EvoSci process can ask has is marked ``untracked`` in state
     (:func:`_mark_untracked`) and then reported with that status; a marked
-    record is still polled once per EvoSci process, so a terminal status wins
-    over the mark. Returns the still-active count for the idle throttle.
+    record is still polled until its status is unknown or terminal, so a
+    terminal status wins over the mark. Returns the still-active count for the
+    idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
     if registry is None:

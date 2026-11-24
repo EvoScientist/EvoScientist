@@ -677,7 +677,7 @@ async def test_tui_notification_turn_carries_the_mark(monkeypatch, workspace, st
 
 def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
     import asyncio
-    from contextlib import asynccontextmanager
+    from contextlib import asynccontextmanager, nullcontext
 
     from EvoScientist.cli import interactive
     from EvoScientist.config import EvoScientistConfig
@@ -703,6 +703,7 @@ def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
     monkeypatch.setattr(
         interactive, "PromptSession", lambda **kw: SimpleNamespace(prompt_async=prompt)
     )
+    monkeypatch.setattr(interactive, "patch_stdout", lambda **_kw: nullcontext())
     monkeypatch.setattr(interactive, "get_checkpointer", checkpointer)
     monkeypatch.setattr(interactive, "_load_agent", lambda **kw: object())
     monkeypatch.setattr(
