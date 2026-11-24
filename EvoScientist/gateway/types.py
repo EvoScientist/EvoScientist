@@ -122,6 +122,8 @@ class RunRequest:
     """Acceptance criteria this turn is graded against; ``None`` means ungraded."""
     goal_request: dict[str, Any] | None = None
     """A ``/goal`` request; the run then carries no message (``message`` is ``""``)."""
+    bg_processes: dict[str, dict] | None = None
+    """Terminal process records to checkpoint with a notification message."""
 
 
 @dataclass(frozen=True, slots=True)

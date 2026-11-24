@@ -1277,6 +1277,7 @@ def cmd_interactive(
                 notifs: list,
                 *,
                 target_thread_id: str | None,
+                bg_processes: dict[str, dict] | None = None,
             ) -> None:
                 """Inject a batched async-task notification as a synthetic user message.
 
@@ -1296,6 +1297,7 @@ def cmd_interactive(
                     ui_backend=state["ui_backend"],
                     agent=ready_agent,
                     message=text,
+                    bg_processes=bg_processes,
                     # Falls back to live state["thread_id"] if no override is
                     # passed (legacy / direct-call paths). Dedup reader has no
                     # fallback and returns {} for a falsey id; the asymmetry
@@ -1448,13 +1450,14 @@ def cmd_interactive(
                         )
                         try:
                             await async_notifier.consume_notifications(
-                                run_message=lambda text, notifs, _tid=current_tid: (
+                                run_message=lambda text, notifs, _tid=current_tid, **kwargs: (
                                     _run_serialized_turn(
                                         turn_lock,
                                         lambda: _inject_notification_message(
                                             text,
                                             notifs,
                                             target_thread_id=_tid,
+                                            **kwargs,
                                         ),
                                     )
                                 ),

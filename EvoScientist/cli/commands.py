@@ -2105,7 +2105,9 @@ def _serve_drain_notifications(
 
     from .tui_runtime import run_streaming
 
-    def _run_notification_message(text: str, notifs: list) -> None:
+    def _run_notification_message(
+        text: str, notifs: list, *, bg_processes: dict[str, dict] | None = None
+    ) -> None:
         """Synchronous wrapper: run the agent on the synthetic notification text."""
         # Render the per-task visual frame (matches CLI/TUI aesthetic).
         from EvoScientist.cli.async_notifier import format_notification_lines
@@ -2121,6 +2123,7 @@ def _serve_drain_notifications(
                 ui_backend="cli",
                 agent=runtime_state.agent,
                 message=text,
+                bg_processes=bg_processes,
                 thread_id=tid,
                 show_thinking=show_thinking,
                 interactive=True,
@@ -2142,8 +2145,10 @@ def _serve_drain_notifications(
                     f"{origin.sender or origin.chat_id}[/dim]"
                 )
 
-    async def _run_notification_message_async(text: str, notifs: list) -> None:
-        await _aio.to_thread(_run_notification_message, text, notifs)
+    async def _run_notification_message_async(
+        text: str, notifs: list, **kwargs
+    ) -> None:
+        await _aio.to_thread(_run_notification_message, text, notifs, **kwargs)
 
     async def _read_async_tasks() -> async_notifier.AsyncTasksState:
         thread_id = runtime_state.thread_id

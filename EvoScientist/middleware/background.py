@@ -41,9 +41,15 @@ def _bg_processes_reducer(
     existing: "dict[str, BgProcessRecord] | None",
     update: "dict[str, BgProcessRecord]",
 ) -> "dict[str, BgProcessRecord]":
-    """Merge process-record updates into the existing registry (last write per key)."""
+    """Merge per process, preserving a checked exit over an older notice snapshot."""
     merged = dict(existing or {})
-    merged.update(update)
+    for process_id, record in update.items():
+        current = merged.get(process_id, {})
+        # A check_process may have stored the exit after the notification
+        # consumer read state. Its returncode must survive that stale input.
+        if current.get("returncode") is not None and record.get("returncode") is None:
+            continue
+        merged[process_id] = record
     return merged
 
 

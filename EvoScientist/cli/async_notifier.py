@@ -390,9 +390,9 @@ async def enqueue_completions_from_state_throttled(
 
 # --- Background-process reader (mirror of the async-task reader above) --------
 # Process ids the bg-process reader has already surfaced an exit for. The mirrored
-# ``bg_processes[*].status`` only goes terminal once the agent observes the exit
-# via a tool (check/stop/list), so this idempotency set keeps one proactive exit →
-# one enqueue for the agent-didn't-check path, mirroring ``_reader_enqueued_task_ids``.
+# ``bg_processes[*].status`` goes terminal when a tool observes the exit or a
+# notification turn records it. This set prevents repeat enqueues before that
+# turn, mirroring ``_reader_enqueued_task_ids``.
 _reader_enqueued_process_ids: set[str] = set()
 # Process ids a reader invocation is currently awaiting a status for. The
 # idle tick and a turn-boundary read can interleave at the status await;
@@ -560,7 +560,7 @@ async def enqueue_bg_process_completions_from_state(
     Mirror of :func:`enqueue_completions_from_state` for OS background processes.
     Reads the ``bg_processes`` registry the middleware mirrors into state and, for
     each process not already surfaced and not terminal-in-state (a terminal state
-    means the agent already observed the exit via check/stop/list — nothing to
+    means a tool or notification turn already recorded the exit — nothing to
     proactively surface, which is the state-based dedup), polls
     ``gateway.get_process_status``. Newly-terminal processes are enqueued as
     ``kind="bg-process"`` notifications via the shared queue. A process no
@@ -863,7 +863,7 @@ NOTIFICATION_BATCH_GRACE_SECONDS = 0.3
 
 
 async def consume_notifications(
-    run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
+    run_message: Callable[..., Awaitable[None]],
     read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
     *,
@@ -877,7 +877,8 @@ async def consume_notifications(
             ``llm_text`` is the full structured message for the LLM
             (from ``format_batch_message``).  ``notifs_list`` is the
             survivors list so callers can render per-task visual lines
-            without re-parsing the text.
+            without re-parsing the text. When available, ``bg_processes`` is
+            passed as a keyword to checkpoint terminal records with the message.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
         read_bg_processes_state: optional reader of ``bg_processes`` for
@@ -920,4 +921,16 @@ async def consume_notifications(
         return
 
     text = format_batch_message(survivors)
-    await run_message(text, survivors)
+    marks = {
+        n.task_id: {**bg_processes[n.task_id], "status": n.status}
+        for n in survivors
+        if n.kind == "bg-process"
+        and n.status in TERMINAL_STATUSES
+        and bg_processes is not None
+        and n.task_id in bg_processes
+        and bg_processes[n.task_id].get("status") not in TERMINAL_STATUSES
+    }
+    if marks:
+        await run_message(text, survivors, bg_processes=marks)
+    else:
+        await run_message(text, survivors)

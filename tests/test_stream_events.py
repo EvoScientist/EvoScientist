@@ -42,6 +42,31 @@ from tests.fakes.stream_v3 import (
 )
 
 
+async def test_process_marks_are_only_added_to_new_message_input():
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from EvoScientist.stream.events import build_agent_stream_input
+
+    marks = {"p1": {"status": "success"}}
+    run_input = await build_agent_stream_input("done", bg_processes=marks)
+    assert run_input["bg_processes"] == marks
+    agent = FakeV3Agent([])
+    async for _event in stream_agent_events(agent, "done", "t1", bg_processes=marks):
+        pass
+    assert agent.astream_events.call_args.args[0]["bg_processes"] == marks
+    assert "bg_processes" not in await build_agent_stream_input("hello")
+    resume = Command(resume={"ok": True})
+    assert await build_agent_stream_input(resume, bg_processes=marks) is resume
+    # A graph without BackgroundMiddleware ignores unknown input keys.
+    builder = StateGraph(MessagesState)
+    builder.add_node("reply", lambda _: {})
+    builder.add_edge(START, "reply")
+    builder.add_edge("reply", END)
+    result = await builder.compile().ainvoke(run_input)
+    assert list(result) == ["messages"]
+    assert result["messages"][0].content == "done"
+
+
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self

@@ -1882,6 +1882,7 @@ def _run_streaming(
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
+    bg_processes: dict[str, dict] | None = None,
     goal_request: dict[str, Any] | None = None,
     _state: StreamState | None = None,
     _media_sent: set[str] | None = None,
@@ -1957,6 +1958,7 @@ def _run_streaming(
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
                 goal_request=goal_request,
+                bg_processes=bg_processes,
                 _state=_state,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
@@ -2002,6 +2004,7 @@ def _run_streaming(
                 rubric=rubric,
                 # Read only with the turn's first input; a resume ignores it.
                 goal_request=goal_request,
+                bg_processes=bg_processes,
             )
         )
         try:

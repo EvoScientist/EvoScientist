@@ -62,6 +62,7 @@ async def test_local_gateway_streams_from_injected_streamer():
                 "thread_id": thread_id,
                 "metadata": kwargs.get("metadata"),
                 "media": kwargs.get("media"),
+                "bg_processes": kwargs.get("bg_processes"),
             }
         )
         yield {"type": "text", "content": "hi"}
@@ -76,6 +77,7 @@ async def test_local_gateway_streams_from_injected_streamer():
             thread_id="t1",
             metadata={"workspace_dir": "/tmp/ws"},
             media=["plot.png"],
+            bg_processes={"p1": {"status": "success"}},
             target=GraphTarget(local_graph=agent, workspace_dir="/tmp/ws"),
         )
         return [event async for event in gateway.stream_events(request)]
@@ -93,6 +95,7 @@ async def test_local_gateway_streams_from_injected_streamer():
         "thread_id": "t1",
         "metadata": {"workspace_dir": "/tmp/ws"},
         "media": ["plot.png"],
+        "bg_processes": {"p1": {"status": "success"}},
     }
 
 
@@ -4056,12 +4059,18 @@ async def test_langgraph_server_gateway_marks_a_graded_run():
     )
     with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
         async for _event in gateway.stream_events(
-            RunRequest(message="hi", thread_id="abc12345", rubric="- a")
+            RunRequest(
+                message="hi",
+                thread_id="abc12345",
+                rubric="- a",
+                bg_processes={"p1": {"status": "success"}},
+            )
         ):
             pass
 
     start = stream.run.starts[0]
     assert start["input"]["rubric"] == "- a"
+    assert start["input"]["bg_processes"] == {"p1": {"status": "success"}}
     assert start["config"]["configurable"]["rubric_run"] == {"mode": "input"}
 
 
