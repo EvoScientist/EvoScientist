@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import psutil
 
@@ -85,6 +85,9 @@ def _elapsed(proc: BgProcess) -> int:
     """Seconds the process has run — frozen at first-observed exit once it has exited."""
     end = proc.finished_ts if proc.finished_ts is not None else time.time()
     return int(end - proc.started_ts)
+
+
+EXIT_STATUSES: Final = frozenset({"success", "error", "interrupted"})
 
 
 def terminal_status(proc: BgProcess) -> str | None:

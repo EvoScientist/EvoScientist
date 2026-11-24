@@ -2146,9 +2146,11 @@ def _serve_drain_notifications(
                 )
 
     async def _run_notification_message_async(
-        text: str, notifs: list, **kwargs
+        text: str, notifs: list, *, bg_processes: dict[str, dict] | None = None
     ) -> None:
-        await _aio.to_thread(_run_notification_message, text, notifs, **kwargs)
+        await _aio.to_thread(
+            _run_notification_message, text, notifs, bg_processes=bg_processes
+        )
 
     async def _read_async_tasks() -> async_notifier.AsyncTasksState:
         thread_id = runtime_state.thread_id

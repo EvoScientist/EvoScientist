@@ -36,8 +36,6 @@ from langgraph.types import Command
 from .. import agent_shell, background, paths
 from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
-_EXIT_STATUSES = frozenset({"success", "error", "interrupted"})
-
 
 def _bg_processes_reducer(
     existing: "dict[str, BgProcessRecord] | None",
@@ -54,8 +52,8 @@ def _bg_processes_reducer(
             # A notice mark has no returncode, and an ``untracked`` mark built
             # from an older snapshot must not undo it.
             or (
-                current.get("status") in _EXIT_STATUSES
-                and record.get("status") not in _EXIT_STATUSES
+                current.get("status") in background.EXIT_STATUSES
+                and record.get("status") not in background.EXIT_STATUSES
             )
         ):
             continue

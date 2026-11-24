@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -1365,10 +1366,8 @@ def run_textual_interactive(
                     return
                 try:
                     await consume_notifications(
-                        run_message=lambda text, notifs, **kwargs: (
-                            self._inject_notification_tui(
-                                text, notifs, target_thread_id=target_tid, **kwargs
-                            )
+                        run_message=partial(
+                            self._inject_notification_tui, target_thread_id=target_tid
                         ),
                         read_async_tasks_state=lambda: self._read_async_tasks_tui(
                             target_tid

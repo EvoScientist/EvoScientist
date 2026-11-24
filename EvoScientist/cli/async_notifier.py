@@ -22,7 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
@@ -704,7 +704,7 @@ def dedup_notifications(
     *,
     bg_processes: dict[str, dict] | None = None,
 ) -> list[AsyncTaskNotification]:
-    """Filter notifications the agent has already seen via a check.
+    """Filter notifications the thread already records as seen.
 
     Async tasks require a terminal status checked at or after the task's last update.
     Background processes use a terminal thread record or a local observation.
@@ -861,8 +861,18 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
 NOTIFICATION_BATCH_GRACE_SECONDS = 0.3
 
 
+class RunMessage(Protocol):
+    def __call__(
+        self,
+        text: str,
+        notifs: list[AsyncTaskNotification],
+        *,
+        bg_processes: dict[str, dict] | None = None,
+    ) -> Awaitable[None]: ...
+
+
 async def consume_notifications(
-    run_message: Callable[..., Awaitable[None]],
+    run_message: RunMessage,
     read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
     *,
@@ -876,9 +886,8 @@ async def consume_notifications(
             ``llm_text`` is the full structured message for the LLM
             (from ``format_batch_message``).  ``notifs_list`` is the
             survivors list so callers can render per-task visual lines
-            without re-parsing the text. ``bg_processes`` is passed by keyword
-            only when the thread's records need a terminal mark; it is
-            checkpointed with the message.
+            without re-parsing the text. ``bg_processes`` holds the records to
+            checkpoint with the message, or ``None`` when none needs a mark.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
         read_bg_processes_state: optional reader of ``bg_processes``, for dedup
@@ -930,7 +939,4 @@ async def consume_notifications(
         and n.task_id in bg_processes
         and bg_processes[n.task_id].get("status") not in TERMINAL_STATUSES
     }
-    if marks:
-        await run_message(text, survivors, bg_processes=marks)
-    else:
-        await run_message(text, survivors)
+    await run_message(text, survivors, bg_processes=marks or None)

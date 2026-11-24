@@ -1450,14 +1450,14 @@ def cmd_interactive(
                         )
                         try:
                             await async_notifier.consume_notifications(
-                                run_message=lambda text, notifs, _tid=current_tid, **kwargs: (
+                                run_message=lambda text, notifs, *, bg_processes=None, _tid=current_tid: (
                                     _run_serialized_turn(
                                         turn_lock,
                                         lambda: _inject_notification_message(
                                             text,
                                             notifs,
                                             target_thread_id=_tid,
-                                            **kwargs,
+                                            bg_processes=bg_processes,
                                         ),
                                     )
                                 ),
