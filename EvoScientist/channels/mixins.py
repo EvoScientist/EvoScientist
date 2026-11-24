@@ -191,6 +191,7 @@ class WebSocketMixin:
     async def _ws_loop(self) -> None:
         """Main WebSocket loop with auto-reconnect."""
         import os
+        from urllib.parse import urlsplit
 
         import aiohttp
 
@@ -207,8 +208,12 @@ class WebSocketMixin:
                         or os.environ.get("HTTP_PROXY")
                         or None
                     )
+                # The query can carry a connection ticket and the proxy URL
+                # a password, so log neither.
+                url_without_query = urlsplit(ws_url)._replace(query="").geturl()
                 logger.debug(
-                    f"{getattr(self, 'name', '?')} WS connecting to {ws_url[:60]}... proxy={proxy}"
+                    f"{getattr(self, 'name', '?')} WS connecting to "
+                    f"{url_without_query} ({'via proxy' if proxy else 'direct'})"
                 )
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(
@@ -241,6 +246,11 @@ class WebSocketMixin:
 
             except asyncio.CancelledError:
                 break
+            except aiohttp.ClientResponseError as e:
+                # str(e) includes the request URL, ticket and all.
+                logger.error(
+                    f"{getattr(self, 'name', '?')} WS error: {e.status}, {e.message}"
+                )
             except Exception as e:
                 logger.error(f"{getattr(self, 'name', '?')} WS error: {e}")
 
