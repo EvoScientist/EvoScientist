@@ -39,7 +39,7 @@ class AutoSkillsCommand(Command):
         SubCommand("status", "Show AutoSkills config and proposals for review"),
         SubCommand("help", "Show AutoSkills command examples"),
         SubCommand("list", "List autoskill proposals, optionally filtered by status"),
-        SubCommand("review", "Review one autoskill proposal by id"),
+        SubCommand("review", "List proposals awaiting a decision, or show one by id"),
         SubCommand("approve", "Approve an autoskill proposal by id"),
         SubCommand("reject", "Reject an autoskill proposal by id"),
         SubCommand("run", "Run AutoSkills once now"),
@@ -182,9 +182,12 @@ class AutoSkillsCommand(Command):
         await self._list(ctx, status=status)
 
     async def _review_command(self, ctx: CommandContext, args: list[str]) -> None:
+        if not args:
+            await self._list(ctx, status="pending")
+            return
         if len(args) != 1:
             ctx.ui.append_system(
-                f"Usage: {AUTOSKILLS_COMMAND} review <id>",
+                f"Usage: {AUTOSKILLS_COMMAND} review [<id>]",
                 style="yellow",
             )
             return
@@ -352,6 +355,7 @@ class AutoSkillsCommand(Command):
             )
         else:
             ctx.ui.append_system(f"Approval failed: {result.get('error')}", style="red")
+            self._hint_changed(ctx, proposal.proposal_id, result)
 
     async def _reject(self, ctx: CommandContext, proposal_id: str | None) -> None:
         from ... import paths
@@ -393,6 +397,7 @@ class AutoSkillsCommand(Command):
             )
         else:
             ctx.ui.append_system(f"Reject failed: {result.get('error')}", style="red")
+            self._hint_changed(ctx, proposal.proposal_id, result)
 
     async def _run(self, ctx: CommandContext) -> None:
         from ...config import get_effective_config
@@ -528,6 +533,7 @@ class AutoSkillsCommand(Command):
         rows = [
             (AUTOSKILLS_COMMAND, "Show this command reference"),
             (f"{AUTOSKILLS_COMMAND} status", "Show config and the next useful action"),
+            (f"{AUTOSKILLS_COMMAND} review", "Review proposals waiting for a decision"),
             (
                 f"{AUTOSKILLS_COMMAND} review <id>",
                 "Show one proposal's files for review",
@@ -558,24 +564,30 @@ class AutoSkillsCommand(Command):
             style="dim",
         )
 
+    @staticmethod
+    def _hint_changed(
+        ctx: CommandContext, proposal_id: str, result: dict[str, Any]
+    ) -> None:
+        if str(result.get("error") or "").startswith("Proposal changed since"):
+            ctx.ui.append_system(
+                f"To decide on the draft as it is now, run {AUTOSKILLS_COMMAND} "
+                f"review {proposal_id} first.",
+                style="dim",
+            )
+
     def _remember(
         self,
         ctx: CommandContext,
-        proposal: Any,
+        proposal: SkillProposal,
         *,
         content_digest: str | None = None,
     ) -> None:
-        if content_digest is None:
-            content_digest = getattr(proposal, "content_digest", None)
-        if not isinstance(content_digest, str):
-            key = (self._workspace_dir(ctx), proposal.proposal_id)
-            previous = self._snapshots.get(key)
-            content_digest = (
-                previous.content_digest
-                if previous is not None and previous.updated_at == proposal.updated_at
-                else None
-            )
         key = (self._workspace_dir(ctx), proposal.proposal_id)
+        if content_digest is None:
+            # A listing keeps the digest of a review of the same version.
+            previous = self._snapshots.get(key)
+            if previous is not None and previous.updated_at == proposal.updated_at:
+                content_digest = previous.content_digest
         self._snapshots[key] = _ProposalSnapshot(
             updated_at=proposal.updated_at,
             content_digest=content_digest,
@@ -594,7 +606,6 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
-
         return str(ctx.workspace.root)
 
     @staticmethod

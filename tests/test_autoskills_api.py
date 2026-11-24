@@ -284,6 +284,43 @@ def test_list_only_issues_a_decision_digest_for_complete_previews(
     assert (served.skills_dir / name / relative).read_bytes() == script.encode("utf-8")
 
 
+@pytest.mark.parametrize(
+    ("data", "shown"),
+    [(b"\x89PNG\x00\x01", ""), (b"caf\xe9\n", "caf\ufffd\n")],
+)
+def test_list_issues_no_digest_for_a_file_it_cannot_show_as_it_is(
+    server, served, data, shown
+):
+    _draft(served, "focused-validation")
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    (folder / "assets").mkdir()
+    (folder / "assets" / "logo.bin").write_bytes(data)
+
+    draft = _only_draft(server)
+
+    assert draft["contents"] == {"assets/logo.bin": shown}
+    assert draft["content_digest"] is None
+    assert draft["review_incomplete"] == "unavailable"
+
+
+def test_list_does_not_inline_a_file_whose_nul_byte_is_past_the_preview(
+    server, served, monkeypatch
+):
+    from EvoScientist.langgraph_dev import autoskills_api
+
+    _draft(served, "focused-validation")
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+    (folder / "table.dat").write_bytes(b"x" * 64 + b"\x00")
+    monkeypatch.setattr(autoskills_api, "MAX_INLINE_CHARS", 3)
+
+    draft = _only_draft(server)
+
+    assert draft["contents"] == {"table.dat": ""}
+    assert server.get(
+        "/api/autoskills/proposals/focused-validation/file?path=table.dat"
+    ).json() == {"error": "binary_file"}
+
+
 def test_list_reports_install_error_for_collision(server, served):
     _draft(served, "focused-validation")
     _installed_skill(served.skills_dir, "focused-validation")
@@ -984,7 +1021,7 @@ def test_inline_text_is_cut_at_the_character_limit(
     path = tmp_path / "SKILL.md"
     path.write_bytes(data)
 
-    assert autoskills_api._inline(path, tmp_path.resolve()) == expected
+    assert autoskills_api._read_inline(path, tmp_path.resolve())[:2] == expected
 
 
 def test_file_route_installed_copy(server, served):
@@ -1153,9 +1190,12 @@ def test_approve_route_without_client_digest_refuses_a_draft_rewritten_since_sub
     )
 
     assert response.status_code == 409
-    body = response.json()
-    assert body["error"] == "draft_changed", body
-    assert body["detail"] == "Proposal changed since it was submitted; resubmit it"
+    # Not draft_changed: the version is the client's, so reading it again
+    # would draw the same refusal.
+    assert response.json() == {
+        "error": "approve_failed",
+        "detail": "Proposal changed since it was submitted; resubmit it",
+    }
     assert not (served.skills_dir / "focused-validation").exists()
     assert _only_draft(server)["status"] == "pending"
 
@@ -1210,14 +1250,15 @@ def test_approve_route_refuses_a_draft_changed_since_the_page_read_it(
     assert (installed / "SKILL.md").is_file()
 
 
+@pytest.mark.parametrize("field", ["expected_updated_at", "expected_content_digest"])
 @pytest.mark.parametrize("expected", [5, ["2026-11-06"], {"at": "now"}])
-def test_approve_route_refuses_an_expected_updated_at_that_is_not_text(
-    server, served, secret, expected
+def test_approve_route_refuses_an_expected_value_that_is_not_text(
+    server, served, secret, field, expected
 ):
     _draft(served, "focused-validation")
 
     response = _decide(
-        server, "focused-validation", "approve", secret, expected_updated_at=expected
+        server, "focused-validation", "approve", secret, **{field: expected}
     )
 
     assert response.status_code == 400
@@ -1642,6 +1683,27 @@ def test_revert_route_reports_a_failed_removal(server, served, secret, monkeypat
     assert response.json() == {"error": "revert_failed", "detail": "file in use"}
 
 
+def test_revert_route_answers_a_busy_draft_as_a_failed_revert(
+    server, served, secret, quiet_skill_index, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals
+
+    _draft(served, "focused-validation")
+    _approve(served, "focused-validation")
+    monkeypatch.setattr(proposals, "_DRAFT_LOCK_TIMEOUT", 0.01)
+    folder = autoskill_proposals_dir(paths.MEMORIES_DIR) / "focused-validation"
+
+    with proposals._draft_lock(folder):
+        response = _decide(server, "focused-validation", "revert", secret)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "revert_failed",
+        "detail": "Proposal is busy; timed out waiting for another writer",
+    }
+    assert _only_draft(server)["status"] == "approved"
+
+
 def test_revert_route_says_why_an_undo_is_unavailable(
     server, served, secret, monkeypatch
 ):
@@ -1859,8 +1921,8 @@ def test_concurrent_decisions_decide_one_draft_once(
     """Two approvals of one draft: one installs, the other is told it is decided.
 
     The API takes one decision at a time, so the second call finds the draft
-    already approved. The install itself is serialized by the destination
-    lock, which ``test_autoskills_lock.py`` covers.
+    already approved. The draft's lock, which serializes writers across
+    processes, is covered in ``test_autoskills_lock.py``.
     """
     import threading
 

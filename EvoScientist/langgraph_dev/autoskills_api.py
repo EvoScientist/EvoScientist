@@ -106,10 +106,11 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
 
 def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes | None]:
     """The preview text, truncation flag, and bytes only for a lossless capture."""
-    # A character takes at most four bytes, so one byte more shows a longer text.
-    limit = MAX_INLINE_CHARS * 4 + 1
+    # A character takes at most four bytes, so one byte more shows a longer
+    # text; read as far as the file route does, which calls a NUL byte binary.
+    limit = max(MAX_INLINE_CHARS * 4, MAX_FILE_BYTES) + 1
     data = _read_regular(path, limit) if _resolves_within_root(path, folder) else None
-    if data is None:
+    if data is None or b"\x00" in data:
         return "", False, None
     text = data.decode("utf-8", errors="replace")
     shown = text[:MAX_INLINE_CHARS]
@@ -119,12 +120,6 @@ def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes | None]:
         truncated,
         data if not truncated and shown.encode("utf-8") == data else None,
     )
-
-
-def _inline(path: Path, folder: Path) -> tuple[str, bool]:
-    """The start of a draft's text file, and whether it was cut."""
-    text, truncated, _data = _read_inline(path, folder)
-    return text, truncated
 
 
 def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
@@ -373,10 +368,8 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     error = str(result.get("error") or "")
     if error.startswith("Only pending proposals"):
         return 409, {"error": "not_pending", "status": result.get("status")}
-    if error.startswith("Proposal changed since it was submitted"):
-        # The version is the same as the client's, so there is nothing to
-        # reload: the draft has to be submitted again.
-        return 409, {"error": "draft_changed", "detail": _failure_text(result)}
+    # "Changed since it was submitted" keeps the client's version, so reading
+    # the draft again changes nothing: it is answered as a failed approval.
     if error.startswith(
         ("Proposal changed since it was read", "Proposal changed since it was shown")
     ):
@@ -501,10 +494,8 @@ def decide(
 ) -> tuple[int, dict[str, Any]]:
     """Decide one served draft, refusing a version or content the client did not read.
 
-    A client that sends ``expected_content_digest`` vouches for the content it
-    was shown. The shipped WebUI sends none, so its decision is checked against
-    the digest recorded when the draft was submitted: one rewritten in place
-    since then is refused until it is submitted again.
+    ``expected_content_digest`` is the digest of what the client was shown;
+    without one, the approval compares the digest recorded at submit.
     """
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}

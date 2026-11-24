@@ -13,7 +13,7 @@ import stat
 import tempfile
 import time
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -256,10 +256,8 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
 
     Proposals made by ``--mode=run`` sessions named the run folder; they
     belong to its workspace. Other proposals, and folders that cannot be
-    resolved or are reached through a link, are left as they are. Each
-    manifest is read again under its draft's lock, so a decision that commits
-    during the loop is not overwritten. A draft a writer holds for longer than
-    the lock timeout raises ``FileLockTimeout``; the caller logs it and the
+    resolved or are reached through a link, are left as they are. A draft
+    locked for longer than the timeout raises ``FileLockTimeout``, and the
     next start runs the upgrade again. Part of the one-time upgrade of stored
     values (see ``sessions._upgrade_stored_dirs``). Returns the number
     rewritten.
@@ -330,13 +328,9 @@ def move_proposals(
     """Give every proposal of the project *old_key* (every status, so
     ``/autoskills list`` keeps its history) to the project *new_key*, with
     its memory project id mapped through *project_ids*. Returns the number
-    rewritten; running it again rewrites none.
-
-    Each manifest is read again under its draft's lock, so a decision that
-    commits during the loop is not overwritten. A draft a writer holds for
-    longer than the lock timeout raises ``FileLockTimeout``, which fails the
-    move; the next server start, or running the move again, finishes it.
-    """
+    rewritten; running it again rewrites none. A draft locked for longer
+    than the timeout raises ``FileLockTimeout``, which fails the move; the
+    next server start, or running the move again, finishes it."""
     moved = 0
     for manifest_path, _listed in list(_proposal_manifests(memory_dir, old_key)):
         # The listing only names candidates. Each manifest is read again under
@@ -891,12 +885,13 @@ def copied_files(proposal_dir: Path) -> list[Path]:
     files: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(proposal_dir, onerror=_raise):
         base = Path(dirpath)
-        for name in filenames:
-            source_path = base / name
+        for filename in filenames:
+            source_path = base / filename
             if not _is_regular_file(source_path):
                 continue
             relative = source_path.relative_to(proposal_dir)
-            if relative.as_posix() in {"manifest.json", "RATIONALE.md"}:
+            name = relative.as_posix()
+            if name in {"manifest.json", "RATIONALE.md"} or _is_cache(name):
                 continue
             files.append(relative)
     return sorted(files, key=lambda relative: relative.as_posix())
@@ -923,26 +918,62 @@ def _copied_contents(root: Path) -> dict[str, bytes]:
     return contents
 
 
-def _content_digest(source: Path | Mapping[str, bytes]) -> str:
-    """Hash a draft folder or already-read payload names and bytes."""
-    contents = _copied_contents(source) if isinstance(source, Path) else source
+def _hash_regular(path: Path) -> str | None:
+    """The sha256 of *path* if it is a regular file, read in chunks, else None."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _file_digests(root: Path) -> dict[str, str]:
+    """The sha256 of each file an approval copies from *root*."""
+    resolved_root = root.resolve()
+    digests: dict[str, str] = {}
+    for relative in copied_files(root):
+        digest = _hash_regular(_draft_source(root, resolved_root, relative))
+        if digest is None:
+            raise OSError(f"Cannot read proposal file: {relative.as_posix()}")
+        digests[relative.as_posix()] = digest
+    return digests
+
+
+def _digest_of_files(file_digests: Mapping[str, str]) -> str:
+    """One digest over a draft's file names and their sha256 digests."""
     digest = hashlib.sha256()
-    for name in sorted(contents):
-        data = contents[name]
+    for name in sorted(file_digests):
         encoded_name = name.encode("utf-8")
         digest.update(len(encoded_name).to_bytes(8, "big"))
         digest.update(encoded_name)
-        digest.update(len(data).to_bytes(8, "big"))
-        digest.update(data)
+        digest.update(bytes.fromhex(file_digests[name]))
     return digest.hexdigest()
 
 
-def _backup_destination(memory_dir: str | Path, destination: Path) -> Path:
-    """Copy an existing install before an update can overwrite it.
+def _content_digest(contents: Mapping[str, bytes]) -> str:
+    """The digest of a draft whose files are already read."""
+    return _digest_of_files(
+        {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+    )
+
+
+def _backup_destination(
+    memory_dir: str | Path, destination: Path, names: Iterable[str]
+) -> Path:
+    """Copy the installed files an update is about to overwrite.
 
     The copy lives under the memory folder, not beside the skill: one left
     behind by a crash or a failed restore must not show up among the skills.
     """
+    resolved_destination = destination.resolve()
     backup_parent = Path(
         tempfile.mkdtemp(
             prefix=f".{destination.name}.backup-", dir=_snapshots_root(memory_dir)
@@ -950,7 +981,15 @@ def _backup_destination(memory_dir: str | Path, destination: Path) -> Path:
     )
     backup = backup_parent / destination.name
     try:
-        shutil.copytree(destination, backup, symlinks=True)
+        backup.mkdir()
+        for name in names:
+            source = destination / name
+            # A path that leaves the skill is refused before anything is written.
+            if _resolves_within_root(source, resolved_destination) and _is_regular_file(
+                source
+            ):
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, backup / name)
     except BaseException:
         shutil.rmtree(backup_parent, ignore_errors=True)
         raise
@@ -971,12 +1010,6 @@ def _restore_destination(
     if current is None or original is None:
         raise OSError(f"Could not read the install folder: {destination}")
     for name, path in current.items():
-        if name not in original:
-            # The install added this file and nobody changed it since.
-            if name in installed_digests:
-                with contextlib.suppress(OSError):
-                    path.unlink()
-            continue
         if name not in installed_digests:
             continue
         with path.open("rb") as handle:
@@ -984,14 +1017,14 @@ def _restore_destination(
         if current_digest != installed_digests[name]:
             # The user changed this file after the install wrote it.
             continue
-        _copy_file_atomic(original[name], path)
-    # A folder the install added and the user left alone goes away with it.
-    added = set(installed_digests) - set(original)
-    for name in added:
-        with contextlib.suppress(OSError):
-            (destination / name).unlink()
+        if name in original:
+            _copy_file_atomic(original[name], path)
+        else:
+            # The install added this file.
+            with contextlib.suppress(OSError):
+                path.unlink()
     # The folders the install created for those files go with them.
-    for name in added:
+    for name in set(installed_digests) - set(original):
         parent = (destination / name).parent
         while parent != destination and parent.is_dir():
             if any(parent.iterdir()):
@@ -1337,7 +1370,7 @@ def _submit_autoskill_proposal_locked(
         "updated_at": _version_stamp(existing.get("updated_at") if existing else None),
         "cluster_hash": cluster_text,
         "source_observation_ids": list(source_ids),
-        "content_digest": _content_digest(proposal_dir),
+        "content_digest": _digest_of_files(_file_digests(proposal_dir)),
     }
     if normalized_operation == "update":
         manifest["target_skill_name"] = skill_name
@@ -1756,11 +1789,8 @@ def _snapshot_proposal(
     )
     try:
         _copy_draft_snapshot(proposal_dir, snapshot)
-        contents = _copied_contents(snapshot)
-        approved_digests = {
-            name: hashlib.sha256(data).hexdigest() for name, data in contents.items()
-        }
-        return snapshot, _content_digest(contents), approved_digests
+        approved_digests = _file_digests(snapshot)
+        return snapshot, _digest_of_files(approved_digests), approved_digests
     except Exception:
         _remove_created(snapshot)
         raise
@@ -1900,8 +1930,6 @@ def approve_skill_proposal(
                     "proposal_id": manifest.get("proposal_id"),
                     "error": "Automatic approval requires a valid submission digest. Resubmit the proposal.",
                 }
-            # A draft submitted before the digest was recorded has nothing to
-            # compare against.
             compared: str | None = None
             changed = ""
             if approved_by == "auto" or expected_content_digest is None:
@@ -1927,6 +1955,7 @@ def approve_skill_proposal(
                 return {
                     "approved": False,
                     "proposal_id": manifest.get("proposal_id"),
+                    "updated_at": manifest.get("updated_at"),
                     "content_digest": snapshot_digest,
                     "error": changed,
                 }
@@ -1995,7 +2024,9 @@ def approve_skill_proposal(
                     destination, must_create=target.base_path != destination
                 )
                 if not created:
-                    destination_backup = _backup_destination(memory_dir, destination)
+                    destination_backup = _backup_destination(
+                        memory_dir, destination, approved_digests
+                    )
             except (OSError, ValueError, RecursionError) as exc:
                 return install_failed(
                     f"Could not install the skill: {exc}",
@@ -2051,7 +2082,7 @@ def approve_skill_proposal(
                 )
                 return install_failed(
                     f"Skill install path escapes its destination: {blocked_path}",
-                    changed=not created,
+                    changed=False,
                     leftover=leftover,
                 )
             if destination_backup is not None:
@@ -2111,8 +2142,9 @@ def _regular_files(root: Path) -> dict[str, Path] | None:
     return files
 
 
-# Files a skill gains by being used or browsed (Finder's ``._<name>`` too), which
-# Undo removes with it; compared without case, as Windows and macOS names are.
+# Files a folder gains by being used or browsed (Finder's ``._<name>`` too): an
+# approval leaves them out of the copy and Undo removes them with the skill;
+# compared without case, as Windows and macOS names are.
 _CACHE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
 
@@ -2227,7 +2259,8 @@ def revert_skill_proposal(
         return {
             "reverted": False,
             "proposal_id": proposal_id,
-            "error": "Proposal is busy; timed out waiting for another writer",
+            "error": "revert_failed",
+            "detail": "Proposal is busy; timed out waiting for another writer",
         }
     except OSError as exc:
         return {

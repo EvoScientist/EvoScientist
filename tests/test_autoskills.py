@@ -337,7 +337,11 @@ def _resubmit_focused_validation(memory_dir, skills_dir):
 
 
 def test_content_digest_uses_the_exact_file_bytes(tmp_path):
-    from EvoScientist.memory.autoskills.proposals import _content_digest
+    from EvoScientist.memory.autoskills.proposals import (
+        _content_digest,
+        _digest_of_files,
+        _file_digests,
+    )
 
     folder = autoskill_proposals_dir(tmp_path) / "focused-validation"
     folder.mkdir(parents=True)
@@ -347,10 +351,10 @@ def test_content_digest_uses_the_exact_file_bytes(tmp_path):
     expected = hashlib.sha256()
     expected.update(len(name).to_bytes(8, "big"))
     expected.update(name)
-    expected.update(len(raw).to_bytes(8, "big"))
-    expected.update(raw)
+    expected.update(hashlib.sha256(raw).digest())
 
-    assert _content_digest(folder) == expected.hexdigest()
+    assert _digest_of_files(_file_digests(folder)) == expected.hexdigest()
+    assert _content_digest({"SKILL.md": raw}) == expected.hexdigest()
 
 
 def test_approval_refuses_content_changed_since_the_client_digest(tmp_path):
@@ -441,7 +445,10 @@ def test_a_draft_submitted_before_the_digest_was_recorded_is_approved(tmp_path):
 
 
 def test_the_digest_of_what_the_client_was_shown_is_the_comparison_point(tmp_path):
-    from EvoScientist.memory.autoskills.proposals import _content_digest
+    from EvoScientist.memory.autoskills.proposals import (
+        _digest_of_files,
+        _file_digests,
+    )
 
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     _submit_focused_validation(memory_dir, skills_dir)
@@ -451,7 +458,7 @@ def test_the_digest_of_what_the_client_was_shown_is_the_comparison_point(tmp_pat
         encoding="utf-8",
     )
     # The client renders the draft as it is now, and vouches for that text.
-    shown = _content_digest(folder)
+    shown = _digest_of_files(_file_digests(folder))
 
     with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
         result = approve_skill_proposal(
@@ -464,40 +471,6 @@ def test_the_digest_of_what_the_client_was_shown_is_the_comparison_point(tmp_pat
     assert result["approved"] is True, result
     installed = skills_dir / "focused-validation" / "SKILL.md"
     assert "Edited after submit." in installed.read_text(encoding="utf-8")
-
-
-def test_the_snapshot_is_copied_without_the_install_copy(tmp_path, monkeypatch):
-    """The snapshot copy is its own step, not the install copy.
-
-    The install copy reads the verified snapshot. If the snapshot were made
-    with the same call, a caller that intercepts the install copy would also
-    intercept the snapshot, and the approval would refuse before it ever
-    installed.
-    """
-    from EvoScientist.memory.autoskills import proposals as module
-
-    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
-    _submit_focused_validation(memory_dir, skills_dir)
-    real_copy = module._copy_proposed_skill
-    copied = []
-
-    def record(source, destination):
-        copied.append((Path(source), Path(destination)))
-        return real_copy(source, destination)
-
-    monkeypatch.setattr(module, "_copy_proposed_skill", record)
-    monkeypatch.setattr(module, "_notify_approved_skill", lambda: None)
-
-    result = approve_skill_proposal(
-        memory_dir, "focused-validation", skills_dir=skills_dir
-    )
-
-    assert result["approved"] is True, result
-    assert len(copied) == 1, copied
-    source, destination = copied[0]
-    snapshot_root = Path(memory_dir).resolve() / module.AUTOSKILL_SNAPSHOTS_DIR
-    assert source.resolve().is_relative_to(snapshot_root), source
-    assert destination == skills_dir / "focused-validation", destination
 
 
 def test_approval_installs_the_snapshot_it_hashed(tmp_path, monkeypatch):
@@ -875,6 +848,174 @@ def test_update_refusal_keeps_an_edit_the_user_made_during_the_approval(
 
     assert result["approved"] is False
     assert "Edited by the user." in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_update_refusal_keeps_a_new_file_the_user_edited_during_the_approval(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "added-update", "Installed version", "Original installed body."
+    )
+    _submit_update(memory_dir, skills_dir, "added-update")
+    draft = autoskill_proposals_dir(memory_dir) / "added-update"
+    (draft / "notes.txt").write_text("from the draft\n", encoding="utf-8")
+    _submit_update(memory_dir, skills_dir, "added-update")
+    real_copy = module._copy_proposed_skill
+
+    def copy_then_user_edits(snapshot, destination):
+        outcome = real_copy(snapshot, destination)
+        (installed / "notes.txt").write_text("the user's notes\n", encoding="utf-8")
+        return outcome
+
+    monkeypatch.setattr(module, "_copy_proposed_skill", copy_then_user_edits)
+    _fail_the_commit(monkeypatch)
+    result = approve_skill_proposal(
+        memory_dir, "added-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert (installed / "notes.txt").read_text(encoding="utf-8") == (
+        "the user's notes\n"
+    )
+    assert "Original installed body." in (installed / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_an_update_backs_up_only_the_files_it_overwrites(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "backup-update", "Installed version", "Original installed body."
+    )
+    (installed / "data").mkdir()
+    (installed / "data" / "table.bin").write_bytes(b"not in the draft")
+    _submit_update(memory_dir, skills_dir, "backup-update")
+    real_restore = module._restore_destination
+    backed_up = []
+
+    def restore(destination, backup, installed_digests):
+        backed_up.extend(
+            path.relative_to(backup).as_posix()
+            for path in sorted(backup.rglob("*"))
+            if path.is_file()
+        )
+        return real_restore(destination, backup, installed_digests)
+
+    monkeypatch.setattr(module, "_restore_destination", restore)
+    _fail_the_commit(monkeypatch)
+    result = approve_skill_proposal(
+        memory_dir, "backup-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert backed_up == ["SKILL.md"]
+    assert "Original installed body." in (installed / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert (installed / "data" / "table.bin").read_bytes() == b"not in the draft"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges")
+def test_a_blocked_update_reports_no_change_and_keeps_no_backup(tmp_path, monkeypatch):
+    from EvoScientist.memory.autoskills import proposals as module
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    installed = _write_installed_skill(
+        skills_dir, "blocked-update", "Installed version", "Original installed body."
+    )
+    shared = tmp_path / "shared-refs"
+    shared.mkdir()
+    (shared / "guide.md").write_text("outside the skill\n", encoding="utf-8")
+    (installed / "refs").symlink_to(shared, target_is_directory=True)
+    _submit_update(memory_dir, skills_dir, "blocked-update")
+    draft = autoskill_proposals_dir(memory_dir) / "blocked-update"
+    (draft / "refs").mkdir()
+    (draft / "refs" / "guide.md").write_text("from the draft\n", encoding="utf-8")
+    _submit_update(memory_dir, skills_dir, "blocked-update")
+    real_backup = module._backup_destination
+    backed_up = []
+
+    def backup(*args):
+        folder = real_backup(*args)
+        backed_up.extend(
+            path.relative_to(folder).as_posix()
+            for path in sorted(folder.rglob("*"))
+            if path.is_file()
+        )
+        return folder
+
+    monkeypatch.setattr(module, "_backup_destination", backup)
+    result = approve_skill_proposal(
+        memory_dir, "blocked-update", skills_dir=skills_dir, exact=True
+    )
+
+    assert result["approved"] is False
+    assert result["error"] == (
+        f"Skill install path escapes its destination: {installed / 'refs' / 'guide.md'}"
+    )
+    # The file behind the link is neither written nor copied into the backup.
+    assert (shared / "guide.md").read_text(encoding="utf-8") == "outside the skill\n"
+    assert backed_up == ["SKILL.md"]
+    assert _snapshots_left(memory_dir) == []
+
+
+def _snapshots_left(memory_dir):
+    from EvoScientist.memory.autoskills.proposals import AUTOSKILL_SNAPSHOTS_DIR
+
+    root = Path(memory_dir) / AUTOSKILL_SNAPSHOTS_DIR
+    return sorted(path.name for path in root.iterdir()) if root.exists() else []
+
+
+@pytest.mark.parametrize("outcome", ["created", "updated", "digest", "commit"])
+def test_an_approval_leaves_no_snapshot_or_backup_behind(
+    tmp_path, monkeypatch, outcome
+):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    name = "snapshot-cleanup"
+    if outcome == "created":
+        _submit_create(memory_dir, skills_dir, name)
+    else:
+        _write_installed_skill(skills_dir, name, "Installed version", "Old body.")
+        _submit_update(memory_dir, skills_dir, name)
+    if outcome == "digest":
+        draft = autoskill_proposals_dir(memory_dir) / name / "SKILL.md"
+        draft.write_text(
+            draft.read_text(encoding="utf-8") + "Edited after submit.\n",
+            encoding="utf-8",
+        )
+    if outcome == "commit":
+        _fail_the_commit(monkeypatch)
+
+    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
+        result = approve_skill_proposal(
+            memory_dir, name, skills_dir=skills_dir, exact=True
+        )
+
+    assert result["approved"] is (outcome in ("created", "updated")), result
+    assert _snapshots_left(memory_dir) == []
+
+
+@pytest.mark.parametrize(
+    "cache", [".DS_Store", "scripts/__pycache__/check.cpython-311.pyc"]
+)
+def test_a_cache_file_in_the_draft_is_neither_compared_nor_installed(tmp_path, cache):
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    _submit_focused_validation(memory_dir, skills_dir)
+    draft = autoskill_proposals_dir(memory_dir) / "focused-validation"
+    (draft / cache).parent.mkdir(parents=True, exist_ok=True)
+    (draft / cache).write_bytes(b"\x00left by a file browser or an interpreter")
+
+    result = _approve_quietly(memory_dir, "focused-validation", skills_dir)
+
+    assert result["approved"] is True, result
+    installed = skills_dir / "focused-validation"
+    assert (installed / "SKILL.md").is_file()
+    assert not (installed / cache).exists()
 
 
 def test_find_skill_proposal_matches_exact_id_only(tmp_path):
@@ -1740,34 +1881,6 @@ def test_revert_compares_installed_files_in_bounded_reads(tmp_path, monkeypatch)
     assert (draft / "SKILL.md").read_text(encoding="utf-8") == (
         "the live draft changed\n"
     )
-
-
-@pytest.mark.parametrize("changed", [False, True])
-def test_revert_compares_every_chunk(tmp_path, monkeypatch, changed):
-    from EvoScientist.memory.autoskills import proposals as module
-
-    memory_dir, _skills_dir, installed = _approved_create_with_script(tmp_path)
-    real_file_digest = module.hashlib.file_digest
-    monkeypatch.setattr(
-        module.hashlib,
-        "file_digest",
-        lambda handle, digest: real_file_digest(handle, digest, _bufsize=4),
-    )
-    if changed:
-        # Same size and the same first chunk; the edit sits in the third chunk.
-        (installed / "scripts" / "check.py").write_text(
-            "print('chock')\n", encoding="utf-8"
-        )
-
-    with patch("EvoScientist.memory.autoskills.proposals._notify_approved_skill"):
-        result = revert_skill_proposal(memory_dir, "focused-validation")
-
-    if changed:
-        assert result["error"] == "skill_changed", result
-        assert (installed / "scripts" / "check.py").is_file()
-    else:
-        assert result["reverted"] is True, result
-        assert not installed.exists()
 
 
 @pytest.mark.skipif(
@@ -2726,7 +2839,9 @@ def test_a_failed_fork_leaves_no_partial_fork(tmp_path, monkeypatch):
     assert (skills_dir / "paper-review" / "SKILL.md").is_file()
 
 
-def test_a_failed_update_in_place_keeps_the_skill_and_says_so(tmp_path, monkeypatch):
+def test_a_failed_first_copy_of_an_update_leaves_the_skill_untouched(
+    tmp_path, monkeypatch
+):
     from EvoScientist.memory.autoskills import proposals as module
 
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
@@ -4577,6 +4692,70 @@ def test_autoskills_review_renders_only_the_named_draft(tmp_path, monkeypatch):
         asyncio.run(command.execute(ctx, ["approve", "chosen-draft"]))
     assert (skills_dir / "chosen-draft" / "SKILL.md").is_file()
     assert not (skills_dir / "other-draft").exists()
+
+
+def test_autoskills_review_without_an_id_lists_the_pending_drafts(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
+    _submit_create(memory_dir, skills_dir, "pending-draft")
+    _submit_create(memory_dir, skills_dir, "decided-draft")
+    _approve_quietly(memory_dir, "decided-draft", skills_dir)
+    ctx, _messages, rendered = _command_context(tmp_path, skills_dir)
+
+    asyncio.run(AutoSkillsCommand().execute(ctx, ["review"]))
+
+    output = _command_output(rendered)
+    assert "pending-draft" in output
+    assert "decided-draft" not in output
+    assert "Steps." not in output
+
+
+def test_autoskills_approve_refuses_a_draft_edited_since_its_review(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
+    _submit_create(memory_dir, skills_dir, "edited-draft")
+    ctx, messages, _rendered = _command_context(tmp_path, skills_dir)
+    command = AutoSkillsCommand()
+    asyncio.run(command.execute(ctx, ["review", "edited-draft"]))
+    skill = autoskill_proposals_dir(memory_dir) / "edited-draft" / "SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8") + "Edited after the review.\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(command.execute(ctx, ["approve", "edited-draft"]))
+
+    assert not (skills_dir / "edited-draft").exists()
+    assert "Approval failed: Proposal changed since it was shown" in messages
+    assert any("/autoskills review edited-draft" in m for m in messages)
+
+
+def test_autoskills_reject_refuses_a_draft_resubmitted_since_the_list(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.commands.implementation.autoskills import AutoSkillsCommand
+
+    memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memory_dir)
+    _submit_create(memory_dir, skills_dir, "resubmitted-draft")
+    ctx, messages, _rendered = _command_context(tmp_path, skills_dir)
+    command = AutoSkillsCommand()
+    asyncio.run(command.execute(ctx, ["list"]))
+    _submit_create(memory_dir, skills_dir, "resubmitted-draft")
+
+    asyncio.run(command.execute(ctx, ["reject", "resubmitted-draft"]))
+
+    assert _manifest(memory_dir, "resubmitted-draft")["status"] == "pending"
+    assert "Reject failed: Proposal changed since it was read" in messages
+    assert any("/autoskills review resubmitted-draft" in m for m in messages)
 
 
 def test_autoskills_review_prefers_a_decided_exact_id_to_a_pending_prefix(

@@ -128,7 +128,9 @@ def test_draft_writers_same_draft_do_not_interleave(
         second_thread.start()
         second_started = True
         assert second_attempted.wait(10)
-        assert not second_done.is_set()
+        # Still waiting on the lock while the first writer holds it.
+        second_thread.join(0.3)
+        assert second_thread.is_alive()
     finally:
         release.set()
         first_thread.join(15)
@@ -259,7 +261,8 @@ def test_draft_lock_timeout_is_a_refusal_for_every_writer(
     assert finished, "the contending writer hung instead of refusing"
     assert not writer.is_alive()
     assert results[action][flag] is False
-    assert "timed out waiting for another writer" in results[action]["error"]
+    reason = results[action].get("detail") or results[action]["error"]
+    assert "timed out waiting for another writer" in reason
     assert _manifest(memory_dir, name)["status"] == "pending"
 
 
@@ -360,12 +363,7 @@ def test_approval_refuses_a_workspace_move_between_lookup_and_lock(
 
 
 def test_a_resubmit_waits_for_an_approval_that_is_installing(tmp_path, monkeypatch):
-    """The draft's lock is held until the approval has committed.
-
-    A resubmit that arrives while the skill is being installed used to land
-    before the approval's manifest write, which then overwrote it. It now
-    waits, and starts from the approval the first writer committed.
-    """
+    """A resubmit waits until the approval has committed, then starts from it."""
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     name = "focused-validation"
     installed = skills_dir / name
@@ -491,11 +489,7 @@ def test_the_skill_index_is_told_once_the_draft_lock_is_released(tmp_path, monke
 def test_the_skill_index_is_told_once_the_revert_lock_is_released(
     tmp_path, monkeypatch
 ):
-    """A callback that reads the draft must not wait on the revert's own lock.
-
-    The skill index is told after an Undo as well, and it was told under the
-    draft's lock until the approval and the revert were made to agree.
-    """
+    """A callback that reads the draft must not wait on the revert's own lock."""
     memory_dir, skills_dir = tmp_path / "memories", tmp_path / "skills"
     name = "focused-validation"
     folder = _write_draft(memory_dir, name)
