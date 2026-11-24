@@ -389,6 +389,7 @@ def test_configure_logging_caps_credential_url_loggers(monkeypatch):
             "httpx": logging.INFO,
             "telegram": logging.DEBUG,
             "websockets": logging.DEBUG,
+            "slack_sdk": logging.DEBUG,
         }
         for name, level in url_log_levels.items():
             assert not logging.getLogger(name).isEnabledFor(level)

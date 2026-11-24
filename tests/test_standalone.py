@@ -808,6 +808,8 @@ def test_run_standalone_quiets_httpx(monkeypatch):
         "httpx": logging.INFO,
         "httpcore": logging.INFO,
         "telegram": logging.DEBUG,
+        "websockets": logging.DEBUG,
+        "slack_sdk": logging.DEBUG,
     }
     for name in leaking_level:
         logging.getLogger(name).setLevel(logging.DEBUG)
