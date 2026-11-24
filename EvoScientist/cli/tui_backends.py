@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..gateway import GraphGateway
-from ..stream.display import _run_streaming
+from ..stream.display import ReceivedFiles, _run_streaming
 
 if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
@@ -32,7 +32,7 @@ class StreamingTUIBackend(Protocol):
         on_file_write: Callable[[str], None] | None = None,
         work_dir: str | Path | None = None,
         media_dir: str | Path | None = None,
-        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+        received_files: ReceivedFiles | None = None,
         routes: dict[str, Any] | None = None,
         dangerous: bool = False,
         on_stream_event: Callable[[str, Any], Any] | None = None,
@@ -71,7 +71,7 @@ class RichStreamingBackend:
         on_file_write: Callable[[str], None] | None = None,
         work_dir: str | Path | None = None,
         media_dir: str | Path | None = None,
-        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+        received_files: ReceivedFiles | None = None,
         routes: dict[str, Any] | None = None,
         dangerous: bool = False,
         on_stream_event: Callable[[str, Any], Any] | None = None,

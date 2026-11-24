@@ -13,6 +13,7 @@ from .tui_backends import RichStreamingBackend, StreamingTUIBackend
 
 if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
+    from ..stream.display import ReceivedFiles
 
 DEFAULT_UI_BACKEND = "cli"
 # An unknown name lands where an unknown config.yaml value does (the field default).
@@ -116,7 +117,7 @@ def run_streaming(
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
     media_dir: str | Path | None = None,
-    received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,

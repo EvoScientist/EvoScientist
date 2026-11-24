@@ -12,11 +12,11 @@ import logging
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -156,14 +156,27 @@ def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | N
     return (status.st_dev, status.st_ino), (status.st_size, status.st_mtime_ns)
 
 
+ReceivedFiles: TypeAlias = dict[tuple[int, int], tuple[int, int]]
+"""A turn's received files: file id ``(device, inode)`` -> ``(size, mtime_ns)``."""
+
+
 def received_media_state(
     received_media: Iterable[str] | None,
-) -> dict[tuple[int, int], tuple[int, int]]:
+) -> ReceivedFiles:
     """The received files as they are when recorded for the current turn.
 
     Keyed by the file itself, so a read matches however the agent spells it.
     """
     return dict(filter(None, map(_file_state, received_media or ())))
+
+
+def record_received_media(
+    received_files: ReceivedFiles | None,
+    media: Iterable[str] | None,
+) -> None:
+    """Add files the user sent mid-turn to the turn's received files."""
+    if received_files is not None:
+        received_files.update(received_media_state(media))
 
 
 def forward_media_result(
@@ -176,7 +189,7 @@ def forward_media_result(
     media_dir: str | Path | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
-    received_files: Mapping[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
 
@@ -1878,7 +1891,7 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
-    received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,

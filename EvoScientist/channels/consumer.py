@@ -36,6 +36,7 @@ from .interaction import (
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
+    from ..stream.display import ReceivedFiles
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ class _ConsumerIO(InteractionIO):
         msg: InboundMessage,
         session_key: str,
         *,
-        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+        received_files: ReceivedFiles | None = None,
     ) -> None:
         self._consumer = consumer
         self._msg = msg
@@ -209,12 +210,10 @@ class _ConsumerIO(InteractionIO):
         self._last_reply_message = (
             reply.context if isinstance(reply.context, InboundMessage) else None
         )
-        if self._last_reply_message is not None and self._received_files is not None:
-            from ..stream.display import received_media_state
+        if self._last_reply_message is not None:
+            from ..stream.display import record_received_media
 
-            self._received_files.update(
-                received_media_state(self._last_reply_message.media)
-            )
+            record_received_media(self._received_files, self._last_reply_message.media)
         return reply.content
 
     def take_reply_context(self) -> InboundMessage | None:
@@ -891,7 +890,7 @@ class InboundConsumer:
         event_data: dict,
         session_key: str,
         *,
-        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+        received_files: ReceivedFiles | None = None,
     ) -> dict:
         """Handle an ask_user interrupt via the shared engine.
 

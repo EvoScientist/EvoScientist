@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from ..gateway import GraphGateway
     from ..paths import SessionDirs
     from ..runtime import AsyncRuntime
+    from ..stream.display import ReceivedFiles
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -541,7 +542,7 @@ class _BridgeIO(InteractionIO):
         capabilities: ChannelCapabilities,
         session_key: str,
         *,
-        received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+        received_files: ReceivedFiles | None = None,
     ) -> None:
         self._bus = bus
         self._msg = msg
@@ -574,15 +575,13 @@ class _BridgeIO(InteractionIO):
 
     async def wait_reply(self, *, timeout: float) -> str | None:
         from ..channels.bus.events import InboundMessage
-        from ..stream.display import received_media_state
+        from ..stream.display import record_received_media
 
         reply = await _reply_registry.wait_event(self._session_key, timeout)
         if reply is None:
             return None
-        if self._received_files is not None and isinstance(
-            reply.context, InboundMessage
-        ):
-            self._received_files.update(received_media_state(reply.context.media))
+        if isinstance(reply.context, InboundMessage):
+            record_received_media(self._received_files, reply.context.media)
         return reply.content
 
 
@@ -800,7 +799,7 @@ def channel_ask_user_prompt(
     ask_user_data: dict,
     msg: ChannelMessage | None = None,
     *,
-    received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
 ) -> dict:
     """Collect answers to ask_user questions from a channel user.
 

@@ -101,6 +101,7 @@ if TYPE_CHECKING:
 
     from ..backends import ParkedCloseReason
     from ..runtime import AsyncRuntime
+    from ..stream.display import ReceivedFiles
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -1757,7 +1758,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
-            received_files: dict[tuple[int, int], tuple[int, int]] | None = None,
+            received_files: ReceivedFiles | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
