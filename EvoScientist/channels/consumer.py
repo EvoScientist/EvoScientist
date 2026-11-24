@@ -36,6 +36,7 @@ from .interaction import (
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
+    from ..stream.display import ReceivedFiles
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +171,18 @@ class _ConsumerIO(InteractionIO):
     """
 
     def __init__(
-        self, consumer: InboundConsumer, msg: InboundMessage, session_key: str
+        self,
+        consumer: InboundConsumer,
+        msg: InboundMessage,
+        session_key: str,
+        *,
+        received_files: ReceivedFiles | None = None,
     ) -> None:
         self._consumer = consumer
         self._msg = msg
         self._session_key = session_key
         self._last_reply_message: InboundMessage | None = None
+        self._received_files = received_files
         channel = consumer._get_channel(msg.channel)
         self.capabilities = (
             channel.capabilities if channel is not None else ChannelCapabilities()
@@ -203,6 +210,10 @@ class _ConsumerIO(InteractionIO):
         self._last_reply_message = (
             reply.context if isinstance(reply.context, InboundMessage) else None
         )
+        if self._last_reply_message is not None:
+            from ..stream.display import record_received_media
+
+            record_received_media(self._received_files, self._last_reply_message.media)
         return reply.content
 
     def take_reply_context(self) -> InboundMessage | None:
@@ -730,6 +741,7 @@ class InboundConsumer:
                         msg,
                         interrupt_data,
                         session_key,
+                        received_files=received_files,
                     )
 
                     from ..backends import build_ask_user_resume
@@ -877,6 +889,8 @@ class InboundConsumer:
         msg: InboundMessage,
         event_data: dict,
         session_key: str,
+        *,
+        received_files: ReceivedFiles | None = None,
     ) -> dict:
         """Handle an ask_user interrupt via the shared engine.
 
@@ -891,7 +905,7 @@ class InboundConsumer:
         ``{"status": "cancelled"}``.
         """
         questions = event_data.get("questions", [])
-        io = _ConsumerIO(self, msg, session_key)
+        io = _ConsumerIO(self, msg, session_key, received_files=received_files)
         return await resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT)
 
     # ── internal ──

@@ -505,7 +505,7 @@ class PendingReplyRegistry:
     """Route "the next message from this chat" into a waiting coroutine.
 
     One instance per process (the consumer owns one on its loop; the CLI
-    bridge owns one on the bus loop).  ``register`` / ``wait`` are used by
+    bridge owns one on the bus loop).  ``wait_event`` is used by
     an :class:`InteractionIO` adapter to block for a reply; the inbound
     interception point calls ``try_resolve`` to hand a message to that
     waiter instead of enqueuing it as a fresh turn.
@@ -545,14 +545,6 @@ class PendingReplyRegistry:
     def discard(self, session_key: str) -> None:
         """Drop any pending waiter for *session_key* (idempotent)."""
         self._pending.pop(session_key, None)
-
-    async def wait(self, session_key: str, timeout: float) -> str | None:
-        """Register, await a reply for *timeout* seconds, then clean up.
-
-        Returns the reply text, or ``None`` on timeout / cancellation.
-        """
-        reply = await self.wait_event(session_key, timeout)
-        return reply.content if reply is not None else None
 
     async def wait_event(self, session_key: str, timeout: float) -> PendingReply | None:
         """Register, await a reply event, then clean up.

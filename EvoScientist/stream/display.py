@@ -12,11 +12,11 @@ import logging
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -156,14 +156,27 @@ def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | N
     return (status.st_dev, status.st_ino), (status.st_size, status.st_mtime_ns)
 
 
+ReceivedFiles: TypeAlias = dict[tuple[int, int], tuple[int, int]]
+"""A turn's received files: file id ``(device, inode)`` -> ``(size, mtime_ns)``."""
+
+
 def received_media_state(
     received_media: Iterable[str] | None,
-) -> dict[tuple[int, int], tuple[int, int]]:
-    """The files that arrived with a message, as they are when its turn starts.
+) -> ReceivedFiles:
+    """The received files as they are when recorded for the current turn.
 
     Keyed by the file itself, so a read matches however the agent spells it.
     """
     return dict(filter(None, map(_file_state, received_media or ())))
+
+
+def record_received_media(
+    received_files: ReceivedFiles | None,
+    media: Iterable[str] | None,
+) -> None:
+    """Add files the user sent mid-turn to the turn's received files."""
+    if received_files is not None:
+        received_files.update(received_media_state(media))
 
 
 def forward_media_result(
@@ -176,7 +189,7 @@ def forward_media_result(
     media_dir: str | Path | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
-    received_files: Mapping[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
 
@@ -189,7 +202,7 @@ def forward_media_result(
     dangerous mode when *dangerous* is set.
 
     A file in *received_files* (:func:`received_media_state`) came from the
-    user with this turn's message; a read of it is not sent back while it is
+    user during this turn; a read of it is not sent back while it is
     still as it arrived.
     """
     if (
@@ -1878,7 +1891,7 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
-    received_media: list[str] | None = None,
+    received_files: ReceivedFiles | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
@@ -1917,8 +1930,9 @@ def _run_streaming(
             calls name real files anywhere.
         routes: The agent's file tool routes (``file_tool_routes``), so a
             path under ``/skills/`` or ``/memories/`` names that tier's file.
-        received_media: Files attached to this turn, which are not echoed
-            when a read_file result names an unchanged attachment.
+        received_files: The files that came from the user during this turn
+            (:func:`received_media_state`); a read of one is not sent back
+            while it is unchanged.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1952,7 +1966,7 @@ def _run_streaming(
                 cancel_scope=cancel_scope,
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
-                received_media=received_media,
+                received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
@@ -1971,7 +1985,6 @@ def _run_streaming(
     state = _state if _state is not None else StreamState()
     if _media_sent is None:
         _media_sent = set()
-    received_files = received_media_state(received_media)
     _MIN_THINKING_LEN = 200
 
     def _stopped_response() -> str:
