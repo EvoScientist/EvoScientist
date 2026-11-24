@@ -3292,6 +3292,8 @@ def replay_cap(monkeypatch):
     monkeypatch.setattr(server_mod, "_REPLAY_QUIET_SECONDS", 0.2)
     monkeypatch.setattr(server_mod, "_REPLAY_MAX_SECONDS", 0.6)
     monkeypatch.setattr(server_mod, "_CAPPED_READ_BACK_SECONDS", 0.3)
+    # The replay always starts: a slow first envelope must not end the skip.
+    monkeypatch.setattr(server_mod, "_REPLAY_FIRST_EVENT_SECONDS", 0.6)
 
 
 @pytest.mark.parametrize("busy", [True, False], ids=["busy", "idle"])

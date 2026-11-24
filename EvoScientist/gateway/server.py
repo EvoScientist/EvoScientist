@@ -59,7 +59,7 @@ _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
 # A read-back of a finished run ends when no envelope arrives for this long.
 _READ_BACK_FIRST_EVENT_SECONDS = 5.0
-# The read-back's budget for a run started past the replay cap: the
+# The read-back's budget for a run started past the replay cap: its
 # first-event window plus a margin.
 _CAPPED_READ_BACK_SECONDS = 10.0
 # A turn asks for its run's status once it has had none of the run's envelopes
