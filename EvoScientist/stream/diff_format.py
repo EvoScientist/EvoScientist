@@ -233,8 +233,8 @@ def build_edit_diff(
     if not diff_lines:
         return None
 
-    diff_text = "\n".join(diff_lines)
-    return format_diff_rich(diff_text, max_lines=max_lines, title=file_path)
+    unified_diff = "\n".join(diff_lines)
+    return format_diff_rich(unified_diff, max_lines=max_lines, title=file_path)
 
 
 def diff_text(markup: str) -> Text:
