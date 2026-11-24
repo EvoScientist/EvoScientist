@@ -384,9 +384,12 @@ def test_configure_logging_caps_credential_url_loggers(monkeypatch):
             lambda *_a: SimpleNamespace(log_level="DEBUG"),
         )
         _configure_logging()
-        # The level each library logs its request URL at: httpx at INFO,
-        # python-telegram-bot at DEBUG.
-        url_log_levels = {"httpx": logging.INFO, "telegram": logging.DEBUG}
+        # The level each library logs its request URL at.
+        url_log_levels = {
+            "httpx": logging.INFO,
+            "telegram": logging.DEBUG,
+            "websockets": logging.DEBUG,
+        }
         for name, level in url_log_levels.items():
             assert not logging.getLogger(name).isEnabledFor(level)
     finally:
