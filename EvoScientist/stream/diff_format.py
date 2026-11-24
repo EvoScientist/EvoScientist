@@ -2,7 +2,7 @@
 
 Constructs unified diffs from old_string/new_string tool args and renders
 them with Rich markup (color-coded lines, line numbers, gutter bars).
-Works in both Rich CLI and Textual TUI (the TUI parses it with Rich's Text.from_markup).
+Works in both Rich CLI and Textual TUI; both render it through diff_text().
 
 Ported from upstream deepagents-cli widgets/diff.py + config.py.
 """
@@ -15,6 +15,7 @@ import re
 import sys
 
 from rich.markup import RE_TAGS, escape
+from rich.text import Text
 
 # ---------------------------------------------------------------------------
 # Charset detection (simplified from upstream config.py)
@@ -234,3 +235,8 @@ def build_edit_diff(
 
     diff_text = "\n".join(diff_lines)
     return format_diff_rich(diff_text, max_lines=max_lines, title=file_path)
+
+
+def diff_text(markup: str) -> Text:
+    """Parse diff markup into Rich Text without emoji shortcode substitution."""
+    return Text.from_markup(markup, emoji=False)

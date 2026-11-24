@@ -255,6 +255,52 @@ class TestToolCallWidget(unittest.TestCase):
 
         assert "Updating memory" in header.updated.plain
 
+    def _edit_widget(self, old: str, new: str):
+        from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+        class _Output:
+            def __init__(self) -> None:
+                self.updated = None
+
+            def update(self, value) -> None:
+                self.updated = value
+
+            def add_class(self, name: str) -> None:
+                pass
+
+        w = ToolCallWidget(
+            "edit_file", {"path": "/t.py", "old_string": old, "new_string": new}
+        )
+        output = _Output()
+        w.query_one = lambda selector, cls=None: output  # type: ignore[assignment]
+        w._status = "success"
+        w._result_content = "Successfully replaced 1 instance(s)"
+        return w, output
+
+    def test_inline_diff_keeps_source_text(self):
+        from unittest import mock
+
+        w, output = self._edit_widget("x = 0", 'y = a[1:x:2]  # ":smile:"')
+        with mock.patch(
+            "EvoScientist.cli.widgets.tool_call_widget._COLLAPSE_LINES", 100
+        ):
+            w._render_output()
+
+        assert w._collapsed is False
+        assert 'y = a[1:x:2]  # ":smile:"' in output.updated.plain
+
+    def test_expanded_diff_keeps_source_text(self):
+        old = "\n".join(f"v{i} = {i}" for i in range(8))
+        new = old.replace("v3 = 3", 'v3 = a[1:x:2]  # ":smile:"')
+        w, output = self._edit_widget(old, new)
+        w._render_output()
+        assert w._collapsed is True
+
+        w.on_click(None)  # type: ignore[arg-type]
+
+        assert w._collapsed is False
+        assert 'v3 = a[1:x:2]  # ":smile:"' in output.updated.plain
+
     def test_result_summary_truncation(self):
         from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 

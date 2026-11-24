@@ -7,13 +7,13 @@ from unittest import mock
 
 import pytest
 from rich.console import Console
-from rich.text import Text
 from textual.content import Content
 
 from EvoScientist.stream.diff_format import (
     _detect_unicode_support,
     _escape_markup,
     build_edit_diff,
+    diff_text,
     format_diff_rich,
 )
 
@@ -192,19 +192,22 @@ class TestBuildEditDiff:
             ("x = arr[1]", "x = arr[0]", "x = arr[0]"),
             ("x = 1", "x = 1 \\", "x = 1 \\"),
             ("items = [\n    1,\n]", "items = [\n    2,\n]", "items = ["),
+            ("x = 0", "y = a[1:x:2]", "y = a[1:x:2]"),
+            ('label = ""', 'label = ":smile:"', 'label = ":smile:"'),
         ],
     )
     def test_source_lines_round_trip(self, old, new, source_line):
         markup = build_edit_diff("/test.py", old, new)
         assert markup is not None
-        assert source_line in Text.from_markup(markup).plain
+        assert source_line in diff_text(markup).plain
+        assert source_line in Content.from_rich_text(diff_text(markup)).plain
 
     def test_tui_conversion_preserves_brackets_and_backslash(self):
         markup = build_edit_diff(
             "/test.py", "items = [\n    1,\n]", "items = [\n    2,\\\n]"
         )
         assert markup is not None
-        content = Content.from_rich_text(Text.from_markup(markup))
+        content = Content.from_rich_text(diff_text(markup))
         assert "items = [" in content.plain
         assert "    2,\\" in content.plain
 

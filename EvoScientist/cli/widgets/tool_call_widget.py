@@ -9,7 +9,7 @@ from textual.containers import Vertical
 from textual.events import Click
 from textual.widgets import Static
 
-from ...stream.diff_format import build_edit_diff
+from ...stream.diff_format import build_edit_diff, diff_text
 from ...stream.utils import failure_summary, format_tool_compact_with_result
 from .timestamp_mixin import show_timestamp_toast
 
@@ -231,7 +231,7 @@ class ToolCallWidget(Vertical):
                     else:
                         # Short diff: show inline
                         self._collapsed = False
-                        output_w.update(Text.from_markup(diff_markup))
+                        output_w.update(diff_text(diff_markup))
                     output_w.add_class("--visible")
                     return
         if not self._should_collapse():
@@ -262,7 +262,7 @@ class ToolCallWidget(Vertical):
         if self._diff_markup is not None:
             if self._collapsed:
                 self._collapsed = False
-                output_w.update(Text.from_markup(self._diff_markup))
+                output_w.update(diff_text(self._diff_markup))
             else:
                 self._collapsed = True
                 output_w.update(

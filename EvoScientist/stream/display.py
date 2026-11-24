@@ -29,7 +29,7 @@ from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
-from .diff_format import build_edit_diff
+from .diff_format import build_edit_diff, diff_text
 from .formatter import ToolResultFormatter
 from .state import (
     StreamState,
@@ -565,7 +565,7 @@ def format_tool_result_compact(
         if old_str and new_str and old_str != new_str:
             diff_markup = build_edit_diff(path, old_str, new_str)
             if diff_markup:
-                elements.append(Text.from_markup(diff_markup))
+                elements.append(diff_text(diff_markup))
                 return elements
 
     # Special handling for write_todos (a failed call shows its error instead)
