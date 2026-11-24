@@ -2192,6 +2192,29 @@ class TestCopiedModelKeepsItsSettings:
         assert sent[-1]["model"] == "vendor/other-model"
         assert sent[-1]["temperature"] == 0.1
 
+    def test_a_copy_does_not_inherit_what_a_model_learned(self):
+        """What a model learned about refused media stays with that model."""
+        import httpx
+        from langchain_openai import ChatOpenAI
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        _sent, transport = self._bodies()
+        model = ChatOpenAI(
+            model="some-model",
+            api_key="test",
+            base_url="http://example.invalid/v1",
+            profile={"image_inputs": True},
+            http_client=httpx.Client(transport=transport),
+        )
+        _patch_openai_compat_content(model)
+        model._content_compat().blocked.add("image")
+
+        copy = model.model_copy(update={"model_name": "other-model"})
+
+        assert copy._content_compat().blocked == set()
+        assert "image" in model._content_compat().blocked
+
     def test_a_copy_still_normalizes_the_content(self):
         import httpx
         from langchain_core.messages import HumanMessage

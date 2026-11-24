@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
@@ -22,14 +23,22 @@ class OpenAICompatContentMixin:
         profile = getattr(self, "profile", None)
         effective = profile if isinstance(profile, Mapping) else None
         compat = self.__dict__.get("_evosci_content_compat")
-        # A copy carries the profile it was made with, so the compat is
-        # rebuilt when the copy's profile differs from the one it holds.
-        if not isinstance(compat, _OpenAICompatContent) or compat.profile != effective:
+        owner = self.__dict__.get("_evosci_content_compat_owner")
+        # A copy carries both, so the owner tells them apart: what one model
+        # learns about the media its endpoint refuses must not reach the model
+        # it was copied from.
+        if (
+            not isinstance(compat, _OpenAICompatContent)
+            or not isinstance(owner, weakref.ReferenceType)
+            or owner() is not self
+            or compat.profile != effective
+        ):
             compat = _OpenAICompatContent(
                 effective,
                 hoist_tool_media=self.__dict__.get("_evosci_hoist_tool_media", True),
             )
             self.__dict__["_evosci_content_compat"] = compat
+            self.__dict__["_evosci_content_compat_owner"] = weakref.ref(self)
         return compat
 
     def _generate(
