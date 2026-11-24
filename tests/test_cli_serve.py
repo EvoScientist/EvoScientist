@@ -356,14 +356,12 @@ def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
     assert pointed == [8123]
 
 
-def test_configure_logging_never_reveals_channel_tokens(monkeypatch):
-    """Issue #666: `EvoSci serve --debug` must not print channel credentials.
+def test_configure_logging_caps_credential_url_loggers(monkeypatch):
+    """`EvoSci serve --debug` must not print channel credentials.
 
-    httpx logs every request URL at INFO (Telegram's Bot API embeds the bot
-    token in the URL path; DingTalk/WeCom send access_token as a query
-    parameter) and python-telegram-bot logs its API URL at DEBUG, so capping
-    these loggers must keep the URL-printing level out of reach regardless of
-    the root level.
+    Telegram's Bot API embeds the bot token in the URL path and DingTalk/WeCom
+    send access_token as a query parameter, so the loggers that print request
+    URLs must stay above that level even when the root logger is at DEBUG.
     """
     import logging
     from types import SimpleNamespace
@@ -386,11 +384,11 @@ def test_configure_logging_never_reveals_channel_tokens(monkeypatch):
             lambda *_a: SimpleNamespace(log_level="DEBUG"),
         )
         _configure_logging()
-        for name, cap_level in CREDENTIAL_URL_LOGGERS.items():
-            # Assert the property, not the implementation: the cap must block
-            # the level at which the logger prints the credential-bearing
-            # URL (one standard step below the cap).
-            assert not logging.getLogger(name).isEnabledFor(cap_level - 10)
+        # The level each library logs its request URL at: httpx at INFO,
+        # python-telegram-bot at DEBUG.
+        url_log_levels = {"httpx": logging.INFO, "telegram": logging.DEBUG}
+        for name, level in url_log_levels.items():
+            assert not logging.getLogger(name).isEnabledFor(level)
     finally:
         for lg, level in zip(loggers, saved_levels, strict=True):
             lg.setLevel(level)
