@@ -187,14 +187,15 @@ def cached_langgraph_async_client(
 ):
     """Return a cached async SDK client, keyed on URL and normalized headers.
 
-    Caching avoids a new connection pool on every call. The key includes the *normalized* headers, so ``headers=None``
-    (defaults) and an explicit copy of the default headers share one client,
-    while genuinely different header sets get their own — a caller passing
-    different headers must never silently receive a client built for
-    someone else's. The client keeps one connection pool per event loop, so
-    one cached client per key serves every loop of the process (the Rich CLI
-    has two). Callers that only read (e.g. the async-task completion poll)
-    reuse this rather than constructing per poll.
+    Caching avoids a new connection pool on every call. The key includes the
+    *normalized* headers, so ``headers=None`` (defaults) and an explicit copy
+    of the default headers share one client, while genuinely different header
+    sets get their own — a caller passing different headers must never
+    silently receive a client built for someone else's. The client keeps one
+    connection pool per event loop, so one cached client per key serves every
+    loop of the process (the Rich CLI has two). Callers that only read (e.g.
+    the async-task completion poll) reuse this rather than constructing per
+    poll.
     """
     normalized = langgraph_dev_headers(headers)
     key = (url, tuple(sorted(normalized.items())))

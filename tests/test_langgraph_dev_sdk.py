@@ -156,7 +156,15 @@ def test_one_client_works_from_two_event_loops(keep_alive_url):
 def test_the_sdk_default_client_fails_from_two_event_loops(keep_alive_url):
     """The premise of the test above, on this server: without a pool per loop
     the second loop reuses the first loop's connection."""
+    import sys
+
     from langgraph_sdk import get_client
+
+    if sys.platform == "win32":
+        pytest.skip(
+            "drives one Proactor loop's transport from another thread, "
+            "which can hang that loop"
+        )
 
     result = _use_on_two_loops(get_client(url=keep_alive_url))
 
