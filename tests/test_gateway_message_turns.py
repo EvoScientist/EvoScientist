@@ -3475,6 +3475,44 @@ async def test_past_the_replay_cap_a_failed_run_the_read_back_misses_names_the_c
     assert gateway.thread_store.client.runs.cancelled == []
 
 
+@pytest.mark.parametrize(
+    "checkpoint", [False, True], ids=["no-checkpoint", "checkpoint-without-a-prompt"]
+)
+async def test_past_the_replay_cap_an_answer_the_read_back_misses_names_the_cap(
+    checkpoint, replay_cap, quiet_poll
+):
+    """An answer's messages are not rebuilt from state, and its run left no
+    new prompt: past the cap the turn's error says why the read-back fell
+    short, with the cap's error as its cause."""
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-1"}]
+    )
+    if checkpoint:
+        respond = stream.run.respond_command
+
+        async def respond_and_finish(params):
+            reply = await respond(params)
+            threads.run_states[(THREAD_ID, stream.run.run_id)] = {"values": _NEW_STATE}
+            return reply
+
+        stream.run.respond_command = respond_and_finish
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^The run finished, but its reply could not be shown "
+        r"\(Thread history replay did not finish",
+    ) as caught:
+        await _turn(
+            gateway,
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+        )
+
+    assert isinstance(caught.value.__cause__, server_mod._ReplayCapError)
+    assert len(stream.run.responds) == 1
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
 async def test_thread_events_aclose_stops_the_reader_and_drops_the_queue():
     async def many() -> AsyncIterator[dict[str, Any]]:
         for n in range(100):

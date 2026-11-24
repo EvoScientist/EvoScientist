@@ -2035,6 +2035,10 @@ class LangGraphServerGateway:
                         f"status {finished_status}"
                         + (f" ({past_replay_cap})" if past_replay_cap else "")
                     ) from stream_error
+                # Past the cap, the cap is why the read-back fell short.
+                unshown_error = _UNSHOWN_REPLY_ERROR + (
+                    f" ({past_replay_cap})" if past_replay_cap else ""
+                )
                 # The run's last checkpoint, not the thread's latest state: a
                 # later run on the thread may already have added its own.
                 try:
@@ -2042,7 +2046,7 @@ class LangGraphServerGateway:
                         request.thread_id, limit=1, metadata={"run_id": run_id}
                     )
                 except Exception as exc:
-                    raise RuntimeError(_UNSHOWN_REPLY_ERROR) from exc
+                    raise RuntimeError(unshown_error) from exc
                 # No checkpoint (a resume that pauses again in the same step
                 # writes none): a prompt the read-back holds is still a result.
                 state = history[0] if history else {}
@@ -2077,10 +2081,8 @@ class LangGraphServerGateway:
                     )
                 ):
                     raise RuntimeError(
-                        _LOST_LIVE_EVENTS_ERROR
-                        if emitted_interrupt
-                        else _UNSHOWN_REPLY_ERROR
-                    )
+                        _LOST_LIVE_EVENTS_ERROR if emitted_interrupt else unshown_error
+                    ) from stream_error
                 if not told_late and (
                     any(held for _, held in recovered) or state_events
                 ):
