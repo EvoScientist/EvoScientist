@@ -1274,8 +1274,9 @@ async def test_finished_run_with_lost_live_events_is_read_back(
     assert stream.event_streams_opened == 2
     assert gateway.thread_store.client.runs.cancelled == []
     assert "Lost the live events of run run-1" in caplog.text
-    notices = [line for line in gateway.events.lines if "fallback" not in line]
-    assert notices == [server_mod._RECOVERED_TURN_NOTICE]
+    # The run's custom middleware line arrives once, from the read-back.
+    custom = ["fallback: fb"] if run is _SUBAGENT_RUN else []
+    assert gateway.events.lines == [*custom, server_mod._RECOVERED_TURN_NOTICE]
 
 
 async def test_read_back_drops_the_earlier_runs_it_replays(quiet_poll):
@@ -2242,18 +2243,81 @@ _TWO_REPLIES_STATE = {
 }
 
 
+# The first reply also calls a tool: the stream can drop while its tool call
+# streams, after its text and before its end.
+_REPLY_WITH_TOOL_RUN = [
+    _lifecycle("run-1", "running"),
+    _text("First", "1-0"),
+    {
+        "method": "messages",
+        "params": {
+            "namespace": [],
+            "data": {
+                "event": "content-block-finish",
+                "content": {
+                    "type": "tool_call",
+                    "id": "call-1",
+                    "name": "execute",
+                    "args": {"command": "ls"},
+                },
+            },
+        },
+        "event_id": "1-1",
+    },
+    _finish_with_usage("1-2", 10, 5),
+    _tool("tool-started", "1-3", tool_name="execute", input={"command": "ls"}),
+    _tool("tool-finished", "1-4", tool_name="execute", output="a.txt"),
+    _text("Second", "1-5"),
+    _finish_with_usage("1-6", 20, 7),
+    _lifecycle("run-1", "completed"),
+]
+_REPLY_WITH_TOOL_STATE = {
+    "messages": [
+        *_TWO_REPLIES_STATE["messages"][:-2],
+        {
+            **_TWO_REPLIES_STATE["messages"][-2],
+            "tool_calls": [
+                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+            ],
+        },
+        {
+            "type": "tool",
+            "content": "a.txt",
+            "id": "tool-1",
+            "name": "execute",
+            "tool_call_id": "call-1",
+        },
+        _TWO_REPLIES_STATE["messages"][-1],
+    ]
+}
+
+
 @pytest.mark.parametrize(
-    "live_limit", range(len(_TWO_REPLIES_RUN)), ids=lambda n: f"{n}-live"
+    ("run", "state", "live_limit"),
+    [
+        *(
+            pytest.param(_TWO_REPLIES_RUN, _TWO_REPLIES_STATE, n, id=f"text-{n}-live")
+            for n in range(len(_TWO_REPLIES_RUN))
+        ),
+        *(
+            pytest.param(
+                _REPLY_WITH_TOOL_RUN, _REPLY_WITH_TOOL_STATE, n, id=f"tool-{n}-live"
+            )
+            for n in range(len(_REPLY_WITH_TOOL_RUN))
+        ),
+    ],
 )
-async def test_state_completion_reports_each_replys_usage_once(live_limit, quiet_poll):
+async def test_state_completion_reports_each_replys_usage_once(
+    run, state, live_limit, quiet_poll
+):
     """A reply whose text all arrived live but whose end did not gets its
     usage, also when the next reply holds the cut."""
-    expected = await _live_events(_TWO_REPLIES_RUN, values=_EARLIER_STATE)
+    expected = await _live_events(run, values=_EARLIER_STATE)
     stream = FakeLangGraphThreadStream(
-        THREAD_ID, events=_TWO_REPLIES_RUN, live_limit=live_limit, read_back_limit=0
+        THREAD_ID, events=run, live_limit=live_limit, read_back_limit=0
     )
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
-    _state_after_start(stream, threads, {"values": _TWO_REPLIES_STATE})
+    _state_after_start(stream, threads, {"values": state})
 
     events = await _turn(gateway, "hi")
 
