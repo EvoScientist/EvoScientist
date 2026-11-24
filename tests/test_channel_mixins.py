@@ -60,3 +60,20 @@ async def test_ws_loop_error_log_hides_ticket_on_rejected_handshake(
 
     assert "403" in caplog.text
     assert "ws-ticket" not in caplog.text
+
+
+async def test_ws_loop_error_log_hides_ticket_on_connect_timeout(monkeypatch, caplog):
+    channel = _WsChannel()
+    url = await channel._get_ws_url()
+
+    def _time_out():
+        channel._running = False
+        raise aiohttp.ServerTimeoutError(f"Connection timeout to host {url}")
+
+    monkeypatch.setattr(aiohttp, "ClientSession", _time_out)
+    caplog.set_level(logging.ERROR, logger="EvoScientist.channels.mixins")
+
+    await channel._ws_loop()
+
+    assert "Connection timeout to host wss://gateway.example.com/connect" in caplog.text
+    assert "ws-ticket" not in caplog.text

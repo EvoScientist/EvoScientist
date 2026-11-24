@@ -15,10 +15,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_URL_QUERY_RE = re.compile(r"(://[^\s?]*)\?\S*")
+
+
+def _without_url_queries(text: str) -> str:
+    """Drop the query of every URL in *text*; it can carry a connection ticket."""
+    return _URL_QUERY_RE.sub(r"\1", text)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -252,7 +260,11 @@ class WebSocketMixin:
                     f"{getattr(self, 'name', '?')} WS error: {e.status}, {e.message}"
                 )
             except Exception as e:
-                logger.error(f"{getattr(self, 'name', '?')} WS error: {e}")
+                # A connect timeout quotes the request URL too.
+                logger.error(
+                    f"{getattr(self, 'name', '?')} WS error: "
+                    f"{_without_url_queries(str(e))}"
+                )
 
             await self._ws_cleanup_heartbeat()
             self._ws_session = None
