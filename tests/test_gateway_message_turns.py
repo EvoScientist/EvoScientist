@@ -3291,6 +3291,7 @@ def replay_cap(monkeypatch):
     (Windows)."""
     monkeypatch.setattr(server_mod, "_REPLAY_QUIET_SECONDS", 0.2)
     monkeypatch.setattr(server_mod, "_REPLAY_MAX_SECONDS", 0.6)
+    monkeypatch.setattr(server_mod, "_CAPPED_READ_BACK_SECONDS", 0.3)
 
 
 @pytest.mark.parametrize("busy", [True, False], ids=["busy", "idle"])
@@ -3353,6 +3354,19 @@ async def test_past_the_replay_cap_a_pause_shows_its_prompt(replay_cap, quiet_po
     assert gateway.thread_store.client.runs.cancelled == []
 
 
+def _record_read_back_budgets(monkeypatch) -> list[float | None]:
+    """The ``max_seconds`` of each read-back the gateway opens."""
+    budgets: list[float | None] = []
+    read_back = LangGraphServerGateway._finished_run_envelopes
+
+    def recording(self, request, max_seconds=None):
+        budgets.append(max_seconds)
+        return read_back(self, request, max_seconds)
+
+    monkeypatch.setattr(LangGraphServerGateway, "_finished_run_envelopes", recording)
+    return budgets
+
+
 class _EndlessReplayStream(FakeLangGraphThreadStream):
     """Every connection replays without end: the read-back also hits the cap."""
 
@@ -3363,16 +3377,19 @@ class _EndlessReplayStream(FakeLangGraphThreadStream):
 
 
 async def test_past_the_replay_cap_a_read_back_that_hits_the_cap_uses_the_state(
-    replay_cap, quiet_poll
+    replay_cap, quiet_poll, monkeypatch
 ):
     stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
     _state_after_start(stream, threads, {"values": _NEW_STATE})
+    budgets = _record_read_back_budgets(monkeypatch)
 
     events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello world"]
     assert events[-1]["response"] == "Hello world"
+    # The long history would make it wait out the whole cap again.
+    assert budgets == [server_mod._CAPPED_READ_BACK_SECONDS]
 
 
 async def test_past_the_replay_cap_an_unreadable_status_ends_with_the_cap_error(
@@ -3491,3 +3508,32 @@ async def test_thread_events_aclose_lets_a_cancel_of_its_caller_through():
 
     with pytest.raises(asyncio.CancelledError):
         await closing
+
+
+async def test_a_lost_run_below_the_cap_reads_back_with_the_full_budget(
+    quiet_poll, monkeypatch
+):
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    budgets = _record_read_back_budgets(monkeypatch)
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert budgets == [None]
+
+
+async def test_read_back_stops_at_its_budget(replay_cap):
+    """An endless replay ends at ``max_seconds``, well before the cap."""
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async with asyncio.timeout(GUARD_SECONDS):
+        async for _ in gateway._finished_run_envelopes(
+            RunRequest(message="hi", thread_id=THREAD_ID), 0.05
+        ):
+            pass
+
+    assert loop.time() - started < server_mod._REPLAY_MAX_SECONDS

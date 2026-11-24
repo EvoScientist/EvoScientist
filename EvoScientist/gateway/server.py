@@ -59,6 +59,9 @@ _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
 # A read-back of a finished run ends when no envelope arrives for this long.
 _READ_BACK_FIRST_EVENT_SECONDS = 5.0
+# The read-back's budget for a run started past the replay cap: the
+# first-event window plus a margin.
+_CAPPED_READ_BACK_SECONDS = 10.0
 # A turn asks for its run's status once it has had none of the run's envelopes
 # for this long, and again at this interval while that lasts.
 _QUIET_POLL_SECONDS = 5.0
@@ -1433,16 +1436,20 @@ class LangGraphServerGateway:
         status = run.get("status")
         return status if status in _FINISHED_RUN_STATUSES else None
 
-    async def _finished_run_envelopes(self, request: RunRequest) -> AsyncIterator[Any]:
+    async def _finished_run_envelopes(
+        self, request: RunRequest, max_seconds: float | None = None
+    ) -> AsyncIterator[Any]:
         """The thread's envelopes from a new connection, for a run that has finished.
 
         A new connection replays every stored run, the finished one included.
-        Ends when no envelope arrives for the first-event window, at the
-        replay cap, or when the connection fails (logged): the caller checks
-        whether it saw the run's end.
+        Ends when no envelope arrives for the first-event window, after
+        ``max_seconds`` (default: the replay cap), or when the connection
+        fails (logged): the caller checks whether it saw the run's end.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _REPLAY_MAX_SECONDS
+        deadline = loop.time() + (
+            _REPLAY_MAX_SECONDS if max_seconds is None else max_seconds
+        )
         try:
             stream = self.thread_store.client.threads.stream(
                 request.thread_id,
@@ -1987,7 +1994,15 @@ class LangGraphServerGateway:
                 # events are held until the turn knows it can end with
                 # a result, so the notice is never followed by a loss.
                 accepting_run = False
-                async with aclosing(self._finished_run_envelopes(request)) as envelopes:
+                # Past the cap a long history makes the read-back hit the cap
+                # too: a short budget still reads back a short replay (a busy
+                # thread), and the checkpoint covers the rest.
+                async with aclosing(
+                    self._finished_run_envelopes(
+                        request,
+                        None if past_replay_cap is None else _CAPPED_READ_BACK_SECONDS,
+                    )
+                ) as envelopes:
                     async for event in envelopes:
                         fed = await feed(event, read_back=True)
                         if fed is None:
