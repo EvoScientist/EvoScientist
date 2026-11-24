@@ -5,7 +5,10 @@ from __future__ import annotations
 import difflib
 from unittest import mock
 
+import pytest
 from rich.console import Console
+from rich.text import Text
+from textual.content import Content
 
 from EvoScientist.stream.diff_format import (
     _detect_unicode_support,
@@ -42,29 +45,29 @@ class TestEscapeMarkup:
 
     def test_index_brackets_show_no_backslash(self):
         assert (
-            _render(f"[on #152d15]{_escape_markup('++arr[0];')}[/on #152d15]")
-            == "++arr[0];"
+            _render(f"[on #152d15]{_escape_markup('x = arr[0]')}[/on #152d15]")
+            == "x = arr[0]"
         )
 
     def test_trailing_backslash_keeps_closing_tag(self):
-        assert _render(
-            f"[on #152d15]{_escape_markup('end' + chr(92), before_tag=True)}[/on #152d15]"
-        ) == "end" + chr(92)
+        text = "end\\"
+        assert (
+            _render(f"[on #152d15]{_escape_markup(text, before_tag=True)}[/on #152d15]")
+            == text
+        )
 
-    def test_trailing_backslash_runs_before_closing_tag(self):
-        for count in (1, 2, 3):
-            text = "end" + chr(92) * count
-            markup = _escape_markup(text, before_tag=True)
-            assert _render(f"[on #152d15]{markup}[/on #152d15]") == text
+    @pytest.mark.parametrize("text", ["end\\", "end\\\\", "end\\\\\\"])
+    def test_trailing_backslash_runs_before_closing_tag(self, text):
+        markup = _escape_markup(text, before_tag=True)
+        assert _render(f"[on #152d15]{markup}[/on #152d15]") == text
 
-    def test_trailing_backslash_without_closing_tag(self):
-        for count in (1, 2, 3):
-            text = "end" + chr(92) * count
-            assert _render(f"{_escape_markup(text)} ===") == text + " ==="
+    @pytest.mark.parametrize("text", ["end\\", "end\\\\", "end\\\\\\"])
+    def test_trailing_backslash_without_closing_tag(self, text):
+        assert _render(f"{_escape_markup(text)} ===") == text + " ==="
 
-    def test_backslash_before_brackets(self):
-        for text in (chr(92) + "[b]", "a" + chr(92) + "[1]", chr(92) * 2 + "[x]y"):
-            assert _render(_escape_markup(text)) == text
+    @pytest.mark.parametrize("text", [r"\[b]", r"a\[1]", r"\\[x]y"])
+    def test_backslash_before_brackets(self, text):
+        assert _render(_escape_markup(text)) == text
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +186,28 @@ class TestFormatDiffRich:
 
 
 class TestBuildEditDiff:
+    @pytest.mark.parametrize(
+        ("old", "new", "source_line"),
+        [
+            ("x = arr[1]", "x = arr[0]", "x = arr[0]"),
+            ("x = 1", "x = 1 \\", "x = 1 \\"),
+            ("items = [\n    1,\n]", "items = [\n    2,\n]", "items = ["),
+        ],
+    )
+    def test_source_lines_round_trip(self, old, new, source_line):
+        markup = build_edit_diff("/test.py", old, new)
+        assert markup is not None
+        assert source_line in Text.from_markup(markup).plain
+
+    def test_tui_conversion_preserves_brackets_and_backslash(self):
+        markup = build_edit_diff(
+            "/test.py", "items = [\n    1,\n]", "items = [\n    2,\\\n]"
+        )
+        assert markup is not None
+        content = Content.from_rich_text(Text.from_markup(markup))
+        assert "items = [" in content.plain
+        assert "    2,\\" in content.plain
+
     def test_returns_none_when_equal(self):
         assert build_edit_diff("/foo.py", "same", "same") is None
 

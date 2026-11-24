@@ -2,7 +2,7 @@
 
 Constructs unified diffs from old_string/new_string tool args and renders
 them with Rich markup (color-coded lines, line numbers, gutter bars).
-Works in both Rich CLI and Textual TUI (both render Rich markup natively).
+Works in both Rich CLI and Textual TUI (the TUI parses it with Rich's Text.from_markup).
 
 Ported from upstream deepagents-cli widgets/diff.py + config.py.
 """
@@ -14,7 +14,7 @@ import os
 import re
 import sys
 
-from rich.markup import escape
+from rich.markup import RE_TAGS, escape
 
 # ---------------------------------------------------------------------------
 # Charset detection (simplified from upstream config.py)
@@ -42,8 +42,14 @@ BOX_DOUBLE_HORIZ = "\u2550" if _UNICODE else "="  # ═ or =
 # ---------------------------------------------------------------------------
 
 
-# Backslashes before a "[" that Rich would not read as the start of a tag.
-_BACKSLASH_BEFORE_PLAIN_BRACKET = re.compile(r"(\\+)(?=\[(?![a-z#/@][^[]*?\]))")
+_BACKSLASHES_BEFORE_BRACKET = re.compile(r"(\\+)(?=\[)")
+
+
+def _add_backslash_before_plain_bracket(match: re.Match[str]) -> str:
+    # Rich drops one backslash before a "[" that does not start a tag.
+    if RE_TAGS.match(match.string, match.end()):
+        return match.group(1)
+    return match.group(1) + "\\"
 
 
 def _escape_markup(text: str, before_tag: bool = False) -> str:
@@ -61,7 +67,9 @@ def _escape_markup(text: str, before_tag: bool = False) -> str:
     """
     body = text.rstrip("\\")
     trailing = len(text) - len(body)
-    body = _BACKSLASH_BEFORE_PLAIN_BRACKET.sub(r"\1\\", escape(body))
+    body = _BACKSLASHES_BEFORE_BRACKET.sub(
+        _add_backslash_before_plain_bracket, escape(body)
+    )
     return body + "\\" * (trailing * 2 if before_tag else trailing)
 
 

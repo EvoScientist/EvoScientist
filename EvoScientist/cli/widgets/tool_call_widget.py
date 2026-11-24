@@ -231,7 +231,7 @@ class ToolCallWidget(Vertical):
                     else:
                         # Short diff: show inline
                         self._collapsed = False
-                        output_w.update(diff_markup)
+                        output_w.update(Text.from_markup(diff_markup))
                     output_w.add_class("--visible")
                     return
         if not self._should_collapse():
@@ -262,7 +262,7 @@ class ToolCallWidget(Vertical):
         if self._diff_markup is not None:
             if self._collapsed:
                 self._collapsed = False
-                output_w.update(self._diff_markup)
+                output_w.update(Text.from_markup(self._diff_markup))
             else:
                 self._collapsed = True
                 output_w.update(
