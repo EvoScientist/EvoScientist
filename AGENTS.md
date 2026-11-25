@@ -80,14 +80,20 @@ If the operator installed the pre-commit hooks, `git commit` runs Ruff and may r
 To exercise a change in the real app, run it against a throwaway data folder, config folder, and ports so it never touches the operator's install or live server:
 
 ```bash
-unset $(env | grep -o '^EVOSCIENTIST_[A-Z0-9_]*') 2>/dev/null   # inherited overrides would escape the sandbox
+sandbox() (   # a subshell, so nothing leaks into the calling shell
+  unset $(env | grep -o '^EVOSCIENTIST_[A-Z0-9_]*') 2>/dev/null   # inherited overrides would escape the sandbox
+  export EVOSCIENTIST_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config"
+  export EVOSCIENTIST_LANGGRAPH_DEV_PORT=16174 EVOSCIENTIST_WEBUI_PORT=14716 EVOSCIENTIST_CCPROXY_PORT=18000
+  uv run --no-sync EvoSci "$@"
+)
 SANDBOX=$(mktemp -d)
-export EVOSCIENTIST_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config"
-export EVOSCIENTIST_LANGGRAPH_DEV_PORT=16174 EVOSCIENTIST_WEBUI_PORT=14716 EVOSCIENTIST_CCPROXY_PORT=18000
-uv run --no-sync EvoSci ...
+sandbox ...             # any EvoSci arguments
+sandbox server stop     # when you're done
 ```
 
-The sandbox config has no API keys, but provider keys exported in the shell (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) still apply. Unset them unless the operator says the run may use them. Claude OAuth (`anthropic_auth_mode: oauth`) uses the operator's own sign-in in `~/.claude`, outside the sandbox, so don't turn it on without asking. If the run needs a real model, ask the operator instead of copying keys out of their config. Stop any server you started there with `uv run --no-sync EvoSci server stop` from the same shell.
+If your shell doesn't keep state between commands, define `sandbox` again in each one and reuse the same `SANDBOX` folder.
+
+The sandbox config has no API keys, but provider keys exported in the shell (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) still apply. Unset them unless the operator says the run may use them. Claude OAuth (`anthropic_auth_mode: oauth`) uses the operator's own sign-in in `~/.claude`, outside the sandbox, so don't turn it on without asking. If the run needs a real model, ask the operator instead of copying keys out of their config. Always stop a server you started there with `sandbox server stop`.
 
 ## Pull requests
 

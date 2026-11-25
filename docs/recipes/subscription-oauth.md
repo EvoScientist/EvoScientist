@@ -89,7 +89,7 @@ Uses the unofficial ChatGPT/Codex OAuth sign-in from `langchain-openai` (subject
 These use the Python inside EvoScientist's own environment (macOS/Linux; on Windows, run the sign-in through `EvoSci onboard` and check it from a normal `EvoSci` session):
 
 ```bash
-PY="$(dirname "$(readlink -f "$(command -v EvoSci)")")/python"   # source checkout: PY=/path/to/clone/.venv/bin/python
+E=$(command -v EvoSci); PY="$(dirname "$(readlink "$E" || echo "$E")")/python"   # source checkout: PY=/path/to/clone/.venv/bin/python
 
 # Claude: check ccproxy health + model call
 curl -s http://127.0.0.1:8000/health | head -c 60
@@ -110,7 +110,7 @@ EVOSCIENTIST_OPENAI_AUTH_MODE=oauth \
 | OpenAI connection error to `127.0.0.1` after upgrade | Run `EvoSci server stop` so a fresh server starts without legacy ccproxy routing. |
 | `ccproxy is required ... not found` | Install the extra (Part 1, step 1). |
 | `Run: ccproxy auth login claude_api` | Authenticate Claude OAuth once via that command. |
-| `ccproxy: command not found` (e.g. after `EvoSci update`) | `EvoSci update` doesn't keep `ccproxy` on your `PATH`, but it is still installed next to `EvoSci`: run `"$(dirname "$(readlink -f "$(command -v EvoSci)")")/ccproxy" auth login claude_api`, or re-run the sign-in from `EvoSci onboard`. |
+| `ccproxy: command not found` (e.g. after `EvoSci update`) | `EvoSci update` doesn't keep `ccproxy` on your `PATH`, but it is still installed next to `EvoSci`: run `E=$(command -v EvoSci); "$(dirname "$(readlink "$E" || echo "$E")")/ccproxy" auth login claude_api`, or re-run the sign-in from `EvoSci onboard`. |
 | `ccproxy_port 8000 is in use` | Free port `8000` or pick another via `EvoSci config set ccproxy_port <port>`. |
 | `ccproxy` config changes ignored | Run `EvoSci server stop`, restart, and check for a shadowing `.ccproxy.toml` / `ccproxy.toml`. |
 
