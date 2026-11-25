@@ -719,34 +719,11 @@ class _BusyThreadStream(FakeLangGraphThreadStream):
             yield event
 
 
-@pytest.mark.parametrize(
-    ("message", "busy", "answered"),
-    [
-        pytest.param(
-            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
-            True,
-            True,
-            id="resume-busy",
-        ),
-        pytest.param(
-            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
-            False,
-            False,
-            id="resume-idle",
-        ),
-        pytest.param("hi", True, False, id="new-message-busy"),
-    ],
-)
-async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
-    message, busy, answered, monkeypatch
-):
+@pytest.mark.parametrize("busy", [True, False], ids=["resume-busy", "resume-idle"])
+async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(busy, replay_cap):
     """A sibling task's envelopes keep the SSE from going quiet; a resume on a
-    busy thread is sent at the cap and queues behind that run. Anything else
-    still fails at the cap."""
-    # The sibling's gaps must stay under the quiet window on a ~15 ms timer
-    # (Windows).
-    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
-    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    busy thread is sent at the cap, queues behind that run and is read live. A
+    resume on an idle thread goes the #710 way: its run starts and is read back."""
     stream = _BusyThreadStream(
         THREAD_ID,
         events=[
@@ -760,15 +737,16 @@ async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(
     )
     if busy:
         threads.threads[0]["status"] = "busy"
+    gateway.events = _Notices()
 
-    if answered:
-        events = await _turn(gateway, message)
-        assert _texts(events) == ["resumed"]
-        assert len(stream.run.responds) == 1
-    else:
-        with pytest.raises(RuntimeError, match="replay did not finish"):
-            await _turn(gateway, message)
-        assert stream.run.responds == stream.run.starts == []
+    events = await _turn(
+        gateway, Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert _texts(events) == ["resumed"]
+    assert len(stream.run.responds) == 1
+    assert stream.event_streams_opened == (1 if busy else 2)
+    assert gateway.events.lines == ([] if busy else [server_mod._REPLAY_CAP_NOTICE])
 
 
 # --- _ThreadEvents.skip_replay: controllable clock, no real waiting ---------
@@ -3300,3 +3278,364 @@ async def test_closed_stream_completed_from_the_state_says_it_once(quiet_poll):
 
     assert events[-1]["response"] == "Hello world"
     assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]
+
+
+# --- #710: a new message past the replay cap ---------------------------------
+
+
+@pytest.fixture
+def replay_cap(monkeypatch):
+    """A replay cap a replay that never goes quiet reaches quickly. The
+    sibling's gaps must stay under the quiet window on a ~15 ms timer
+    (Windows)."""
+    monkeypatch.setattr(server_mod, "_REPLAY_QUIET_SECONDS", 0.2)
+    monkeypatch.setattr(server_mod, "_REPLAY_MAX_SECONDS", 0.6)
+    monkeypatch.setattr(server_mod, "_CAPPED_READ_BACK_SECONDS", 0.3)
+    # The replay always starts: a slow first envelope must not end the skip.
+    monkeypatch.setattr(server_mod, "_REPLAY_FIRST_EVENT_SECONDS", 0.6)
+
+
+@pytest.mark.parametrize("busy", [True, False], ids=["busy", "idle"])
+async def test_new_message_past_the_replay_cap_starts_its_run_and_reads_it_back(
+    busy, replay_cap, quiet_poll, caplog
+):
+    """The thread's SSE does not go quiet within the cap: the run is started
+    anyway, not read live, waited for by its status and read back."""
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("answer"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    if busy:
+        threads.threads[0]["status"] = "busy"
+    gateway.events = _Notices()
+
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["answer"]
+    assert len(stream.run.starts) == 1
+    assert stream.event_streams_opened == 2
+    assert gateway.thread_store.client.runs.cancelled == []
+    capped = [
+        record
+        for record in caplog.records
+        if "without reading it live" in record.getMessage()
+    ]
+    # The cap's line is the frontend's: the log does not warn again.
+    assert [record.levelname for record in capped] == ["INFO"]
+    # One line at the cap; nothing was lost, so no "lost" line at the end.
+    assert gateway.events.lines == [server_mod._REPLAY_CAP_NOTICE]
+
+
+async def test_replay_cap_warns_a_turn_without_a_frontend(
+    replay_cap, quiet_poll, caplog
+):
+    """With no sink to show the cap's line, the log is the only trace."""
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("answer"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
+        await _turn(gateway, "hi")
+
+    capped = [
+        record
+        for record in caplog.records
+        if "without reading it live" in record.getMessage()
+    ]
+    assert [record.levelname for record in capped] == ["WARNING"]
+
+
+async def test_past_the_replay_cap_a_refused_start_shows_no_line(
+    replay_cap, quiet_poll, monkeypatch
+):
+    """The cap's line promises a result: a start the server refuses ends the
+    turn with its own error and no line."""
+    stream = _BusyThreadStream(THREAD_ID, events=[])
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+    gateway.events = _Notices()
+    capped: list[server_mod._ReplayCapError] = []
+    skip_replay = server_mod._ThreadEvents.skip_replay
+
+    async def recording_skip(self: server_mod._ThreadEvents) -> int:
+        try:
+            return await skip_replay(self)
+        except server_mod._ReplayCapError as exc:
+            capped.append(exc)
+            raise
+
+    monkeypatch.setattr(server_mod._ThreadEvents, "skip_replay", recording_skip)
+
+    async def refuse(**kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("run refused")
+
+    stream.run.start = refuse
+
+    with pytest.raises(RuntimeError, match="run refused"):
+        await _turn(gateway, "hi")
+
+    assert len(capped) == 1
+    assert gateway.events.lines == []
+
+
+async def test_past_the_replay_cap_a_failed_run_raises_its_own_error(
+    replay_cap, quiet_poll
+):
+    failed = _lifecycle("run-1", "failed")
+    failed["params"]["data"]["error"] = "boom"
+    stream = _BusyThreadStream(
+        THREAD_ID, events=[_lifecycle("run-1", "running"), failed]
+    )
+    stream.run.status = "error"
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    with pytest.raises(RuntimeError, match="Run failed: boom"):
+        await _turn(gateway, "hi")
+
+    assert stream.event_streams_opened == 2
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_past_the_replay_cap_a_pause_shows_its_prompt(replay_cap, quiet_poll):
+    stream = _BusyThreadStream(THREAD_ID, events=_PAUSE_RUN)
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE, interrupts=[])
+
+    events = await _turn(gateway, "hi")
+
+    assert [e for e in events if e["type"] == "interrupt"] == [_INTERRUPT_EVENT]
+    assert stream.event_streams_opened == 2
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+def _record_read_back_budgets(monkeypatch) -> list[float | None]:
+    """The ``max_seconds`` of each read-back the gateway opens."""
+    budgets: list[float | None] = []
+    read_back = LangGraphServerGateway._finished_run_envelopes
+
+    def recording(self, request, max_seconds=None):
+        budgets.append(max_seconds)
+        return read_back(self, request, max_seconds)
+
+    monkeypatch.setattr(LangGraphServerGateway, "_finished_run_envelopes", recording)
+    return budgets
+
+
+class _EndlessReplayStream(FakeLangGraphThreadStream):
+    """Every connection replays without end: the read-back also hits the cap."""
+
+    async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
+        while True:
+            yield _text("old token", "0-1")
+            await asyncio.sleep(0.005)
+
+
+async def test_past_the_replay_cap_a_read_back_that_hits_the_cap_uses_the_state(
+    replay_cap, quiet_poll, monkeypatch
+):
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+    budgets = _record_read_back_budgets(monkeypatch)
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+    assert events[-1]["response"] == "Hello world"
+    # The long history would make it wait out the whole cap again.
+    assert budgets == [server_mod._CAPPED_READ_BACK_SECONDS]
+
+
+async def test_past_the_replay_cap_an_unreadable_status_ends_with_the_cap_error(
+    replay_cap, quiet_poll
+):
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    async def unreadable(thread_id: str, run_id: str) -> dict[str, Any]:
+        raise ConnectionError("server busy")
+
+    gateway.thread_store.client.runs.get = unreadable
+
+    with pytest.raises(server_mod._ReplayCapError, match="replay did not finish"):
+        await _turn(gateway, "hi")
+
+
+async def test_past_the_replay_cap_the_live_connection_stops_reading(
+    replay_cap, quiet_poll
+):
+    """While the turn waits for its run, the live connection no longer
+    buffers the rest of the replay."""
+    opened: list[_ThreadEvents] = []
+    real_init = _ThreadEvents.__init__
+
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        opened.append(self)
+
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+    runs = gateway.thread_store.client.runs
+    real_get = runs.get
+    seen: list[tuple[int, bool, int]] = []
+
+    async def get(thread_id: str, run_id: str) -> dict[str, Any]:
+        live = opened[0]
+        seen.append((stream.closes, live._reader.done(), live._queue.qsize()))
+        return await real_get(thread_id, run_id)
+
+    runs.get = get
+
+    with patch.object(_ThreadEvents, "__init__", recording_init):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello world"]
+    # The SDK stream is closed too: its own bounded queue stops filling.
+    assert seen == [(1, True, 0)]
+
+
+async def test_past_the_replay_cap_the_first_status_request_comes_at_once(
+    replay_cap, monkeypatch
+):
+    monkeypatch.setattr(server_mod, "_QUIET_POLL_SECONDS", 30.0)
+    monkeypatch.setattr(server_mod, "_FINISHED_GRACE_SECONDS", 30.0)
+    stream = _BusyThreadStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    async with asyncio.timeout(5):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+
+
+async def test_past_the_replay_cap_a_failed_run_the_read_back_misses_names_the_cap(
+    replay_cap, quiet_poll
+):
+    """The read-back also hits the cap, so the run's own error is out of
+    reach: the turn's error says why, with the cap's error as its cause."""
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    stream.run.status = "error"
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    with pytest.raises(
+        RuntimeError, match=r"status error \(Thread history replay did not finish"
+    ) as caught:
+        await _turn(gateway, "hi")
+
+    assert isinstance(caught.value.__cause__, server_mod._ReplayCapError)
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+@pytest.mark.parametrize(
+    "checkpoint", [False, True], ids=["no-checkpoint", "checkpoint-without-a-prompt"]
+)
+async def test_past_the_replay_cap_an_answer_the_read_back_misses_names_the_cap(
+    checkpoint, replay_cap, quiet_poll
+):
+    """An answer's messages are not rebuilt from state, and its run left no
+    new prompt: past the cap the turn's error says why the read-back fell
+    short, with the cap's error as its cause."""
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, threads = _gateway(
+        stream, values=_EARLIER_STATE, interrupts=[{"id": "interrupt-1"}]
+    )
+    if checkpoint:
+        respond = stream.run.respond_command
+
+        async def respond_and_finish(params):
+            reply = await respond(params)
+            threads.run_states[(THREAD_ID, stream.run.run_id)] = {"values": _NEW_STATE}
+            return reply
+
+        stream.run.respond_command = respond_and_finish
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^The run finished, but its reply could not be shown "
+        r"\(Thread history replay did not finish",
+    ) as caught:
+        await _turn(
+            gateway,
+            Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}),
+        )
+
+    assert isinstance(caught.value.__cause__, server_mod._ReplayCapError)
+    assert len(stream.run.responds) == 1
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_thread_events_aclose_stops_the_reader_and_drops_the_queue():
+    async def many() -> AsyncIterator[dict[str, Any]]:
+        for n in range(100):
+            yield {"n": n}
+        await asyncio.Event().wait()
+
+    events = _ThreadEvents(many())
+    await asyncio.sleep(0.05)
+    assert events._queue.qsize() == 100
+
+    await events.aclose()
+
+    assert events._reader.done()
+    assert events._queue.qsize() == 0
+
+
+async def test_thread_events_aclose_lets_a_cancel_of_its_caller_through():
+    """Only the reader's cancellation is absorbed: a turn cancelled while it
+    waits for the reader to stop is cancelled."""
+
+    async def slow_to_stop() -> AsyncIterator[dict[str, Any]]:
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            await asyncio.sleep(0.2)
+
+    events = _ThreadEvents(slow_to_stop())
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(events.aclose())
+    await asyncio.sleep(0.05)
+    closing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+
+async def test_a_lost_run_below_the_cap_reads_back_with_the_full_budget(
+    quiet_poll, monkeypatch
+):
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN, live_limit=0)
+    gateway, _ = _gateway(stream)
+    budgets = _record_read_back_budgets(monkeypatch)
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert budgets == [None]
+
+
+async def test_read_back_stops_at_its_budget(replay_cap):
+    """An endless replay ends at ``max_seconds``, well before the cap."""
+    stream = _EndlessReplayStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    async with asyncio.timeout(GUARD_SECONDS):
+        async for _ in gateway._finished_run_envelopes(
+            RunRequest(message="hi", thread_id=THREAD_ID), 0.05
+        ):
+            pass
+
+    assert loop.time() - started < server_mod._REPLAY_MAX_SECONDS
