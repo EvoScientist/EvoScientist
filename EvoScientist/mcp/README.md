@@ -24,7 +24,7 @@ sequential-thinking:
 
 ## CLI & Slash Commands
 
-Every `EvoSci mcp ...` command also works interactively as `/mcp ...`:
+Every `EvoSci mcp ...` command also works interactively as `/mcp ...`. Inside a session, use the long flag names: `/mcp add` accepts only `-T` as a short flag, and `/mcp edit` accepts none.
 
 | Command | Action |
 |---|---|
@@ -35,18 +35,28 @@ Every `EvoSci mcp ...` command also works interactively as `/mcp ...`:
 | `EvoSci mcp edit <name> [flags]` | Update routing, tools, or URL without re-adding |
 | `EvoSci mcp remove <name>` | Remove a server |
 
-### `add` / `edit` Flags
+### `add` Flags
 
-| Flag | Short | What it does |
+| Flag | Short (CLI) | What it does |
 |---|---|---|
-| `--transport` | `-T` | `stdio`, `http`, `streamable_http`, `sse`, or `websocket` (auto-detected: `http(s)` URL → `http`, otherwise `stdio`) |
-| `--tools` | `-t` | Comma-separated tool allowlist with glob wildcards (omit or pass `none` on `edit` for all tools) |
+| `--transport` | `-T` | `stdio`, `http`, `streamable_http`, `sse`, or `websocket` (auto-detected: `ws(s)://` → `websocket`, `http(s)://` → `http`, otherwise `stdio`) |
+| `--tools` | `-t` | Comma-separated tool allowlist with glob wildcards (omit for all tools) |
 | `--expose-to` | `-e` | Comma-separated target agents (default: `main`) |
 | `--header` | `-H` | HTTP header `Key:Value` (repeatable) |
 | `--env` | | Subprocess env var `KEY=VALUE` for `stdio` (repeatable) |
 | `--env-ref` | | Forward an existing host env var by name (repeatable) |
 
 *(Put `--` before server arguments that start with `-` so `EvoSci` passes them through.)*
+
+### `edit` Flags
+
+`edit` takes `--tools` (`-t`), `--expose-to` (`-e`), `--header` (`-H`), `--env`, and `--transport` (no `-T` here) as above, plus:
+
+| Flag | What it does |
+|---|---|
+| `--command` / `--url` | Replace the server's command (`stdio`) or URL |
+| `--args a,b,c` | Replace the command's arguments *(`/mcp edit` inside a session only)* |
+| `--tools none` / `--expose-to none` | Clear the list (all tools / back to `main`) |
 
 ### Examples
 
@@ -69,21 +79,16 @@ EvoSci mcp add fs npx -t "read_*,write_*" -- -y @modelcontextprotocol/server-fil
 # Update an existing server in place
 EvoSci mcp edit fs --expose-to main,code-agent
 EvoSci mcp edit fs --tools none
+
+# Inside a session: same commands, long flags only
+/mcp add brave-search npx --env-ref BRAVE_API_KEY --expose-to research-agent -- -y @modelcontextprotocol/server-brave-search
 ```
 
 ## Routing Tools to Specific Agents (`expose_to`)
 
-By default, MCP tools only go to `main`. Route specialized servers straight to the sub-agents that need them—no need to edit `EvoScientist/subagents/*.yaml`:
+By default, MCP tools only go to `main`. Route specialized servers straight to the sub-agents that need them—no need to edit `EvoScientist/subagents/*.yaml`.
 
-| Target name | Role |
-|---|---|
-| `main` | Main orchestrator *(default)* |
-| `planner-agent` | Experiment planning |
-| `research-agent` | Literature search |
-| `code-agent` | Code implementation |
-| `debug-agent` | Debugging |
-| `data-analysis-agent` | Data analysis & plotting |
-| `writing-agent` | Report drafting |
+Valid targets are `main` (the orchestrator, default) and any sub-agent id—the top-level keys in `EvoScientist/subagents/*.yaml`, such as `research-agent`, `code-agent`, or `data-analysis-agent`.
 
 ## Filtering Tools With Wildcards (`tools`)
 
@@ -114,11 +119,10 @@ On session startup (or `/new`), EvoScientist reads `mcp.yaml`, connects to each 
 
 ## Troubleshooting
 
-- **Missing `langchain-mcp-adapters`:** Run `pip install langchain-mcp-adapters`.
 - **`npx` not found:** EvoScientist installs a private Node.js automatically on first use. If that failed (offline/proxy), run `EvoSci setup` (add `--cn` in mainland China).
 - **`${VAR}` / `--env-ref` resolves empty:** Export the variable before starting EvoScientist (and restart the background server via `EvoSci server stop` if it was started from another shell). Missing vars resolve to `""` with a warning.
 - **Tools don't appear where expected:** Check `expose_to` agent names, make sure `tools` isn't filtering everything out, and run `/new` after editing `mcp.yaml`.
-- **Windows `stdio` `[Errno 9] Bad file descriptor`:** EvoScientist wraps the MCP SDK to fall back to `sys.__stderr__` / `os.devnull` when the TUI redirects `sys.stderr`. If you still hit this, launch from a real console (not `pythonw.exe`).
+- **Windows `stdio` `[Errno 9] Bad file descriptor`:** Launch EvoScientist from a real console window (not `pythonw.exe`).
 
 ## Security
 

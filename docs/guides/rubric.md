@@ -21,7 +21,7 @@ EvoSci -p "Reproduce table 2" --auto-mode --rubric @criteria.md
 | Code | Meaning |
 |---|---|
 | `0` | Grader returned **satisfied** |
-| `3` | Run finished without a satisfied verdict (hit 3-pass limit, grader failed, or run stopped early at a cancelled approval/question) |
+| `3` | Run finished without a satisfied verdict: the 3-pass limit was reached, the grader failed, the rubric could not be evaluated, or the run stopped before grading (a cancelled approval/question, or the approval round limit) |
 | `1` | The run itself errored |
 
 With `--output-format stream-json`, each pass emits `rubric_evaluation_start` and `rubric_evaluation` events (see [`stream-json`](stream-json.md)).
@@ -39,17 +39,21 @@ In the TUI and classic CLI, attach checklists directly to the current thread (sa
 
 | Command | What it does |
 |---|---|
-| `/rubric set <criteria>` or `@file` | Grades every turn starting from your next message until cleared. |
+| `/rubric set <criteria>` or `@file` | Grades every turn starting from your next message until cleared. Setting it again replaces the checklist. |
 | `/rubric next <criteria>` or `@file` | Grades **only** the next task, then clears itself (takes precedence over `set` for that one turn). |
 | `/rubric` (or `/rubric show`) | Displays active and pending checklists. |
 | `/rubric clear` | Removes both checklists. |
 
 *(Multiline text works; quote paths with spaces like `@"my criteria.md"`. The status bar shows `rubric: on`, `rubric: next`, or `rubric: on+next`. Because [`/goal`](goal.md) shares the sticky slot, `/rubric set` and `/rubric clear` cancel an active goal.)*
 
+Each message you send gets up to 3 passes. A message that continues a deferred or cut-short task keeps that task's start (the grader still reads from the message that started it), but its pass count starts again.
+
 ### Background Work & Deferral
 
-- **Interactive sessions:** If the agent leaves sub-agents or `run_in_background` processes running on the thread, grading is **deferred** (`Acceptance check deferred: ...`) and runs automatically when their completion notification arrives (or on your next message if a background process never exits or you restart the CLI; `/rubric clear` cancels a waiting check).
-- **Single-shot (`--rubric`) runs:** Do not defer—if the agent stops while a background command is still running, the grader flags the missing deliverable and the agent gets another pass to wait for it.
+- **Interactive sessions:** If the agent leaves sub-agents or `run_in_background` processes running on the thread, grading is **deferred** (`Acceptance check deferred: ...`) and runs automatically when their completion notification arrives.
+  - A `run_in_background` process that never exits holds grading back only until your next message.
+  - A sub-agent task that never ends keeps the grading waiting; `/rubric clear` drops it.
+  - After a CLI restart, a process the grading waits for is usually reported as no longer tracked, and the turn that notice starts runs the grading (the process may still be running).- **Single-shot (`--rubric`) runs:** Do not defer—if the agent stops while a background command is still running, the grader flags the missing deliverable and the agent gets another pass to wait for it. Each early stop uses one of the 3 passes.
 
 ### Limitations
 

@@ -25,12 +25,13 @@ Treat this file as strong defaults—explicit instructions from the human drivin
 
 ## Ways to hurt yourself (hard rules)
 
-1. **Never touch the live install's data or config.** `~/.config/evoscientist/` and `~/.evoscientist/` hold the operator's real API keys, ChatGPT OAuth tokens, sessions DB, memories, skills, and scheduled tasks. Reading them is fine if needed; never write to them, never point tests at them, and never clean them up. Tests must isolate paths via `tmp_path` and `EVOSCIENTIST_DATA_DIR`.
+1. **Never touch the live install's data or config.** `~/.config/evoscientist/` and `~/.evoscientist/` hold the operator's real API keys, ChatGPT OAuth tokens, sessions DB, memories, skills, and scheduled tasks. Reading them is fine if needed; never write to them, never point tests at them, and never clean them up.
 2. **Never kill processes by broad pattern.** Do not run `pkill -f`, `pgrep | kill`, or blanket kills on `python`/`node`/`EvoSci`/`ccproxy`. The operator may be running a live EvoScientist session, background server (`6174`), WebUI (`4716`), or `ccproxy` (`8000`) while you work. Only stop PIDs you spawned yourself.
 3. **Never edit `constraints.txt` by hand.** It is generated from `uv.lock` on release PRs only (`release_guard.sh` enforces this). Only touch `pyproject.toml` / `uv.lock` when a task requires a dependency change.
 4. **Respect pinned dependency ceilings in `pyproject.toml`.** Every upper-bound cap in `pyproject.toml` has an inline comment explaining the upstream regression it guards against. Do not bump or unpin a capped dependency without verifying the original issue is fixed.
 5. **Never weaken the settings API boundary.** The WebUI settings API must continue refusing mutations to `auto_approve`, `auto_mode`, `dangerous_mode`, `shell_allow_list`, bind hosts, allowed browser origins, and channel access settings (see [SECURITY.md](SECURITY.md)).
 6. **Never make live network or LLM calls in tests.** The entire test suite runs offline with zero API keys on Linux and Windows.
+7. **Don't fight the test home redirect.** `EvoScientist.paths` resolves its folders at import, so `tests/conftest.py` points `HOME` at a throwaway folder before EvoScientist is imported—setting `EVOSCIENTIST_DATA_DIR` in a fixture is too late. Use `tmp_path` / `tmp_workspace` for files, and don't import `EvoScientist` from a pytest plugin or anything that loads before `conftest.py`.
 
 ## Hit every surface
 

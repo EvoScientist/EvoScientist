@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -120,10 +120,10 @@
 
 ## ✨ 核心特性
 
-- **多智能体科研团队：** 内置 6 个专职子智能体（规划、文献调研、编码、调试、数据分析、论文写作），并支持按需调用专家技能（`/expert`）。
+- **多智能体科研团队：** 内置规划、文献调研、编码、调试、数据分析与论文写作等专职子智能体，并支持按需调用专家技能（`/expert`）。
 - **自我进化记忆与 AutoSkills：** 每轮自动提炼经验并构建关联知识图谱，定期从记忆中生成可复用技能供你审核（`/autoskills`）。
 - **目标驱动与验收评分：** 用 `/goal` 或 `--rubric` 设定验收清单，由独立评审模型自动检查产物并驱动修订。
-- **多端统一体验：** 支持桌面客户端、浏览器 WebUI（`--ui webui`）、Textual TUI、经典 CLI、10 大即时通讯渠道（`EvoSci serve`）、定时任务（`/schedule`）以及无头 `stream-json` 流。
+- **多端统一体验：** 支持桌面客户端、浏览器 WebUI（`--ui webui`）、Textual TUI、经典 CLI、Telegram / Slack / 飞书等即时通讯渠道（`EvoSci serve`）、定时任务（`/schedule`）以及无头 `stream-json` 流。
 - **多模型与订阅直连：** 支持 Anthropic、OpenAI、Google、OpenRouter、DeepSeek、MiniMax、NVIDIA、Ollama 与自定义 OpenAI/Anthropic 接口，也支持 Claude Pro/Max 与 ChatGPT Plus/Pro 订阅登录。
 - **MCP 与技能生态：** 一条命令接入 MCP 服务器（`EvoSci mcp add`），或通过 `/evoskills` 直接安装 [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) 科研全流程技能。
 
@@ -180,28 +180,40 @@ irm https://evoscientist.ai/install.ps1 | iex
 & ([scriptblock]::Create((irm https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist@main/scripts/install.ps1))) -Cn
 ```
 
-安装完成后**重新打开终端**，执行 `EvoSci onboard`，然后运行 `EvoSci`。后续升级只需运行 `EvoSci update`。代理、企业 TLS 证书与卸载步骤见[安装指南](docs/guides/install.md)。
+安装完成后**重新打开终端**，执行 `EvoSci onboard`，然后运行 `EvoSci`。后续升级只需运行 `EvoSci update`。
+
+代理、企业 TLS 证书与完整卸载步骤见 **[安装指南](docs/guides/install.md)**。
 
 <details>
 <summary>其他安装方式（<code>uv</code> / <code>pip</code> / Docker / 源码开发）</summary>
 
+**`uv` 或 `pip`（需 Python 3.11–3.13）：**
 ```bash
-# uv / pip（需 Python 3.11–3.13）
-uv tool install EvoScientist
-uv pip install 'EvoScientist[telegram,feishu,wechat]'   # 按需安装渠道依赖，或 all-channels
+uv tool install EvoScientist                           # 独立 CLI 工具
+uv tool install 'EvoScientist[telegram,slack]'         # 附带渠道依赖（或 all-channels）
+uv tool install git+https://github.com/EvoScientist/EvoScientist.git  # 最新 main 分支
+pip install EvoScientist                               # 或安装到已有虚拟环境
+```
+*（`EvoSci channel setup` 也会自动为所选渠道安装缺失的依赖。）*
 
-# 源码开发
+**源码开发（贡献者）：**
+```bash
 git clone https://github.com/EvoScientist/EvoScientist.git && cd EvoScientist
 uv sync --dev --extra all-channels
 uv run pre-commit install
+```
 
-# Docker（将命令沙箱限制在挂载目录内）
-mkdir -p workspace
-docker run -it --rm --env-file .env \
+**Docker（将 shell 命令沙箱限制在挂载目录内）：**
+```bash
+mkdir -p workspace   # Linux 下请先创建，避免 Docker 以 root 身份创建该目录
+docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup   # 首次运行一次
+docker run -it --rm \
+  --env-file .env \
   -v "$(pwd)/workspace:/workspace" \
   -v evosci-data:/home/evosci/.evoscientist \
   ghcr.io/evoscientist/evoscientist:latest
 ```
+*（`--env-file .env` 用于设置容器的环境变量，如 API Key。`docker compose` 用法、Linux 下 UID 不是 1000 时的文件权限处理，以及如何加装 `stt`/`oauth` 依赖或 LaTeX，见[安装指南的 Docker 一节](docs/guides/install.md#docker)。）*
 
 </details>
 
@@ -226,29 +238,97 @@ EvoSci
 EvoSci                                        # 交互式 TUI（默认）
 EvoSci --ui webui                             # 浏览器 WebUI（http://localhost:4716）
 EvoSci --ui cli                               # 经典 CLI（便于终端原生复制）
-EvoSci -p "分析 results.csv"                  # 单次运行（长提示可用 --prompt-file）
+EvoSci -p "分析 results.csv"                  # 单次运行（长提示可用 --prompt-file prompt.txt）
 EvoSci --workdir /path/to/project             # 在指定项目目录启动
-EvoSci -m run                                 # 独立隔离会话目录
-EvoSci serve                                  # 无头模式（仅运行即时通讯渠道）
+EvoSci -m run                                 # 每个会话使用独立隔离的工作区
+EvoSci serve                                  # 无头模式（用于即时通讯渠道）
 EvoSci deploy                                 # 独立 LangGraph 后端（程序集成可加 --json）
-EvoSci -p "query" --output-format stream-json # JSONL 事件流（见 docs/guides/stream-json.md）
+EvoSci -p "query" --output-format stream-json # stdout 输出 JSONL 事件流（见 docs/guides/stream-json.md）
 EvoSci -p "query" --rubric @criteria.md       # 按验收清单自动评分修订（见 docs/guides/rubric.md）
 ```
 
+运行 `EvoSci -h` 查看全部参数；在会话中输入 `/help` 查看斜杠命令（`/goal`、`/rubric`、`/schedule`、`/threads`、`/resume`、`/skills`、`/evoskills`、`/expert`、`/autoskills`、`/mcp`、`/channel`、`/model`、`/compact`）。
+
+<details>
+<summary>手动配置 API Key、项目工作区与审批</summary>
+
+**API Key：** 用 `EvoSci config set` 保存（写入 `~/.config/evoscientist/config.yaml`），或在 shell 中导出（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GOOGLE_API_KEY`、`MINIMAX_API_KEY`、`NVIDIA_API_KEY`，以及可选的 `TAVILY_API_KEY`）。vLLM、LM Studio 或网关见[自定义接口](docs/guides/custom-endpoints.md)；不用 API Key、直接使用 Claude Pro/Max 或 ChatGPT Plus/Pro 订阅见[订阅登录](docs/recipes/subscription-oauth.md)。
+
+**后台服务与项目目录：**
+- 共享后台服务（`EvoSci server status` / `stop`）继承启动它的 shell 的环境变量；修改 shell 导出的变量后，请执行 `EvoSci server stop` 让它重启。
+- 项目中的 `.env` 只用于 `EvoSci` 启动参数（`EVOSCIENTIST_DEFAULT_MODE`、`EVOSCIENTIST_UI_BACKEND`）。其中的 API Key 会被忽略并给出警告；其他变量（如 `HF_TOKEN`）同样会被忽略——请在启动 `EvoSci` 前在 shell 中导出。
+- 移动或重命名项目目录后，用 `EvoSci workspace move <old_dir> <new_dir>` 迁移其会话、记忆与定时任务。
+
+**审批与安全：**
+- 默认情况下 shell 命令需要确认。可用 `--auto-approve` 跳过确认，用 `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"` 放行安全前缀，或在任意确认提示中按 `3` 对本次会话全部放行。
+- **危险模式**会跳过审批提示并解除工作区沙箱——仅在完全信任任务时使用。`--dangerous` 只作用于当前会话自己的智能体；`EvoSci config set dangerous_mode true` 会持久生效，并同样作用于后台服务与 WebUI。详见 [SECURITY.md](SECURITY.md)。
+- 关闭澄清提问：`EvoSci config set enable_ask_user false`。
+
+</details>
+
+<details>
+<summary>Python SDK / 脚本调用</summary>
+
+```python
+from EvoScientist import EvoScientist_agent
+from EvoScientist.utils import format_messages
+from langchain_core.messages import HumanMessage
+
+thread = {"configurable": {"thread_id": "1"}}
+last_len = 0
+
+for state in EvoScientist_agent.stream(
+    {"messages": [HumanMessage(content="Hi?")]},
+    config=thread,
+    stream_mode="values",
+):
+    msgs = state["messages"]
+    if len(msgs) > last_len:
+        format_messages(msgs[last_len:])
+        last_len = len(msgs)
+```
+
+</details>
+
+### 从其他设备访问
+
+后台服务（端口 `6174`）与 WebUI（端口 `4716`）默认仅监听 `127.0.0.1`。
+
+- **最安全（在不可信网络中推荐）：** 保持仅本机监听，通过 SSH 端口转发访问：
+  ```bash
+  ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>
+  ```
+- **仅限可信局域网：** 传入 `--host 0.0.0.0`（或持久化设置 `webui_host` / `langgraph_dev_host`），并将浏览器端 UI 的部署地址指向 `http://<machine-ip>:6174`。如需从其他浏览器来源访问（如 LangSmith Studio 或自定义域名），用 `EvoSci config set backend_allowed_origins https://smith.langchain.com` 加入白名单。正在运行的后台服务会保留原有的监听地址与来源设置，直到你执行 `EvoSci server stop`。
+
 > [!WARNING]
-> 后台服务（端口 `6174`）和 WebUI（端口 `4716`）默认仅监听 `127.0.0.1`。请勿在不可信网络中直接暴露 `--host 0.0.0.0`，远程访问优先使用 SSH 端口转发：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`。详见 [安全策略](SECURITY.md)。
+> 端口 `6174` 是一个无需认证、可以以你的身份执行 shell 命令的 API。切勿将其暴露在不可信网络或多人共用的机器上——请阅读 [SECURITY.md](SECURITY.md)。
 
 ---
 
 ## ⏰ 定时任务、MCP 与消息渠道
 
-- **定时任务（`/schedule`）：** 支持 Cron 表达式和自然语言调度，可选 `--rubric` 自动验收结果。
+- **定时任务（`/schedule`）：** 按 Cron 表达式定期运行科研任务（也可直接用自然语言描述）。加上 `--rubric "<checklist>"` 可对每次运行自动验收：
+  ```text
+  /schedule add "0 9 * * 1-5" "Summarize new arXiv ML papers using paper-navigator and save to /memories/daily-papers.md"
+  /schedule list | pause <id> | resume <id> | run <id> | remove <id>
+  ```
 - **MCP 工具接入：** 一行命令添加外部 MCP 服务 — `EvoSci mcp add sequential-thinking npx -- -y @modelcontextprotocol/server-sequential-thinking`（见 [MCP 指南](EvoScientist/mcp/README.md)）。
-- **消息渠道：** 支持 Telegram、Discord、Slack、飞书、企业微信/公众号、钉钉、QQ、Signal、邮件和 iMessage — `EvoSci channel setup telegram`（见 [渠道指南](EvoScientist/channels/README.md)）。
+- **消息渠道：** 在 Telegram、Discord、Slack、飞书、微信（企业微信 / 公众号 / 个人微信）、钉钉、QQ、Signal、邮件和 iMessage 之间共享同一个智能体会话 — `EvoSci channel setup`（见 [渠道指南](EvoScientist/channels/README.md)）。
 
 ## 📚 完整文档
 
-查看 **[docs/README.md](docs/README.md)** 获取全部指南、配方与示例（安装、自定义接口、订阅登录、`/goal`、`/rubric`、模型重试、`stream-json` 与文献综述示例）。
+完整文档索引见 **[docs/README.md](docs/README.md)**：
+
+- **[安装指南](docs/guides/install.md)** — 一键安装、`--cn` 镜像、Docker、代理、TLS 证书、`EvoSci update` 与卸载
+- **[自定义接口](docs/guides/custom-endpoints.md)** — vLLM、LM Studio、LiteLLM 以及兼容 OpenAI/Anthropic 的网关
+- **[订阅登录](docs/recipes/subscription-oauth.md)** — 无需 API Key，使用 Claude Pro/Max（`ccproxy`）与 ChatGPT Plus/Pro
+- **[目标（`/goal`）](docs/guides/goal.md)** 与 **[验收清单（`--rubric` / `/rubric`）](docs/guides/rubric.md)** — 自动检查的验收标准
+- **[模型重试](docs/guides/model-retry.md)** — 临时故障的重试预算与备用模型链
+- **[`stream-json` 协议](docs/guides/stream-json.md)** — 面向 SDK 与脚本的无头 JSONL 集成
+- **[macOS 7×24 小时部署](docs/recipes/deployment-macos-24h.md)** 与 **[文献综述示例](docs/examples/survey-literature/README.md)**
+- **[安全策略](SECURITY.md)** — 信任模型与漏洞报告
+
+---
 
 ## 🤝 参与贡献与社区
 

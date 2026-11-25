@@ -1,6 +1,6 @@
 # Custom OpenAI- & Anthropic-Compatible Endpoints
 
-Use `custom-openai` or `custom-anthropic` to connect EvoScientist to any compatible endpoint—vLLM, LM Studio, LiteLLM, Ollama, or an internal company gateway—without disturbing your normal vendor provider settings.
+Use `custom-openai` or `custom-anthropic` to connect EvoScientist to any compatible endpoint—vLLM, LM Studio, LiteLLM, or an internal company gateway—without disturbing your normal vendor provider settings. *(For Ollama, use the built-in `ollama` provider instead: `EvoSci config set provider ollama`. Also set `ollama_base_url` (e.g. `http://localhost:11434`) so the model pickers list your local models.)*
 
 *(One endpoint of each kind is supported at a time; multiple named endpoints are tracked in [#282](https://github.com/EvoScientist/EvoScientist/issues/282).)*
 
@@ -14,6 +14,8 @@ EvoSci config set model YOUR_MODEL_ID
 ```
 
 For an Anthropic-compatible endpoint, use `custom-anthropic`, `custom_anthropic_base_url` (**without** `/v1`—the SDK appends it), and `custom_anthropic_api_key`. Trailing slashes are stripped automatically.
+
+If the base URL is missing, the error names the environment variable (`CUSTOM_OPENAI_BASE_URL` / `CUSTOM_ANTHROPIC_BASE_URL`) even when you configure everything with `EvoSci config set`—set `custom_openai_base_url` / `custom_anthropic_base_url` as shown above.
 
 ### All Settings & Environment Variables
 

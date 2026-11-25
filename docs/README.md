@@ -14,7 +14,7 @@ New to EvoScientist? Read in this order:
 
 | Guide | What it covers |
 |---|---|
-| [Installation](guides/install.md) | One-line install options, `--cn` mirrors, proxies, custom TLS certs, `EvoSci update`, and clean uninstall |
+| [Installation](guides/install.md) | One-line install options, `--cn` mirrors, Docker, proxies, custom TLS certs, `EvoSci update`, and clean uninstall |
 | [Custom Endpoints](guides/custom-endpoints.md) | Pointing `custom-openai` / `custom-anthropic` at vLLM, LM Studio, LiteLLM, or internal gateways |
 | [Working Toward a Goal](guides/goal.md) | `/goal` in the TUI & CLI: draft acceptance criteria, review them, and grade every turn until met |
 | [Grading With a Rubric](guides/rubric.md) | Explicit checklists via `--rubric` (single-shot) or `/rubric` (interactive), exit codes, and deferral |
@@ -34,7 +34,7 @@ New to EvoScientist? Read in this order:
 | Integration | Where to look |
 |---|---|
 | **MCP Servers** | [MCP Integration Guide](../EvoScientist/mcp/README.md) — `EvoSci mcp add`, transports, wildcard tool filters, and per-agent routing |
-| **Messaging Channels** | [Channels Guide](../EvoScientist/channels/README.md) — Telegram, Discord, Slack, Feishu, WeChat, DingTalk, QQ, Signal, Email, and iMessage |
+| **Messaging Channels** | [Channels Guide](../EvoScientist/channels/README.md) — Telegram, Slack, Feishu, WeChat, and more: setup, access control, and troubleshooting |
 
 ## Contributing & Agents
 

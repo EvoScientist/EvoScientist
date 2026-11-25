@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.4.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -120,10 +120,10 @@
 
 ## ✨ Highlights
 
-- **Multi-Agent Research Team:** 6 built-in specialists (`planner`, `research`, `code`, `debug`, `data-analysis`, `writing`) plus installable expert skills (`/expert`).
+- **Multi-Agent Research Team:** Built-in planning, research, coding, debugging, data-analysis, and writing specialists, plus installable expert skills (`/expert`).
 - **Self-Evolving Memory & AutoSkills:** Automatically distills lessons from each session into a linked knowledge graph and proposes reusable skills for your review (`/autoskills`).
 - **Goals & Rubrics:** Set acceptance criteria with `/goal` or `--rubric` so a separate grader verifies outputs and drives revisions automatically.
-- **Every Surface, One Backend:** Desktop app, browser WebUI (`--ui webui`), Textual TUI, classic CLI, 10 messaging channels (`EvoSci serve`), cron schedules (`/schedule`), and headless `stream-json`.
+- **Every Surface, One Backend:** Desktop app, browser WebUI (`--ui webui`), Textual TUI, classic CLI, messaging channels like Telegram, Slack, and Feishu (`EvoSci serve`), cron schedules (`/schedule`), and headless `stream-json`.
 - **Any Provider or Subscription:** Anthropic, OpenAI, Google, OpenRouter, DeepSeek, MiniMax, NVIDIA, Ollama, custom OpenAI/Anthropic endpoints, plus Claude Pro/Max & ChatGPT Plus/Pro OAuth sign-in.
 - **Extensible via MCP & Skills:** Add MCP servers in one command (`EvoSci mcp add`) or install ready-made research workflows from [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) (`/evoskills`).
 
@@ -183,10 +183,12 @@ For mainland China mirrors (`--cn`), proxies, corporate TLS certs, and clean uni
 
 **`uv` or `pip` (Python 3.11–3.13):**
 ```bash
-uv tool install EvoScientist                       # isolated CLI tool
-uv pip install 'EvoScientist[telegram,slack]'      # optional channel extras (or all-channels)
-uv pip install git+https://github.com/EvoScientist/EvoScientist.git  # latest main
+uv tool install EvoScientist                           # isolated CLI tool
+uv tool install 'EvoScientist[telegram,slack]'         # with channel extras (or all-channels)
+uv tool install git+https://github.com/EvoScientist/EvoScientist.git  # latest main
+pip install EvoScientist                               # into an existing venv instead
 ```
+*(`EvoSci channel setup` also installs a channel's missing extras for you.)*
 
 **From source (contributors):**
 ```bash
@@ -198,13 +200,14 @@ uv run pre-commit install
 **Docker (sandboxes shell commands to mounted volumes):**
 ```bash
 mkdir -p workspace   # create first on Linux so Docker doesn't make it root-owned
+docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup   # once
 docker run -it --rm \
   --env-file .env \
   -v "$(pwd)/workspace:/workspace" \
   -v evosci-data:/home/evosci/.evoscientist \
   ghcr.io/evoscientist/evoscientist:latest
 ```
-*(Run `docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup` once to install the agent's research Python into the volume. A starter [`docker-compose.yml`](./docker-compose.yml) is also included: `docker compose run --rm evoscientist`. On Linux with host UID ≠ 1000, build locally with `docker build --build-arg UID="$(id -u)" -t evoscientist:local .`)*
+*(`--env-file .env` sets the container's environment, e.g. API keys. For `docker compose`, Linux file permissions when your UID isn't 1000, and adding the `stt`/`oauth` extras or LaTeX, see the [Docker section of the Installation Guide](docs/guides/install.md#docker).)*
 
 </details>
 
@@ -247,12 +250,12 @@ Run `EvoSci -h` for the full flag reference, or type `/help` inside a session fo
 
 **Background server & project folders:**
 - The shared background server (`EvoSci server status` / `stop`) inherits the environment of the shell that started it; restart it (`EvoSci server stop`) after changing shell exports.
-- A project `.env` only configures `EvoSci` launcher flags (`EVOSCIENTIST_DEFAULT_MODE`, `EVOSCIENTIST_UI_BACKEND`)—API keys in `.env` are ignored with a warning.
+- A project `.env` only configures `EvoSci` launcher flags (`EVOSCIENTIST_DEFAULT_MODE`, `EVOSCIENTIST_UI_BACKEND`). API keys there are ignored with a warning; other variables (e.g. `HF_TOKEN`) are ignored too—export them in your shell before starting `EvoSci`.
 - If you move or rename a project folder, migrate its sessions, memory, and schedules with `EvoSci workspace move <old_dir> <new_dir>`.
 
 **Approvals & safety:**
 - Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow safe prefixes with `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"`, or press `3` at any prompt to approve for the session.
-- **Dangerous mode** (`--dangerous` or `EvoSci config set dangerous_mode true`) disables all prompts and lifts the workspace sandbox—use only when you fully trust the task. See [SECURITY.md](SECURITY.md).
+- **Dangerous mode** skips approval prompts and lifts the workspace sandbox—use only when you fully trust the task. `--dangerous` applies to this session's own agent; `EvoSci config set dangerous_mode true` is persistent and also covers the background server and WebUI. See [SECURITY.md](SECURITY.md).
 - Disable clarifying questions with `EvoSci config set enable_ask_user false`.
 
 </details>
@@ -289,7 +292,7 @@ By default, the backend (port `6174`) and WebUI (port `4716`) bind to `127.0.0.1
   ```bash
   ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>
   ```
-- **Trusted LAN only:** Pass `--host 0.0.0.0` (or persist `webui_host` / `langgraph_dev_host`) and point the browser UI's deployment URL at `http://<machine-ip>:6174`. If accessing from another browser origin (like LangSmith Studio or a custom DNS host), allowlist it with `EvoSci config set backend_allowed_origins https://smith.langchain.com` and run `EvoSci server stop`.
+- **Trusted LAN only:** Pass `--host 0.0.0.0` (or persist `webui_host` / `langgraph_dev_host`) and point the browser UI's deployment URL at `http://<machine-ip>:6174`. If accessing from another browser origin (like LangSmith Studio or a custom DNS host), allowlist it with `EvoSci config set backend_allowed_origins https://smith.langchain.com`. A running background server keeps its old bind and origins until you run `EvoSci server stop`.
 
 > [!WARNING]
 > Port `6174` is an unauthenticated API that can execute shell commands as you. Never expose it on an untrusted network or shared multi-user machine—read [SECURITY.md](SECURITY.md).
@@ -304,13 +307,13 @@ By default, the backend (port `6174`) and WebUI (port `4716`) bind to `127.0.0.1
   /schedule list | pause <id> | resume <id> | run <id> | remove <id>
   ```
 - **MCP servers:** Add external tools in one command — `EvoSci mcp add sequential-thinking npx -- -y @modelcontextprotocol/server-sequential-thinking` ([MCP Guide](EvoScientist/mcp/README.md)).
-- **Messaging channels:** Share your agent session across Telegram, Discord, Slack, Feishu, WeChat, DingTalk, QQ, Signal, Email, and iMessage — `EvoSci channel setup telegram` ([Channels Guide](EvoScientist/channels/README.md)).
+- **Messaging channels:** Share your agent session across Telegram, Discord, Slack, Feishu, WeChat, DingTalk, QQ, Signal, Email, and iMessage — `EvoSci channel setup` ([Channels Guide](EvoScientist/channels/README.md)).
 
 ## 📚 Documentation
 
 Browse the full documentation index in **[docs/README.md](docs/README.md)**:
 
-- **[Installation Guide](docs/guides/install.md)** — One-line installer, `--cn` mirrors, proxies, TLS certs, `EvoSci update`, uninstall
+- **[Installation Guide](docs/guides/install.md)** — One-line installer, `--cn` mirrors, Docker, proxies, TLS certs, `EvoSci update`, uninstall
 - **[Custom Endpoints](docs/guides/custom-endpoints.md)** — vLLM, LM Studio, LiteLLM, and OpenAI/Anthropic-compatible gateways
 - **[Subscription Sign-In](docs/recipes/subscription-oauth.md)** — Claude Pro/Max (`ccproxy`) and ChatGPT Plus/Pro without API keys
 - **[Goals (`/goal`)](docs/guides/goal.md)** & **[Rubrics (`--rubric` / `/rubric`)](docs/guides/rubric.md)** — Self-checking acceptance criteria

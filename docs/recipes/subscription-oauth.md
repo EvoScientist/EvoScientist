@@ -15,18 +15,23 @@ EvoScientist
 
 ## Part 1: Claude Pro / Max (via `ccproxy`)
 
-1. **Install the OAuth extra:**
+1. **Install the OAuth extra:** The easiest route is `EvoSci onboard` → Anthropic → Claude Pro/Max sign-in. It installs `ccproxy` into EvoScientist's own environment (keeping its pinned dependencies) and runs the login for you, covering steps 1–2. To do it by hand on a [one-line install](../guides/install.md), reinstall with the extra, pinned to your release's tested dependencies:
    ```bash
-   pip install 'EvoScientist[oauth]'
-   # or from source: uv sync --extra oauth
+   V=$(EvoSci --version | awk '{print $2}')
+   uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
+   "$uv" tool install --force --python 3.12 --managed-python \
+     -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
+     "EvoScientist[oauth]==$V"
    which ccproxy
    ```
+   *(The reinstall drops packages EvoScientist added for MCP servers or channels—re-add them afterwards, or use `EvoSci onboard` instead. Source checkout: `uv sync --extra oauth`.)*
 
 2. **Authenticate once per machine:**
    ```bash
    ccproxy auth login claude_api
    ccproxy auth status claude_api
    ```
+   ccproxy refreshes the token itself; re-run the login only if `status` shows it expired or not authenticated.
 
 3. **Configure EvoScientist:**
    ```bash
@@ -72,7 +77,9 @@ Uses the unofficial ChatGPT/Codex OAuth sign-in from `langchain-openai` (subject
   ```bash
   ssh -L 1455:localhost:1455 <host>
   ```
-- **In Docker:** Sign in on a machine with a browser, stop EvoScientist in the container, copy `~/.evoscientist/auth/chatgpt.json` into the container's `/home/evosci/.evoscientist/auth/chatgpt.json` (owned by user `evosci`), then **sign in again on your host machine**. OpenAI rotates tokens on refresh, so two machines sharing one token file will log each other out.
+- **In Docker:** Sign in on a machine with a browser, stop EvoScientist in the container, copy `~/.evoscientist/auth/chatgpt.json` into the container's `/home/evosci/.evoscientist/auth/chatgpt.json`, then **sign in again on your host machine**. OpenAI rotates tokens on refresh, so two machines sharing one token file will log each other out.
+  - The file **and its `auth/` directory** must belong to the container user `evosci`: EvoScientist rewrites the file on every refresh.
+  - If the container later reports `ChatGPT sign-in required`, repeat both steps (copy a fresh file in, then sign in again on the host).
 
 ---
 
@@ -96,9 +103,11 @@ python -c "from EvoScientist.llm import get_chat_model; print(get_chat_model('gp
 | `ChatGPT sign-in required` | Run `EvoSci login chatgpt` (or sign in from desktop Settings, or switch back via `EvoSci config set openai_auth_mode api_key`). |
 | `Port 1455 is in use` | Close the other running sign-in or Codex CLI login and retry. |
 | OpenAI connection error to `127.0.0.1` after upgrade | Run `EvoSci server stop` so a fresh server starts without legacy ccproxy routing. |
-| `ccproxy is required ... not found` | Install the extra: `pip install 'EvoScientist[oauth]'`. |
+| `ccproxy is required ... not found` | Install the extra (Part 1, step 1). |
 | `Run: ccproxy auth login claude_api` | Authenticate Claude OAuth once via that command. |
 | `ccproxy_port 8000 is in use` | Free port `8000` or pick another via `EvoSci config set ccproxy_port <port>`. |
 | `ccproxy` config changes ignored | Run `EvoSci server stop`, restart, and check for a shadowing `.ccproxy.toml` / `ccproxy.toml`. |
+
+**Debugging Claude requests:** Run a second ccproxy on a spare port with `ccproxy serve --port 8001 --log-level debug` to see exactly what is forwarded upstream.
 
 > **Security note:** Never paste `ccproxy --log-level debug` output or `~/.evoscientist/auth/chatgpt.json` anywhere—both contain live bearer tokens. Heavy agent loops also consume your subscription's shared quota faster than normal chat.

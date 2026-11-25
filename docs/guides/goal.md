@@ -12,7 +12,7 @@ Want to supply your own checklist without drafting? Use [`/rubric set`](rubric.m
 
 | Command | What it does |
 |---|---|
-| `/goal <objective>` | Drafts acceptance criteria and opens them for your review. Once accepted, the objective is sent as your message and the agent starts working. |
+| `/goal <objective>` | Drafts acceptance criteria and opens them for your review. Once accepted, the objective is sent as your message and the agent starts working. A thread that already has a goal keeps it until you accept the new one. |
 | `/goal` (or `/goal show`, `/goal status`) | Shows the current goal, status, note, and criteria. |
 | `/goal amend <feedback>` | Revises an active or blocked goal and its criteria (goes through review again), then sends your feedback to continue. |
 | `/goal pause` | Pauses grading and tells the agent to stop pursuing the goal while keeping it saved. |
@@ -28,7 +28,7 @@ Want to supply your own checklist without drafting? Use [`/rubric set`](rubric.m
    - Under `--auto-mode`, the draft is auto-accepted with a visible warning (`Goal accepted without review (auto mode).`).
 2. **Automatic grading:** Each time the agent finishes a turn, the grader checks the work against the criteria (up to **3 passes per task**, waiting for any thread background work—see [Grading With a Rubric](rubric.md)).
 3. **Lifecycle states** (shown in the status bar):
-   - `goal: active` — Grading after every turn. If 3 passes aren't enough, it pauses and waits for your next message, `/goal amend`, or `/goal clear`.
+   - `goal: active` — Grading after every turn. If 3 passes aren't enough, the goal stays `active` and the agent waits for your next message, `/goal amend`, or `/goal clear`.
    - `goal: blocked` — The agent reported it needs input from you; grading skips that turn and your next message unblocks it.
    - `goal: paused` — Saved but not actively graded.
    - `goal: done` — Criteria passed; grading stops while the goal stays inspectable via `/goal`.
@@ -45,4 +45,5 @@ A goal uses the same thread slot as `/rubric set`:
 - **Supported surfaces:** TUI and classic interactive CLI only. Refused in messaging channels and on the `langgraph_server` gateway.
 - **Switching surfaces:** If you open the same thread in WebUI, `EvoSci serve`, or `-p`, the goal is ignored there—but stays intact when you return to the TUI/CLI.
 - **Length caps:** Objective ≤ 8,000 chars; objective + criteria combined ≤ 12,000 chars.
-- **Interrupted review:** Closing the app or pressing Ctrl+C during a review discards the draft on your next message—just run `/goal` again.
+- **Interrupted review:** Closing the app or pressing Ctrl+C during a review discards the draft on your next message—just run `/goal` again. Answering the review from a surface without goal support discards it too.
+- **Drafting errors:** Model retries and fallback switches while drafting aren't announced; a draft that fails is reported with its reason.

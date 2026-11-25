@@ -22,12 +22,24 @@ EvoSci config set auto_mode_retry_wait_seconds 600
 EvoSci config set model_retry_wait_seconds 0        # disable retries for interactive runs & memory workers
 ```
 
+**Which config counts:** The tier travels with the run, so a `-p --auto-mode` run gets the unattended budget whether it runs in-process or on the background server. Runs the server starts on its own (WebUI, background sub-agents, scheduled tasks) follow the **server's** `config.yaml`; after changing these keys, run `EvoSci server stop` so the server picks them up.
+
 ### How the Budget Works
 
-- **Clock starts on first failure:** Time spent on the initial attempt does not count against the budget (so a long generation that drops near the end still gets retried). Backoff starts at `1s` and doubles up to `10s` (interactive) or `2m` (unattended), honoring `Retry-After` headers when they fit in the remaining budget.
+- **Clock starts on first failure:** Time spent on the initial attempt does not count against the budget (so a long generation that drops near the end still gets retried). Backoff starts at `1s` and doubles up to `10s` (interactive) or `2m` (unattended), honoring `Retry-After` headers when they fit in the remaining budget (otherwise the call gives up at once).
 - **One exhausted budget ends retries for the rest of that run:** If a single model call burns through its entire budget (including inside a sub-agent), retries turn off for remaining calls in that run so a downed provider doesn't stall the run repeatedly. Starting a new message (or answering an approval/question) resets a fresh budget.
 - **Calls that recover don't penalize later calls:** If a call retries for 55s and succeeds, the next call still gets a full 60s budget.
 - **Fallback chains (`model_fallbacks`):** One attempt tries the primary model followed by the chain, and retries if *any* model in the chain failed transiently (starting from the primary again, using the shortest retry wait). If the budget runs out, the final error from the last model in the chain is raised (`-p` exits `1` with a resume hint).
+
+<details>
+<summary>Edge cases</summary>
+
+- The budget decides whether another attempt may *start*; it doesn't cut off an attempt that hangs.
+- A value that isn't a whole number of seconds (e.g. `60s`) falls back to the default, with a warning in the log.
+- Every attempt starts from the primary again, so a primary that fails permanently (wrong key, unknown model) is still called once per attempt.
+- A fallback whose request is rejected as malformed ends the chain for that attempt.
+
+</details>
 
 ## What You See
 

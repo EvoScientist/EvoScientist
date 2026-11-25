@@ -15,14 +15,19 @@ Anthropic API ◀── ccproxy ◀── EvoSci background server
 
 ## 1. Install EvoScientist With Extras
 
-Always quote brackets in `zsh`:
+Install with the [one-line installer](../guides/install.md), then add the extras pinned to the same release's tested dependencies (`EvoSci update` keeps them from then on):
 
 ```bash
-uv tool install 'EvoScientist[telegram,stt,oauth]'
+curl -fsSL https://evoscientist.ai/install.sh | bash
+V=$(EvoSci --version | awk '{print $2}')
+uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
+"$uv" tool install --force --python 3.12 --managed-python \
+  -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
+  "EvoScientist[telegram,stt,oauth]==$V"
 which EvoSci && EvoSci --version
 ```
 
-*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone.)*
+*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone, and use `<clone>/.venv/bin/EvoSci` wherever this recipe says `EvoSci`.)*
 
 ## 2. Authenticate Claude OAuth (Optional — Skip If Using an API Key)
 
@@ -45,7 +50,8 @@ uv run --with faster-whisper python -c "from faster_whisper import WhisperModel;
 
 ```bash
 EvoSci config set provider anthropic
-EvoSci config set anthropic_auth_mode oauth
+EvoSci config set anthropic_auth_mode oauth            # Claude Pro/Max (step 2) only
+# or, with an API key: EvoSci config set anthropic_api_key "sk-ant-..."
 EvoSci config set channel_enabled telegram
 EvoSci config set telegram_bot_token       "YOUR_BOT_TOKEN"
 EvoSci config set telegram_allowed_senders "YOUR_TELEGRAM_USER_ID"
@@ -65,7 +71,7 @@ Send both a text message and a voice note to your Telegram bot. Once both work, 
 ## 5. Register a `launchd` Auto-Start Service
 
 ```bash
-EVOSCI_BIN=$(which EvoSci)
+EVOSCI_BIN=$(which EvoSci)   # source checkout: EVOSCI_BIN=/path/to/clone/.venv/bin/EvoSci
 WORKDIR="/absolute/path/to/your/workspace"   # adjust to your workspace
 
 cat > ~/Library/LaunchAgents/com.evosci.serve.plist << EOF
