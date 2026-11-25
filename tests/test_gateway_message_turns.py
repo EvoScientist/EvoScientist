@@ -572,7 +572,7 @@ async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
         patch.object(
             FakeLangGraphThreadStream, "events", property(lambda self: lost())
         ),
-        pytest.raises(RuntimeError, match=_UNSHOWN),
+        pytest.raises(RuntimeError, match=r"^Lost the run's live events$"),
     ):
         await collect()
 
