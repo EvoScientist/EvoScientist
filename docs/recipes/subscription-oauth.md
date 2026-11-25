@@ -15,10 +15,10 @@ EvoScientist
 
 ## Part 1: Claude Pro / Max (via `ccproxy`)
 
-1. **Install the OAuth extra:** The easiest route is `EvoSci onboard` → Anthropic → Claude Pro/Max sign-in. It installs `ccproxy` into EvoScientist's own environment (keeping its pinned dependencies) and runs the login for you, covering steps 1–2. To do it by hand on a [one-line install](../guides/install.md), reinstall with the extra, pinned to your release's tested dependencies:
+1. **Install the OAuth extra:** The easiest route is `EvoSci onboard` → Anthropic → Claude Pro/Max sign-in. It installs `ccproxy` into EvoScientist's own environment (keeping its pinned dependencies) and runs the login for you, covering steps 1–2. To do it by hand on a [one-line install](../guides/install.md) (macOS/Linux; on Windows use `EvoSci onboard`), reinstall with the extra, pinned to your release's tested dependencies:
    ```bash
    V=$(EvoSci --version | awk '{print $2}')
-   uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
+   uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' "${EVOSCIENTIST_DATA_DIR:-$HOME/.evoscientist}/tools/uv.json")   # the installer's own uv
    "$uv" tool install --force --python 3.12 --managed-python \
      --with-executables-from ccproxy-api \
      -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
@@ -86,10 +86,10 @@ Uses the unofficial ChatGPT/Codex OAuth sign-in from `langchain-openai` (subject
 
 ## Quick Verification
 
-These use the Python inside EvoScientist's own environment (source checkout: `PY=<clone>/.venv/bin/python`):
+These use the Python inside EvoScientist's own environment (macOS/Linux; on Windows, run the sign-in through `EvoSci onboard` and check it from a normal `EvoSci` session):
 
 ```bash
-PY="$(dirname "$(readlink -f "$(command -v EvoSci)")")/python"
+PY="$(dirname "$(readlink -f "$(command -v EvoSci)")")/python"   # source checkout: PY=/path/to/clone/.venv/bin/python
 
 # Claude: check ccproxy health + model call
 curl -s http://127.0.0.1:8000/health | head -c 60

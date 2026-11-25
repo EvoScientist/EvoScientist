@@ -13,6 +13,15 @@ Anthropic API ◀── ccproxy ◀── EvoSci background server
 - macOS 13+ on Apple silicon, [uv](https://docs.astral.sh/uv), and an active Claude Pro/Max subscription (or an API key)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric user ID from [@userinfobot](https://t.me/userinfobot)
 
+> **Set up with an older version of this recipe?** Stop and remove its LaunchAgents first. Otherwise the old bot keeps polling Telegram next to the new one, and the old `com.evosci.ccproxy` job keeps running (`EvoSci server stop` doesn't stop it; the server now manages `ccproxy` itself):
+>
+> ```bash
+> for job in com.evosci.serve com.evosci.ccproxy; do
+>   launchctl unload ~/Library/LaunchAgents/$job.plist 2>/dev/null
+>   rm -f ~/Library/LaunchAgents/$job.plist
+> done
+> ```
+
 ## 1. Install EvoScientist With Extras
 
 Install with the [one-line installer](../guides/install.md):
@@ -25,7 +34,7 @@ curl -fsSL https://evoscientist.ai/install.sh | bash
 
 ```bash
 V=$(EvoSci --version | awk '{print $2}')
-uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
+uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' "${EVOSCIENTIST_DATA_DIR:-$HOME/.evoscientist}/tools/uv.json")   # the installer's own uv
 "$uv" tool install --force --python 3.12 --managed-python \
   --with-executables-from ccproxy-api \
   -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
@@ -111,7 +120,7 @@ launchctl list | grep evosci
 
 Watch live logs anytime with `tail -f /tmp/evosci.log`.
 
-A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on automatic login (**System Settings → Users & Groups**). macOS doesn't offer this while FileVault is on.
+A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on automatic login (**System Settings → Users & Groups**). macOS doesn't offer this while FileVault is on. Anyone who can restart the Mac then gets into that account without a password, so only do this with a standard (non-admin) account on a machine in a place you trust.
 
 ## Day-to-Day Management
 
@@ -129,4 +138,3 @@ A LaunchAgent starts when you log in, not at boot. To come back on its own after
 - **Voice messages arrive as `[voice: ...]` instead of text:** Confirm `stt_enabled` is `true` and `faster-whisper` is installed in the same environment as `EvoSci`.
 - **Agent asks for shell approval in Telegram:** Make sure `--auto-approve` is included in `ProgramArguments`.
 - **Workspace on an external `/Volumes/...` drive:** `KeepAlive: true` automatically retries until the drive mounts after reboot.
-- **Set up with an older version of this recipe?** It ran `ccproxy` as its own `com.evosci.ccproxy` LaunchAgent, which `EvoSci server stop` doesn't stop. The server now manages `ccproxy` itself, so remove the old job: `launchctl unload ~/Library/LaunchAgents/com.evosci.ccproxy.plist && rm ~/Library/LaunchAgents/com.evosci.ccproxy.plist`.
