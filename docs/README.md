@@ -1,32 +1,46 @@
-<h1 align="center">🍪 Examples & Recipes</h1>
+# EvoScientist Documentation
 
-<h3 align="center">Customize your EvoScientist — harness it, make it yours.</h3>
+Guides, recipes, and integration references for getting the most out of EvoScientist.
 
-| Example                                                     | Description                                                                     |
-|------------------------------------------------------------|---------------------------------------------------------------------------------|
-| [Survey literature](https://github.com/EvoScientist/EvoScientist/tree/main/docs/examples/survey-literature#literature-survey)   | Run EvoScientist with the `paper-navigator` skill to produce a bilingual, conference-grade literature survey |
+## Start Here
 
+New to EvoScientist? Read in this order:
 
-| Recipe                                                     | Description                                                                     |
-|------------------------------------------------------------|---------------------------------------------------------------------------------|
-| [macOS 24/7 Deployment](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/deployment-macos-24h.md#running-evoscientist-247-on-macos-telegram-bot--stt--ccproxy)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
-| [Subscription sign-in (Claude OAuth + ChatGPT)](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/subscription-oauth.md#using-evoscientist-with-your-ai-subscriptions-claude-oauth--chatgpt-sign-in)   | Use Claude and GPT models through your existing subscriptions — no API keys; Claude via ccproxy, ChatGPT by direct sign-in   |
+1. **[Main README](../README.md)** — What EvoScientist does, desktop app & quick install, onboarding, and everyday commands.
+2. **[Installation Guide](guides/install.md)** — One-line installer internals, mainland China mirrors (`--cn`), proxies, corporate TLS certs, upgrading, and uninstalling.
+3. **[Security Policy](../SECURITY.md)** — Trust model, approval modes, command guard, and safe LAN/SSH access.
 
+## Guides
 
-| Guide                                                      | Description                                                                     |
-|------------------------------------------------------------|---------------------------------------------------------------------------------|
-| [`stream-json` output protocol](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/stream-json.md#stream-json-output-protocol)   | Line-delimited JSON event stream (`--output-format stream-json`) for driving EvoScientist headlessly from SDK / programmatic clients |
-| [Grading a run against a rubric](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/rubric.md#grading-a-run-against-a-rubric)   | Acceptance criteria for single-shot runs (`--rubric`) and for threads in the TUI / interactive CLI (`/rubric`): what the grader checks, when grading is deferred, exit codes and limits |
-| [Working toward a goal](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/goal.md#working-toward-a-goal) | `/goal` in the TUI / interactive CLI: an objective with drafted acceptance criteria you review, graded every turn until met; amend, pause, resume and clear |
-| [Retrying transient model failures](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/model-retry.md#retrying-transient-model-failures) | What a transient provider failure is, the per-call wait budget for interactive and unattended runs and how a call that uses it up ends retries for the rest of its run (`model_retry_wait_seconds`, `auto_mode_retry_wait_seconds`), and what each surface shows |
-| [Custom OpenAI- and Anthropic-compatible endpoints](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/custom-endpoints.md#custom-openai--and-anthropic-compatible-endpoints) | Point the `custom-openai` / `custom-anthropic` providers at a gateway, vLLM, LM Studio or an internal proxy: the four settings and their env vars (and which one wins), which model id actually reaches the endpoint, and how keys are handled when the endpoint needs none |
+| Guide | What it covers |
+|---|---|
+| [Installation](guides/install.md) | One-line install options, `--cn` mirrors, proxies, custom TLS certs, `EvoSci update`, and clean uninstall |
+| [Custom Endpoints](guides/custom-endpoints.md) | Pointing `custom-openai` / `custom-anthropic` at vLLM, LM Studio, LiteLLM, or internal gateways |
+| [Working Toward a Goal](guides/goal.md) | `/goal` in the TUI & CLI: draft acceptance criteria, review them, and grade every turn until met |
+| [Grading With a Rubric](guides/rubric.md) | Explicit checklists via `--rubric` (single-shot) or `/rubric` (interactive), exit codes, and deferral |
+| [Transient Model Retries](guides/model-retry.md) | Retry budgets (`model_retry_wait_seconds`, `auto_mode_retry_wait_seconds`), fallback chains, and backoff |
+| [`stream-json` Protocol](guides/stream-json.md) | JSONL event schema (`--output-format stream-json`) for driving EvoScientist headlessly from scripts/SDKs |
 
-## Contributing a Recipe
+## Recipes & Examples
 
-See the [Contributing Guide](../CONTRIBUTING.md) for general guidelines. When adding a new recipe:
+| Page | What it covers |
+|---|---|
+| [Using AI Subscriptions (Claude OAuth + ChatGPT)](recipes/subscription-oauth.md) | Run on Claude Pro/Max (`ccproxy`) and/or ChatGPT Plus/Pro (direct sign-in) with no API keys |
+| [24/7 macOS Deployment (Telegram + STT + ccproxy)](recipes/deployment-macos-24h.md) | Run EvoScientist continuously on a Mac via `launchd` with voice transcription |
+| [Example: Literature Survey](examples/survey-literature/README.md) | Produce a bilingual conference-grade survey (68 SIGIR 2026 papers) using `paper-navigator` |
 
-- **Use `EvoSci` CLI** — recipes should work with `EvoSci serve`, `EvoSci config`, or `EvoSci onboard`
-- **Pin dependencies** — specify EvoScientist extras (e.g., `pip install -e ".[telegram,stt]"`)
-- **Include a README** with clear setup and usage instructions
-- **Keep it focused** — each recipe should demonstrate one deployment or integration scenario
-- **Add to the table** above so others can discover it
+## Integrations
+
+| Integration | Where to look |
+|---|---|
+| **MCP Servers** | [MCP Integration Guide](../EvoScientist/mcp/README.md) — `EvoSci mcp add`, transports, wildcard tool filters, and per-agent routing |
+| **Messaging Channels** | [Channels Guide](../EvoScientist/channels/README.md) — Telegram, Discord, Slack, Feishu, WeChat, DingTalk, QQ, Signal, Email, and iMessage |
+
+## Contributing & Agents
+
+- **[CONTRIBUTING.md](../CONTRIBUTING.md)** — What belongs in a PR, verification expectations, and local dev setup.
+- **[AGENTS.md](../AGENTS.md)** — Repo map, safety rules, multi-surface checklist, and verification commands for coding agents.
+
+### Adding a New Recipe
+
+Keep recipes focused on one real setup or workflow, use `EvoSci` CLI commands (`EvoSci onboard`, `EvoSci config set`, `EvoSci serve`), specify any optional extras cleanly (e.g. `'EvoScientist[telegram,stt]'`), and add a row to the table above.

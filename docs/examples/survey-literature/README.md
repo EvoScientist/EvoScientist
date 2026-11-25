@@ -1,81 +1,55 @@
-# Literature Survey
+# Example: Systematic Literature Survey
 
-Run [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) with the [`paper-navigator`](https://github.com/EvoScientist/EvoSkills/tree/main#-paper-navigator--academic-paper-discovery--reading) skill to produce a conference-grade literature survey from a topic.
+Use EvoScientist with the [`paper-navigator`](https://github.com/EvoScientist/EvoSkills/tree/main#-paper-navigator--academic-paper-discovery--reading) skill to turn a topic or venue scope into a bilingual, conference-grade literature survey with arXiv citations.
 
-## What it does
+## Sample Output
 
-You give EvoScientist:
+This worked run surveyed **68 arXiv-public SIGIR 2026 papers** across 10 sections (abstract, thematic map, four method fronts, evaluation/fairness, cross-theme trends, open questions, conclusion, and references):
 
-- a research topic or venue scope (e.g. *SIGIR 2026 full papers on arXiv*)
-- an LLM provider
-- the `paper-navigator` skill installed
+- **English:** [`SIGIR2026_public_arxiv_systematic_survey_en.md`](SIGIR2026_public_arxiv_systematic_survey_en.md)
+- **中文:** [`SIGIR2026_public_arxiv_systematic_survey_zh.md`](SIGIR2026_public_arxiv_systematic_survey_zh.md)
 
-It then:
+## How It Works
 
-1. decomposes the topic into 4–6 variant queries (sub-topic angles, terminology variants)
-2. discovers candidate papers via arXiv / Semantic Scholar / citation traversal
-3. deduplicates and clusters them into a thematic taxonomy
-4. reads each paper with structured evaluation (TLDR, contribution, limitation)
-5. drafts the survey section-by-section with inline numbered citations
-6. writes the English version first, then translates it into Chinese — both saved as local `.md` with a reference list linked back to arXiv
+Given a topic/venue, an LLM provider, and `paper-navigator`, EvoScientist:
 
-## Start here
+1. Expands the topic into 4–6 search angles and terminology variants.
+2. Discovers papers via arXiv, Semantic Scholar, and citation traversal.
+3. Deduplicates and groups them into a thematic taxonomy.
+4. Reads each paper for a structured TL;DR, key contribution, and limitation.
+5. Drafts the survey section by section with inline numbered citations.
+6. Writes the English Markdown file first, then translates it into Chinese—both saved locally with arXiv links.
 
-The full worked output for this run:
+## Run It Yourself
 
-- **English** — [`SIGIR2026_public_arxiv_systematic_survey_en.md`](SIGIR2026_public_arxiv_systematic_survey_en.md)
-- **中文** — [`SIGIR2026_public_arxiv_systematic_survey_zh.md`](SIGIR2026_public_arxiv_systematic_survey_zh.md)
+*(This example used OpenRouter with `gpt-4` and `paper-navigator` v1.1.0; any strong model works.)*
 
-Both cover 68 arXiv-public papers, organized into 10 sections (abstract → thematic map → 4 method fronts → evaluation/fairness → cross-theme trends → open questions → conclusion → references).
+1. **Install and configure a provider:**
+   ```bash
+   uv tool install EvoScientist
+   EvoSci onboard
+   ```
+   ![Onboard model selection](assets/model_selection.png)
 
-## Quick start
+2. **Install `paper-navigator` inside an `EvoSci` session:**
+   ```text
+   /evoskills
+   ```
+   ![Skill picker](assets/skill_selection.png)
 
-Requirements: an OpenRouter API key (this run used `gpt-4`; any capable model works).
+3. **Paste the prompt:**
+   ```text
+   Use paper-navigator to write a systematic survey of SIGIR 2026 papers
+   publicly available on arXiv. Generate the English version first, then
+   translate it into Chinese. Save both as local .md files.
+   ```
+   ![Prompt input](assets/prompt.png)
 
-Install EvoScientist and pick a provider:
+Both Markdown files are saved in your current workspace.
 
-```bash
-uv tool install EvoScientist
-EvoSci onboard
-```
+## Adapting to Your Own Topic
 
-![Onboard model selection](assets/model_selection.png)
-
-Install the `paper-navigator` skill:
-
-```bash
-/evoskills
-```
-
-![Skill picker](assets/skill_selection.png)
-
-Run EvoScientist and paste the prompt:
-
-```
-Use paper-navigator to write a systematic survey of SIGIR 2026 papers
-publicly available on arXiv. Generate the English version first, then
-translate it into Chinese. Save both as local .md files.
-```
-
-![Prompt input](assets/prompt.png)
-
-The two Markdown files will be written into your current workspace.
-
-## Configuration
-
-This example was generated with:
-
-| Setting | Value |
-|---|---|
-| Provider | OpenRouter |
-| Model | `gpt-4` |
-| Skill | `paper-navigator` (v1.1.0) |
-
-To swap providers, re-run `EvoSci onboard` or edit `~/.config/evoscientist/config.yaml`.
-
-## Adapting this to your own venue
-
-- **Different conference / year** — change the topic scope in the prompt; `paper-navigator` handles arXiv filtering automatically.
-- **Single-language output** — drop the "both English and Chinese" instruction.
-- **Narrower survey** — add a sub-topic constraint (e.g. *focus only on retrieval-augmented reasoning*).
-- **Tighter citation budget** — cap the paper count in the prompt (*at most 30 papers*).
+- **Different venue or year:** Swap the conference/year in the prompt.
+- **One language only:** Drop the Chinese translation sentence.
+- **Narrower scope:** Add a sub-topic constraint (e.g. *"focus only on retrieval-augmented reasoning"*).
+- **Smaller paper budget:** Cap the paper count (e.g. *"at most 30 papers"*).

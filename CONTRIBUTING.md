@@ -1,126 +1,100 @@
 # Contributing to EvoScientist
 
-We appreciate your interest and the time you spend helping improve EvoScientist. Please read the following guidelines before contributing.
+Thanks for caring enough about EvoScientist to help make it better.
 
-## How you can contribute
+Like most fast-moving AI projects, **we are bottlenecked by review bandwidth, not by code generation**. Reviewing, testing, and maintaining a PR long-term costs far more time than writing one. Please read this before opening a PR so nobody's time gets wasted.
 
-- **Report bugs and request features:** open an issue using the provided templates. Make sure to use the correct template and labels.
-- **Propose design changes:** use issues or discussion threads to outline the problem, alternatives, and trade-offs before implementing.
-- **Contribute code or docs:** submit PRs that address an open issue. They must have a clear rationale and tests where applicable.
+> **Using an AI coding agent on this repo?** Make sure it reads [AGENTS.md](AGENTS.md) first. You are still responsible for understanding, testing, and owning every line in your PR.
 
-## What we are looking for in PRs
+---
 
-We aim to keep EvoScientist focused on core functionality that benefits the majority of users. PRs should only include:
+## What Belongs in a PR (and What Doesn't)
 
-- Bug fixes / improvements to existing features
-- New features that were proposed in an issue and agreed upon with maintainers
-- Documentation updates and examples
-- Meaningful additions to the test suite
+**Always welcome:**
+- **Bug fixes** for real issues you actually hit (crashes, regressions, Windows/macOS quirks, broken provider/channel behavior)
+- **Focused improvements** to existing core features
+- **Documentation fixes, guides, and recipes** that make EvoScientist clearer to use
+- **Tests** covering edge cases or regressions
 
-If you want to add a niche or specialized workflow, consider contributing to the [EvoSkills repository](https://github.com/EvoScientist/EvoSkills) instead.
+**Discuss in an issue first (before writing code):**
+- New core features, new CLI flags, or changes to how EvoScientist behaves by default
+- New LLM providers or messaging channels
+- Architectural or UI refactors
 
-## Development setup
+**Belongs elsewhere (likely closed if opened here):**
+- **Domain-specific workflows or research pipelines** — contribute these as skills to [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) instead of baking them into core.
+- **Drive-by AI-generated refactors or "cleanup" PRs** with no clear bug or user impact.
+- **Bundled mega-PRs** that mix a bug fix, a refactor, and a new feature together.
 
-1. **Fork and clone** the repository:
-   ```bash
-   git clone https://github.com/<your-username>/EvoScientist.git
-   cd EvoScientist
-   ```
+---
 
-2. **Install dependencies** (requires [uv](https://docs.astral.sh/uv/)):
-   ```bash
-   uv sync --dev --extra all-channels
-   ```
-   The channel extras let the channel tests run; without them they are skipped.
+## High-Value Ways to Help (Without Even Opening a PR)
 
-3. **Run the test suite** (no API keys or network needed):
-   ```bash
-   uv run pytest -n auto --dist worksteal
-   ```
-   `-n auto` runs one worker per CPU; plain `uv run pytest` runs serially.
+- **Confirm or reproduce open bugs** with your OS, Python version, provider, and minimal steps.
+- **Flag duplicates or already-fixed issues** so maintainers can close stale tickets.
+- **Test open PRs** that fix a bug you care about and comment with what happened on your machine—a real test report beats opening a competing PR.
 
-4. **Run the linter:**
-   ```bash
-   uv run ruff check .
-   ```
+---
 
-## Submitting a pull request
+## PR Rules
 
-1. Create a branch from `main` with a descriptive name (e.g. `fix/session-crash`, `feat/export-csv`).
-2. Make your changes, keeping commits focused and well-described.
-3. Ensure `uv run ruff check .` and `uv run pytest` pass locally — these also run in CI.
-4. Open a PR against `main` and fill in the PR template.
-5. A maintainer will review your PR. Please be responsive to feedback.
+1. **One problem per PR.** Include the code, tests, and doc updates needed for that fix. Keep unrelated cleanups in separate PRs.
+2. **Show that it works.** State how you reproduced the bug (or tested the change), the exact commands you ran, and what you observed. *"Tests pass"* alone is not verification. For TUI or WebUI changes, attach before/after screenshots or a short recording to the PR description (don't commit them to the repo).
+3. **Respect the security model.** Read [SECURITY.md](SECURITY.md) before touching approvals, shell sandboxing, server bind hosts, or the WebUI settings API.
+4. **Stay responsive and mergeable.** Rebase on `main` if conflicts appear and reply to review feedback.
+5. **Follow our doc style.** If your PR updates docs, rewrite or trim affected sections directly—don't tack changelog paragraphs onto the end of guides.
 
-## Releases
+---
 
-The release PR (`release: vX.Y.Z`) also refreshes `constraints.txt`, which pins every dependency to its version in `uv.lock`, so installs from the release tag get the tested set:
+## Local Development Setup
+
+Requires Python **3.11–3.13** and [uv](https://docs.astral.sh/uv/).
+
+```bash
+# 1. Fork and clone
+git clone https://github.com/<your-username>/EvoScientist.git
+cd EvoScientist
+
+# 2. Install dev tools + optional channel dependencies (so channel tests run)
+uv sync --dev --extra all-channels
+
+# 3. Install pre-commit hooks (optional but recommended)
+uv run pre-commit install
+```
+
+### Running Checks Locally
+
+All tests run offline—no LLM API keys or network required.
+
+```bash
+# Fast iteration on a single file
+uv run pytest tests/path/to/test_foo.py -v
+
+# Full parallel test suite (mirrors CI)
+uv run pytest -n auto --dist worksteal
+
+# Lint + format check (both run in CI)
+uv run ruff check .
+uv run ruff format --check .
+```
+
+See [AGENTS.md](AGENTS.md) for the codebase map, multi-surface checklist, and local safety rules.
+
+---
+
+## Maintainer Note: Releases & `constraints.txt`
+
+Normal PRs never touch `constraints.txt`. Only release PRs (`release: vX.Y.Z`) regenerate it from `uv.lock` so tag-based installs pin the exact tested dependencies:
 
 ```bash
 uv lock
 uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate -o constraints.txt
 ```
 
-The file is generated; never edit it by hand. A check on the release PR flags a `uv.lock` that is out of date or a `constraints.txt` that does not match it, and the publish workflows refuse such a release. Other PRs do not need to regenerate it.
-
-Installs read the file from the release tag. A release that the publish guard refuses, or that shipped a wrong `constraints.txt`, is fixed by a new patch release. The repository uses immutable releases: a published release's tag never moves, and its name cannot be reused even after the release is deleted. jsDelivr also caches tagged files for a year.
-
-## Code style
-
-- We use [Ruff](https://docs.astral.sh/ruff/) for linting. Run `uv run ruff check .` before pushing.
-- Follow the existing code patterns and conventions in the area you're modifying.
-- Keep changes minimal and focused on the task at hand.
+`release-check.yml` rejects release PRs with a stale `uv.lock` or mismatched `constraints.txt`. Releases are immutable—fix a bad release with a new patch version rather than moving tags.
 
 ---
 
-## Project overview
+## Questions?
 
-EvoScientist is a multi-agent AI system for automated scientific experimentation and discovery. It orchestrates specialized sub-agents that plan experiments, search literature, write code, debug, analyze data, and draft reports.
-
-| Fact | Value |
-|------|-------|
-| Language | Python 3.11+ |
-| License | Apache 2.0 |
-| Framework | [DeepAgents](https://github.com/langchain-ai/deepagents) + [LangChain](https://python.langchain.com/) + [LangGraph](https://langchain-ai.github.io/langgraph/) |
-| Default model | `claude-sonnet-5-5` (Anthropic) |
-| Tests | ~890 across 36 files, no API keys needed |
-| Config file | `~/.config/evoscientist/config.yaml` |
-
-### Sub-Agents (defined in `EvoScientist/subagent.yaml`)
-
-| Agent | Purpose |
-|-------|---------|
-| `planner-agent` | Creates and updates experimental plans (no web search, no implementation) |
-| `research-agent` | Web research for methods, baselines, and datasets (Tavily search) |
-| `code-agent` | Implements experiment code and runnable scripts |
-| `debug-agent` | Reproduces failures, identifies root causes, applies minimal fixes |
-| `data-analysis-agent` | Computes metrics, creates plots, summarizes insights |
-| `writing-agent` | Drafts paper-ready Markdown experiment reports |
-
-### Data flow
-
-```txt
-User Input (CLI / TUI / 10 Channel Integrations)
-    |
-CLI (cli/) / TUI (cli/tui_*) / Channel Server (channels/)
-    |
-Main Agent (EvoScientist.py) -- create_deep_agent()
-    +-- System Prompt (prompts.py)
-    +-- Chat Model (llm/ -- multi-provider)
-    +-- Middleware: Memory (middleware/memory.py)
-    +-- Backend: CompositeBackend (backends.py)
-    |     / --> CustomSandboxBackend (workspace read/write + execute)
-    |     /skills/ --> MergedReadOnlyBackend (user > built-in)
-    |     /memory/ --> FilesystemBackend (persistent cross-session)
-    +-- MCP Tools (mcp/ -- optional, cached by config signature)
-    |
-task tool --> Delegates to Sub-Agents
-    |
-Stream Events --> Emitter --> Tracker --> State --> Rich Display / TUI
-```
-
----
-
-## Need help?
-
-Reach us on [Discord](https://discord.gg/AZ9ZMXkunY) or WeChat (linked in README).
+Come chat on [Discord](https://discord.gg/AZ9ZMXkunY) or WeChat (see [README.md](README.md#-contributing--community)).
