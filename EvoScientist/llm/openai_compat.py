@@ -125,4 +125,9 @@ def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any
     if not issubclass(cls, OpenAICompatContentMixin):
         model.__class__ = _content_compat_class(cls)
     model.__dict__["_evosci_hoist_tool_media"] = hoist_tool_media
+    compat = model.__dict__.get("_evosci_content_compat")
+    if isinstance(compat, _OpenAICompatContent):
+        # Re-applying with a different flag must reach a normalizer that is
+        # already serving requests; the learned blocked types stay.
+        compat.hoist_tool_media = hoist_tool_media
     return model

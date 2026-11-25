@@ -2152,9 +2152,7 @@ class TestCopiedModelKeepsItsSettings:
         import httpx
         import openrouter
 
-        def respond(request):
-            body = json.loads(request.content)
-            sent.append(body)
+        def reply(body: dict) -> httpx.Response:
             if body.get("stream"):
                 chunk = {
                     "id": "gen-1",
@@ -2200,11 +2198,23 @@ class TestCopiedModelKeepsItsSettings:
                 },
             )
 
+        def respond(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            return reply(body)
+
+        async def respond_async(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            return reply(body)
+
         return openrouter.OpenRouter(
             api_key="test",
             server_url="http://example.invalid/api/v1",
             client=httpx.Client(transport=httpx.MockTransport(respond)),
-            async_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+            async_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(respond_async)
+            ),
         )
 
     def test_a_copy_of_an_openrouter_model_sends_its_own_settings(self, monkeypatch):
@@ -2378,6 +2388,18 @@ class TestPatchOpenAICompatContent:
 
         assert chunks == ["c1", "c2"]
         assert received_msgs[0].content == "hello"
+
+    def test_repatching_with_a_different_hoist_flag_takes_effect(self):
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        _patch_openai_compat_content(model, hoist_tool_media=True)
+        compat = getattr(model, "_content_compat")()
+
+        _patch_openai_compat_content(model, hoist_tool_media=False)
+
+        assert getattr(model, "_content_compat")() is compat
+        assert compat.hoist_tool_media is False
 
     def test_generate_preserves_media(self):
         from langchain_core.messages import HumanMessage
