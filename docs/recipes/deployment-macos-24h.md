@@ -15,17 +15,25 @@ Anthropic API ◀── ccproxy ◀── EvoSci background server
 
 ## 1. Install EvoScientist With Extras
 
-Install with the [one-line installer](../guides/install.md), then add the extras pinned to the same release's tested dependencies (`EvoSci update` keeps them from then on):
+Install with the [one-line installer](../guides/install.md):
 
 ```bash
 curl -fsSL https://evoscientist.ai/install.sh | bash
+```
+
+**Open a new terminal** so `EvoSci` is on your `PATH`, then add the extras pinned to the same release's tested dependencies (`EvoSci update` keeps them from then on):
+
+```bash
 V=$(EvoSci --version | awk '{print $2}')
 uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
 "$uv" tool install --force --python 3.12 --managed-python \
+  --with-executables-from ccproxy-api \
   -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
   "EvoScientist[telegram,stt,oauth]==$V"
-which EvoSci && EvoSci --version
+which EvoSci ccproxy && EvoSci --version
 ```
+
+*(`--with-executables-from` puts `ccproxy` on your `PATH` for step 2. Reinstalling over an existing install drops packages EvoScientist added for MCP servers or channels—re-add them afterwards.)*
 
 *(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone, and use `<clone>/.venv/bin/EvoSci` wherever this recipe says `EvoSci`.)*
 
@@ -51,7 +59,9 @@ uv run --with faster-whisper python -c "from faster_whisper import WhisperModel;
 ```bash
 EvoSci config set provider anthropic
 EvoSci config set anthropic_auth_mode oauth            # Claude Pro/Max (step 2) only
-# or, with an API key: EvoSci config set anthropic_api_key "sk-ant-..."
+# or, with an API key:
+#   EvoSci config set anthropic_auth_mode api_key
+#   EvoSci config set anthropic_api_key "sk-ant-..."
 EvoSci config set channel_enabled telegram
 EvoSci config set telegram_bot_token       "YOUR_BOT_TOKEN"
 EvoSci config set telegram_allowed_senders "YOUR_TELEGRAM_USER_ID"
@@ -101,6 +111,8 @@ launchctl list | grep evosci
 
 Watch live logs anytime with `tail -f /tmp/evosci.log`.
 
+A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on automatic login (**System Settings → Users & Groups**). macOS doesn't offer this while FileVault is on.
+
 ## Day-to-Day Management
 
 | Action | Command |
@@ -117,3 +129,4 @@ Watch live logs anytime with `tail -f /tmp/evosci.log`.
 - **Voice messages arrive as `[voice: ...]` instead of text:** Confirm `stt_enabled` is `true` and `faster-whisper` is installed in the same environment as `EvoSci`.
 - **Agent asks for shell approval in Telegram:** Make sure `--auto-approve` is included in `ProgramArguments`.
 - **Workspace on an external `/Volumes/...` drive:** `KeepAlive: true` automatically retries until the drive mounts after reboot.
+- **Set up with an older version of this recipe?** It ran `ccproxy` as its own `com.evosci.ccproxy` LaunchAgent, which `EvoSci server stop` doesn't stop. The server now manages `ccproxy` itself, so remove the old job: `launchctl unload ~/Library/LaunchAgents/com.evosci.ccproxy.plist && rm ~/Library/LaunchAgents/com.evosci.ccproxy.plist`.

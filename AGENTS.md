@@ -83,10 +83,11 @@ To exercise a change in the real app, run it against a throwaway data folder, co
 SANDBOX=$(mktemp -d)
 export EVOSCIENTIST_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config"
 export EVOSCIENTIST_LANGGRAPH_DEV_PORT=16174 EVOSCIENTIST_WEBUI_PORT=14716 EVOSCIENTIST_CCPROXY_PORT=18000
+unset EVOSCIENTIST_MEMORIES_DIR EVOSCIENTIST_MEMORY_DIR   # would point memories outside the sandbox
 uv run --no-sync EvoSci ...
 ```
 
-The sandbox starts with no API keys. If the run needs a real model, ask the operator instead of copying keys out of their config. Stop any server you started there with `EvoSci server stop` from the same shell.
+The sandbox config has no API keys, but provider keys exported in the shell (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) still apply. Unset them unless the operator says the run may use them. If the run needs a real model, ask the operator instead of copying keys out of their config. Stop any server you started there with `EvoSci server stop` from the same shell.
 
 ## Pull requests
 

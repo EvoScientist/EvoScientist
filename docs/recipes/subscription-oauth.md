@@ -20,11 +20,12 @@ EvoScientist
    V=$(EvoSci --version | awk '{print $2}')
    uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)   # the installer's own uv
    "$uv" tool install --force --python 3.12 --managed-python \
+     --with-executables-from ccproxy-api \
      -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
      "EvoScientist[oauth]==$V"
    which ccproxy
    ```
-   *(The reinstall drops packages EvoScientist added for MCP servers or channels—re-add them afterwards, or use `EvoSci onboard` instead. Source checkout: `uv sync --extra oauth`.)*
+   *(`--with-executables-from` puts `ccproxy` on your `PATH`. The reinstall drops packages EvoScientist added for MCP servers or channels—re-add them afterwards, or use `EvoSci onboard` instead. Source checkout: `uv sync --extra oauth`.)*
 
 2. **Authenticate once per machine:**
    ```bash
@@ -85,15 +86,19 @@ Uses the unofficial ChatGPT/Codex OAuth sign-in from `langchain-openai` (subject
 
 ## Quick Verification
 
+These use the Python inside EvoScientist's own environment (source checkout: `PY=<clone>/.venv/bin/python`):
+
 ```bash
+PY="$(dirname "$(readlink -f "$(command -v EvoSci)")")/python"
+
 # Claude: check ccproxy health + model call
 curl -s http://127.0.0.1:8000/health | head -c 60
 ANTHROPIC_BASE_URL=http://127.0.0.1:8000/claude ANTHROPIC_API_KEY=ccproxy-oauth \
-python -c "from EvoScientist.llm import get_chat_model; print(get_chat_model('claude-sonnet-5-5', provider='anthropic').invoke('Reply with exactly: OK').content)"
+"$PY" -c "from EvoScientist.llm import get_chat_model; print(get_chat_model('claude-sonnet-5-5', provider='anthropic').invoke('Reply with exactly: OK').content)"
 
 # ChatGPT: model call (after `EvoSci login chatgpt`)
 EVOSCIENTIST_OPENAI_AUTH_MODE=oauth \
-python -c "from EvoScientist.llm import get_chat_model; print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly: OK').text)"
+"$PY" -c "from EvoScientist.llm import get_chat_model; print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly: OK').text)"
 ```
 
 ## Troubleshooting
