@@ -1830,22 +1830,25 @@ class LangGraphServerGateway:
                             stream_error = exc
                             event = None
                     if event is None:
-                        # The count tells a stream that never delivered (a
-                        # rejected open looks like an end) from one that
-                        # dropped mid-run.
-                        logger.warning(
-                            "The event stream of run %s on thread %s %s after "
-                            "%d of the run's envelopes; waiting for the run "
-                            "to finish",
-                            run_id,
-                            request.thread_id,
-                            "failed" if stream_error is not None else "ended",
-                            len(live_event_ids),
-                        )
                         if finished_status is None:
                             # The rest of the run can take minutes: say so now.
                             self._notify(_STREAM_CLOSED_NOTICE)
                             told_late = True
+                        # The count tells a stream that never delivered (a
+                        # rejected open looks like an end) from one that
+                        # dropped mid-run; a frontend with a sink has its line.
+                        logger.log(
+                            logging.WARNING if self.events is None else logging.INFO,
+                            "The event stream of run %s on thread %s %s after "
+                            "%d of the run's envelopes%s",
+                            run_id,
+                            request.thread_id,
+                            "failed" if stream_error is not None else "ended",
+                            len(live_event_ids),
+                            "; waiting for the run to finish"
+                            if finished_status is None
+                            else "",
+                        )
                         stream_closed = True
                         quiet_deadline = loop.time()
                         continue
@@ -1878,10 +1881,11 @@ class LangGraphServerGateway:
                                 closed_status_failures += 1
                                 if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
                                     # The run cannot be followed any more:
-                                    # end the turn with the stream's own
-                                    # error, as before #711, caused by the
-                                    # status request that failed last (a
-                                    # server that died answers neither).
+                                    # end the turn with the stream's read
+                                    # error, or with "ended before the run
+                                    # finished", caused by the status request
+                                    # that failed last (a server that died
+                                    # answers neither).
                                     if stream_error is not None:
                                         raise stream_error from status_exc
                                     raise RuntimeError(
