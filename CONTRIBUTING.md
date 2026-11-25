@@ -48,7 +48,7 @@ Like most fast-moving AI projects, **we are bottlenecked by review bandwidth, no
 
 ## Local Development Setup
 
-Requires Python **3.11–3.13** and [uv](https://docs.astral.sh/uv/).
+Requires Python **3.11+** (CI tests 3.11–3.13) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 # 1. Fork and clone
@@ -64,21 +64,7 @@ uv run pre-commit install
 
 ### Running Checks Locally
 
-All tests run offline—no LLM API keys or network required.
-
-```bash
-# Fast iteration on a single file
-uv run pytest tests/path/to/test_foo.py -v
-
-# Full parallel test suite (mirrors CI)
-uv run pytest -n auto --dist worksteal
-
-# Lint + format check (both run in CI)
-uv run ruff check .
-uv run ruff format --check .
-```
-
-See [AGENTS.md](AGENTS.md) for the codebase map, multi-surface checklist, and local safety rules.
+All tests run offline—no LLM API keys or network required. The test, lint, and format commands CI runs are in [AGENTS.md → Verifying changes](AGENTS.md#verifying-changes), along with the codebase map, the multi-surface checklist, and how to run EvoScientist without touching your own install. It's written for coding agents but works just as well for humans.
 
 ---
 
