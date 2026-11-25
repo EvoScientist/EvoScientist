@@ -2,7 +2,7 @@
 
 Constructs unified diffs from old_string/new_string tool args and renders
 them with Rich markup (color-coded lines, line numbers, gutter bars).
-Works in both Rich CLI and Textual TUI (both render Rich markup natively).
+Works in both Rich CLI and Textual TUI; both render it through diff_text().
 
 Ported from upstream deepagents-cli widgets/diff.py + config.py.
 """
@@ -13,6 +13,9 @@ import difflib
 import os
 import re
 import sys
+
+from rich.markup import RE_TAGS, escape
+from rich.text import Text
 
 # ---------------------------------------------------------------------------
 # Charset detection (simplified from upstream config.py)
@@ -40,12 +43,35 @@ BOX_DOUBLE_HORIZ = "\u2550" if _UNICODE else "="  # ═ or =
 # ---------------------------------------------------------------------------
 
 
-def _escape_markup(text: str) -> str:
+_BACKSLASHES_BEFORE_BRACKET = re.compile(r"(\\+)(?=\[)")
+
+
+def _add_backslash_before_plain_bracket(match: re.Match[str]) -> str:
+    # Rich drops one backslash before a "[" that does not start a tag.
+    if RE_TAGS.match(match.string, match.end()):
+        return match.group(1)
+    return match.group(1) + "\\"
+
+
+def _escape_markup(text: str, before_tag: bool = False) -> str:
     """Escape Rich markup characters in text.
 
-    Prevents ``[`` and ``]`` from being interpreted as Rich tags.
+    Prevents ``[...]`` from being read as a Rich tag. Rich only needs the
+    opening ``[`` escaped, so a backslash before ``]`` would show up in the
+    output.
+
+    Rich drops one backslash before a ``[`` that does not start a tag, so
+    one is added there. It also renders a run of N backslashes right before
+    a tag as N // 2 backslashes, so when ``before_tag`` is true (the text is
+    followed by a closing tag) the trailing run is doubled. Otherwise it is
+    kept as is.
     """
-    return text.replace("[", r"\[").replace("]", r"\]")
+    body = text.rstrip("\\")
+    trailing = len(text) - len(body)
+    body = _BACKSLASHES_BEFORE_BRACKET.sub(
+        _add_backslash_before_plain_bracket, escape(body)
+    )
+    return body + "\\" * (trailing * 2 if before_tag else trailing)
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +162,8 @@ def format_diff_rich(
             continue
 
         content = line[1:] if line else ""
-        escaped = _escape_markup(content)
-
         if line.startswith("-"):
+            escaped = _escape_markup(content, before_tag=True)
             gutter = f"[red bold]{GUTTER_BAR}[/red bold]"
             ln = f"[dim]{old_num:>{width}}[/dim]"
             body = f"[on #2d1515]{escaped}[/on #2d1515]"
@@ -146,6 +171,7 @@ def format_diff_rich(
             old_num += 1
             line_count += 1
         elif line.startswith("+"):
+            escaped = _escape_markup(content, before_tag=True)
             gutter = f"[green bold]{GUTTER_BAR}[/green bold]"
             ln = f"[dim]{new_num:>{width}}[/dim]"
             body = f"[on #152d15]{escaped}[/on #152d15]"
@@ -153,6 +179,7 @@ def format_diff_rich(
             new_num += 1
             line_count += 1
         elif line.startswith(" "):
+            escaped = _escape_markup(content)
             formatted.append(f"[dim]{BOX_VERTICAL}{old_num:>{width}}[/dim]  {escaped}")
             old_num += 1
             new_num += 1
@@ -210,5 +237,10 @@ def build_edit_diff(
     if not diff_lines:
         return None
 
-    diff_text = "\n".join(diff_lines)
-    return format_diff_rich(diff_text, max_lines=max_lines, title=file_path)
+    unified_diff = "\n".join(diff_lines)
+    return format_diff_rich(unified_diff, max_lines=max_lines, title=file_path)
+
+
+def diff_text(markup: str) -> Text:
+    """Parse diff markup into Rich Text without emoji shortcode substitution."""
+    return Text.from_markup(markup, emoji=False)
