@@ -418,19 +418,6 @@ def test_stage_unreadable_restart_record_is_dropped(started):
     assert not (paths.SERVER_HOME / "restart-after-update.json").exists()
 
 
-def test_service_stop_is_server_stop_with_notice(monkeypatch):
-    stopped = []
-    monkeypatch.setattr(
-        manager, "stop_server", lambda **_k: stopped.append("server") or 42
-    )
-
-    result = CliRunner().invoke(app, ["service", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == ["server"]
-    assert "deprecated" in result.output
-
-
 def _recorded_server(monkeypatch, record, stopped: list) -> None:
     """*record* names the running server; ending it is recorded in
     *stopped*."""
@@ -661,8 +648,7 @@ def test_server_status_shows_starting_record_as_starting(monkeypatch):
     assert "not responding" not in output
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_names_lock_held_without_record(monkeypatch, group):
+def test_stop_names_lock_held_without_record(monkeypatch):
     from EvoScientist.langgraph_dev import server_home
 
     stopped: list = []
@@ -671,7 +657,7 @@ def test_stop_names_lock_held_without_record(monkeypatch, group):
     monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
     monkeypatch.setattr(manager, "stop_server", lambda **_k: stopped.append(1))
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 1
     assert stopped == []
@@ -813,16 +799,6 @@ def test_server_status_shows_no_ccproxy_without_oauth(monkeypatch):
     _oauth(monkeypatch, False)
 
     assert "ccproxy" not in _status_output()
-
-
-def test_service_start_is_server_start_with_notice(started, tmp_path):
-    result = CliRunner().invoke(app, ["service", "start", "--workdir", str(tmp_path)])
-
-    assert result.exit_code == 0, result.output
-    assert started == [(tmp_path, "langgraph_server")]
-    output = " ".join(result.output.split())
-    assert "deprecated" in output
-    assert "EvoSci server stop" in output
 
 
 def test_server_start_oauth_points_at_server_ccproxy(started, tmp_path, monkeypatch):
@@ -1019,10 +995,9 @@ def test_stop_asks_recorded_server_on_another_port(busy_server, monkeypatch):
     assert all(":7000" in url for url in asked)
 
 
-@pytest.mark.parametrize("command", [["server", "stop"], ["service", "stop"]])
-def test_stop_without_terminal_refuses_busy_server(busy_server, command):
+def test_stop_without_terminal_refuses_busy_server(busy_server):
     """It serves every project; a script must say --yes to end its work."""
-    result = CliRunner().invoke(app, command)
+    result = CliRunner().invoke(app, ["server", "stop"])
 
     assert result.exit_code == 1
     assert busy_server == []
@@ -1064,13 +1039,12 @@ def test_stop_question_says_what_a_stop_does(
     assert unsaid not in output
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_with_yes_stops_busy_server(busy_server, monkeypatch, group):
+def test_stop_with_yes_stops_busy_server(busy_server, monkeypatch):
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     monkeypatch.setattr(ccproxy_mod, "stop_recorded_ccproxy", lambda: None)
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 0, result.output
     assert busy_server == ["server"]
@@ -1146,15 +1120,14 @@ def test_server_status_names_unreadable_lock(monkeypatch):
     assert "server.lock" in "".join(output.split())
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_names_unreadable_lock(monkeypatch, group):
+def test_stop_names_unreadable_lock(monkeypatch):
     from EvoScientist.langgraph_dev import server_home
 
     monkeypatch.setattr(manager, "read_record", lambda **_k: None)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.UNKNOWN)
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 1
     output = " ".join(result.output.split())

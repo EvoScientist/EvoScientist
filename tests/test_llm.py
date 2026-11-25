@@ -4886,23 +4886,6 @@ class TestChatGPTSignIn:
         assert built == []
         assert mock_init.call_args[1]["base_url"] == "https://example.test/v1"
 
-    def test_whole_tool_args_patch_is_installed(self, built, monkeypatch):
-        import langchain_openai.chat_models.base as base
-
-        current = base._convert_responses_chunk_to_generation_chunk
-        monkeypatch.setattr(
-            base,
-            "_convert_responses_chunk_to_generation_chunk",
-            getattr(current, "__wrapped__", current),
-        )
-        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
-
-        get_chat_model("gpt-6-sol", provider="openai")
-
-        assert hasattr(
-            base._convert_responses_chunk_to_generation_chunk, "_evosci_whole_tool_args"
-        )
-
     def test_not_signed_in_reaches_the_caller(self, tmp_path, monkeypatch):
         from EvoScientist.llm.chatgpt_oauth import SIGN_IN_HINT, NotSignedInError
 

@@ -97,7 +97,7 @@ def test_interactive_refusal_or_failure_says_how_to_retry(answer, login_ok):
 
     assert exc_info.value.exit_code == 1
     assert SIGN_IN_AGAIN in _printed(mock_console)
-    assert "Start EvoSci in a terminal" not in _printed(mock_console)
+    assert SIGN_IN_HINT not in _printed(mock_console)
     assert mock_login.called is (answer is True)
 
 

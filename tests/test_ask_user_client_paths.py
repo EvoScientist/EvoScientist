@@ -116,7 +116,7 @@ class TestChannelsConsumerAskUserResume:
 
         resolved: list[dict] = []
 
-        async def _fake_resolve(_msg, interrupt_data, _session_key):
+        async def _fake_resolve(_msg, interrupt_data, _session_key, **_kwargs):
             resolved.append(interrupt_data)
             question = interrupt_data["questions"][0]["question"]
             return ANSWER_RED if question == "Colour?" else ANSWER_LARGE

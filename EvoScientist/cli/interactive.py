@@ -1111,9 +1111,15 @@ def cmd_interactive(
                             human_budget_exhausted=human_budget_exhausted,
                         )
 
+                    from ..stream.display import received_media_state
+
+                    received_files = received_media_state(msg.media)
+
                     def _channel_ask_user(ask_user_data: dict) -> dict:
                         """Send ask_user questions to channel user and wait for reply."""
-                        return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+                        return _ch_mod.channel_ask_user_prompt(
+                            ask_user_data, msg, received_files=received_files
+                        )
 
                     # ---- Slash command dispatch (cmd_manager, not the agent) ----
                     # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
@@ -1215,7 +1221,7 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
-                            received_media=msg.media,
+                            received_files=received_files,
                             work_dir=str(state["dirs"].work_dir),
                             media_dir=state["dirs"].sandbox_media_dir,
                             routes=file_tool_routes(state["dirs"].workspace),
@@ -1763,17 +1769,6 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup failed",
-                        exc_info=True,
-                    )
                 # Best-effort: guard so a DB lookup failure here can't
                 # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")

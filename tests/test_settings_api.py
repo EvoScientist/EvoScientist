@@ -153,6 +153,7 @@ class TestGet:
             "revision",
             "config_error",
             "instance",
+            "chatgpt",
         }
         assert body["revision"] is None
         assert "dangerous_mode" in body["read_only"]
@@ -205,6 +206,65 @@ class TestGet:
         assert "sk-x" not in str(body["config_error"])
         assert body["setup_needed"] is False
         assert body["restart_required"] is False
+
+
+class TestChatGPTSignIn:
+    """The page shows whether a ChatGPT plan is signed in, never the token."""
+
+    def test_not_signed_in(self, server, monkeypatch, tmp_path):
+        monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+        body = server.get("/api/settings").json()
+        assert body["chatgpt"] == {"signed_in": False, "plan": None, "problem": None}
+
+    def test_signed_in_shows_the_plan_and_no_token(self, server, monkeypatch, tmp_path):
+        from datetime import UTC, datetime, timedelta
+
+        from langchain_openai.chatgpt_oauth import (
+            _ChatGPTToken,
+            _FileChatGPTOAuthTokenProvider,
+        )
+
+        from EvoScientist.llm import chatgpt_oauth
+
+        monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
+        path = chatgpt_oauth.token_path()
+        path.parent.mkdir(parents=True)
+        _FileChatGPTOAuthTokenProvider(path=path).save(
+            _ChatGPTToken(
+                access_token="tok-access-secret",
+                refresh_token="tok-refresh-secret",
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+                account_id="acct_1",
+                plan_type="plus",
+            )
+        )
+
+        response = server.get("/api/settings")
+
+        assert response.json()["chatgpt"] == {
+            "signed_in": True,
+            "plan": "plus",
+            "problem": None,
+        }
+        assert "tok-access-secret" not in response.text
+        assert "tok-refresh-secret" not in response.text
+
+    def test_page_loads_when_the_sign_in_module_does_not(self, server, monkeypatch):
+        import sys
+
+        import EvoScientist.llm as llm_pkg
+
+        monkeypatch.delattr(llm_pkg, "chatgpt_oauth", raising=False)
+        monkeypatch.setitem(sys.modules, "EvoScientist.llm.chatgpt_oauth", None)
+
+        response = server.get("/api/settings")
+
+        assert response.status_code == 200
+        assert response.json()["chatgpt"] == {
+            "signed_in": False,
+            "plan": None,
+            "problem": "sign-in is unavailable",
+        }
 
 
 class TestSetupNeeded:

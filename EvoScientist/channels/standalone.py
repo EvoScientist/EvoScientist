@@ -280,18 +280,12 @@ async def _async_main(
             if previous is not None:
                 signal.signal(sig, previous)
         if consumer is not None:
-            from ..middleware.code_interpreter import aclose_code_interpreters
-
-            # A forced exit leaves the consumer's turns running; settle them
-            # first so none reopens an interpreter after the close.
+            # A forced exit leaves the consumer's turns running; settle them.
             current = asyncio.current_task()
             leftover = [t for t in asyncio.all_tasks() if t is not current]
-            try:
-                for t in leftover:
-                    t.cancel()
-                await asyncio.gather(*leftover, return_exceptions=True)
-            finally:
-                await aclose_code_interpreters()
+            for t in leftover:
+                t.cancel()
+            await asyncio.gather(*leftover, return_exceptions=True)
     return channel_exited
 
 
