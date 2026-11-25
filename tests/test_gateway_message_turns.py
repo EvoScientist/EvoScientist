@@ -2497,6 +2497,37 @@ async def test_read_back_value_snapshots_start_at_the_runs_input_checkpoint(
     assert _texts(events) == ["Hello world"]
 
 
+async def test_read_back_with_an_unreadable_input_checkpoint_shows_no_other_runs_answer(
+    quiet_poll,
+):
+    """The input checkpoint cannot be read, so the pre-run read is the only
+    baseline, and it predates the other run's answer: the read-back's value
+    snapshots must not show that answer as this turn's."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _values(_THIS_RUN_DONE["messages"][:-1], "1-0"),
+        _values(_THIS_RUN_DONE["messages"], "1-1"),
+        _lifecycle("run-1", "completed"),
+    ]
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=run, live_limit=0)
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _start_after_another_run(
+        stream, threads, input_checkpoint={"values": _AFTER_THE_OTHER_RUN}
+    )
+    get_history = threads.get_history
+
+    async def input_checkpoint_unreadable(thread_id, **kwargs):
+        if (kwargs.get("metadata") or {}).get("source") == "input":
+            raise RuntimeError("checkpoint pruned")
+        return await get_history(thread_id, **kwargs)
+
+    threads.get_history = input_checkpoint_unreadable
+
+    events = await _turn(gateway, "hi")
+
+    assert "Other answer" not in "".join(_texts(events))
+
+
 async def test_state_completion_without_an_input_checkpoint_raises(quiet_poll):
     stream = FakeLangGraphThreadStream(
         THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0

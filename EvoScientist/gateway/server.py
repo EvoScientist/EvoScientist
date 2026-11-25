@@ -1477,20 +1477,11 @@ class LangGraphServerGateway:
 
         The pre-run read can be stale: a run the new one queued behind adds its
         messages after it. ``None`` when the run has no input checkpoint (a
-        resumed run writes none) or it cannot be read (logged).
+        resumed run writes none); a failed read raises.
         """
-        try:
-            history = await self.thread_store.client.threads.get_history(
-                thread_id, limit=1, metadata={"run_id": run_id, "source": "input"}
-            )
-        except Exception:
-            logger.warning(
-                "Could not read the input checkpoint of run %s on thread %s",
-                run_id,
-                thread_id,
-                exc_info=True,
-            )
-            return None
+        history = await self.thread_store.client.threads.get_history(
+            thread_id, limit=1, metadata={"run_id": run_id, "source": "input"}
+        )
         if not history:
             return None
         values = history[0].get("values")
@@ -1989,11 +1980,26 @@ class LangGraphServerGateway:
                 # A new message's run starts at its input checkpoint: what
                 # the thread had then is not this turn's, also in the value
                 # snapshots the read-back replays.
-                start_messages = (
-                    None
-                    if isinstance(request.message, Command)
-                    else await self._run_start_messages(request.thread_id, run_id)
-                )
+                start_messages = None
+                if not isinstance(request.message, Command):
+                    try:
+                        start_messages = await self._run_start_messages(
+                            request.thread_id, run_id
+                        )
+                    except Exception:
+                        # The pre-run read can predate another run's answer:
+                        # judged against it, the value snapshots would show
+                        # that answer as this turn's. Skip them, as when the
+                        # pre-run read itself fails.
+                        logger.warning(
+                            "Could not read the input checkpoint of run %s on "
+                            "thread %s; value-message processing disabled for "
+                            "the read-back",
+                            run_id,
+                            request.thread_id,
+                            exc_info=True,
+                        )
+                        processor.stop_value_messages()
                 if start_messages is not None:
                     processor.mark_messages_seen(start_messages)
                 # The new connection replays earlier runs first. Its
