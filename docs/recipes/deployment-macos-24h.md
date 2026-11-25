@@ -21,6 +21,8 @@ Anthropic API ◀── ccproxy ◀── EvoSci background server
 >   rm -f ~/Library/LaunchAgents/$job.plist
 > done
 > ```
+>
+> The old recipe also pointed `anthropic_base_url` at that proxy. If you're switching to an API key, clear it and restart the background server, or requests keep going to the stopped proxy: `EvoSci config set anthropic_base_url "" && EvoSci server stop`. (OAuth mode sets the proxy URL itself, so it doesn't matter there.)
 
 ## 1. Install EvoScientist With Extras
 

@@ -110,7 +110,7 @@ EVOSCIENTIST_OPENAI_AUTH_MODE=oauth \
 | OpenAI connection error to `127.0.0.1` after upgrade | Run `EvoSci server stop` so a fresh server starts without legacy ccproxy routing. |
 | `ccproxy is required ... not found` | Install the extra (Part 1, step 1). |
 | `Run: ccproxy auth login claude_api` | Authenticate Claude OAuth once via that command. |
-| `ccproxy: command not found` (e.g. after `EvoSci update`) | `EvoSci update` doesn't keep `ccproxy` on your `PATH`, but it is still installed next to `EvoSci`: run `E=$(command -v EvoSci); "$(dirname "$(readlink "$E" || echo "$E")")/ccproxy" auth login claude_api`, or re-run the sign-in from `EvoSci onboard`. |
+| `ccproxy: command not found` (e.g. after `EvoSci update`) | `EvoSci update` doesn't keep `ccproxy` on your `PATH`, but it is still installed next to `EvoSci`: run `E=$(command -v EvoSci); "$(dirname "$(readlink "$E" \|\| echo "$E")")/ccproxy" auth login claude_api`, or re-run the sign-in from `EvoSci onboard`. |
 | `ccproxy_port 8000 is in use` | Free port `8000` or pick another via `EvoSci config set ccproxy_port <port>`. |
 | `ccproxy` config changes ignored | Run `EvoSci server stop`, restart, and check for a shadowing `.ccproxy.toml` / `ccproxy.toml`. |
 
