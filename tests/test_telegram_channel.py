@@ -415,6 +415,30 @@ async def test_start_rejected_token_stays_out_of_the_error(rejected_token):
     assert shut_down == bots
 
 
+async def test_start_closes_the_bot_when_initialize_fails(monkeypatch):
+    telegram = pytest.importorskip("telegram")
+    from telegram.error import NetworkError
+
+    shut_down = []
+    real_shutdown = telegram.Bot.shutdown
+
+    async def _offline(self, *_args, **_kwargs):
+        raise NetworkError("offline")
+
+    async def _record_shutdown(self):
+        shut_down.append(self)
+        await real_shutdown(self)
+
+    monkeypatch.setattr(telegram.Bot, "get_me", _offline)
+    monkeypatch.setattr(telegram.Bot, "shutdown", _record_shutdown)
+    channel = TelegramChannel(TelegramConfig(bot_token="123456:token"))
+
+    with pytest.raises(NetworkError):
+        await channel.start()
+
+    assert shut_down == [channel._app.bot]
+
+
 async def test_run_rejected_token_stops_without_logging_it(rejected_token, caplog):
     from EvoScientist.channels.logging_caps import quiet_credential_url_loggers
 

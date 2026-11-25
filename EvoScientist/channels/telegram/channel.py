@@ -90,10 +90,12 @@ class TelegramChannel(Channel):
 
         try:
             await self._app.initialize()
-        except InvalidToken:
-            # initialize() opened the bot's HTTP clients before getMe failed,
-            # and Application.shutdown() skips an app that never initialized.
+        except Exception as exc:
+            # Application.shutdown() skips an app whose initialize() failed,
+            # so the bot's HTTP clients are closed here.
             await self._app.bot.shutdown()
+            if not isinstance(exc, InvalidToken):
+                raise
             # The library's message quotes the rejected token in full.
             raise ChannelError(
                 "Telegram rejected the bot token; check telegram_bot_token"
