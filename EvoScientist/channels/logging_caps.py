@@ -40,7 +40,9 @@ def quiet_credential_url_loggers() -> None:
 _URL_USERINFO_RE = re.compile(r"(://)[^\s/?#]*@")
 # The query, up to whitespace or a quote, so a URL quoted inside an exception
 # message keeps its closing quote. Commas and brackets are valid inside a query.
-_URL_QUERY_RE = re.compile(r"(://[^\s?#]*)\?[^\s'\"]*")
+# The query is optional so that a URL without one is consumed in one step:
+# requiring it rescans a long run of text once per "://" in it.
+_URL_QUERY_RE = re.compile(r"(://[^\s?#]*)(\?[^\s'\"]*)?")
 
 
 def scrub_url_secrets(text: str) -> str:
@@ -52,7 +54,7 @@ def scrub_url_secrets(text: str) -> str:
     if "://" not in text:
         return text
     text = _URL_USERINFO_RE.sub(r"\1***@", text)
-    return _URL_QUERY_RE.sub(r"\1?***", text)
+    return _URL_QUERY_RE.sub(lambda m: m[1] + ("?***" if m[2] else ""), text)
 
 
 class RedactingFormatter(logging.Formatter):
