@@ -83,7 +83,7 @@ slack = ["slack-sdk>=3.27", "aiohttp>=3.9"]
 wechat = ["pycryptodome>=3.20", "aiohttp>=3.9", "qrcode>=7.4", "certifi>=2024.0"]
 feishu = ["lark-oapi>=1.4.0"]
 qq = [
-    "qq-botpy>=1.0",
+    "qq-botpy>=1.2.0",
     "cryptography>=41.0",
     "qrcode>=7.4",
 ]
@@ -98,7 +98,7 @@ all-channels = [
     "qrcode>=7.4",
     "certifi>=2024.0",
     "lark-oapi>=1.4.0",
-    "qq-botpy>=1.0",
+    "qq-botpy>=1.2.0",
     "cryptography>=41.0",
     "qrcode>=7.4",
 ]

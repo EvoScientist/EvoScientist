@@ -470,3 +470,33 @@ class TestQQCapabilitiesButtons:
 
         assert QQ.inline_buttons is True
         assert QQ.supports("inline_buttons") is True
+
+
+class TestQQClientLogging:
+    async def test_client_keeps_botpy_debug_logs_off(self, monkeypatch):
+        """botpy logs request headers, token included, at DEBUG."""
+        import logging
+
+        import pytest
+
+        botpy_logging = pytest.importorskip("botpy.logging")
+        from EvoScientist.channels.qq.channel import _make_bot_class
+
+        botpy_logger = logging.getLogger("botpy")
+        saved_level = botpy_logger.level
+        monkeypatch.setattr(botpy_logger, "handlers", [])
+        # botpy only attaches its file handler while this list is empty.
+        monkeypatch.setattr(botpy_logging, "_ext_handlers", [])
+        try:
+            # What botpy's import does when "--debug" is in sys.argv.
+            botpy_logger.setLevel(logging.DEBUG)
+            channel = QQChannel(QQConfig(app_id="id", app_secret="secret"))
+
+            _make_bot_class(channel)()
+
+            assert not botpy_logger.isEnabledFor(logging.DEBUG)
+            assert not any(
+                isinstance(h, logging.FileHandler) for h in botpy_logger.handlers
+            )
+        finally:
+            botpy_logger.setLevel(saved_level)
