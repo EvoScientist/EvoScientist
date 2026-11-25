@@ -696,6 +696,9 @@ _SUBAGENTS_DIR = _PACKAGE_DIR / "subagents"
 # too, so a server started with such a flag is not drift, while a change in
 # the file still is.
 _FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
+# The port is compared on its own. Live-applied settings
+# (``settings_api.LIVE_FIELDS``) take effect without a restart, so they are
+# left out as well; see ``_server_config_fingerprint``.
 _UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"})
 
 
@@ -721,14 +724,21 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     this session set that a lasting server does not get, come from
     ``config.yaml``, not from ``config``, so every caller hashes what the
     server reads.
+    The live-applied settings (``settings_api.LIVE_FIELDS``) are left out
+    too, since they take effect without a restart.
     """
     from EvoScientist.config.settings import load_config
+    from EvoScientist.langgraph_dev.settings_api import LIVE_FIELDS
 
     file_config = load_config()
     parts = []
     for field in dataclass_fields(EvoScientistConfig):
         name = field.name
-        if is_client_only(name) or name in _UNFINGERPRINTED_FIELDS:
+        if (
+            is_client_only(name)
+            or name in _UNFINGERPRINTED_FIELDS
+            or name in LIVE_FIELDS
+        ):
             continue
         from_file = name in _FINGERPRINT_FILE_FIELDS or _withheld_flag(
             _ENV_MAPPINGS.get(name, "")
