@@ -1278,9 +1278,9 @@ async def test_finished_run_with_lost_live_events_is_read_back(
     assert stream.event_streams_opened == 2
     assert gateway.thread_store.client.runs.cancelled == []
     assert "Lost the live events of run run-1" in caplog.text
-    # The run's custom middleware line arrives once, from the read-back.
+    # The run's custom middleware line arrives once, with the read-back's events.
     custom = ["fallback: fb"] if run is _SUBAGENT_RUN else []
-    assert gateway.events.lines == [*custom, server_mod._RECOVERED_TURN_NOTICE]
+    assert gateway.events.lines == [server_mod._RECOVERED_TURN_NOTICE, *custom]
 
 
 async def test_read_back_drops_the_earlier_runs_it_replays(quiet_poll):
@@ -2643,10 +2643,23 @@ async def test_prompt_held_by_the_read_back_is_shown_without_a_boundary(
     assert gateway.thread_store.client.runs.cancelled == []
 
 
-async def test_nothing_to_show_from_state_shows_no_line(quiet_poll):
+@pytest.mark.parametrize(
+    ("run", "read_back_limit"),
+    [
+        pytest.param(_TEXT_RUN, 0, id="nothing-read-back"),
+        pytest.param(
+            [*_TEXT_RUN[:4], _values(_NEW_STATE["messages"], "1-3"), _TEXT_RUN[4]],
+            5,
+            id="read-back-holds-a-snapshot",
+        ),
+    ],
+)
+async def test_nothing_to_show_from_state_shows_no_line(
+    run, read_back_limit, quiet_poll
+):
     """The live stream showed the whole answer; only the run's end was lost."""
     stream = FakeLangGraphThreadStream(
-        THREAD_ID, events=_TEXT_RUN, live_limit=4, read_back_limit=0
+        THREAD_ID, events=run, live_limit=4, read_back_limit=read_back_limit
     )
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
     _state_after_start(stream, threads, {"values": _NEW_STATE})
@@ -2656,3 +2669,100 @@ async def test_nothing_to_show_from_state_shows_no_line(quiet_poll):
 
     assert events[-1]["response"] == "Hello world"
     assert gateway.events.lines == []
+
+
+_FALLBACK_NOTICE_RUN = [
+    _lifecycle("run-1", "running"),
+    _text("Before", "1-0"),
+    {
+        "method": "custom",
+        "params": {
+            "namespace": [],
+            "data": {
+                "evoscientist": {
+                    "kind": "fallback_notice",
+                    "text": "fb",
+                    "style": "red",
+                }
+            },
+        },
+        "event_id": "1-1",
+    },
+    _text(" after", "1-2"),
+    _finish("1-3"),
+    _lifecycle("run-1", "completed"),
+]
+
+
+@pytest.mark.parametrize(
+    ("read_back_limit", "shown", "lost"),
+    [
+        pytest.param(
+            None,
+            [server_mod._RECOVERED_TURN_NOTICE, "Before", "fallback: fb", " after"],
+            False,
+            id="read-back",
+        ),
+        pytest.param(3, [], True, id="read-back-cut-then-lost"),
+    ],
+)
+async def test_read_back_shows_middleware_notices_with_its_events(
+    read_back_limit, shown, lost, quiet_poll
+):
+    """Held read-back events and their notices are shown together, in order."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=_FALLBACK_NOTICE_RUN,
+        live_limit=0,
+        read_back_limit=read_back_limit,
+    )
+    gateway, _ = _gateway(stream)
+    gateway.events = _Notices()
+
+    async def turn() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id=THREAD_ID)
+        ):
+            if event["type"] == "text":
+                gateway.events.lines.append(event["content"])
+
+    if lost:
+        with pytest.raises(RuntimeError, match=r"^Lost the run's live events$"):
+            async with asyncio.timeout(GUARD_SECONDS):
+                await turn()
+    else:
+        async with asyncio.timeout(GUARD_SECONDS):
+            await turn()
+
+    assert gateway.events.lines == shown
+
+
+async def test_resume_turn_shows_a_held_prompt_without_a_checkpoint_of_its_own(
+    quiet_poll,
+):
+    """A resume that pauses again in the same step writes no checkpoint of its
+    own: the prompt the read-back holds is still shown."""
+    run = [
+        _lifecycle("run-1", "running"),
+        _tool("tool-finished", "1-0", tool_name="execute", output="a.txt"),
+        _input_requested([]),
+        _lifecycle("run-1", "interrupted"),
+    ]
+    gateway, threads = _resumed_gateway(
+        read_back_limit=3, interrupts=[_STATE_INTERRUPT], run=run
+    )
+    stream = threads.streams[THREAD_ID]
+    respond = stream.run.respond_command
+
+    async def respond_without_a_checkpoint(params):
+        reply = await respond(params)
+        del threads.run_states[(THREAD_ID, stream.run.run_id)]
+        return reply
+
+    stream.run.respond_command = respond_without_a_checkpoint
+
+    events = await _turn(gateway, _RESUME)
+
+    assert [e["type"] for e in events if e["type"] in ("interrupt", "error")] == [
+        "interrupt"
+    ]

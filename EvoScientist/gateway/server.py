@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1691,7 +1692,8 @@ class LangGraphServerGateway:
 
             Returns the turn's events for it and the envelope, or ``None``
             for an envelope that is not this run's or that a read-back
-            already had live.
+            already had live. A read-back's middleware events are left to
+            ``released``, which shows them with the held events.
             """
             nonlocal accepting_run, emitted_interrupt
             raw_event = _as_raw_map(event)
@@ -1708,8 +1710,8 @@ class LangGraphServerGateway:
                     return None
                 if not read_back:
                     live_event_ids.add(event_id)
-            out: list[GraphEvent] = list(
-                self._deliver_custom_middleware_events(raw_event)
+            out: list[GraphEvent] = (
+                [] if read_back else self._deliver_custom_middleware_events(raw_event)
             )
             event_map: dict[str, Any] = dict(raw_event)
             out.extend(tracker.process(event_map))
@@ -1717,6 +1719,14 @@ class LangGraphServerGateway:
                 emitted_interrupt = emitted_interrupt or _is_interrupt_event(normalized)
                 out.append(normalized)
             return out, event_map
+
+        def released(
+            held: list[tuple[dict[str, Any], list[GraphEvent]]],
+        ) -> Iterator[GraphEvent]:
+            """Held read-back events, each envelope's middleware events first."""
+            for event_map, turn_events in held:
+                yield from self._deliver_custom_middleware_events(event_map)
+                yield from turn_events
 
         try:
             # Every turn reads ``stream.events`` and stops at its own run's end
@@ -1833,7 +1843,7 @@ class LangGraphServerGateway:
                     if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
                         end_event = event_map
             # The live connection is closed before any read-back opens another.
-            recovered: list[GraphEvent] = []
+            recovered: list[tuple[dict[str, Any], list[GraphEvent]]] = []
             if end_event is None:
                 # The run finished and its live envelopes stopped coming:
                 # read it back from a new connection, which replays it.
@@ -1864,7 +1874,7 @@ class LangGraphServerGateway:
                         if fed is None:
                             continue
                         turn_events, event_map = fed
-                        recovered.extend(turn_events)
+                        recovered.append((event_map, turn_events))
                         if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
                             end_event = event_map
                             break
@@ -1872,7 +1882,7 @@ class LangGraphServerGateway:
                     # A failed run ends the turn with its error, not a result.
                     if _root_lifecycle_phase(end_event) != "failed":
                         self._notify_recovered_turn()
-                    for turn_event in recovered:
+                    for turn_event in released(recovered):
                         yield turn_event
             if end_event is None:
                 # The read-back did not reach the run's end: thread state
@@ -1896,9 +1906,9 @@ class LangGraphServerGateway:
                     )
                 except Exception as exc:
                     raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
-                if not history:
-                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
-                state = history[0]
+                # No checkpoint (a resume that pauses again in the same step
+                # writes none): a prompt the read-back holds is still a result.
+                state = history[0] if history else {}
                 # What the turn has not shown of its answer, matched
                 # against the text shown so far. A resumed run has no input
                 # checkpoint, and a run it queued behind can add messages
@@ -1925,12 +1935,14 @@ class LangGraphServerGateway:
                 if (
                     answer_events is None
                     and not state_events
-                    and not any(_is_interrupt_event(e) for e in recovered)
+                    and not any(
+                        _is_interrupt_event(e) for _, held in recovered for e in held
+                    )
                 ):
                     raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
-                if recovered or state_events:
+                if any(held for _, held in recovered) or state_events:
                     self._notify_recovered_turn()
-                for turn_event in [*recovered, *state_events]:
+                for turn_event in itertools.chain(released(recovered), state_events):
                     emitted_interrupt = emitted_interrupt or _is_interrupt_event(
                         turn_event
                     )
