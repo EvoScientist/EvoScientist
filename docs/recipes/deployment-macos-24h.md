@@ -125,7 +125,7 @@ A LaunchAgent starts when you log in, not at boot. To come back on its own after
 ## Troubleshooting
 
 - **`zsh: no matches found`:** Quote package extras (`'EvoScientist[telegram,stt,oauth]'`).
-- **Claude OAuth token expired/missing:** Run `ccproxy auth login claude_api` and check `ccproxy auth status claude_api`.
+- **Claude OAuth token expired/missing:** Run `ccproxy auth login claude_api` and check `ccproxy auth status claude_api`. If `ccproxy` isn't found (`EvoSci update` doesn't keep it on your `PATH`), call it from next to `EvoSci`: `"$(dirname "$(readlink -f "$(command -v EvoSci)")")/ccproxy" auth login claude_api`.
 - **Voice messages arrive as `[voice: ...]` instead of text:** Confirm `stt_enabled` is `true` and `faster-whisper` is installed in the same environment as `EvoSci`.
 - **Agent asks for shell approval in Telegram:** Make sure `--auto-approve` is included in `ProgramArguments`.
 - **Workspace on an external `/Volumes/...` drive:** `KeepAlive: true` automatically retries until the drive mounts after reboot.
