@@ -248,6 +248,7 @@ class GraphCache:
                 return graph
             with self._lock:
                 generation = self._generation
+                build_mcp_stamp = self._mcp_stamp
             graph = _build(graph_id, dirs)
             with self._lock:
                 # An ``mcp.yaml`` edit during the build is not in this graph:
@@ -260,6 +261,11 @@ class GraphCache:
                 if self._generation != generation:
                     # Another access invalidated while this built: serve the
                     # graph but do not cache it.
+                    return graph
+                if self._mcp_stamp != build_mcp_stamp:
+                    # The file was replaced while this built, even if the same
+                    # bytes came back. Which bytes the build read is unknowable
+                    # here, so serve the graph but do not cache it.
                     return graph
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]

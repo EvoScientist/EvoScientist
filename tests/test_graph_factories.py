@@ -281,6 +281,28 @@ def test_graph_cache_caches_a_first_build_on_broken_mcp_yaml(
     assert graphs.get("EvoScientist", dirs) is not first
 
 
+def test_graph_cache_restore_during_a_build_is_not_cached(
+    builds, monkeypatch, tmp_path
+):
+    """A broken edit restored before the build ends still leaves it unknown
+    which bytes the build read. The graph is served but not cached."""
+    _write_mcp_yaml("servers: {}\n", 1)
+
+    def build_during_restore(graph_id, dirs):
+        _write_mcp_yaml("servers: [unclosed\n", 2)
+        _write_mcp_yaml("servers: {}\n", 3)
+        builds.append((graph_id, dirs))
+        return object()
+
+    monkeypatch.setattr(factories, "_build", build_during_restore)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    restored = graphs.get("EvoScientist", dirs)
+    builds.clear()
+    assert graphs.get("EvoScientist", dirs) is not restored
+    assert builds == [("EvoScientist", dirs)]
+
+
 def test_graph_cache_invalidation_during_a_build_is_not_cached(
     builds, monkeypatch, tmp_path
 ):
