@@ -2401,6 +2401,32 @@ class TestPatchOpenAICompatContent:
         assert model._content_compat() is compat  # type: ignore[attr-defined]
         assert compat.hoist_tool_media is False
 
+    def test_repatching_a_copy_leaves_the_originals_normalizer_alone(self):
+        import copy as copy_module
+
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        _patch_openai_compat_content(model, hoist_tool_media=True)
+        compat = model._content_compat()  # type: ignore[attr-defined]
+
+        # A shallow copy carries the original's normalizer and owner weakref.
+        shallow = copy_module.copy(model)
+        _patch_openai_compat_content(shallow, hoist_tool_media=False)
+
+        assert compat.hoist_tool_media is True
+        assert shallow._content_compat() is not compat  # type: ignore[attr-defined]
+        assert shallow._content_compat().hoist_tool_media is False  # type: ignore[attr-defined]
+
+        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        tool = ToolMessage(
+            content=[{"type": "text", "text": "see"}, img], tool_call_id="1"
+        )
+        # The original still hoists the tool media out of the tool message.
+        assert any(isinstance(m, HumanMessage) for m in compat._prepare([tool]))
+
     def test_generate_preserves_media(self):
         from langchain_core.messages import HumanMessage
 

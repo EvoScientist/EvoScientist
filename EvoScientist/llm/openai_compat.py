@@ -126,8 +126,14 @@ def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any
         model.__class__ = _content_compat_class(cls)
     model.__dict__["_evosci_hoist_tool_media"] = hoist_tool_media
     compat = model.__dict__.get("_evosci_content_compat")
-    if isinstance(compat, _OpenAICompatContent):
+    owner = model.__dict__.get("_evosci_content_compat_owner")
+    if (
+        isinstance(compat, _OpenAICompatContent)
+        and isinstance(owner, weakref.ReferenceType)
+        and owner() is model
+    ):
         # Re-applying with a different flag must reach a normalizer that is
-        # already serving requests; the learned blocked types stay.
+        # already serving this model's requests. A copy shares the original's
+        # normalizer until its first request, and must leave it alone.
         compat.hoist_tool_media = hoist_tool_media
     return model
