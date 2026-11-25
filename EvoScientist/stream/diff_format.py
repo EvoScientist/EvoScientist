@@ -97,7 +97,7 @@ def format_diff_rich(
     """Format a unified diff with line numbers and colors.
 
     Args:
-        diff: Unified diff string.
+        diff: Single-file unified diff string.
         max_lines: Maximum number of content lines to show before truncating.
             ``None`` means unlimited.
         title: Optional title shown above the diff (e.g. file path).
@@ -110,13 +110,17 @@ def format_diff_rich(
 
     lines = diff.splitlines()
 
+    # The ``---`` / ``+++`` file headers only come before the first hunk.
+    # Inside a hunk, a removed "-- comment" line reads "--- comment" and is
+    # content, not a header.
+    first_hunk = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines)
+    )
+    body_lines = lines[first_hunk:]
+
     # Compute stats (skip +++ / --- headers)
-    additions = sum(
-        1 for ln in lines if ln.startswith("+") and not ln.startswith("+++")
-    )
-    deletions = sum(
-        1 for ln in lines if ln.startswith("-") and not ln.startswith("---")
-    )
+    additions = sum(1 for ln in body_lines if ln.startswith("+"))
+    deletions = sum(1 for ln in body_lines if ln.startswith("-"))
 
     # Find max line number for column width
     max_line = 0
@@ -143,13 +147,13 @@ def format_diff_rich(
     old_num = new_num = 0
     line_count = 0
 
-    for line in lines:
+    for index, line in enumerate(lines):
         if max_lines is not None and line_count >= max_lines:
             formatted.append(f"\n[dim]... ({len(lines) - line_count} more lines)[/dim]")
             break
 
         # Skip file headers
-        if line.startswith(("---", "+++")):
+        if index < first_hunk and line.startswith(("---", "+++")):
             continue
 
         # Hunk headers — update line numbers, don't display
