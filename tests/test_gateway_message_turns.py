@@ -518,31 +518,38 @@ async def test_events_from_another_run_are_dropped():
     assert _texts(events) == ["mine"]
 
 
-async def test_events_stream_ending_early_raises():
-    stream = FakeLangGraphThreadStream(THREAD_ID, events=[])
-
-    async def ended() -> AsyncIterator[dict[str, Any]]:
-        await stream.run.started.wait()
-        return
-        yield
-
+async def test_events_stream_ending_early_while_status_is_unreadable_raises(
+    quiet_poll,
+):
+    """A turn whose stream ended waits for its run by status; when the status
+    cannot be read three times in a row it fails as "ended before the run finished"."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
     gateway, _ = _gateway(stream)
-    with (
-        patch.object(
-            FakeLangGraphThreadStream,
-            "events",
-            property(lambda self: ended()),
-        ),
-        pytest.raises(RuntimeError, match="ended before the run finished"),
-    ):
+    runs = gateway.thread_store.client.runs
+
+    async def unreadable(thread_id: str, run_id: str) -> dict[str, Any]:
+        runs.gets.append((thread_id, run_id))
+        raise ConnectionError("server busy")
+
+    runs.get = unreadable
+
+    with pytest.raises(RuntimeError, match="ended before the run finished"):
         await _turn(gateway, "hi")
+
+    assert len(runs.gets) == 3
+    # The run that could not be followed is cancelled.
+    assert runs.cancelled == [(THREAD_ID, ["run-1"])]
 
 
 @pytest.mark.parametrize("drop", ["raises", "ends"])
 async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
     """A stream lost between the envelope's prompt and the root
-    ``interrupted`` fails the turn without cancelling or repairing the run
-    the prompt belongs to."""
+    ``interrupted``: the turn waits for the run and reads it back. With
+    nothing more to recover (the read-back ends the same way, the state is
+    empty) it fails, without cancelling or repairing the run the prompt
+    belongs to."""
     stream = FakeLangGraphThreadStream(THREAD_ID, events=[])
 
     async def lost() -> AsyncIterator[dict[str, Any]]:
@@ -565,11 +572,13 @@ async def test_events_stream_lost_after_a_prompt_keeps_the_pause(drop):
         patch.object(
             FakeLangGraphThreadStream, "events", property(lambda self: lost())
         ),
-        pytest.raises((ConnectionError, RuntimeError)),
+        pytest.raises(RuntimeError, match=r"^Lost the run's live events$"),
     ):
         await collect()
 
     assert [e["type"] for e in events] == ["interrupt", "error"]
+    # It waited for the run by its status, then read the run back.
+    assert gateway.thread_store.client.runs.gets == [(THREAD_ID, "run-1")]
     assert gateway.thread_store.client.runs.cancelled == []
     assert threads.state_updates == []
 
@@ -2139,11 +2148,14 @@ async def test_stream_ending_after_a_finished_status_reads_the_run_back(quiet_po
         return run
 
     runs.get = get_and_end
+    gateway.events = _Notices()
 
     events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["Hello", " world"]
     assert stream.event_streams_opened == 2
+    # The run had finished when the stream ended: no wait to announce.
+    assert gateway.events.lines == [server_mod._RECOVERED_TURN_NOTICE]
 
 
 def _two_runs_state(later: bool) -> dict[str, Any]:
@@ -2906,3 +2918,385 @@ async def test_state_completion_keeps_the_result_of_a_reused_call_id(
         "tool_result",
         "done",
     ]
+
+
+# --- #711: the event stream ends or fails before the run does ---------------
+
+
+class _StatusAfter:
+    """``runs.get`` answering ``running`` for the first *n* requests, then the
+    run's own status. ``read_back_early`` records a read-back opened while the
+    run still ran (an assert here would be swallowed: the gateway counts any
+    exception from ``runs.get`` as a failed status request)."""
+
+    def __init__(self, gateway, stream, n: int, fail_first: int = 0) -> None:
+        self.runs = gateway.thread_store.client.runs
+        self.stream = stream
+        self.n = n
+        self.fail_first = fail_first
+        self.calls = 0
+        self.read_back_early = False
+        self.real = self.runs.get
+        self.runs.get = self
+
+    async def __call__(self, thread_id: str, run_id: str) -> dict[str, Any]:
+        self.calls += 1
+        # The read-back waits until the run has finished.
+        self.read_back_early |= self.stream.event_streams_opened != 1
+        if self.calls <= self.fail_first:
+            raise ConnectionError("server busy")
+        if self.calls <= self.n:
+            return {"run_id": run_id, "status": "running"}
+        return await self.real(thread_id, run_id)
+
+
+@pytest.mark.parametrize(
+    "live_end",
+    [True, ConnectionError("read failed")],
+    ids=["stream-ends", "stream-raises"],
+)
+@pytest.mark.parametrize("live_limit", [0, 2], ids=["nothing-live", "partly-live"])
+@pytest.mark.parametrize(
+    ("run", "interrupts"),
+    [
+        pytest.param(_TEXT_RUN, None, id="text"),
+        pytest.param(_TOOL_RUN, None, id="tool-call"),
+        pytest.param(_PAUSE_RUN, [], id="pause"),
+    ],
+)
+async def test_run_outlives_its_event_stream_and_is_read_back(
+    run, interrupts, live_limit, live_end, quiet_poll, caplog
+):
+    """The stream ends (or fails) while the run works on: the turn waits for
+    the run's status, then reads the finished run back. Its events equal a
+    live turn's, and the run is not cancelled."""
+    expected = await _live_events(run, interrupts=interrupts)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=run, live_limit=live_limit, live_end=live_end
+    )
+    gateway, _ = _gateway(stream, interrupts=interrupts)
+    status = _StatusAfter(gateway, stream, n=2)
+    gateway.events = _Notices()
+
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
+        events = await _turn(gateway, "hi")
+
+    assert events == expected
+    # Said when the stream closed, not again with the result.
+    assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]
+    assert status.calls == 3
+    assert not status.read_back_early
+    assert gateway.thread_store.client.runs.cancelled == []
+    how = "failed" if isinstance(live_end, Exception) else "ended"
+    closed = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith(
+            f"The event stream of run run-1 on thread {THREAD_ID} {how} after "
+            f"{live_limit} of the run's envelopes"
+        )
+    ]
+    # The notice is the frontend's line: the log does not warn again.
+    assert [record.levelname for record in closed] == ["INFO"]
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["running", "finished"])
+async def test_closed_stream_warns_a_turn_without_a_frontend(
+    finished, quiet_poll, caplog
+):
+    """With no sink to show the notice, the log is the only trace; it says
+    the turn waits only while the run has not finished."""
+    if finished:
+        stream = _EndAfterStatusStream(THREAD_ID, events=_TEXT_RUN)
+        gateway, _ = _gateway(stream)
+        runs = gateway.thread_store.client.runs
+        get = runs.get
+
+        async def get_and_end(thread_id: str, run_id: str) -> dict[str, Any]:
+            run = await get(thread_id, run_id)
+            stream.status_asked.set()
+            return run
+
+        runs.get = get_and_end
+    else:
+        stream = FakeLangGraphThreadStream(
+            THREAD_ID, events=_TEXT_RUN, live_limit=1, live_end=True
+        )
+        gateway, _ = _gateway(stream)
+        _StatusAfter(gateway, stream, n=1)
+
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
+        await _turn(gateway, "hi")
+
+    closed = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("The event stream of run run-1")
+    ]
+    assert [record.levelname for record in closed] == ["WARNING"]
+    waits = closed[0].getMessage().endswith("waiting for the run to finish")
+    assert waits is not finished
+
+
+async def test_stream_ending_after_the_run_finished_is_read_back(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert gateway.thread_store.client.runs.gets == [(THREAD_ID, "run-1")]
+
+
+async def test_run_failing_after_its_stream_ended_raises_its_own_error(quiet_poll):
+    failed = _lifecycle("run-1", "failed")
+    failed["params"]["data"]["error"] = "boom"
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=[_lifecycle("run-1", "running"), failed],
+        live_limit=1,
+        live_end=True,
+    )
+    stream.run.status = "error"
+    gateway, _ = _gateway(stream)
+    _StatusAfter(gateway, stream, n=1)
+
+    with pytest.raises(RuntimeError, match="Run failed: boom"):
+        await _turn(gateway, "hi")
+
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_failed_status_requests_after_the_stream_ended_are_retried(
+    quiet_poll,
+):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    status = _StatusAfter(gateway, stream, n=0, fail_first=2)
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert status.calls == 3
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_failed_status_requests_must_come_in_a_row_to_end_the_turn(
+    quiet_poll,
+):
+    """Two failures, a success that says ``running``, two more failures: the
+    count starts again, so the turn still recovers."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    real = runs.get
+    answers = ["fail", "fail", "running", "fail", "fail", "real"]
+
+    async def flaky(thread_id: str, run_id: str) -> dict[str, Any]:
+        answer = answers.pop(0)
+        if answer == "fail":
+            raise ConnectionError("server busy")
+        if answer == "running":
+            return {"run_id": run_id, "status": "running"}
+        return await real(thread_id, run_id)
+
+    runs.get = flaky
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert answers == []
+
+
+async def test_a_stream_error_the_status_cannot_settle_keeps_its_message(
+    quiet_poll,
+):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID,
+        events=_TEXT_RUN,
+        live_limit=0,
+        live_end=ConnectionError("read failed"),
+    )
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+
+    raised: list[Exception] = []
+
+    async def unreadable(thread_id: str, run_id: str) -> dict[str, Any]:
+        raised.append(ConnectionError(f"server busy {len(raised)}"))
+        raise raised[-1]
+
+    runs.get = unreadable
+
+    with pytest.raises(ConnectionError, match="read failed") as caught:
+        await _turn(gateway, "hi")
+
+    assert caught.value.__cause__ is raised[-1]
+
+
+async def test_closed_stream_asks_for_the_status_once_per_poll_window(quiet_poll):
+    """After the stream closed the turn waits a poll window between status
+    requests instead of asking again at once."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    real = runs.get
+    loop = asyncio.get_running_loop()
+    asked: list[float] = []
+    answered: list[float] = []
+
+    async def running_for_a_while(thread_id: str, run_id: str) -> dict[str, Any]:
+        asked.append(loop.time())
+        try:
+            if asked[-1] < asked[0] + 0.5:
+                return {"run_id": run_id, "status": "running"}
+            return await real(thread_id, run_id)
+        finally:
+            answered.append(loop.time())
+
+    runs.get = running_for_a_while
+
+    events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+    assert len(asked) >= 2
+    # Each answer is followed by a full 0.2 s window before the next request.
+    assert min(asked[i + 1] - answered[i] for i in range(len(asked) - 1)) >= 0.15
+
+
+async def test_status_failures_before_the_stream_closed_do_not_count(quiet_poll):
+    """Two failed status requests while the stream is still open, then it
+    ends and one more fails: the turn keeps waiting for the run."""
+    stream = FakeLangGraphThreadStream(THREAD_ID, events=_TEXT_RUN)
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+    real = runs.get
+    answers = ["fail", "fail", "fail", "real"]
+    two_failed = asyncio.Event()
+
+    async def flaky(thread_id: str, run_id: str) -> dict[str, Any]:
+        answer = answers.pop(0)
+        if len(answers) == 2:
+            two_failed.set()
+        if answer == "fail":
+            raise ConnectionError("server busy")
+        return await real(thread_id, run_id)
+
+    runs.get = flaky
+
+    async def quiet_then_closed() -> AsyncIterator[dict[str, Any]]:
+        await stream.run.started.wait()
+        yield _lifecycle("run-1", "running")
+        await two_failed.wait()
+
+    real_events = FakeLangGraphThreadStream.events
+    opened: list[object] = []
+
+    def events(self: FakeLangGraphThreadStream) -> AsyncIterator[dict[str, Any]]:
+        opened.append(self)
+        if len(opened) == 1:
+            return quiet_then_closed()
+        return real_events.fget(self)
+
+    with patch.object(FakeLangGraphThreadStream, "events", property(events)):
+        turn_events = await _turn(gateway, "hi")
+
+    assert _texts(turn_events) == ["Hello", " world"]
+    assert answers == []
+
+
+async def test_resume_turn_outlives_its_event_stream(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=1, live_end=True
+    )
+    gateway, _ = _gateway(stream, interrupts=[{"id": "interrupt-0"}])
+    _StatusAfter(gateway, stream, n=1)
+
+    events = await _turn(
+        gateway, Command(resume={"interrupt-0": {"decisions": [{"type": "approve"}]}})
+    )
+
+    assert _texts(events) == ["Hello", " world"]
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_run_the_server_no_longer_has_after_the_stream_ended(quiet_poll):
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    start = stream.run.start
+
+    async def start_and_forget(**kwargs: Any) -> dict[str, Any]:
+        reply = await start(**kwargs)
+        stream.run.runs.clear()
+        return reply
+
+    stream.run.start = start_and_forget
+
+    with pytest.raises(RuntimeError, match="Run run-1 no longer exists"):
+        await _turn(gateway, "hi")
+
+    assert gateway.thread_store.client.runs.cancelled == []
+
+
+async def test_status_is_asked_as_soon_as_the_stream_ends(monkeypatch):
+    """No wait before the first status request, and none after a finished
+    status once the stream is closed: with long windows the turn still ends
+    at once."""
+    monkeypatch.setattr(server_mod, "_QUIET_POLL_SECONDS", 30.0)
+    monkeypatch.setattr(server_mod, "_FINISHED_GRACE_SECONDS", 30.0)
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=1, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+
+    async with asyncio.timeout(5):
+        events = await _turn(gateway, "hi")
+
+    assert _texts(events) == ["Hello", " world"]
+
+
+async def test_giving_up_keeps_the_last_status_error_as_the_cause(quiet_poll):
+    """A server that died answers neither the stream nor the status: the
+    turn's error carries the status request's error as its cause."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, live_end=True
+    )
+    gateway, _ = _gateway(stream)
+    runs = gateway.thread_store.client.runs
+
+    async def dead(thread_id: str, run_id: str) -> dict[str, Any]:
+        raise ConnectionError("All connection attempts failed")
+
+    runs.get = dead
+
+    with pytest.raises(RuntimeError, match="ended before the run finished") as caught:
+        await _turn(gateway, "hi")
+
+    assert isinstance(caught.value.__cause__, ConnectionError)
+
+
+async def test_closed_stream_completed_from_the_state_says_it_once(quiet_poll):
+    """The line shown when the stream closed covers a result that comes from
+    the run's checkpoint too."""
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=2, read_back_limit=0, live_end=True
+    )
+    gateway, threads = _gateway(stream, values=_EARLIER_STATE)
+    _state_after_start(stream, threads, {"values": _NEW_STATE})
+    _StatusAfter(gateway, stream, n=1)
+    gateway.events = _Notices()
+
+    events = await _turn(gateway, "hi")
+
+    assert events[-1]["response"] == "Hello world"
+    assert gateway.events.lines == [server_mod._STREAM_CLOSED_NOTICE]

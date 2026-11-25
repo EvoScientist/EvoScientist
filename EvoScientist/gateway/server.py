@@ -64,11 +64,18 @@ _READ_BACK_FIRST_EVENT_SECONDS = 5.0
 _QUIET_POLL_SECONDS = 5.0
 # How long a run that has finished gets to deliver its last live envelopes.
 _FINISHED_GRACE_SECONDS = 2.0
+# Status requests in a row that may fail after the turn's event stream ended,
+# before the turn ends with the stream's error.
+_CLOSED_STATUS_ATTEMPTS = 3
 _FINISHED_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _ROOT_END_PHASES = frozenset({"completed", "failed", "interrupted"})
 _LOST_LIVE_EVENTS_ERROR = "Lost the run's live events"
 # The run succeeded, but neither its read-back nor its checkpoint shows the reply.
 _UNSHOWN_REPLY_ERROR = "The run finished, but its reply could not be shown"
+_STREAM_CLOSED_NOTICE = (
+    "Lost the live connection to this run; "
+    "the result is shown when the run has finished."
+)
 _RECOVERED_TURN_NOTICE = (
     "The live events of this turn were lost; "
     "the result is shown now that the run has finished."
@@ -1473,18 +1480,23 @@ class LangGraphServerGateway:
         messages = values.get("messages") if isinstance(values, dict) else None
         return messages if isinstance(messages, list) else []
 
+    def _notify(self, text: str) -> None:
+        """One line in the turn for an attended frontend; headless ones
+        (``events is None``) have the WARNING log only."""
+        if self.events is None:
+            return
+        try:
+            self.events.emit_notice(text)
+        except Exception:
+            logger.debug("turn notice failed", exc_info=True)
+
     def _notify_recovered_turn(self) -> None:
         """Tell an attended frontend that this turn's result arrives late.
 
         The TUI and the Rich CLI carry a sink and show the line in the turn;
         headless frontends (``events is None``) have the WARNING log only.
         """
-        if self.events is None:
-            return
-        try:
-            self.events.emit_notice(_RECOVERED_TURN_NOTICE)
-        except Exception:
-            logger.debug("recovered-turn notice failed", exc_info=True)
+        self._notify(_RECOVERED_TURN_NOTICE)
 
     async def get_process_status(
         self,
@@ -1788,18 +1800,58 @@ class LangGraphServerGateway:
                 loop = asyncio.get_running_loop()
                 finished_status: str | None = None
                 status_failures = 0
+                # A stream that ends or fails before the run's end does not
+                # end the run (#711): wait for it by its status instead.
+                stream_closed = False
+                stream_error: Exception | None = None
+                closed_status_failures = 0
+                # The turn already said its result comes when the run finishes.
+                told_late = False
                 quiet_deadline = loop.time() + _QUIET_POLL_SECONDS
                 while end_event is None:
-                    event = await events.next_within(
-                        max(0.0, quiet_deadline - loop.time())
-                    )
+                    wait = max(0.0, quiet_deadline - loop.time())
+                    if stream_closed:
+                        await asyncio.sleep(wait)
+                        event = _QUIET
+                    else:
+                        try:
+                            event = await events.next_within(wait)
+                        except Exception as exc:
+                            # langgraph-sdk 0.4 ends ``stream.events`` on a
+                            # read error and keeps the error to itself; this
+                            # catches a transport that raises.
+                            logger.warning(
+                                "Reading the event stream of run %s on thread "
+                                "%s failed",
+                                run_id,
+                                request.thread_id,
+                                exc_info=True,
+                            )
+                            stream_error = exc
+                            event = None
                     if event is None:
-                        if finished_status is not None:
-                            # The run has finished: read it back.
-                            break
-                        raise RuntimeError(
-                            "Thread event stream ended before the run finished"
+                        if finished_status is None:
+                            # The rest of the run can take minutes: say so now.
+                            self._notify(_STREAM_CLOSED_NOTICE)
+                            told_late = True
+                        # The count tells a stream that never delivered (a
+                        # rejected open looks like an end) from one that
+                        # dropped mid-run; a frontend with a sink has its line.
+                        logger.log(
+                            logging.WARNING if self.events is None else logging.INFO,
+                            "The event stream of run %s on thread %s %s after "
+                            "%d of the run's envelopes%s",
+                            run_id,
+                            request.thread_id,
+                            "failed" if stream_error is not None else "ended",
+                            len(live_event_ids),
+                            "; waiting for the run to finish"
+                            if finished_status is None
+                            else "",
                         )
+                        stream_closed = True
+                        quiet_deadline = loop.time()
+                        continue
                     if event is _QUIET:
                         if finished_status is not None:
                             break
@@ -1809,7 +1861,7 @@ class LangGraphServerGateway:
                             )
                         except _RunGoneError:
                             raise
-                        except Exception:
+                        except Exception as status_exc:
                             # Keep waiting. A long silent tool call polls
                             # for its whole length: one traceback is enough.
                             status_failures += 1
@@ -1825,7 +1877,27 @@ class LangGraphServerGateway:
                                 exc_info=status_failures == 1,
                             )
                             finished_status = None
+                            if stream_closed:
+                                closed_status_failures += 1
+                                if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
+                                    # The run cannot be followed any more:
+                                    # end the turn with the stream's read
+                                    # error, or with "ended before the run
+                                    # finished", caused by the status request
+                                    # that failed last (a server that died
+                                    # answers neither).
+                                    if stream_error is not None:
+                                        raise stream_error from status_exc
+                                    raise RuntimeError(
+                                        "Thread event stream ended before the "
+                                        "run finished"
+                                    ) from status_exc
+                        else:
+                            closed_status_failures = 0
                         run_ended = finished_status is not None
+                        if run_ended and stream_closed:
+                            # No live envelope can come any more.
+                            break
                         quiet_deadline = loop.time() + (
                             _FINISHED_GRACE_SECONDS
                             if run_ended
@@ -1882,7 +1954,7 @@ class LangGraphServerGateway:
                             break
                 if end_event is not None:
                     # A failed run ends the turn with its error, not a result.
-                    if _root_lifecycle_phase(end_event) != "failed":
+                    if not told_late and _root_lifecycle_phase(end_event) != "failed":
                         self._notify_recovered_turn()
                     for turn_event in released(recovered):
                         yield turn_event
@@ -1946,7 +2018,9 @@ class LangGraphServerGateway:
                         if emitted_interrupt
                         else _UNSHOWN_REPLY_ERROR
                     )
-                if any(held for _, held in recovered) or state_events:
+                if not told_late and (
+                    any(held for _, held in recovered) or state_events
+                ):
                     self._notify_recovered_turn()
                 for turn_event in itertools.chain(released(recovered), state_events):
                     emitted_interrupt = emitted_interrupt or _is_interrupt_event(

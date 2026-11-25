@@ -681,6 +681,7 @@ class FakeLangGraphThreadStream:
         stay_open: bool = False,
         live_limit: int | None = None,
         read_back_limit: int | None = None,
+        live_end: BaseException | bool | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.queued_events = list(events or [])
@@ -702,6 +703,9 @@ class FakeLangGraphThreadStream:
         # all of it, or its first ``read_back_limit`` envelopes.
         self.live_limit = live_limit
         self.read_back_limit = read_back_limit
+        # After ``live_limit`` envelopes the live connection stays silent;
+        # with ``live_end`` it ends instead (``True``) or raises the error.
+        self.live_end = live_end
 
     async def __aenter__(self) -> FakeLangGraphThreadStream:
         self.entered = True
@@ -740,6 +744,10 @@ class FakeLangGraphThreadStream:
             for event in self.queued_events[: self.live_limit]:
                 yield event
             self.lost_live_events = True
+            if isinstance(self.live_end, BaseException):
+                raise self.live_end
+            if self.live_end:
+                return
         await asyncio.Event().wait()
 
     async def _thread_events(self) -> AsyncIterator[dict[str, Any]]:
