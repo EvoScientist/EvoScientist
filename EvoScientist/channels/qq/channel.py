@@ -92,7 +92,14 @@ def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
 
     class _Bot(botpy.Client):
         def __init__(self):
-            super().__init__(intents=intents)
+            # botpy sets its logger to DEBUG when "--debug" is in sys.argv
+            # (as with `EvoSci serve --debug`) and then logs every request's
+            # headers, including the Authorization token. log_level overrides
+            # that once the Client is built. ext_handlers=False stops botpy
+            # from writing its own botpy.log into the working directory.
+            super().__init__(
+                intents=intents, log_level=logging.INFO, ext_handlers=False
+            )
 
         async def on_ready(self):
             logger.info(f"QQ bot ready: {self.robot.name}")

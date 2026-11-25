@@ -27,6 +27,7 @@ from .capabilities import ChannelCapabilities
 from .debug import TraceMixin, debug_trace_enabled
 from .formatter import UnifiedFormatter
 from .interaction import is_slash_command
+from .logging_caps import scrub_url_secrets
 from .plugin import ChannelMeta, ChannelPlugin
 
 _logger = logging.getLogger(__name__)
@@ -1339,7 +1340,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                     self._startup_event.set()
                 break
             except ChannelError as e:
-                self._startup_error = str(e)
+                # Shown in the CLI's channel panel, which bypasses logging.
+                self._startup_error = scrub_url_secrets(str(e))
                 self._startup_event.set()
                 self._trace_event(
                     "channel_fatal_error",
