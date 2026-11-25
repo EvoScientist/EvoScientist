@@ -90,6 +90,10 @@ class SessionEventSink:
         """Render a fallback lifecycle line verbatim."""
         self._display_fallback(text, style)
 
+    def emit_notice(self, text: str, style: str = "yellow") -> None:
+        """Render a gateway notice verbatim, where fallback lines are shown."""
+        self._display_fallback(text, style)
+
     # --- ToolSelectionView read side (runtime thread) -------------------
     @property
     def tool_selection_active(self) -> bool:
