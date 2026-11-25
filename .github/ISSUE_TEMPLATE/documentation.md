@@ -1,18 +1,17 @@
 ---
 name: Documentation
-about: Report missing, incorrect, or unclear documentation
+about: Report inaccurate, outdated, or unclear documentation
 title: ''
 labels: documentation
 assignees: ''
 type: Documentation
-
 ---
 
-**What documentation is affected?**
-Describe which part of the project needs better docs.
+**Which doc is affected?**
+Link or path (e.g. `README.md`, `docs/guides/install.md`, `EvoScientist/channels/README.md`).
 
-**What is wrong or missing?**
-Describe the issue — is something inaccurate, outdated, hard to follow, or missing entirely?
+**What's wrong or confusing?**
+Is a command/setting wrong, out of date, or hard to follow?
 
-**Suggested improvement**
-If you have a specific fix or addition in mind, describe it here.
+**Suggested fix**
+Optional — how would you clarify or correct it?

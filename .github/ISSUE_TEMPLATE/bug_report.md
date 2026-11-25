@@ -1,38 +1,33 @@
 ---
 name: Bug report
-about: Report a bug to help us improve EvoScientist
+about: Report a bug in EvoScientist
 title: ''
 labels: bug
 assignees: ''
 type: Bug
-
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+**What happened?**
+A short, clear description of the bug and what you expected instead.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Run `EvoSci ...`
-2. Provide input '...'
-3. See error
+**Steps to reproduce**
+1. Run `...`
+2. Do `...`
+3. Observe `...`
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+**Logs / error output**
+Paste the traceback or relevant output (redact any API keys or tokens).
 
-**Error output / logs**
-If applicable, paste the relevant terminal output or traceback.
-
-```
-<paste here>
+```text
 ```
 
-**System information**
- - OS: [e.g. Ubuntu 22.04, macOS 14.3, Windows 11]
- - Python version: [e.g. 3.11.8]
- - Terminal: [e.g. iTerm2, Alacritty, Windows Terminal]
- - EvoScientist version: [e.g. 0.0.2 — run `EvoSci --version`]
- - LLM provider: [e.g. Anthropic, OpenAI, Ollama]
+**Environment**
+- **EvoScientist version:** *(output of `EvoSci --version`)*
+- **Surface:** Desktop app / WebUI / TUI / CLI / `-p` / Channel *(pick one)*
+- **Install method:** Desktop app / one-line installer / `uv` / `pip` / Docker / source
+- **OS & Python:** *(e.g. macOS 15 Apple silicon, Windows 11, Ubuntu 24.04; Python 3.12)*
+- **Provider & model:** *(e.g. Anthropic, OpenAI, ChatGPT sign-in, custom-openai)*
 
-**Additional context**
-Add any other context about the problem here.
+**Already checked?**
+- [ ] Searched open issues and PRs for duplicates
+- [ ] Reproduced on the latest release (`EvoSci update`)

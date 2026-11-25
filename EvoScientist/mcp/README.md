@@ -29,6 +29,7 @@ Every `EvoSci mcp ...` command also works interactively as `/mcp ...`:
 | Command | Action |
 |---|---|
 | `EvoSci mcp` / `EvoSci mcp list` | List configured servers |
+| `EvoSci mcp install [name-or-tag]` | Browse or install servers from the built-in registry/marketplace |
 | `EvoSci mcp config [name]` | Show full config for all servers or one server |
 | `EvoSci mcp add <name> <cmd-or-url> [-- args...]` | Add a server |
 | `EvoSci mcp edit <name> [flags]` | Update routing, tools, or URL without re-adding |
@@ -38,7 +39,7 @@ Every `EvoSci mcp ...` command also works interactively as `/mcp ...`:
 
 | Flag | Short | What it does |
 |---|---|---|
-| `--transport` | | `stdio`, `http`, `streamable_http`, `sse`, or `websocket` (auto-detected: `http(s)` URL → `http`, otherwise `stdio`) |
+| `--transport` | `-T` | `stdio`, `http`, `streamable_http`, `sse`, or `websocket` (auto-detected: `http(s)` URL → `http`, otherwise `stdio`) |
 | `--tools` | `-t` | Comma-separated tool allowlist with glob wildcards (omit or pass `none` on `edit` for all tools) |
 | `--expose-to` | `-e` | Comma-separated target agents (default: `main`) |
 | `--header` | `-H` | HTTP header `Key:Value` (repeatable) |

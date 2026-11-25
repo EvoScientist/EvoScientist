@@ -22,7 +22,7 @@ Given a topic/venue, an LLM provider, and `paper-navigator`, EvoScientist:
 
 ## Run It Yourself
 
-*(This example used OpenRouter with `gpt-4` and `paper-navigator` v1.1.0; any strong model works.)*
+Any strong model and provider works.
 
 1. **Install and configure a provider:**
    ```bash

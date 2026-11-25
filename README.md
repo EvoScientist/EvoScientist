@@ -137,16 +137,7 @@
 - **[11–13 Mar 2026]** 🚀 EvoScientist debuts alongside our [Technical Report](https://arxiv.org/abs/2603.08127)
 - **[24 Nov 2025]** 🏆 6/6 papers accepted at [ICAIS 2025](https://icais.ai/) — Best Paper & AI Reviewer's Appraisal Award
 
-<details>
-<summary>📦 Recent Releases (v0.4.x) — see <a href="https://github.com/EvoScientist/EvoScientist/releases">GitHub Releases</a> for full history</summary>
-
-- **[v0.4.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.4)** (20 Nov 2026) — GPT-6.2 Sol/Astra, Gemini 4 Neon, HY4 Flash, Qwen 4 Max; standalone `EvoSci login chatgpt`; custom OpenAI `/models` auto-discovery; stricter shell sandbox; `deepagents 0.7.41`.
-- **[v0.4.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.3)** (14 Nov 2026) — Claude Fable 5.2, Gemini 4 Carbon/Hydrogen; `EvoSci workspace move`; unified `EvoSci server` (now manages `ccproxy` too); agent media files sent to chat.
-- **[v0.4.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.2)** (06 Nov 2026) — Unified `reasoning_effort` (default `high`) across Claude/OpenAI/OpenRouter/DeepSeek; Tencent HY4; clearer failed-command and background-process reporting.
-- **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)** (03 Nov 2026) — Shared background server across WebUI and Desktop app (WebUI 0.5); cancelling a server run stops its shell command; cleaner tool errors.
-- **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)** (31 Oct 2026) — One shared background service across projects (`EvoSci server stop`); GPT-6.1 Terra; hardened shell sandbox and safer `EvoSci update`; Apple silicon macOS.
-
-</details>
+See **[GitHub Releases](https://github.com/EvoScientist/EvoScientist/releases)** for the full version changelog.
 
 ---
 

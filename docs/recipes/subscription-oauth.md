@@ -62,7 +62,7 @@ Uses the unofficial ChatGPT/Codex OAuth sign-in from `langchain-openai` (subject
 
 ### Plan & Context Notes
 
-- **Supported models depend on your plan** (and differ from the public API). On ChatGPT Plus (Oct 2026), `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, and the `gpt-5.6` family work. Unsupported models return `The '<model>' model is not supported when using Codex with a ChatGPT account.`
+- **Supported models depend on your plan** (and differ from the public OpenAI API). If your ChatGPT tier doesn't include a model ID, the backend returns `The '<model>' model is not supported when using Codex with a ChatGPT account.`
 - **272K context budget:** EvoScientist summarizes conversations before 272K tokens on this route to match Codex defaults and protect subscription rate limits.
 - **Reasoning effort:** Higher settings (`xhigh`/`max`) increase latency and consume more plan quota (`none`/`minimal` map to `low`).
 

@@ -46,7 +46,7 @@ EvoSci            # TUI (or `EvoSci --ui webui` for the browser UI)
 
 Data lives in `~/.evoscientist` (or `$EVOSCIENTIST_DATA_DIR` if set). Your existing system Python, Node.js, and Git are never modified:
 
-1. Downloads a SHA-256-verified `uv` (0.12.23) into `~/.evoscientist/tools/uv-0.12.23/` (recorded in `uv.json`).
+1. Downloads a SHA-256-verified `uv` into `~/.evoscientist/tools/` (recorded in `uv.json`).
 2. Fetches the release's `constraints.txt` and installs EvoScientist as a `uv` tool on `uv`'s own Python 3.12 with exact tested dependency versions.
 3. Adds `uv`'s tool bin directory (`~/.local/bin`) to your shell profile or Windows user `PATH`.
 4. Runs `EvoSci setup`, which installs only what's missing: Node.js (if none or `< 20.9`), Git for Windows (Windows only), a Python environment for the agent's shell (if no usable `python` exists), and the local WebUI.
@@ -70,7 +70,7 @@ You can also **re-run the install script** to repair or switch versions:
 
 ## Uninstalling
 
-First stop the background server (`EvoSci server stop`, or `EvoSci service stop` on v0.4.0–0.4.2).
+First stop the background server (`EvoSci server stop`).
 
 <details>
 <summary><strong>macOS / Linux uninstall steps</strong></summary>

@@ -31,7 +31,7 @@ For an Anthropic-compatible endpoint, use `custom-anthropic`, `custom_anthropic_
 ## How Model IDs Are Sent & Discovered
 
 - **Verbatim model IDs:** Whenever `provider` is explicitly `custom-openai` or `custom-anthropic`, EvoScientist sends your configured `model` string **verbatim**—even if that name also exists in another provider's short-name table (like `qwen3.5-27b`). *(If no provider is named at all, short names from other providers resolve to their registry IDs, e.g. `openai/gpt-6.1-terra`.)*
-- **Automatic model listing (`custom-openai`):** When `custom_openai_base_url` is set, `/model`, `/model-fallback add`, `EvoSci onboard`, and the WebUI picker (`GET /api/models`) query `GET {base_url}/models` (up to 500 IDs, bounded by a short timeout) and display what your server actually serves. If the probe fails or returns empty, pickers fall back to `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`.
+- **Automatic model listing (`custom-openai`):** When `custom_openai_base_url` is set, `/model`, `/model-fallback add`, `EvoSci onboard`, and the WebUI picker (`GET /api/models`) query `GET {base_url}/models` (up to 500 IDs, bounded by a short timeout) and display what your server actually serves. If the probe fails or returns empty, pickers fall back to EvoScientist's built-in defaults.
 - **`custom-anthropic`:** Pickers show the built-in defaults; enter custom model IDs via **"Type a model name…"** in `EvoSci onboard` or `EvoSci config set model <id>`.
 
 ## Keyless Local Servers (vLLM, LM Studio, etc.)

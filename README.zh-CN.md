@@ -137,16 +137,7 @@
 - **[2026-03-11–13]** 🚀 EvoScientist 正式开源并发布[技术报告](https://arxiv.org/abs/2603.08127)
 - **[2025-11-24]** 🏆 [ICAIS 2025](https://icais.ai/) 投稿 6/6 全中，荣获最佳论文与 AI 评审奖
 
-<details>
-<summary>📦 近期版本更新（v0.4.x）— 完整记录见 <a href="https://github.com/EvoScientist/EvoScientist/releases">GitHub Releases</a></summary>
-
-- **[v0.4.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.4)**（2026-11-20）— 新增 GPT-6.2 Sol/Astra、Gemini 4 Neon、HY4 Flash、Qwen 4 Max；新增 `EvoSci login chatgpt`；自定义 OpenAI 接口自动拉取 `/models`；更严格的 Shell 沙箱；升级至 `deepagents 0.7.41`。
-- **[v0.4.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.3)**（2026-11-14）— 新增 Claude Fable 5.2、Gemini 4 Carbon/Hydrogen；新增 `EvoSci workspace move`；`EvoSci server` 统一托管后台服务与 `ccproxy`；支持在对话中回传媒体文件。
-- **[v0.4.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.2)**（2026-11-06）— 统一 Claude/OpenAI/OpenRouter/DeepSeek 的 `reasoning_effort`（默认 `high`）；新增腾讯 HY4；命令失败与后台进程状态提示更清晰。
-- **[v0.4.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.1)**（2026-11-03）— WebUI 与桌面端共享同一后台服务（WebUI 0.5）；取消任务同步中止 Shell 命令。
-- **[v0.4.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.4.0)**（2026-10-31）— 全项目共享单后台服务（`EvoSci server stop`）；新增 GPT-6.1 Terra；强化沙箱与 `EvoSci update` 安全性。
-
-</details>
+完整版本更新记录请见 **[GitHub Releases](https://github.com/EvoScientist/EvoScientist/releases)**。
 
 ---
 
