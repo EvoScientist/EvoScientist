@@ -2,8 +2,9 @@
 
 ``uv tool install`` records what it installed in ``<env>/uv-receipt.toml``:
 the tool's own requirement (with its extras, or the directory, git or URL it
-came from), every ``--with`` requirement, the constraints and the requested
-Python. A reinstall that leaves any of them out drops it, so the MCP
+came from), every ``--with`` requirement, the packages whose commands it
+exposes (``--with-executables-from``, recorded only as the ``from`` of their
+entry points), the constraints and the requested Python. A reinstall that leaves any of them out drops it, so the MCP
 installer's ``--with`` reinstall and ``EvoSci update`` both rebuild their
 ``uv tool install`` from this file.
 
@@ -81,15 +82,18 @@ def _git_requirement(url: str) -> str:
     return spec
 
 
-def requirement_args(entry: dict[str, Any]) -> list[str]:
+def requirement_args(entry: dict[str, Any], executables: bool = False) -> list[str]:
     """The ``uv tool install`` arguments that add *entry* again: ``--with
     <requirement>`` (name, extras, version or source, marker), or
-    ``--with-editable <path>``. Raises :class:`ReceiptError` for a source
-    that cannot be written as a requirement."""
-    return [
-        "--with-editable" if "editable" in entry else "--with",
-        requirement_string(entry),
-    ]
+    ``--with-executables-from <requirement>`` when the tool exposes the
+    package's commands, or ``--with-editable <path>``. Raises
+    :class:`ReceiptError` for a source that cannot be written as a
+    requirement."""
+    if "editable" in entry:
+        flag = "--with-editable"
+    else:
+        flag = "--with-executables-from" if executables else "--with"
+    return [flag, requirement_string(entry)]
 
 
 def requirement_string(entry: dict[str, Any]) -> str:
@@ -131,6 +135,8 @@ class Receipt:
     others: tuple[dict[str, Any], ...]  # every other requirement (--with)
     constraints: tuple[dict[str, Any], ...]
     python: str | None  # the requested Python, absent without --python
+    # Normalized names of the other packages whose commands the tool exposes.
+    executables_from: frozenset[str] = frozenset()
 
     @property
     def extras(self) -> list[str]:
@@ -145,12 +151,18 @@ class Receipt:
                 return str(self.own[key])
         return None
 
+    def args_for(self, entry: dict[str, Any]) -> list[str]:
+        """The arguments that add the other requirement *entry* again."""
+        return requirement_args(
+            entry, executables=normalize(entry["name"]) in self.executables_from
+        )
+
     def with_args(self) -> list[str]:
-        """``--with`` / ``--with-editable`` arguments for every other
-        requirement."""
+        """``--with`` / ``--with-executables-from`` / ``--with-editable``
+        arguments for every other requirement."""
         args: list[str] = []
         for entry in self.others:
-            args += requirement_args(entry)
+            args += self.args_for(entry)
         return args
 
     def constraint_lines(self) -> list[str]:
@@ -192,12 +204,19 @@ def read_receipt(env: Path) -> Receipt:
     ):
         raise ReceiptError(f"unexpected requirements in {path}")
     python = tool.get("python")
+    entrypoints = tool.get("entrypoints")
+    executables_from = frozenset(
+        normalize(e["from"])
+        for e in (entrypoints if isinstance(entrypoints, list) else [])
+        if isinstance(e, dict) and isinstance(e.get("from"), str)
+    ) - {PACKAGE}
     return Receipt(
         path=path,
         own=_own_requirement(entries, path),
         others=tuple(e for e in entries if normalize(e["name"]) != PACKAGE),
         constraints=tuple(e for e in constraints if isinstance(e, dict)),
         python=python if isinstance(python, str) else None,
+        executables_from=executables_from,
     )
 
 
