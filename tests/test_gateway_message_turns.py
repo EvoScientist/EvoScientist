@@ -2766,3 +2766,129 @@ async def test_resume_turn_shows_a_held_prompt_without_a_checkpoint_of_its_own(
     assert [e["type"] for e in events if e["type"] in ("interrupt", "error")] == [
         "interrupt"
     ]
+
+
+@pytest.mark.parametrize("calls", ["tool_calls", "invalid_tool_calls"])
+@pytest.mark.parametrize("as_objects", [False, True], ids=["dicts", "messages"])
+async def test_state_completion_skips_the_result_of_an_earlier_turns_call(
+    as_objects, calls, quiet_poll
+):
+    """An earlier turn left a call without a result (stopped, or malformed),
+    and the next run's middleware writes one before the new message: it is
+    not this turn's."""
+    from langchain_core.messages import messages_from_dict
+
+    call = {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+    if calls == "invalid_tool_calls":
+        call = {**call, "args": '{"command": "l', "error": None}
+    dangling = [
+        {"type": "human", "content": "list files", "id": "human-0"},
+        {"type": "ai", "content": "", "id": "ai-0", calls: [call]},
+    ]
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    # The pre-run state is the run's input checkpoint too.
+    start = (
+        messages_from_dict([{"type": m["type"], "data": m} for m in dangling])
+        if as_objects
+        else dangling
+    )
+    gateway, threads = _gateway(stream, values={"messages": start})
+    closed = {
+        "type": "tool",
+        "content": "Tool call execute with id call-1 did not complete"
+        if calls == "tool_calls"
+        else "Tool call execute with id call-1 could not be executed - arguments "
+        "were malformed or truncated.",
+        "id": "tool-0",
+        "name": "execute",
+        "tool_call_id": "call-1",
+    }
+    new = [
+        {"type": "human", "content": "hi", "id": "human-1"},
+        {"type": "ai", "content": "Hello world", "id": "ai-1"},
+    ]
+    _state_after_start(
+        stream, threads, {"values": {"messages": [*dangling, closed, *new]}}
+    )
+
+    events = await _turn(gateway, "hi")
+
+    assert [e["type"] for e in events if e["type"] != "text"] == ["done"]
+    assert events[-1]["response"] == "Hello world"
+
+
+@pytest.mark.parametrize("answered", [True, False], ids=["answered", "dangling"])
+async def test_state_completion_keeps_the_result_of_a_reused_call_id(
+    answered, quiet_poll
+):
+    """An earlier call with the same id, answered or left dangling, does not
+    hide this turn's result for its own call."""
+    earlier_call = {
+        "type": "ai",
+        "content": "",
+        "id": "ai-0",
+        "tool_calls": [{"name": "execute", "args": {"command": "ls"}, "id": "call-1"}],
+    }
+    earlier_result = {
+        "type": "tool",
+        "content": "a.txt",
+        "id": "tool-0",
+        "name": "execute",
+        "tool_call_id": "call-1",
+    }
+    earlier = [
+        {"type": "human", "content": "list files", "id": "human-0"},
+        earlier_call,
+        *(
+            [earlier_result, {"type": "ai", "content": "One file", "id": "ai-1"}]
+            if answered
+            else []
+        ),
+    ]
+    # Left dangling, the next run's middleware closes it before the new message.
+    closed = (
+        []
+        if answered
+        else [
+            {
+                **earlier_result,
+                "content": "Tool call execute with id call-1 did not complete",
+            }
+        ]
+    )
+    new = [
+        {"type": "human", "content": "again", "id": "human-1"},
+        {
+            "type": "ai",
+            "content": "",
+            "id": "ai-2",
+            "tool_calls": [
+                {"name": "execute", "args": {"command": "ls"}, "id": "call-1"}
+            ],
+        },
+        {
+            "type": "tool",
+            "content": "a.txt b.txt",
+            "id": "tool-1",
+            "name": "execute",
+            "tool_call_id": "call-1",
+        },
+        {"type": "ai", "content": "Two files", "id": "ai-3"},
+    ]
+    stream = FakeLangGraphThreadStream(
+        THREAD_ID, events=_TEXT_RUN, live_limit=0, read_back_limit=0
+    )
+    gateway, threads = _gateway(stream, values={"messages": earlier})
+    _state_after_start(
+        stream, threads, {"values": {"messages": [*earlier, *closed, *new]}}
+    )
+
+    events = await _turn(gateway, "again")
+
+    assert [e["type"] for e in events if e["type"] != "text"] == [
+        "tool_call",
+        "tool_result",
+        "done",
+    ]

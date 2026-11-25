@@ -1017,6 +1017,26 @@ class _V3EventProcessor:
             # The caller reports the turn as lost.
             return None
 
+        def message_field(message: object, name: str) -> Any:
+            message_map = _as_raw_map(message)
+            if message_map is not None:
+                return message_map.get(name)
+            return getattr(message, name, None)
+
+        # A call the start left without a result (a stopped turn, a malformed
+        # call): the result the next run's middleware writes is not this turn's.
+        dangling_call_ids = {
+            str(call.get("id"))
+            for message in start_messages
+            for key in ("tool_calls", "invalid_tool_calls")
+            for call in message_field(message, key) or ()
+            if isinstance(call, Mapping) and call.get("id")
+        } - {
+            str(call_id)
+            for message in start_messages
+            if (call_id := message_field(message, "tool_call_id"))
+        }
+
         def answer_text(message: AIMessage) -> str:
             return _strip_legacy_thinking_tags(
                 _text_from_content(message.content)
@@ -1061,7 +1081,10 @@ class _V3EventProcessor:
         events: list[dict[str, Any]] = []
         for index, message in enumerate(turn):
             if isinstance(message, ToolMessage):
-                if message.tool_call_id not in self._shown_tool_results:
+                if (
+                    message.tool_call_id not in self._shown_tool_results
+                    and message.tool_call_id not in dangling_call_ids
+                ):
                     events.extend(
                         self._process_tool_event(
                             (),
@@ -1077,6 +1100,11 @@ class _V3EventProcessor:
                 continue
             if not isinstance(message, AIMessage):
                 continue
+            # From here a call with an earlier id is this turn's own.
+            dangling_call_ids -= {
+                str(call.get("id"))
+                for call in (*message.tool_calls, *message.invalid_tool_calls)
+            }
             if cut is None or index < cut or cut_shown:
                 # Its text is shown, in full or up to the cut.
                 if index == cut:
