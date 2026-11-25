@@ -354,6 +354,7 @@ def _inject_subagent_middleware(
         ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
+        ModelRefusalDetectionMiddleware,
         SubagentMessageTimestampMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
@@ -395,7 +396,7 @@ def _inject_subagent_middleware(
             # from the model call (including inner middlewares) and
             # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
-            ErrorNormalizationMiddleware(),
+            ErrorNormalizationMiddleware(pass_through_refusals=True),
             # Stamps the reply of the attempt that succeeded: a failed one
             # raises before the stamp. Outside the tool error handler, so the
             # error results it builds are stamped when the tool fails. No input
@@ -422,6 +423,7 @@ def _inject_subagent_middleware(
             # Inside the retry layer: marks each provider call for the
             # stream decoder.
             ModelCallBoundaryMiddleware(),
+            ModelRefusalDetectionMiddleware(),
         ]
         if memory_controls.memory_enabled:
             middleware.append(memory_middleware)
@@ -995,6 +997,7 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware,
         MessageTimestampMiddleware,
         ModelFallbackMiddleware,
+        ModelRefusalDetectionMiddleware,
         SkillPinMiddleware,
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
@@ -1120,6 +1123,7 @@ def _get_default_middleware(
         # Inside the fallback chain and the tool selector: marks each
         # provider call for the stream decoder.
         ModelCallBoundaryMiddleware(),
+        ModelRefusalDetectionMiddleware(),
     ]
     if cfg.enable_scheduler and not for_async_subagent:
         mw.append(create_scheduler_middleware(workspace))

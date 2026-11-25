@@ -895,6 +895,11 @@ def load_mcp_config() -> dict[str, Any]:
     return _interpolate_value(data)
 
 
+def _is_path_key(key: str) -> bool:
+    """True when ``key`` names the PATH variable on this OS."""
+    return key.upper() == "PATH" if os.name == "nt" else key == "PATH"
+
+
 def _server_path(server: dict[str, Any]) -> str | None:
     """The ``PATH`` a stdio server sets in its ``mcp.yaml`` env, or None. On
     POSIX the server's bare command is searched there when it starts."""
@@ -902,7 +907,7 @@ def _server_path(server: dict[str, Any]) -> str | None:
     if not isinstance(env, dict):
         return None
     for key, value in env.items():
-        if isinstance(key, str) and key.upper() == "PATH" and isinstance(value, str):
+        if isinstance(key, str) and isinstance(value, str) and _is_path_key(key):
             return value
     return None
 
@@ -1022,13 +1027,16 @@ def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
 
 def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
     """What a ``node`` / ``npx`` / ``npm`` server gets on top of the forwarded
-    variables: the user's npm network settings, the npmmirror registry under
-    ``mirror: cn`` (unless the user set a registry) and, for our private Node,
-    the system-certificate and proxy switches for Node's own requests. ``env``
-    is what the server gets so far, its ``mcp.yaml`` env included, which still
-    wins over all of it. Only its string keys and values are read: a key with
-    no value in ``mcp.yaml`` loads as None, and fails that server alone.
+    variables: a ``PATH`` without empty or relative entries (unless the server
+    set ``PATH`` in ``mcp.yaml``), the user's npm network settings, the
+    npmmirror registry under ``mirror: cn`` (unless the user set a registry)
+    and, for our private Node, the system-certificate and proxy switches for
+    Node's own requests. ``env`` is what the server gets so far, its
+    ``mcp.yaml`` env included, which still wins over all of it. Only its string
+    keys and values are read: a key with no value in ``mcp.yaml`` loads as
+    None, and fails that server alone.
     """
+    from ..setup._install import clean_path
     from ..setup.node import (
         is_private,
         node_network_env,
@@ -1038,6 +1046,8 @@ def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
 
     env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
     extra = npm_network_env(os.environ)
+    if not any(_is_path_key(k) for k in env):
+        extra["PATH"] = clean_path()
     # An unresolved command (no npx found) has no folder to read npm from; a
     # bare name would make the lookup try the current directory. npm reads the
     # server's environment: a HOME or npm_config_userconfig in mcp.yaml points
