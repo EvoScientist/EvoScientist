@@ -264,29 +264,21 @@ def test_graph_cache_edit_during_a_build_is_not_cached(builds, monkeypatch, tmp_
     assert builds == [("EvoScientist", dirs)]
 
 
-def test_graph_cache_never_caches_a_graph_built_on_unparsable_mcp_yaml(
-    builds, tmp_path
+@pytest.mark.parametrize("broken_yaml", ["servers: [unclosed\n", "servers\n"])
+def test_graph_cache_caches_a_first_build_on_broken_mcp_yaml(
+    builds, tmp_path, broken_yaml
 ):
-    """A graph built while ``mcp.yaml`` cannot be parsed binds the empty
-    MCP config: it is served to its access but never cached, so restoring
-    the same bytes later cannot leave a tool-less graph behind."""
-    _write_mcp_yaml("servers: {}\n", 1)
+    """A graph first built while ``mcp.yaml`` is broken binds the empty MCP
+    config and is cached under the broken file's digest, so the second access
+    does not rebuild. Fixing the file changes the digest and rebuilds."""
+    _write_mcp_yaml(broken_yaml, 1)
     graphs = GraphCache()
     dirs = SessionDirs(Workspace(tmp_path))
     first = graphs.get("EvoScientist", dirs)
-    other = SessionDirs(Workspace(tmp_path / "other"))
-    _write_mcp_yaml("servers: [unclosed\n", 2)
-    tool_less = graphs.get("EvoScientist", other)
-    assert tool_less is not first
-    # The graphs the server already had are still served while the file
-    # does not parse.
     assert graphs.get("EvoScientist", dirs) is first
-    _write_mcp_yaml("servers: {}\n", 3)
-    # The restored file digests to the original stamp; the tool-less build
-    # must still not have been cached under ``other``'s key.
-    builds.clear()
-    assert graphs.get("EvoScientist", other) is not tool_less
-    assert builds == [("EvoScientist", other)]
+    assert builds == [("EvoScientist", dirs)]
+    _write_mcp_yaml("servers: {}\n", 2)
+    assert graphs.get("EvoScientist", dirs) is not first
 
 
 def test_graph_cache_invalidation_during_a_build_is_not_cached(

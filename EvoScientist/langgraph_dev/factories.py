@@ -145,9 +145,11 @@ class GraphCache:
     built; graphs built for a run folder are dropped, least recently used
     first, past ``RUN_FOLDER_GRAPHS``. An unregistered project's graphs stay
     too: resolving an access refuses that project before its graph is asked
-    for. An ``mcp.yaml`` edit drops every cached graph: builds bind the MCP
-    tools loaded at build time, so the next access rebuilds lazily with the
-    new file.
+    for. A valid ``mcp.yaml`` edit drops every cached graph: builds bind the
+    MCP tools loaded at build time, so the next access rebuilds lazily with
+    the new file. A broken file is stamped without dropping existing graphs;
+    builds first made against it bind no MCP tools and are cached until the
+    file is fixed.
     """
 
     RUN_FOLDER_GRAPHS = 32
@@ -159,9 +161,6 @@ class GraphCache:
         # ``(mtime_ns, size, digest)`` of the ``mcp.yaml`` the cached graphs
         # were built against, or None when there is none.
         self._mcp_stamp: tuple[int, int, str] | None = None
-        # False while ``mcp.yaml`` reads but does not parse: a graph built
-        # then binds the empty config, so it is served but never cached.
-        self._mcp_readable = True
         # Bumped on every invalidation, so a build that overlapped an
         # ``mcp.yaml`` edit can tell its result is stale.
         self._generation = 0
@@ -170,12 +169,12 @@ class GraphCache:
         """Whether ``mcp.yaml`` changed since the cached graphs were built.
 
         Compared by modification time and size; the content is read and
-        digested only when those differ. A file that does not parse (a
-        half-saved edit reads as ``{}`` through ``load_mcp_config`` and would
-        drop every MCP tool) keeps the graphs the server has; the next access
-        checks again. Called under ``self._lock``; also refreshes
-        ``_mcp_readable`` so a build finished while the file cannot be parsed
-        is served but not cached.
+        digested only when those differ. Broken YAML is still stamped: graphs
+        built before the break keep their tools, builds made against the broken
+        file bind the empty config and are cached under its digest, and fixing
+        the file changes the digest so the next access rebuilds. A parseable
+        list or scalar counts as broken because ``load_mcp_config`` reads it as
+        no servers. Called under ``self._lock``.
         """
         import hashlib
 
@@ -188,7 +187,6 @@ class GraphCache:
         except OSError:
             changed = self._mcp_stamp is not None
             self._mcp_stamp = None
-            self._mcp_readable = True
             return changed
         if (
             self._mcp_stamp is not None
@@ -204,18 +202,17 @@ class GraphCache:
         except OSError:
             return False
         try:
-            yaml.safe_load(data)
+            parsed = yaml.safe_load(data)
         except Exception:
-            self._mcp_readable = False
-            return False
-        self._mcp_readable = True
+            broken = True
+        else:
+            broken = parsed is not None and not isinstance(parsed, dict)
         digest = hashlib.sha256(data).hexdigest()
         stamp = (stat.st_mtime_ns, stat.st_size, digest)
-        if self._mcp_stamp is not None and digest == self._mcp_stamp[2]:
-            self._mcp_stamp = stamp
+        previous, self._mcp_stamp = self._mcp_stamp, stamp
+        if broken:
             return False
-        self._mcp_stamp = stamp
-        return True
+        return previous is None or digest != previous[2]
 
     def _cached(self, key: tuple[str, str, str | None]) -> Any:
         with self._lock:
@@ -260,10 +257,9 @@ class GraphCache:
                     self._generation += 1
                     self._graphs.clear()
                     return graph
-                if self._generation != generation or not self._mcp_readable:
-                    # Another access invalidated while this built, or the
-                    # file could not be parsed so the build bound the empty
-                    # config: serve the graph but do not cache it.
+                if self._generation != generation:
+                    # Another access invalidated while this built: serve the
+                    # graph but do not cache it.
                     return graph
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]

@@ -1510,6 +1510,9 @@ def user_mcp_dir(tmp_path, monkeypatch):
     cfg_file = cfg_dir / "mcp.yaml"
     monkeypatch.setattr("EvoScientist.mcp.client.USER_CONFIG_DIR", cfg_dir)
     monkeypatch.setattr("EvoScientist.mcp.client.USER_MCP_CONFIG", cfg_file)
+    monkeypatch.setattr(
+        "EvoScientist.mcp.client._ensure_node_for_stdio", lambda _config: None
+    )
     return cfg_file
 
 
@@ -1585,6 +1588,14 @@ class TestAddMcpServer:
         data = yaml.safe_load(user_mcp_dir.read_text())
         assert "a" in data
         assert "b" in data
+
+    def test_add_ensures_node_after_saving(self, user_mcp_dir, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        configs = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", configs.append)
+        add_mcp_server("fs", "stdio", command="npx", args=[])
+        assert configs == [yaml.safe_load(user_mcp_dir.read_text())]
 
 
 class TestRemoveMcpServer:
@@ -1736,6 +1747,15 @@ class TestEditMcpServer:
         assert entry["tools"] == ["a"]
         assert entry["args"] == ["-y", "srv"]
         assert entry["expose_to"] == ["code-agent"]
+
+    def test_edit_ensures_node_after_saving(self, user_mcp_dir, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        add_mcp_server("fs", "stdio", command="echo", args=[])
+        configs = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", configs.append)
+        edit_mcp_server("fs", command="npx")
+        assert configs == [yaml.safe_load(user_mcp_dir.read_text())]
 
 
 # ---- parse_mcp_edit_args ----

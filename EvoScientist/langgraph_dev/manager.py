@@ -709,10 +709,10 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     (:func:`~EvoScientist.config.settings.is_client_only`) and the port,
     which the record names and every caller compares on its own — a new config
     field counts toward drift by default — and folds in the packaged
-    ``subagents/*.yaml``, which are consumed at graph build too (``mcp.yaml``
-    no longer is: ``GraphCache`` rebuilds on its edits, so the server applies
-    them without a restart). The
-    EvoScientist version is part of it, and for an editable install each
+    ``subagents/*.yaml``, which are consumed at graph build too. ``mcp.yaml``
+    stays out because ``GraphCache`` watches it and rebuilds on edits without a
+    server restart. The EvoScientist version is part of it, and for an editable
+    install each
     source file's path and modification time, so a server left running
     across an upgrade, or across a source checkout's new commit, counts as
     drift as well. Secrets

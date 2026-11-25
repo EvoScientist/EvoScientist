@@ -557,6 +557,7 @@ def add_mcp_server(
     user_cfg = _load_user_config()
     user_cfg[name] = entry
     _save_user_config(user_cfg)
+    _ensure_node_for_stdio(user_cfg)
     return entry
 
 
@@ -598,6 +599,7 @@ def edit_mcp_server(name: str, **fields: Any) -> dict[str, Any]:
 
     user_cfg[name] = entry
     _save_user_config(user_cfg)
+    _ensure_node_for_stdio(user_cfg)
     return entry
 
 
