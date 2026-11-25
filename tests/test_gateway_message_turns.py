@@ -720,14 +720,10 @@ class _BusyThreadStream(FakeLangGraphThreadStream):
 
 
 @pytest.mark.parametrize("busy", [True, False], ids=["resume-busy", "resume-idle"])
-async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(busy, monkeypatch):
+async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(busy, replay_cap):
     """A sibling task's envelopes keep the SSE from going quiet; a resume on a
-    busy thread is sent at the cap and queues behind that run. A resume on an
-    idle thread goes the #710 way: its run starts and is read back."""
-    # The sibling's gaps must stay under the quiet window on a ~15 ms timer
-    # (Windows).
-    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.2)
-    monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.6)
+    busy thread is sent at the cap, queues behind that run and is read live. A
+    resume on an idle thread goes the #710 way: its run starts and is read back."""
     stream = _BusyThreadStream(
         THREAD_ID,
         events=[
@@ -741,6 +737,7 @@ async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(busy, monkeypatc
     )
     if busy:
         threads.threads[0]["status"] = "busy"
+    gateway.events = _Notices()
 
     events = await _turn(
         gateway, Command(resume={"interrupt-1": {"decisions": [{"type": "approve"}]}})
@@ -748,6 +745,8 @@ async def test_resume_to_a_busy_run_is_sent_past_the_replay_cap(busy, monkeypatc
 
     assert _texts(events) == ["resumed"]
     assert len(stream.run.responds) == 1
+    assert stream.event_streams_opened == (1 if busy else 2)
+    assert gateway.events.lines == ([] if busy else [server_mod._REPLAY_CAP_NOTICE])
 
 
 # --- _ThreadEvents.skip_replay: controllable clock, no real waiting ---------
@@ -3315,16 +3314,79 @@ async def test_new_message_past_the_replay_cap_starts_its_run_and_reads_it_back(
         threads.threads[0]["status"] = "busy"
     gateway.events = _Notices()
 
-    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
         events = await _turn(gateway, "hi")
 
     assert _texts(events) == ["answer"]
     assert len(stream.run.starts) == 1
     assert stream.event_streams_opened == 2
     assert gateway.thread_store.client.runs.cancelled == []
-    assert "starting the run without reading it live" in caplog.text
+    capped = [
+        record
+        for record in caplog.records
+        if "without reading it live" in record.getMessage()
+    ]
+    # The cap's line is the frontend's: the log does not warn again.
+    assert [record.levelname for record in capped] == ["INFO"]
     # One line at the cap; nothing was lost, so no "lost" line at the end.
     assert gateway.events.lines == [server_mod._REPLAY_CAP_NOTICE]
+
+
+async def test_replay_cap_warns_a_turn_without_a_frontend(
+    replay_cap, quiet_poll, caplog
+):
+    """With no sink to show the cap's line, the log is the only trace."""
+    stream = _BusyThreadStream(
+        THREAD_ID,
+        events=[
+            _lifecycle("run-1", "running"),
+            _text("answer"),
+            _lifecycle("run-1", "completed"),
+        ],
+    )
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+
+    with caplog.at_level("INFO", logger="EvoScientist.gateway.server"):
+        await _turn(gateway, "hi")
+
+    capped = [
+        record
+        for record in caplog.records
+        if "without reading it live" in record.getMessage()
+    ]
+    assert [record.levelname for record in capped] == ["WARNING"]
+
+
+async def test_past_the_replay_cap_a_refused_start_shows_no_line(
+    replay_cap, quiet_poll, monkeypatch
+):
+    """The cap's line promises a result: a start the server refuses ends the
+    turn with its own error and no line."""
+    stream = _BusyThreadStream(THREAD_ID, events=[])
+    gateway, _ = _gateway(stream, values=_EARLIER_STATE)
+    gateway.events = _Notices()
+    capped: list[server_mod._ReplayCapError] = []
+    skip_replay = server_mod._ThreadEvents.skip_replay
+
+    async def recording_skip(self: server_mod._ThreadEvents) -> int:
+        try:
+            return await skip_replay(self)
+        except server_mod._ReplayCapError as exc:
+            capped.append(exc)
+            raise
+
+    monkeypatch.setattr(server_mod._ThreadEvents, "skip_replay", recording_skip)
+
+    async def refuse(**kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("run refused")
+
+    stream.run.start = refuse
+
+    with pytest.raises(RuntimeError, match="run refused"):
+        await _turn(gateway, "hi")
+
+    assert len(capped) == 1
+    assert gateway.events.lines == []
 
 
 async def test_past_the_replay_cap_a_failed_run_raises_its_own_error(

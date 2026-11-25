@@ -1798,14 +1798,17 @@ class LangGraphServerGateway:
                             # for it by its status and read it back. An
                             # answer on an idle thread too, or a prompt
                             # shown past the cap could never be answered.
-                            logger.warning(
+                            # A frontend with a sink shows the cap's line.
+                            logger.log(
+                                logging.WARNING
+                                if self.events is None
+                                else logging.INFO,
                                 "%s on thread %s; starting the run without "
                                 "reading it live",
                                 exc,
                                 request.thread_id,
                             )
                             past_replay_cap = exc
-                            self._notify(_REPLAY_CAP_NOTICE)
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1821,6 +1824,9 @@ class LangGraphServerGateway:
                         f"Could not identify the run for thread {request.thread_id}"
                     )
                 if past_replay_cap is not None:
+                    # Said once the run has started: a refused start ends the
+                    # turn with its own error.
+                    self._notify(_REPLAY_CAP_NOTICE)
                     # Nothing reads this connection any more: stop it from
                     # buffering the rest of the replay while the run works.
                     # Closing it does not stop the run. The SDK stream goes
@@ -2028,8 +2034,8 @@ class LangGraphServerGateway:
                     request.thread_id,
                 )
                 if finished_status != "success":
-                    # Past the replay cap the read-back usually hits the cap
-                    # too: say so, the run's own error is not reachable.
+                    # Past the replay cap the read-back usually runs out of its
+                    # budget: say so, the run's own error is not reachable.
                     raise RuntimeError(
                         f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
                         f"status {finished_status}"
