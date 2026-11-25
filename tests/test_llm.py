@@ -2394,11 +2394,11 @@ class TestPatchOpenAICompatContent:
 
         model = self._make_model()
         _patch_openai_compat_content(model, hoist_tool_media=True)
-        compat = getattr(model, "_content_compat")()
+        compat = model._content_compat()  # type: ignore[attr-defined]
 
         _patch_openai_compat_content(model, hoist_tool_media=False)
 
-        assert getattr(model, "_content_compat")() is compat
+        assert model._content_compat() is compat  # type: ignore[attr-defined]
         assert compat.hoist_tool_media is False
 
     def test_generate_preserves_media(self):
