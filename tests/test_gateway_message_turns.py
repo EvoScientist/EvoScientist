@@ -1520,15 +1520,29 @@ async def test_failed_read_back_of_a_pause_shows_the_prompt_from_state(quiet_pol
     assert gateway.thread_store.client.runs.cancelled == []
 
 
+_UNSHOWN = r"^The run finished, but its reply could not be shown$"
+
+
 @pytest.mark.parametrize(
     ("live_limit", "status", "state", "message"),
     [
-        pytest.param(0, "success", {"values": {}}, "$", id="empty-state"),
-        pytest.param(0, "success", None, "$", id="state-read-fails"),
+        # The run succeeded: its reply is in its checkpoint, not shown here.
+        pytest.param(0, "success", {"values": {}}, _UNSHOWN, id="empty-state"),
+        pytest.param(0, "success", None, _UNSHOWN, id="state-read-fails"),
         # The text shown is not the start of the state's answer.
-        pytest.param(2, "success", {"values": _OTHER_STATE}, "$", id="other-text"),
-        pytest.param(0, "interrupted", {"values": _NEW_STATE}, "status interrupted"),
-        pytest.param(0, "error", {"values": _NEW_STATE}, "status error"),
+        pytest.param(2, "success", {"values": _OTHER_STATE}, _UNSHOWN, id="other-text"),
+        pytest.param(
+            0,
+            "interrupted",
+            {"values": _NEW_STATE},
+            r"^Lost the run's live events: .*status interrupted$",
+        ),
+        pytest.param(
+            0,
+            "error",
+            {"values": _NEW_STATE},
+            r"^Lost the run's live events: .*status error$",
+        ),
     ],
 )
 async def test_turn_raises_when_read_back_and_state_both_fail(
@@ -1561,7 +1575,7 @@ async def test_turn_raises_when_read_back_and_state_both_fail(
 
     gateway.events = _Notices()
 
-    with pytest.raises(RuntimeError, match=f"Lost the run's live events.*{message}"):
+    with pytest.raises(RuntimeError, match=message):
         await collect()
 
     assert events[-1]["type"] == "error"
@@ -1805,7 +1819,7 @@ async def test_resume_turn_is_not_completed_from_state(quiet_poll):
     add messages after the pre-run read: the turn cannot tell its own apart."""
     gateway, threads = _resumed_gateway(read_back_limit=0)
 
-    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+    with pytest.raises(RuntimeError, match=_UNSHOWN):
         await _turn(gateway, _RESUME)
 
     assert gateway.thread_store.client.runs.cancelled == []
@@ -1857,7 +1871,7 @@ async def test_resume_turn_takes_no_prompt_from_another_runs_checkpoint(
         "interrupts": [_STATE_INTERRUPT],
     }
 
-    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+    with pytest.raises(RuntimeError, match=_UNSHOWN):
         await _turn(gateway, _RESUME)
 
 
@@ -2012,7 +2026,7 @@ async def test_shown_text_longer_than_the_stored_answer_raises(quiet_poll):
     }
     _state_after_start(stream, threads, {"values": short})
 
-    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+    with pytest.raises(RuntimeError, match=_UNSHOWN):
         await _turn(gateway, "hi")
 
 
@@ -2183,7 +2197,7 @@ async def test_state_completion_without_a_checkpoint_of_the_run_raises(quiet_pol
 
     stream.run.start = start_without_a_checkpoint
 
-    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+    with pytest.raises(RuntimeError, match=_UNSHOWN):
         await _turn(gateway, "hi")
 
 
@@ -2500,7 +2514,7 @@ async def test_state_completion_without_an_input_checkpoint_raises(quiet_poll):
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
     _start_after_another_run(stream, threads, input_checkpoint=None)
 
-    with pytest.raises(RuntimeError, match=r"Lost the run's live events$"):
+    with pytest.raises(RuntimeError, match=_UNSHOWN):
         await _turn(gateway, "hi")
 
 
@@ -2727,7 +2741,7 @@ async def test_read_back_shows_middleware_notices_with_its_events(
                 gateway.events.lines.append(event["content"])
 
     if lost:
-        with pytest.raises(RuntimeError, match=r"^Lost the run's live events$"):
+        with pytest.raises(RuntimeError, match=_UNSHOWN):
             async with asyncio.timeout(GUARD_SECONDS):
                 await turn()
     else:

@@ -67,6 +67,8 @@ _FINISHED_GRACE_SECONDS = 2.0
 _FINISHED_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 _ROOT_END_PHASES = frozenset({"completed", "failed", "interrupted"})
 _LOST_LIVE_EVENTS_ERROR = "Lost the run's live events"
+# The run succeeded, but neither its read-back nor its checkpoint shows the reply.
+_UNSHOWN_REPLY_ERROR = "The run finished, but its reply could not be shown"
 _RECOVERED_TURN_NOTICE = (
     "The live events of this turn were lost; "
     "the result is shown now that the run has finished."
@@ -1905,7 +1907,7 @@ class LangGraphServerGateway:
                         request.thread_id, limit=1, metadata={"run_id": run_id}
                     )
                 except Exception as exc:
-                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR) from exc
+                    raise RuntimeError(_UNSHOWN_REPLY_ERROR) from exc
                 # No checkpoint (a resume that pauses again in the same step
                 # writes none): a prompt the read-back holds is still a result.
                 state = history[0] if history else {}
@@ -1939,7 +1941,7 @@ class LangGraphServerGateway:
                         _is_interrupt_event(e) for _, held in recovered for e in held
                     )
                 ):
-                    raise RuntimeError(_LOST_LIVE_EVENTS_ERROR)
+                    raise RuntimeError(_UNSHOWN_REPLY_ERROR)
                 if any(held for _, held in recovered) or state_events:
                     self._notify_recovered_turn()
                 for turn_event in itertools.chain(released(recovered), state_events):
