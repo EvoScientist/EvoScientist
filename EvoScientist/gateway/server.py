@@ -1941,7 +1941,11 @@ class LangGraphServerGateway:
                         _is_interrupt_event(e) for _, held in recovered for e in held
                     )
                 ):
-                    raise RuntimeError(_UNSHOWN_REPLY_ERROR)
+                    raise RuntimeError(
+                        _LOST_LIVE_EVENTS_ERROR
+                        if emitted_interrupt
+                        else _UNSHOWN_REPLY_ERROR
+                    )
                 if any(held for _, held in recovered) or state_events:
                     self._notify_recovered_turn()
                 for turn_event in itertools.chain(released(recovered), state_events):
