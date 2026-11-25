@@ -2144,43 +2144,81 @@ class TestCopiedModelKeepsItsSettings:
         assert sent[-1]["reasoning_effort"] == "high"
         assert sent[-1]["temperature"] == 0.7
 
-    def test_a_copy_of_an_openrouter_model_sends_its_own_settings(self, monkeypatch):
+    @staticmethod
+    def _openrouter_client(sent: list[dict]) -> object:
+        """An OpenRouter SDK client whose transport records the request body."""
+        import json
+
         import httpx
+        import openrouter
+
+        def respond(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            if body.get("stream"):
+                chunk = {
+                    "id": "gen-1",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                payload = (
+                    "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+                ).encode()
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=payload,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "gen-1",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "m",
+                    "system_fingerprint": None,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "ok"},
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            )
+
+        return openrouter.OpenRouter(
+            api_key="test",
+            server_url="http://example.invalid/api/v1",
+            client=httpx.Client(transport=httpx.MockTransport(respond)),
+            async_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+
+    def test_a_copy_of_an_openrouter_model_sends_its_own_settings(self, monkeypatch):
         from langchain_openrouter import ChatOpenRouter
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "test")
 
-        from openai import OpenAI
-
-        sent, transport = self._bodies()
-        client = OpenAI(
-            api_key="test",
-            base_url="http://example.invalid/api/v1",
-            http_client=httpx.Client(transport=transport),
-        )
-        # langchain-openrouter calls chat.send, which the openai SDK version
-        # this repository pins does not have; the completions route is the
-        # same request.
-        real_chat = client.chat
-
-        class _Chat:
-            def send(self, **kwargs):
-                return real_chat.completions.create(**kwargs)
-
-            async def send_async(self, **kwargs):
-                return real_chat.completions.create(**kwargs)
-
-            def __getattr__(self, name):
-                return getattr(real_chat, name)
-
-        client.__dict__["chat"] = _Chat()
-
+        sent: list[dict] = []
         model = ChatOpenRouter(
             model="vendor/some-model",
             temperature=0.7,
-            client=client,
+            client=self._openrouter_client(sent),
         )
         _patch_openai_compat_content(model)
 
@@ -2191,6 +2229,36 @@ class TestCopiedModelKeepsItsSettings:
 
         assert sent[-1]["model"] == "vendor/other-model"
         assert sent[-1]["temperature"] == 0.1
+
+        # The original sends its own settings still.
+        model.invoke("hi")
+        assert sent[-1]["model"] == "vendor/some-model"
+        assert sent[-1]["temperature"] == 0.7
+
+    async def test_a_patched_openrouter_model_streams_asynchronously(self, monkeypatch):
+        """The normalization must forward the caller's kwargs, nothing else.
+
+        ChatOpenRouter hands its kwargs to the OpenRouter SDK's
+        ``chat.send_async``, which has no ``stream_usage`` parameter.
+        """
+        from langchain_openrouter import ChatOpenRouter
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+
+        sent: list[dict] = []
+        model = ChatOpenRouter(
+            model="vendor/some-model",
+            client=self._openrouter_client(sent),
+        )
+        _patch_openai_compat_content(model)
+
+        chunks = [chunk.content async for chunk in model.astream("hi")]
+
+        assert "".join(chunks) == "ok"
+        assert sent[-1]["stream"] is True
+        assert "stream_usage" not in sent[-1]
 
     def test_a_copy_does_not_inherit_what_a_model_learned(self):
         """What a model learned about refused media stays with that model."""

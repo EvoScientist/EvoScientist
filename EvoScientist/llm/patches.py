@@ -307,7 +307,6 @@ class _OpenAICompatContent:
         profile: Mapping[str, object] | None,
         hoist_tool_media: bool,
     ) -> None:
-        self.profile = profile
         self.hoist_tool_media = hoist_tool_media
         self.blocked: set[str] = set()
         if profile is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
@@ -31,7 +32,6 @@ class OpenAICompatContentMixin:
             not isinstance(compat, _OpenAICompatContent)
             or not isinstance(owner, weakref.ReferenceType)
             or owner() is not self
-            or compat.profile != effective
         ):
             compat = _OpenAICompatContent(
                 effective,
@@ -91,8 +91,6 @@ class OpenAICompatContentMixin:
         messages: list[BaseMessage],
         stop: list[str] | None = None,
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
-        *,
-        stream_usage: bool | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         async for chunk in self._content_compat().astream(
@@ -100,10 +98,15 @@ class OpenAICompatContentMixin:
             messages,
             stop=stop,
             run_manager=run_manager,
-            stream_usage=stream_usage,
             **kwargs,
         ):
             yield chunk
+
+
+@functools.cache
+def _content_compat_class(cls: type) -> type:
+    """The mixin applied to *cls*, built once per base class."""
+    return type(f"Evo{cls.__name__}", (OpenAICompatContentMixin, cls), {})
 
 
 def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any:
@@ -120,8 +123,6 @@ def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any
         # mixin cannot take those over.
         return model
     if not issubclass(cls, OpenAICompatContentMixin):
-        model.__class__ = type(
-            f"Evo{cls.__name__}", (OpenAICompatContentMixin, cls), {}
-        )
+        model.__class__ = _content_compat_class(cls)
     model.__dict__["_evosci_hoist_tool_media"] = hoist_tool_media
     return model
