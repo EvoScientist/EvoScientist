@@ -194,6 +194,7 @@ pip install EvoScientist                               # into an existing venv i
 ```bash
 git clone https://github.com/EvoScientist/EvoScientist.git && cd EvoScientist
 uv sync --dev --extra all-channels
+uv run EvoSci setup        # Node.js, the agent's Python, WebUI: whatever is missing
 uv run pre-commit install
 ```
 
@@ -254,7 +255,7 @@ Run `EvoSci -h` for the full flag reference, or type `/help` inside a session fo
 - If you move or rename a project folder, migrate its sessions, memory, and schedules with `EvoSci workspace move <old_dir> <new_dir>`.
 
 **Approvals & safety:**
-- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow safe prefixes with `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"`, or approve for the rest of the session at any prompt (`3` in the TUI and in chat replies, **Approve all (session)** in the classic CLI).
+- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow command prefixes without a prompt with `EvoSci config set shell_allow_list "pytest,ruff"` (an allow-listed interpreter or package manager such as `python`, `pip` or `git` can then run any code without asking), or approve for the rest of the session at any prompt (`3` in the TUI and in chat replies, **Approve all (session)** in the classic CLI).
 - **Dangerous mode** skips approval prompts and lifts the workspace sandbox—use only when you fully trust the task. `--dangerous` applies to this session's own agent; `EvoSci config set dangerous_mode true` is persistent and also covers the background server and WebUI. See [SECURITY.md](SECURITY.md).
 - Disable clarifying questions with `EvoSci config set enable_ask_user false`.
 

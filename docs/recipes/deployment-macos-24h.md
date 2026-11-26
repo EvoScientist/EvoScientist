@@ -46,7 +46,7 @@ which EvoSci ccproxy && EvoSci --version
 
 *(`--with-executables-from` puts `ccproxy` on your `PATH` for step 2. Reinstalling over an existing install drops packages EvoScientist added for MCP servers or channels—re-add them afterwards.)*
 
-*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone, and use `<clone>/.venv/bin/EvoSci` and `<clone>/.venv/bin/ccproxy` wherever this recipe says `EvoSci` or `ccproxy`.)*
+*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` and then `<clone>/.venv/bin/EvoSci setup` inside your clone (it installs the agent's Python environment and anything else the installer would), and use `<clone>/.venv/bin/EvoSci` and `<clone>/.venv/bin/ccproxy` wherever this recipe says `EvoSci` or `ccproxy`.)*
 
 ## 2. Authenticate Claude OAuth (Optional — Skip If Using an API Key)
 

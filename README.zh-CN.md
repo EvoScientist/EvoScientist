@@ -200,6 +200,7 @@ pip install EvoScientist                               # 或安装到已有虚�
 ```bash
 git clone https://github.com/EvoScientist/EvoScientist.git && cd EvoScientist
 uv sync --dev --extra all-channels
+uv run EvoSci setup        # 按需安装 Node.js、智能体的 Python 环境、WebUI
 uv run pre-commit install
 ```
 
@@ -260,7 +261,7 @@ EvoSci -p "query" --rubric @criteria.md       # 按验收清单自动评分修�
 - 移动或重命名项目目录后，用 `EvoSci workspace move <old_dir> <new_dir>` 迁移其会话、记忆与定时任务。
 
 **审批与安全：**
-- 默认情况下 shell 命令需要确认。可用 `--auto-approve` 跳过确认，用 `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"` 放行安全前缀，或在任意确认提示中对本次会话全部放行（TUI 里按 `3`、频道里回复 `3`，经典 CLI 里选 **Approve all (session)**）。
+- 默认情况下 shell 命令需要确认。可用 `--auto-approve` 跳过确认，用 `EvoSci config set shell_allow_list "pytest,ruff"` 免确认放行命令前缀（注意：放行 `python`、`pip`、`git` 这类解释器或包管理器后，它们无需确认即可运行任意代码），或在任意确认提示中对本次会话全部放行（TUI 里按 `3`、频道里回复 `3`，经典 CLI 里选 **Approve all (session)**）。
 - **危险模式**会跳过审批提示并解除工作区沙箱——仅在完全信任任务时使用。`--dangerous` 只作用于当前会话自己的智能体；`EvoSci config set dangerous_mode true` 会持久生效，并同样作用于后台服务与 WebUI。详见 [SECURITY.md](SECURITY.md)。
 - 关闭澄清提问：`EvoSci config set enable_ask_user false`。
 
