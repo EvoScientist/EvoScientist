@@ -1973,8 +1973,14 @@ def _serve_process_message(
             action_requests, msg, human_budget_exhausted=human_budget_exhausted
         )
 
+    from ..stream.display import received_media_state
+
+    received_files = received_media_state(msg.media)
+
     def _ask_user_prompt(ask_user_data: dict) -> dict:
-        return channel_ask_user_prompt(ask_user_data, msg)
+        return channel_ask_user_prompt(
+            ask_user_data, msg, received_files=received_files
+        )
 
     # ---- Slash command dispatch (cmd_manager, not the agent) ----
     # Headless equivalent of the Rich CLI / TUI slash branch so channel
@@ -2060,7 +2066,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
-                received_media=msg.media,
+                received_files=received_files,
                 work_dir=str(dirs.work_dir),
                 media_dir=dirs.sandbox_media_dir,
                 routes=file_tool_routes(dirs.workspace),
@@ -3592,6 +3598,11 @@ def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
 
+    from ..channels.logging_caps import (
+        quiet_credential_url_loggers,
+        redact_root_handlers,
+        scrub_url_secrets,
+    )
     from ..config import get_effective_config
 
     def _resolve_log_level() -> int:
@@ -3615,7 +3626,8 @@ def _configure_logging():
                 record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
-                msg = record.getMessage()
+                # Printed directly, so the formatter's scrub never sees it.
+                msg = scrub_url_secrets(record.getMessage())
                 console.print(
                     f"[dim yellow]\u26a0\ufe0f  Warning:[/dim yellow] [dim]{escape(msg)}[/dim]"
                 )
@@ -3642,3 +3654,7 @@ def _configure_logging():
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
+    # Keep channel credentials out of HTTP request logs.
+    quiet_credential_url_loggers()
+    redact_root_handlers()

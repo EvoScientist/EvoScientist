@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -36,7 +37,7 @@ from EvoScientist.channels.bus.events import (
     OutboundMessage as BusOutbound,
 )
 from EvoScientist.channels.bus.message_bus import MessageBus
-from EvoScientist.channels.channel_manager import ChannelManager
+from EvoScientist.channels.channel_manager import AccountManager, ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.channels.formatter import convert_markdown
 from EvoScientist.channels.middleware import DedupCache, MentionGatingMiddleware
@@ -1221,6 +1222,22 @@ class TestChannelReconnect:
         assert ch._startup_event.is_set()
         assert ch._startup_error == "fatal"
 
+    async def test_stored_start_error_hides_url_secrets(self):
+        """The CLI's channel panel prints the stored error outside logging."""
+
+        ch = StubChannel()
+
+        async def fatal_start():
+            raise ChannelError(
+                "Discord bot failed to connect: 407, message='Proxy Authentication"
+                " Required', url='http://user:proxy-secret@proxy:3128'"
+            )
+
+        ch.start = fatal_start
+        await ch.run()
+        assert ch._startup_error.startswith("Discord bot failed to connect: 407")
+        assert "proxy-secret" not in ch._startup_error
+
 
 class TestExtractRetryAfter:
     def test_generic_errors_use_default_retry_delay(self):
@@ -2377,3 +2394,47 @@ class TestEdgeCases:
         assert "channels" in resp
         assert "queues" in resp
         assert "health" in resp
+
+
+class TestStoredErrorsHideUrlSecrets:
+    """The health endpoint and channel status serve stored errors outside logging."""
+
+    _PROXY_ERROR = "407, url='http://user:proxy-secret@proxy:3128'"
+
+    async def test_account_start_and_stop_errors_hide_proxy_password(self):
+        error = self._PROXY_ERROR
+
+        class _FailingPlugin:
+            id = "stub"
+            config_adapter = None
+
+            async def start(self, _config, *, account_id):
+                raise RuntimeError(error)
+
+            async def stop(self, *, account_id):
+                raise RuntimeError(error)
+
+        accounts = AccountManager()
+        accounts.register_plugin(_FailingPlugin())
+        with pytest.raises(RuntimeError):
+            await accounts.start_account("stub", "a1")
+        state = accounts._states["stub:a1"]
+        assert state.error.startswith("407")
+        assert "proxy-secret" not in state.error
+
+        state.snapshot = SimpleNamespace(mark_disconnected=MagicMock())
+        with pytest.raises(RuntimeError):
+            await accounts.stop_account("stub", "a1")
+        assert state.error.startswith("407")
+        assert "proxy-secret" not in state.error
+        snapshot_error = state.snapshot.mark_disconnected.call_args.kwargs["error"]
+        assert snapshot_error == state.error
+
+    def test_outbound_failure_error_hides_proxy_password(self, tmp_path):
+        mgr = ChannelManager(MessageBus(), media_dir=tmp_path)
+        mgr.register(StubChannel())
+
+        mgr._record_outbound_failure("stub", self._PROXY_ERROR)
+
+        assert mgr._health["stub"].last_failure_error.startswith("407")
+        assert "proxy-secret" not in mgr._health["stub"].last_failure_error

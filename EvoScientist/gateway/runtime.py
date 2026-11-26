@@ -4,9 +4,9 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
 
+from ..langgraph_dev.sdk import get_langgraph_async_client
 from .composite import CompositeGraphGateway
 from .local import LocalGraphGateway, LocalThreadStore
 from .server import (
@@ -70,7 +70,7 @@ def create_runtime_gateways(
         server_thread_store = LangGraphServerThreadStore(
             client=langgraph_client
             if langgraph_client is not None
-            else get_client(url=base_url, headers=headers),
+            else get_langgraph_async_client(url=base_url, headers=headers or {}),
             graph_id=graph_id,
         )
         return RuntimeGateways(
@@ -91,7 +91,7 @@ def create_runtime_gateways(
         server_thread_store = LangGraphServerThreadStore(
             client=langgraph_client
             if langgraph_client is not None
-            else get_client(url=base_url, headers=headers),
+            else get_langgraph_async_client(url=base_url, headers=headers or {}),
             graph_id=graph_id,
         )
 

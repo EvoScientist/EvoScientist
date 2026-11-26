@@ -199,6 +199,19 @@ async def test_worker_warning_does_not_wait_for_ui(session):
         assert len(_shown(app, message)) == 1
 
 
+async def test_error_toast_hides_url_secrets(session):
+    async with session() as (app, pilot):
+        log = logging.getLogger("slack_sdk.socket_mode.aiohttp")
+        try:
+            raise TimeoutError("Connection timeout to host wss://gw/link?ticket=t1")
+        except TimeoutError as e:
+            log.exception(f"Failed to connect (error: {e}); Retrying...")
+        await pilot.pause()
+        messages = [n.message for n in app._notifications]
+        assert any("Failed to connect" in m for m in messages)
+        assert not any("ticket=t1" in m for m in messages)
+
+
 async def test_warning_memory_is_bounded(session):
     async with session() as (app, pilot):
         for i in range(257):

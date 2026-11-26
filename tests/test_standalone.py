@@ -21,16 +21,6 @@ from EvoScientist.paths import Workspace
 from tests.fakes.common import QueueFakeChannel
 
 
-@pytest.fixture(autouse=True)
-def _restore_http_log_levels():
-    """Reset the process-global logger levels run_standalone sets after every test."""
-    loggers = [logging.getLogger(n) for n in ("httpx", "httpcore", "telegram")]
-    saved = [lg.level for lg in loggers]
-    yield
-    for lg, level in zip(loggers, saved, strict=False):
-        lg.setLevel(level)
-
-
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
     """Stub the dev-server spawn + workspace helpers; return (config, ensure_calls).
 
@@ -652,6 +642,8 @@ def test_run_standalone_quiets_httpx(monkeypatch):
         "httpx": logging.INFO,
         "httpcore": logging.INFO,
         "telegram": logging.DEBUG,
+        "websockets": logging.DEBUG,
+        "slack_sdk": logging.DEBUG,
     }
     for name in leaking_level:
         logging.getLogger(name).setLevel(logging.DEBUG)
@@ -857,3 +849,20 @@ def test_sigint_forces_shutdown_after_channel_worker_exits(tmp_path, caplog):
 
     asyncio.run(_run())
     assert "Signal received during shutdown, forcing exit" in caplog.text
+
+
+def test_run_standalone_scrubs_url_secrets_from_root_handlers(monkeypatch):
+    """The per-channel serve.py basicConfig handler keeps its format, minus secrets."""
+    import io
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    monkeypatch.setattr(logging.getLogger(), "handlers", [handler])
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+    logging.getLogger("lib").error("timeout to wss://gw/connect?ticket=t-secret")
+
+    assert stream.getvalue().startswith("[ERROR] timeout to wss://gw/connect")
+    assert "t-secret" not in stream.getvalue()

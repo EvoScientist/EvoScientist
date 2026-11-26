@@ -5,10 +5,15 @@ from __future__ import annotations
 import difflib
 from unittest import mock
 
+import pytest
+from rich.console import Console
+from textual.content import Content
+
 from EvoScientist.stream.diff_format import (
     _detect_unicode_support,
     _escape_markup,
     build_edit_diff,
+    diff_text,
     format_diff_rich,
 )
 
@@ -17,9 +22,17 @@ from EvoScientist.stream.diff_format import (
 # ---------------------------------------------------------------------------
 
 
+def _render(markup: str) -> str:
+    console = Console(width=200, color_system=None)
+    with console.capture() as capture:
+        console.print(markup, end="")
+    return capture.get()
+
+
 class TestEscapeMarkup:
-    def test_escapes_brackets(self):
-        assert _escape_markup("[bold]text[/bold]") == r"\[bold\]text\[/bold\]"
+    def test_tags_render_as_text(self):
+        text = "[bold]text[/bold]"
+        assert _render(_escape_markup(text)) == text
 
     def test_plain_text_unchanged(self):
         assert _escape_markup("hello world") == "hello world"
@@ -28,7 +41,33 @@ class TestEscapeMarkup:
         assert _escape_markup("") == ""
 
     def test_nested_brackets(self):
-        assert _escape_markup("a[b[c]]d") == r"a\[b\[c\]\]d"
+        assert _render(_escape_markup("a[b[c]]d")) == "a[b[c]]d"
+
+    def test_index_brackets_show_no_backslash(self):
+        assert (
+            _render(f"[on #152d15]{_escape_markup('x = arr[0]')}[/on #152d15]")
+            == "x = arr[0]"
+        )
+
+    def test_trailing_backslash_keeps_closing_tag(self):
+        text = "end\\"
+        assert (
+            _render(f"[on #152d15]{_escape_markup(text, before_tag=True)}[/on #152d15]")
+            == text
+        )
+
+    @pytest.mark.parametrize("text", ["end\\", "end\\\\", "end\\\\\\"])
+    def test_trailing_backslash_runs_before_closing_tag(self, text):
+        markup = _escape_markup(text, before_tag=True)
+        assert _render(f"[on #152d15]{markup}[/on #152d15]") == text
+
+    @pytest.mark.parametrize("text", ["end\\", "end\\\\", "end\\\\\\"])
+    def test_trailing_backslash_without_closing_tag(self, text):
+        assert _render(f"{_escape_markup(text)} ===") == text + " ==="
+
+    @pytest.mark.parametrize("text", [r"\[b]", r"a\[1]", r"\\[x]y"])
+    def test_backslash_before_brackets(self, text):
+        assert _render(_escape_markup(text)) == text
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +179,30 @@ class TestFormatDiffRich:
         # Should NOT have truncation marker
         assert "more lines" not in result
 
+    def test_removed_dash_comment_line_is_shown_and_counted(self):
+        old = ["SELECT 1;", "-- old note", "SELECT 2;"]
+        new = ["SELECT 1;", "SELECT 2;"]
+        diff = "\n".join(difflib.unified_diff(old, new, "q.sql", "q.sql", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "[red]-1[/red]" in result
+        assert "[on #2d1515]-- old note[/on #2d1515]" in result
+
+    def test_added_plus_plus_line_is_shown_and_counted(self):
+        old = ["i = 0"]
+        new = ["i = 0", "++i;"]
+        diff = "\n".join(difflib.unified_diff(old, new, "a.c", "a.c", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "[green]+1[/green]" in result
+        assert "[on #152d15]++i;[/on #152d15]" in result
+
+    def test_file_headers_are_still_hidden(self):
+        old = ["a"]
+        new = ["b"]
+        diff = "\n".join(difflib.unified_diff(old, new, "x.py", "x.py", lineterm=""))
+        result = format_diff_rich(diff)
+        assert "x.py" not in result
+        assert "[green]+1[/green] [red]-1[/red]" in result
+
 
 # ---------------------------------------------------------------------------
 # build_edit_diff
@@ -147,6 +210,31 @@ class TestFormatDiffRich:
 
 
 class TestBuildEditDiff:
+    @pytest.mark.parametrize(
+        ("old", "new", "source_line"),
+        [
+            ("x = arr[1]", "x = arr[0]", "x = arr[0]"),
+            ("x = 1", "x = 1 \\", "x = 1 \\"),
+            ("items = [\n    1,\n]", "items = [\n    2,\n]", "items = ["),
+            ("x = 0", "y = a[1:x:2]", "y = a[1:x:2]"),
+            ('label = ""', 'label = ":smile:"', 'label = ":smile:"'),
+        ],
+    )
+    def test_source_lines_round_trip(self, old, new, source_line):
+        markup = build_edit_diff("/test.py", old, new)
+        assert markup is not None
+        assert source_line in diff_text(markup).plain
+        assert source_line in Content.from_rich_text(diff_text(markup)).plain
+
+    def test_tui_conversion_preserves_brackets_and_backslash(self):
+        markup = build_edit_diff(
+            "/test.py", "items = [\n    1,\n]", "items = [\n    2,\\\n]"
+        )
+        assert markup is not None
+        content = Content.from_rich_text(diff_text(markup))
+        assert "items = [" in content.plain
+        assert "    2,\\" in content.plain
+
     def test_returns_none_when_equal(self):
         assert build_edit_diff("/foo.py", "same", "same") is None
 

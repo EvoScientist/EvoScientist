@@ -750,3 +750,18 @@ class TestAssistantMessageBufferContract:
 
         assert msg._content == ""
         fake_md.update.assert_not_called()
+
+
+def test_edit_file_diff_keeps_source_text():
+    rows = format_tool_result_compact(
+        "edit_file",
+        "Successfully replaced 1 instance(s)",
+        tool_args={
+            "path": "/t.py",
+            "old_string": "x = 0",
+            "new_string": 'y = a[1:x:2]  # ":smile:"',
+        },
+        success=True,
+    )
+
+    assert 'y = a[1:x:2]  # ":smile:"' in rows[0].plain
