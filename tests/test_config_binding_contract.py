@@ -36,7 +36,6 @@ from EvoScientist.langgraph_dev.manager import (
     _UNFINGERPRINTED_FIELDS,
     _server_config_fingerprint,
 )
-from EvoScientist.langgraph_dev.settings_api import LIVE_FIELDS
 
 # ── Channel tables ────────────────────────────────────────────────
 
@@ -61,13 +60,13 @@ FIELD_CHANNELS: dict[str, str] = {
     "langgraph_dev_port": "named by the server's record; a session refuses a"
     " server on another port, deploy --json and the WebUI launcher warn of it",
     "memory_skill_synthesis_enabled": "live-applied: read at each AutoSkills"
-    " submission and run (settings_api.LIVE_FIELDS)",
+    " submission and run (config.settings.LIVE_FIELDS)",
     "memory_skill_synthesis_mode": "live-applied: read at each AutoSkills"
-    " submission and run (settings_api.LIVE_FIELDS)",
+    " submission and run (config.settings.LIVE_FIELDS)",
     "memory_skill_synthesis_cadence": "live-applied: the save reconciles each"
-    " project's cron (settings_api.LIVE_FIELDS)",
+    " project's cron (config.settings.LIVE_FIELDS)",
     "memory_skill_synthesis_time": "live-applied: the save reconciles each"
-    " project's cron (settings_api.LIVE_FIELDS)",
+    " project's cron (config.settings.LIVE_FIELDS)",
 }
 
 #: Channel justification for each prefix-based exclusion.
@@ -100,9 +99,7 @@ def _excluded_field_names() -> set[str]:
     """Config fields excluded from the fingerprint (explicit + prefix)."""
     names = _config_field_names()
     excluded = {
-        n
-        for n in names
-        if n in CLIENT_ONLY_FIELDS or n in _UNFINGERPRINTED_FIELDS or n in LIVE_FIELDS
+        n for n in names if n in CLIENT_ONLY_FIELDS or n in _UNFINGERPRINTED_FIELDS
     }
     for name in names - excluded:
         if any(name.startswith(p) for p in CLIENT_ONLY_PREFIXES):
