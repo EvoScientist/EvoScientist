@@ -42,8 +42,6 @@ from EvoScientist.langgraph_dev.manager import (
 #: Channel justification for each explicitly excluded field.
 FIELD_CHANNELS: dict[str, str] = {
     "require_mention": "channel stack policy (CLI process)",
-    "text_chunk_limit": "channel stack policy (CLI process)",
-    "allowed_channels": "channel stack policy (CLI process)",
     "dm_policy": "channel stack policy (CLI process)",
     "shared_webhook_port": "channel stack policy (CLI process)",
     "show_thinking": "UI display flag (client-side rendering)",

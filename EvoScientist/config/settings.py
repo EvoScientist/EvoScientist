@@ -438,8 +438,6 @@ class EvoScientistConfig:
     channel_send_thinking: bool = True  # forward thinking to any channel
     channel_debug_tracing: bool = False  # emit extra inbound diagnostics at DEBUG
     require_mention: str = "group"  # "always" | "group" | "off"
-    text_chunk_limit: int = 0  # 0 = use capability default
-    allowed_channels: str = ""  # comma-separated channel IDs, empty = allow all
 
     # iMessage Settings
     imessage_allowed_senders: str = ""
@@ -1377,8 +1375,6 @@ CLIENT_ONLY_PREFIXES = (
 CLIENT_ONLY_FIELDS = frozenset(
     {
         "require_mention",
-        "text_chunk_limit",
-        "allowed_channels",
         "dm_policy",
         "shared_webhook_port",
         "show_thinking",

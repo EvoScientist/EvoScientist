@@ -600,36 +600,6 @@ class TestChannelAllowList:
 
 
 class TestChannelMentionGating:
-    def test_dm_always_passes(self):
-        ch = StubChannel()
-        raw = RawIncoming(
-            sender_id="u1", chat_id="c1", text="hi", is_group=False, was_mentioned=False
-        )
-        assert ch._should_process(raw) is True
-
-    def test_group_mentioned_passes(self):
-        ch = StubChannel()
-        raw = RawIncoming(
-            sender_id="u1", chat_id="c1", text="hi", is_group=True, was_mentioned=True
-        )
-        assert ch._should_process(raw) is True
-
-    def test_group_not_mentioned_blocked(self):
-        ch = StubChannel()
-        ch.require_mention = "group"
-        raw = RawIncoming(
-            sender_id="u1", chat_id="c1", text="hi", is_group=True, was_mentioned=False
-        )
-        assert ch._should_process(raw) is False
-
-    def test_mention_off_passes_all(self):
-        ch = StubChannel()
-        ch.require_mention = "off"
-        raw = RawIncoming(
-            sender_id="u1", chat_id="c1", text="hi", is_group=True, was_mentioned=False
-        )
-        assert ch._should_process(raw) is True
-
     async def test_private_plain_text_keeps_mentions_but_command_strips_suffix(self):
         middleware = MentionGatingMiddleware(
             require_mention="group",
