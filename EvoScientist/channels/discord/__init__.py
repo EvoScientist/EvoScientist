@@ -12,6 +12,8 @@ def create_from_config(config) -> DiscordChannel:
         DiscordConfig(
             bot_token=config.discord_bot_token,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
             allowed_channels=channels,
             proxy=proxy,
         )

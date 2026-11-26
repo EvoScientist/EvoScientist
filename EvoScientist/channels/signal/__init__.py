@@ -22,6 +22,8 @@ def create_from_config(config) -> SignalChannel:
             config_dir=config.signal_config_dir or None,
             rpc_port=config.signal_rpc_port,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
         )
     )
 

@@ -13,6 +13,8 @@ def create_from_config(config) -> SlackChannel:
             bot_token=config.slack_bot_token,
             app_token=config.slack_app_token,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
             allowed_channels=channels,
             proxy=proxy,
         )
