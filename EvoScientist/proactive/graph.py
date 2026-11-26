@@ -222,6 +222,21 @@ async def _check_thread(
         # build, and a failing build cannot hide the gate's reason.
         try:
             shadow = await asyncio.to_thread(_build_shadow, deps, dirs)
+            from .ranker import ranker_enabled
+
+            if ranker_enabled():
+                # Experimental ranker: the shadow turn drafts candidates, a judge
+                # picks one; the result goes through decide_commit as usual.
+                from ..paths import SERVER_HOME
+                from .ranker import build_judge, run_ranker
+
+                return await run_ranker(
+                    messages=messages,
+                    shadow_turn=lambda t: run_shadow_turn(shadow, messages, t),
+                    judge=build_judge(),
+                    thread_id=thread_id,
+                    log_path=SERVER_HOME / "proactive_ranker.jsonl",
+                )
             return await run_shadow_turn(shadow, messages, trigger)
         except Exception as exc:
             raise _ShadowTurnFailed(last_message_id) from exc
