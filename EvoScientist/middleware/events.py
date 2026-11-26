@@ -249,6 +249,10 @@ class ToolSelectionView(Protocol):
 class SessionEvents(MiddlewareEventSink, ToolSelectionView, Protocol):
     """Gateway-carried session sink for both middleware writes and stream reads."""
 
+    def emit_notice(self, text: str, style: str = "yellow") -> None:
+        """Render one line the gateway itself has to tell the user about a turn."""
+        ...
+
 
 class NoOpSink:
     """Default sink: drops every event and never renders a selection.
@@ -271,6 +275,9 @@ class NoOpSink:
         pass
 
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        pass
+
+    def emit_notice(self, text: str, style: str = "yellow") -> None:
         pass
 
     # --- ToolSelectionView (read side) -----------------------------------

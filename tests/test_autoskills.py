@@ -6270,7 +6270,10 @@ async def test_alist_autoskill_schedules_uses_async_client(
     other.root.mkdir(parents=True)
     crons = _AsyncFakeCrons(workspace, other.key)
     client = SimpleNamespace(crons=crons)
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "EvoScientist.memory.autoskills.schedule.get_langgraph_async_client",
+        lambda **_kwargs: client,
+    )
 
     rows = await alist_autoskill_schedules(
         EvoScientistConfig(),

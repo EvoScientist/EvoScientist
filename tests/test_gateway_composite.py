@@ -493,6 +493,39 @@ def test_create_runtime_gateways_split_builds_composite():
     assert isinstance(gws.thread_store, LocalThreadStore)
 
 
+@pytest.mark.parametrize(
+    ("read_backend", "headers", "auth_scheme"),
+    [
+        pytest.param("local", {"x-auth-scheme": "langsmith"}, "langsmith", id="split"),
+        pytest.param(None, {"x-auth-scheme": "langsmith"}, "langsmith", id="uniform"),
+        pytest.param(None, None, None, id="no-headers"),
+    ],
+)
+def test_server_gateway_from_a_url_keeps_one_pool_per_event_loop(
+    read_backend, headers, auth_scheme
+):
+    """#880: the server gateway built from a URL gets the per-loop client;
+    ``headers=None`` adds no headers of ours, as ``get_client`` did."""
+    from EvoScientist.langgraph_dev.sdk import _PerLoopTransport
+
+    gws = create_runtime_gateways(
+        backend="langgraph_server",
+        read_backend=read_backend,
+        base_url="http://127.0.0.1:1",
+        headers=headers,
+    )
+    execute = (
+        gws.graph_gateway._execute
+        if isinstance(gws.graph_gateway, CompositeGraphGateway)
+        else gws.graph_gateway
+    )
+    http = execute.thread_store.client.http.client
+
+    assert isinstance(http._transport, _PerLoopTransport)
+    assert str(http.base_url) == "http://127.0.0.1:1"
+    assert http.headers.get("x-auth-scheme") == auth_scheme
+
+
 def test_create_runtime_gateways_passthrough_unchanged():
     gws = create_runtime_gateways(backend="local", read_backend="local")
     assert isinstance(gws.graph_gateway, LocalGraphGateway)
