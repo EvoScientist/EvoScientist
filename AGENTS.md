@@ -99,10 +99,10 @@ The sandbox config has no API keys, but provider keys exported in the shell (`AN
 
 - Never open a PR unless the user explicitly asks you to.
 - One problem per PR. Keep unrelated refactors and cleanups separate.
-- Title commits and PRs as Conventional Commits with the area as scope, e.g. `fix(channels): avoid echoing ask_user attachments`. Use `feat`, `fix`, `docs`, `test`, or `refactor`; `release: vX.Y.Z` is reserved for maintainers.
+- Title the PR as a Conventional Commit with the area as scope, e.g. `fix(channels): avoid echoing ask_user attachments`. Use `feat`, `fix`, `docs`, `test`, `refactor`, or `chore`; `release: vX.Y.Z` is reserved for maintainers. PRs are squash-merged, so the title becomes the commit on `main` and individual commit messages don't matter.
 - Fill in [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
 - Explain the problem in a sentence or two, what changed, and **how you verified it** (reproduction + exact commands/observations, not just "tests pass").
-- Never commit temporary plans, scratch notes, or PR-only screenshots.
+- Never commit temporary plans, scratch notes, PR-only screenshots, local paths, user data, API keys, or credentials.
 
 ## Documentation
 
