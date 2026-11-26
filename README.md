@@ -162,7 +162,7 @@ See **[GitHub Releases](https://github.com/EvoScientist/EvoScientist/releases)**
 
 ### One-Line CLI Install *(Recommended)*
 
-Works on a clean machine—no Python, `uv`, Node.js, or Git needed (supports macOS Apple silicon, Linux, WSL2, and native Windows with Git Bash):
+Works on a clean machine—no Python, `uv`, or Node.js needed (supports macOS Apple silicon, Linux, WSL2, and native Windows with Git Bash):
 
 ```bash
 # macOS / Linux / WSL2
@@ -246,15 +246,15 @@ Run `EvoSci -h` for the full flag reference, or type `/help` inside a session fo
 <details>
 <summary>Manual API keys, project workspaces & approvals</summary>
 
-**API keys:** Save with `EvoSci config set` (stored in `~/.config/evoscientist/config.yaml`) or export in your shell (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY`, `NVIDIA_API_KEY`, and optional `TAVILY_API_KEY`). For vLLM, LM Studio, or gateways, see [Custom Endpoints](docs/guides/custom-endpoints.md). For Claude Pro/Max or ChatGPT Plus/Pro without API keys, see [Subscription OAuth](docs/recipes/subscription-oauth.md).
+**API keys:** Save with `EvoSci config set` (stored in `~/.config/evoscientist/config.yaml`) or export in your shell (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY`, `NVIDIA_API_KEY`, and optional `TAVILY_API_KEY`; MiniMax Global keys from platform.minimax.io also need `MINIMAX_BASE_URL=https://api.minimax.io/anthropic`). For vLLM, LM Studio, or gateways, see [Custom Endpoints](docs/guides/custom-endpoints.md). For Claude Pro/Max or ChatGPT Plus/Pro without API keys, see [Subscription OAuth](docs/recipes/subscription-oauth.md).
 
 **Background server & project folders:**
 - The shared background server (`EvoSci server status` / `stop`) inherits the environment of the shell that started it; restart it (`EvoSci server stop`) after changing shell exports.
-- A project `.env` only configures `EvoSci` launcher flags (`EVOSCIENTIST_DEFAULT_MODE`, `EVOSCIENTIST_UI_BACKEND`). API keys there are ignored with a warning; other variables (e.g. `HF_TOKEN`) are ignored too—export them in your shell before starting `EvoSci`.
+- A project `.env` only configures the `EvoSci` command's own settings (such as `EVOSCIENTIST_DEFAULT_MODE` or `EVOSCIENTIST_UI_BACKEND`). API keys there are ignored with a warning; other variables (e.g. `HF_TOKEN`) are ignored too—export them in your shell before starting `EvoSci`.
 - If you move or rename a project folder, migrate its sessions, memory, and schedules with `EvoSci workspace move <old_dir> <new_dir>`.
 
 **Approvals & safety:**
-- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow safe prefixes with `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"`, or press `3` at any prompt to approve for the session.
+- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow safe prefixes with `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"`, or approve for the rest of the session at any prompt (`3` in the TUI and in chat replies, **Approve all (session)** in the classic CLI).
 - **Dangerous mode** skips approval prompts and lifts the workspace sandbox—use only when you fully trust the task. `--dangerous` applies to this session's own agent; `EvoSci config set dangerous_mode true` is persistent and also covers the background server and WebUI. See [SECURITY.md](SECURITY.md).
 - Disable clarifying questions with `EvoSci config set enable_ask_user false`.
 

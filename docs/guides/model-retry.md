@@ -22,7 +22,7 @@ EvoSci config set auto_mode_retry_wait_seconds 600
 EvoSci config set model_retry_wait_seconds 0        # disable retries for interactive runs & memory workers
 ```
 
-**Which config counts:** The tier travels with the run, so a `-p --auto-mode` run gets the unattended budget whether it runs in-process or on the background server. Runs the server starts on its own (WebUI, background sub-agents, scheduled tasks) follow the **server's** `config.yaml`; after changing these keys, run `EvoSci server stop` so the server picks them up.
+**Which config counts:** The tier travels with the run, so a `-p --auto-mode` run gets the unattended budget whether it runs in-process or on the background server. Runs the server starts on its own (WebUI, background sub-agents, scheduled tasks) follow the **server's** `config.yaml` and keep a separate budget per model call (one exhausted call does not stop retries for the rest of such a run); after changing these keys, run `EvoSci server stop` so the server picks them up.
 
 ### How the Budget Works
 

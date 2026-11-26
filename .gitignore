@@ -46,6 +46,7 @@ conversation_history/
 !/CLAUDE.md
 *AGENTS.md
 !/AGENTS.md
+CLAUDE.local.md
 *meals/
 botpy.log
 large_tool_results/

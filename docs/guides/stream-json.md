@@ -46,8 +46,8 @@ EvoSci -p "Summarize the attention mechanism into notes.md" \
 ### Field Notes
 
 - **`tool_result.success`:** `false` when the tool errored, `execute` exited non-zero (even `grep` with no matches), `code_interpreter` raised, or output (other than `write_todos`) begins with `[FAILED]` / `[TOOL ERROR]` or shows an error in its first 3 lines.
-- **`discarded` on retry/fallback events:** Object `{text_chars, thinking_chars, tool_call_ids}` telling UIs what streamed output from the failed attempt to roll back. `subagent` is empty for the main agent, or `rubric_grader` for the grader.
-- **`done.last_pass_response`:** Present on `--rubric` runs—contains only the text written after the final revision feedback (while `response` concatenates all passes separated by blank lines).
+- **`discarded` on retry/fallback events:** Object `{text_chars, thinking_chars, tool_call_ids}` telling UIs what streamed output from the failed attempt to roll back. On `model_retry`, `subagent` and `instance_id` are empty for the main agent; otherwise `subagent` is the sub-agent's name, or `rubric_grader` for the grader.
+- **`done.last_pass_response`:** Present once a `--rubric` run has been graded (absent when it stopped before any grading pass)—contains only the text written after the final revision feedback, empty when that pass wrote none (while `response` concatenates all passes separated by blank lines).
 
 ## Example Transcript
 

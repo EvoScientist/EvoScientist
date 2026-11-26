@@ -17,7 +17,7 @@
 
 ## Checklist
 
-- [ ] Read [CONTRIBUTING.md](../CONTRIBUTING.md) (and [AGENTS.md](../AGENTS.md) if using a coding agent)
+- [ ] Read [CONTRIBUTING.md](https://github.com/EvoScientist/EvoScientist/blob/main/CONTRIBUTING.md) (and [AGENTS.md](https://github.com/EvoScientist/EvoScientist/blob/main/AGENTS.md) if using a coding agent)
 - [ ] Scoped to one problem and core functionality (niche workflows belong in [EvoSkills](https://github.com/EvoScientist/EvoSkills))
 - [ ] Added or updated tests where applicable
 - [ ] `uv run ruff check .` and `uv run ruff format --check .` pass

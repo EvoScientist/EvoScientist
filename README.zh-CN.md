@@ -162,7 +162,7 @@
 
 ### 一键命令行安装（推荐）
 
-无需预先安装 Python、`uv`、Node.js 或 Git，支持 macOS（Apple Silicon）、Linux、WSL2 与原生 Windows：
+无需预先安装 Python、`uv` 或 Node.js，支持 macOS（Apple Silicon）、Linux、WSL2 与原生 Windows：
 
 ```bash
 # macOS / Linux / WSL2
@@ -252,15 +252,15 @@ EvoSci -p "query" --rubric @criteria.md       # 按验收清单自动评分修�
 <details>
 <summary>手动配置 API Key、项目工作区与审批</summary>
 
-**API Key：** 用 `EvoSci config set` 保存（写入 `~/.config/evoscientist/config.yaml`），或在 shell 中导出（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GOOGLE_API_KEY`、`MINIMAX_API_KEY`、`NVIDIA_API_KEY`，以及可选的 `TAVILY_API_KEY`）。vLLM、LM Studio 或网关见[自定义接口](docs/guides/custom-endpoints.md)；不用 API Key、直接使用 Claude Pro/Max 或 ChatGPT Plus/Pro 订阅见[订阅登录](docs/recipes/subscription-oauth.md)。
+**API Key：** 用 `EvoSci config set` 保存（写入 `~/.config/evoscientist/config.yaml`），或在 shell 中导出（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GOOGLE_API_KEY`、`MINIMAX_API_KEY`、`NVIDIA_API_KEY`，以及可选的 `TAVILY_API_KEY`；MiniMax 国际版（platform.minimax.io）的 key 还需要 `MINIMAX_BASE_URL=https://api.minimax.io/anthropic`）。vLLM、LM Studio 或网关见[自定义接口](docs/guides/custom-endpoints.md)；不用 API Key、直接使用 Claude Pro/Max 或 ChatGPT Plus/Pro 订阅见[订阅登录](docs/recipes/subscription-oauth.md)。
 
 **后台服务与项目目录：**
 - 共享后台服务（`EvoSci server status` / `stop`）继承启动它的 shell 的环境变量；修改 shell 导出的变量后，请执行 `EvoSci server stop` 让它重启。
-- 项目中的 `.env` 只用于 `EvoSci` 启动参数（`EVOSCIENTIST_DEFAULT_MODE`、`EVOSCIENTIST_UI_BACKEND`）。其中的 API Key 会被忽略并给出警告；其他变量（如 `HF_TOKEN`）同样会被忽略——请在启动 `EvoSci` 前在 shell 中导出。
+- 项目中的 `.env` 只用于 `EvoSci` 命令自身的设置（如 `EVOSCIENTIST_DEFAULT_MODE` 或 `EVOSCIENTIST_UI_BACKEND`）。其中的 API Key 会被忽略并给出警告；其他变量（如 `HF_TOKEN`）同样会被忽略——请在启动 `EvoSci` 前在 shell 中导出。
 - 移动或重命名项目目录后，用 `EvoSci workspace move <old_dir> <new_dir>` 迁移其会话、记忆与定时任务。
 
 **审批与安全：**
-- 默认情况下 shell 命令需要确认。可用 `--auto-approve` 跳过确认，用 `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"` 放行安全前缀，或在任意确认提示中按 `3` 对本次会话全部放行。
+- 默认情况下 shell 命令需要确认。可用 `--auto-approve` 跳过确认，用 `EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"` 放行安全前缀，或在任意确认提示中对本次会话全部放行（TUI 里按 `3`、频道里回复 `3`，经典 CLI 里选 **Approve all (session)**）。
 - **危险模式**会跳过审批提示并解除工作区沙箱——仅在完全信任任务时使用。`--dangerous` 只作用于当前会话自己的智能体；`EvoSci config set dangerous_mode true` 会持久生效，并同样作用于后台服务与 WebUI。详见 [SECURITY.md](SECURITY.md)。
 - 关闭澄清提问：`EvoSci config set enable_ask_user false`。
 

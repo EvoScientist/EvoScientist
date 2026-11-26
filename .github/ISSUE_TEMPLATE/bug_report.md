@@ -23,7 +23,7 @@ Paste the traceback or relevant output (redact any API keys or tokens).
 
 **Environment**
 - **EvoScientist version:** *(output of `EvoSci --version`)*
-- **Surface:** Desktop app / WebUI / TUI / CLI / `-p` / Channel *(pick one)*
+- **Surface(s):** Desktop app / WebUI / TUI / CLI / `-p` / Channel: *which ones, e.g. Telegram, Slack* *(pick all that apply)*
 - **Install method:** Desktop app / one-line installer / `uv` / `pip` / Docker / source
 - **OS & Python:** *(e.g. macOS 15 Apple silicon, Windows 11, Ubuntu 24.04; Python 3.12)*
 - **Provider & model:** *(e.g. Anthropic, OpenAI, ChatGPT sign-in, custom-openai)*

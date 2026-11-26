@@ -1,6 +1,6 @@
 # One-Line Installation Guide
 
-The one-line installer sets up EvoScientist on a completely blank machine—no `uv`, Python, Node.js, or Git required.
+The one-line installer sets up EvoScientist on a completely blank machine—no `uv`, Python, or Node.js required. *(On Windows it also installs Git if it's missing; on macOS and Linux, downloading skills and the MCP server index from GitHub needs `git` on `PATH`.)*
 
 **Supported platforms:** macOS (Apple silicon), Linux (`x86_64` / `arm64`, glibc ≥ 2.28), Windows 10/11 (`x64`). *(Not supported: Intel Macs, Windows ARM64, musl Linux such as Alpine.)*
 
@@ -39,7 +39,7 @@ EvoSci            # TUI (or `EvoSci --ui webui` for the browser UI)
 
 | bash | PowerShell | What it does |
 |---|---|---|
-| `--cn` | `-Cn` | Uses mainland China mirrors (Tsinghua PyPI, npmmirror for Python/Node/WebUI/npx, jsDelivr for `constraints.txt`) and saves `mirror: cn` for future updates. Override `npx` registry anytime via `npm_config_registry` or `~/.npmrc`. |
+| `--cn` | `-Cn` | Uses mainland China mirrors (Tsinghua PyPI, npmmirror for Python/Node/WebUI/npx, jsDelivr for `constraints.txt`) and saves `mirror: cn` for future updates. `npx` uses npmmirror unless you set another registry (`npm_config_registry`, or `registry=` in `~/.npmrc`); to keep npm's default `https://registry.npmjs.org/`, set `npm_config_registry` to it. |
 | `--version <ver>` | `-Version <ver>` | Install a specific release (requires ≥ `0.3.6`, when `constraints.txt` was introduced). |
 | `--no-modify-path` | `-NoModifyPath` | Skip adding `uv`'s tool bin folder to `PATH`. |
 | `--no-setup` | `-NoSetup` | Install the CLI package only; skip `EvoSci setup`. |

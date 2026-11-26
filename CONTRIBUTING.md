@@ -4,7 +4,7 @@ Thanks for caring enough about EvoScientist to help make it better.
 
 Like most fast-moving AI projects, **we are bottlenecked by review bandwidth, not by code generation**. Reviewing, testing, and maintaining a PR long-term costs far more time than writing one. Please read this before opening a PR so nobody's time gets wasted.
 
-> **Using an AI coding agent on this repo?** Make sure it reads [AGENTS.md](AGENTS.md) first. You are still responsible for understanding, testing, and owning every line in your PR.
+> **Using an AI coding agent on this repo?** Make sure it reads [AGENTS.md](AGENTS.md) first. You are still responsible for understanding, testing, and owning every line in your PR. Keep your own instructions out of the tracked `AGENTS.md` and `CLAUDE.md`: put them in your tool's local, untracked file (for Claude Code, `CLAUDE.local.md`, which is gitignored).
 
 ---
 
@@ -77,7 +77,7 @@ uv lock
 uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate -o constraints.txt
 ```
 
-`release-check.yml` rejects release PRs with a stale `uv.lock` or mismatched `constraints.txt`. Releases are immutable—fix a bad release with a new patch version rather than moving tags.
+`release-check.yml` fails a release PR whose `uv.lock` is stale or whose `constraints.txt` does not match it, and `publish.yml` / `docker.yml` run the same guard when the release is published and refuse to publish such a release. Releases are immutable: a refused or wrong release is fixed by a new patch version; its tag never moves and its version cannot be reused.
 
 ---
 

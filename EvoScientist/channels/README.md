@@ -57,7 +57,7 @@ Connect EvoScientist to messaging platforms so they share the same agent core, m
 
 ## Per-Channel Setup
 
-Each block below shows the `config.yaml` keys; `EvoSci channel setup` prompts for the same values.
+Each block below shows the `config.yaml` keys. `EvoSci channel setup` asks for each platform's main credentials and allowed senders; set the other keys with `EvoSci config set`, such as `*_allowed_channels`, `*_proxy`, and the WeCom / Official Account Token and EncodingAESKey (`wechat_wecom_token` / `wechat_wecom_encoding_aes_key`, `wechat_mp_token` / `wechat_mp_encoding_aes_key`).
 
 ### Telegram
 - **Extra:** `telegram`
@@ -111,9 +111,9 @@ Each block below shows the `config.yaml` keys; `EvoSci channel setup` prompts fo
 
 ### WeChat (Personal, WeCom, or Official Account)
 - **Extra:** `wechat`
-- **Personal WeChat (`wechat_backend: "personal"`):** Sign in by scanning a QR code (iLink Bot API—no public IP needed). `EvoSci channel setup` shows the QR code and saves the account for you. To do it by hand, run the login, then put the `account_id` it prints into config:
+- **Personal WeChat (`wechat_backend: "personal"`):** Sign in by scanning a QR code (iLink Bot API—no public IP needed). `EvoSci channel setup` shows the QR code and saves the account for you (its manual option takes an `account_id` from an earlier login). From a source checkout you can also log in by hand, then put the `account_id` it prints into config:
   ```bash
-  python -m EvoScientist.channels.wechat.serve --qr-login
+  uv run python -m EvoScientist.channels.wechat.serve --qr-login
   ```
   ```yaml
   channel_enabled: "wechat"
@@ -219,10 +219,12 @@ docker run --rm -v $VOL $IMAGE config set channel_enabled telegram
 docker run --rm -v $VOL $IMAGE config set telegram_bot_token "123456:ABC-xxx"
 docker run --rm -v $VOL $IMAGE config set telegram_allowed_senders "YOUR_USER_ID"
 
-docker run -d -v $VOL $IMAGE serve
+docker run --rm -v $VOL $IMAGE setup   # once
+mkdir -p workspace   # create first on Linux so Docker doesn't make it root-owned
+docker run -d --env-file .env -v "$(pwd)/workspace:/workspace" -v $VOL $IMAGE serve
 ```
 
-Polling and WebSocket channels need no exposed ports. Webhook channels (Feishu webhook mode, WeChat WeCom/MP) also need the shared webhook port published: `docker run -d -p 9000:9000 -v $VOL $IMAGE serve`.
+Polling and WebSocket channels need no exposed ports. Webhook channels (Feishu webhook mode, WeChat WeCom/MP) also need the shared webhook port published: `docker run -d -p 9000:9000 --env-file .env -v "$(pwd)/workspace:/workspace" -v $VOL $IMAGE serve`. `--env-file .env` passes your API keys (one `NAME=value` per line) from a host file you create first to the container as its environment; leave it out of both commands if the keys are already saved in the data volume. See the [Docker section of the Installation Guide](../../docs/guides/install.md#docker).
 
 ## Troubleshooting
 
@@ -231,3 +233,4 @@ Polling and WebSocket channels need no exposed ports. Webhook channels (Feishu w
 - **Webhook not receiving events:** Confirm the shared webhook port (`shared_webhook_port`, default `9000`) is publicly reachable (or tunnelled with `ngrok`/`natapp`), the exact callback path (`/webhook/event` for Feishu, `/wechat/callback` for WeChat), and matching signing tokens.
 - **WeCom error `60020`:** Add your server's public IP to the WeCom app's **Trusted IP** list.
 - **Debug logs:** Run with `EVOSCIENTIST_LOG_LEVEL=DEBUG` (or `EvoSci config set log_level debug`) and optionally `EvoSci config set channel_debug_tracing true` to see inbound filter decisions.
+- **Health check:** While channels run, `curl http://localhost:8080/healthz` returns each channel's success and failure counts and account states (in Docker, run `docker exec <container> curl http://localhost:8080/healthz`, or publish the port with `-p 127.0.0.1:8080:8080`). The endpoint listens on port `8080` on all interfaces; if that port is taken, the log says so and channels still start.

@@ -7,7 +7,7 @@ assignees: ''
 type: Feature
 ---
 
-> **Core vs. skills:** EvoScientist core stays focused on capabilities that benefit most users. Domain-specific workflows and research pipelines belong in [**EvoSkills**](https://github.com/EvoScientist/EvoSkills). See [CONTRIBUTING.md](../../CONTRIBUTING.md).
+> **Core vs. skills:** EvoScientist core stays focused on capabilities that benefit most users. Domain-specific workflows and research pipelines belong in [**EvoSkills**](https://github.com/EvoScientist/EvoSkills). See [CONTRIBUTING.md](https://github.com/EvoScientist/EvoScientist/blob/main/CONTRIBUTING.md).
 
 **What problem does this solve?**
 Describe the real friction or workflow gap you hit.

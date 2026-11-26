@@ -50,7 +50,7 @@ Every `EvoSci mcp ...` command also works interactively as `/mcp ...`. Inside a 
 
 ### `edit` Flags
 
-`edit` takes `--tools` (`-t`), `--expose-to` (`-e`), `--header` (`-H`), `--env`, and `--transport` (no `-T` here) as above, plus:
+`edit` takes `--tools` (`-t`), `--expose-to` (`-e`), `--header` (`-H`), `--env`, and `--transport` (no `-T` here) as above. `--header` and `--env` replace all of the server's existing headers or env vars, so pass the full set. Plus:
 
 | Flag | What it does |
 |---|---|
@@ -71,7 +71,7 @@ EvoSci mcp add research-sse https://example.com/sse --transport sse -e research-
 EvoSci mcp add brave-search npx --env-ref BRAVE_API_KEY -e research-agent -- -y @modelcontextprotocol/server-brave-search
 
 # HTTP server with auth header from env var
-EvoSci mcp add brave-http http://localhost:8080/mcp -H "Authorization:Bearer ${BRAVE_API_KEY}"
+EvoSci mcp add brave-http http://localhost:8080/mcp -H 'Authorization:Bearer ${BRAVE_API_KEY}'
 
 # Tool allowlist with glob wildcards
 EvoSci mcp add fs npx -t "read_*,write_*" -- -y @modelcontextprotocol/server-filesystem /workspace
@@ -86,7 +86,7 @@ EvoSci mcp edit fs --tools none
 
 ## Routing Tools to Specific Agents (`expose_to`)
 
-By default, MCP tools only go to `main`. Route specialized servers straight to the sub-agents that need them—no need to edit `EvoScientist/subagents/*.yaml`.
+By default, MCP tools only go to `main`. Route specialized servers straight to the sub-agents that need them—no need to edit `EvoScientist/subagents/*.yaml`. Setting `expose_to` replaces the default, so list `main` too if the main agent should keep the tools (`-e main,research-agent`).
 
 Valid targets are `main` (the orchestrator, default) and any sub-agent id—the top-level keys in `EvoScientist/subagents/*.yaml`, such as `research-agent`, `code-agent`, or `data-analysis-agent`.
 
@@ -111,17 +111,17 @@ brave-search:
   expose_to: [research-agent]
 ```
 
-Supported YAML fields: `transport` *(required)*, `command`/`args`/`env` (`stdio`), `url`/`headers` (`http`, `streamable_http`, `sse`, `websocket`), `tools`, and `expose_to`.
+Supported YAML fields: `transport` *(required)*, `command`/`args`/`env` (`stdio`), `url` (`http`, `streamable_http`, `sse`, `websocket`), `headers` (`http`, `streamable_http`, `sse` only; a `websocket` server with `headers` fails to load), `tools`, and `expose_to`.
 
 ## How It Loads
 
-On session startup (or `/new`), EvoScientist reads `mcp.yaml`, connects to each server, filters tools by `tools`, routes them by `expose_to`, and caches loaded tools by config signature. Servers that fail to connect log a warning and are skipped without blocking startup.
+On session startup (or `/new`), EvoScientist reads `mcp.yaml`, connects to each server, filters tools by `tools`, routes them by `expose_to`, and caches loaded tools by config signature. Servers that fail to connect are reported and skipped without blocking startup. Agents the background server has already built for a project (WebUI runs, the async `data-analysis-agent` and `writing-agent`, scheduled tasks, and sessions whose gateway backend is `langgraph_server`) keep the tools they loaded; to pick up an `mcp.yaml` change there, restart the server: `EvoSci server stop` (the next session starts it again; on an unattended machine run `EvoSci server start`), or restart the desktop app or `EvoSci deploy` if one of them runs it.
 
 ## Troubleshooting
 
 - **`npx` not found:** EvoScientist installs a private Node.js automatically on first use. If that failed (offline/proxy), run `EvoSci setup` (add `--cn` in mainland China).
 - **`${VAR}` / `--env-ref` resolves empty:** Export the variable before starting EvoScientist (and restart the background server via `EvoSci server stop` if it was started from another shell). Missing vars resolve to `""` with a warning.
-- **Tools don't appear where expected:** Check `expose_to` agent names, make sure `tools` isn't filtering everything out, and run `/new` after editing `mcp.yaml`.
+- **Tools don't appear where expected:** Check `expose_to` agent names, make sure `tools` isn't filtering everything out, and run `/new` after editing `mcp.yaml` (for WebUI runs, async sub-agents, scheduled tasks and server-gateway sessions, restart the background server as above).
 - **Windows `stdio` `[Errno 9] Bad file descriptor`:** Launch EvoScientist from a real console window (not `pythonw.exe`).
 
 ## Security

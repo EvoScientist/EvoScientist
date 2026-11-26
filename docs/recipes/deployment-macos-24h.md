@@ -46,7 +46,7 @@ which EvoSci ccproxy && EvoSci --version
 
 *(`--with-executables-from` puts `ccproxy` on your `PATH` for step 2. Reinstalling over an existing install drops packages EvoScientist added for MCP servers or channels—re-add them afterwards.)*
 
-*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone, and use `<clone>/.venv/bin/EvoSci` wherever this recipe says `EvoSci`.)*
+*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` inside your clone, and use `<clone>/.venv/bin/EvoSci` and `<clone>/.venv/bin/ccproxy` wherever this recipe says `EvoSci` or `ccproxy`.)*
 
 ## 2. Authenticate Claude OAuth (Optional — Skip If Using an API Key)
 
@@ -122,7 +122,7 @@ launchctl list | grep evosci
 
 Watch live logs anytime with `tail -f /tmp/evosci.log`.
 
-A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on automatic login (**System Settings → Users & Groups**). macOS doesn't offer this while FileVault is on. Anyone who can restart the Mac then gets into that account without a password, so only do this with a standard (non-admin) account on a machine in a place you trust.
+A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on the setting that starts the Mac after a power failure (desktop Macs such as a Mac mini: **System Settings → Energy**, called **Energy Saver** before macOS 15, or `sudo pmset -a autorestart 1`) and automatic login (**System Settings → Users & Groups**). macOS doesn't offer automatic login while FileVault is on. Anyone who can restart the Mac then gets into that account without a password, so only do this with a standard (non-admin) account on a machine in a place you trust.
 
 ## Day-to-Day Management
 
