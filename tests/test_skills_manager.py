@@ -905,6 +905,8 @@ class TestFetchRemoteSkillIndex:
 
         # Verify install_source is set
         assert "test/repo@" in skill_a["install_source"]
+        assert skill_a["install_source"] == "test/repo@skills/skill-a"
+        assert "\\" not in skill_a["install_source"]
 
     def test_fetch_caches_results(self, tmp_path):
         """Second call within TTL uses cache without cloning again."""
@@ -2219,3 +2221,163 @@ class TestPinnedSkillNames:
         installed_skill_index(workspace)
         pinned_skill_names("/alpha go", workspace)
         assert not workspace.skills_dir.exists()
+
+
+class TestGithubInstallConfinement:
+    """GitHub skill installs and remote indexing stay confined to the clone."""
+
+    @staticmethod
+    def _write_skill(directory: Path, name: str) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Skill {name}\n---\n# {name}\n",
+            encoding="utf-8",
+        )
+        return directory
+
+    @pytest.mark.parametrize("use_url", [False, True], ids=["shorthand", "tree-url"])
+    def test_install_from_github_rejects_relative_path_traversal(
+        self, tmp_path, temp_skills_dir, skills_ws, use_url
+    ):
+        outside = self._write_skill(tmp_path / "outside-skill", "outside-skill")
+
+        def fake_clone(repo, ref, dest):
+            # Place an unrelated skill in the clone and put an outside skill as a sibling.
+            self._write_skill(Path(dest) / "inside-skill", "inside-skill")
+            sibling = Path(dest).parent / "outside-skill"
+            if not sibling.exists():
+                self._write_skill(sibling, "outside-skill")
+
+        source = (
+            "https://github.com/owner/repo/tree/main/../outside-skill"
+            if use_url
+            else "owner/repo@../outside-skill"
+        )
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            result = install_skill(source, str(temp_skills_dir), workspace=skills_ws)
+
+        assert result["success"] is False
+        assert "escapes" in result["error"].lower()
+        assert not (temp_skills_dir / "outside-skill").exists()
+        assert outside.exists()
+
+    def test_install_from_github_rejects_absolute_subpath(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
+        outside = self._write_skill(tmp_path / "abs-skill", "abs-skill")
+
+        def fake_clone(repo, ref, dest):
+            Path(dest).mkdir(parents=True, exist_ok=True)
+
+        source = f"owner/repo@{outside}"
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            result = install_skill(source, str(temp_skills_dir), workspace=skills_ws)
+
+        assert result["success"] is False
+        assert "escapes" in result["error"].lower()
+        assert not (temp_skills_dir / "abs-skill").exists()
+
+    def test_install_from_github_rejects_escaping_symlink_inside_skill(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOP_SECRET_VALUE", encoding="utf-8")
+
+        def fake_clone(repo, ref, dest):
+            skill_dir = self._write_skill(Path(dest) / "evil-skill", "evil-skill")
+            try:
+                (skill_dir / "leaked.txt").symlink_to(secret)
+            except OSError:
+                pytest.skip("file symlinks are not available")
+
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            result = install_skill(
+                "owner/repo@evil-skill", str(temp_skills_dir), workspace=skills_ws
+            )
+
+        assert result["success"] is False
+        assert "escaping" in result["error"].lower()
+        assert not (temp_skills_dir / "evil-skill").exists()
+
+    def test_install_from_github_rejects_escaping_linked_subdir(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
+        import os
+        import subprocess
+
+        outside_dir = tmp_path / "outside-secrets"
+        outside_dir.mkdir()
+        (outside_dir / "config.yaml").write_text("api_key: secret", encoding="utf-8")
+
+        def fake_clone(repo, ref, dest):
+            skill_dir = self._write_skill(
+                Path(dest) / "evil-dir-skill", "evil-dir-skill"
+            )
+            link_path = skill_dir / "linked"
+            try:
+                link_path.symlink_to(outside_dir, target_is_directory=True)
+            except OSError:
+                if os.name != "nt":
+                    pytest.skip("directory symlinks are not available")
+                proc = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link_path), str(outside_dir)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    pytest.skip("junctions are not available")
+
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            result = install_skill(
+                "owner/repo@evil-dir-skill", str(temp_skills_dir), workspace=skills_ws
+            )
+
+        assert result["success"] is False
+        assert "escaping" in result["error"].lower()
+        assert not (temp_skills_dir / "evil-dir-skill").exists()
+
+    def test_fetch_remote_skill_index_rejects_escaping_path(self, tmp_path):
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+
+        def fake_clone(repo, ref, dest):
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            self._write_skill(Path(dest).parent / "outside-idx", "outside-idx")
+
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            index = fetch_remote_skill_index(repo="test/escape", path="..")
+
+        assert index == []
+
+    def test_resolve_remote_head_separates_git_options_from_ref(self):
+        proc = type(
+            "P",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "deadbeef0000000000000000000000000000abcd\trefs/heads/main\n",
+                "stderr": "",
+            },
+        )()
+        with patch("EvoScientist.git_cli.subprocess.run", return_value=proc) as run:
+            resolve_remote_head(
+                "https://github.com/owner/repo/tree/--upload-pack=evil/my-skill"
+            )
+
+        argv = run.call_args.args[0]
+        assert "--" in argv
+        sep_idx = argv.index("--")
+        assert argv[sep_idx + 1] == "https://github.com/owner/repo.git"
+        assert argv[sep_idx + 2] == "--upload-pack=evil"
