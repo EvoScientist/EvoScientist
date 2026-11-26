@@ -255,7 +255,8 @@ Run `EvoSci -h` for the full flag reference, or type `/help` inside a session fo
 - If you move or rename a project folder, migrate its sessions, memory, and schedules with `EvoSci workspace move <old_dir> <new_dir>`.
 
 **Approvals & safety:**
-- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, allow command prefixes without a prompt with `EvoSci config set shell_allow_list "pytest,ruff"` (an allow-listed interpreter or package manager such as `python`, `pip` or `git` can then run any code without asking), or approve for the rest of the session at any prompt (`3` in the TUI and in chat replies, **Approve all (session)** in the classic CLI).
+- Shell commands require confirmation by default. Skip prompts with `--auto-approve`, run chosen command prefixes without a prompt with `EvoSci config set shell_allow_list "pytest,ruff"`, or approve for the rest of the session at any prompt (`3` in the TUI and in chat replies, **Approve all (session)** in the classic CLI).
+- The allow list matches prefixes only, and the agent can write files without asking. Any listed command that runs code—`python`, `pip`, `git`, or `pytest` on a test file the agent wrote—lets it run arbitrary code unprompted, so only list commands you'd approve every time anyway.
 - **Dangerous mode** skips approval prompts and lifts the workspace sandbox—use only when you fully trust the task. `--dangerous` applies to this session's own agent; `EvoSci config set dangerous_mode true` is persistent and also covers the background server and WebUI. See [SECURITY.md](SECURITY.md).
 - Disable clarifying questions with `EvoSci config set enable_ask_user false`.
 
