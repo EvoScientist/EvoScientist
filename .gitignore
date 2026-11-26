@@ -43,7 +43,10 @@ conversation_history/
 .deno_cache/
 *.ipynb
 *CLAUDE.md
+!/CLAUDE.md
 *AGENTS.md
+!/AGENTS.md
+CLAUDE.local.md
 *meals/
 botpy.log
 large_tool_results/

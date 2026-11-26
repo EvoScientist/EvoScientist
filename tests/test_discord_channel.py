@@ -45,6 +45,42 @@ class TestDiscordChannel:
     importlib.util.find_spec("discord") is None,
     reason="discord.py not installed",
 )
+async def test_connect_line_hides_token_and_proxy_password(monkeypatch, caplog):
+    import logging
+
+    import discord
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def event(self, func):
+            return func
+
+        async def start(self, token):
+            raise RuntimeError("connect refused")
+
+    monkeypatch.setattr(discord, "Client", _Client)
+    channel = DiscordChannel(
+        DiscordConfig(
+            bot_token="bot-token-secret",
+            proxy="http://user:proxy-secret@proxy:3128",
+        )
+    )
+    caplog.set_level(logging.INFO, logger="EvoScientist.channels.discord.channel")
+
+    with pytest.raises(ChannelError):
+        await channel.start()
+
+    assert "Discord connect (via proxy)" in caplog.text
+    assert "proxy-secret" not in caplog.text
+    assert "bot-toke" not in caplog.text
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("discord") is None,
+    reason="discord.py not installed",
+)
 class TestDiscordRetryErrorExtraction:
     """Test Discord-specific status code extraction."""
 

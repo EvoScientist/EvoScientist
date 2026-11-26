@@ -14,7 +14,8 @@ the routes run them in a thread.
   changes a base URL only together with its stored key.
 - :func:`capture_restart_baseline` records the file when the server starts,
   before it builds any graph; :func:`pending_restart` names the fields that
-  changed since then, except :data:`LIVE_FIELDS`, which apply at once.
+  changed since then, except
+  :data:`~EvoScientist.config.settings.LIVE_FIELDS`, which apply at once.
   Graphs are also built later (another project, a new run folder, one the
   cache dropped), and those can already use part of a saved change; a
   restart applies it to every graph.
@@ -44,6 +45,7 @@ from EvoScientist.config.provider_keys import (
 from EvoScientist.config.settings import (
     _ENV_MAPPINGS,
     API_KEY_FIELDS,
+    LIVE_FIELDS,
     SECRET_FIELDS,
     EvoScientistConfig,
     SettingsError,
@@ -164,24 +166,12 @@ def capture_restart_baseline() -> None:
     _baseline = _file_digests(mapping)
 
 
-# Read anew at every AutoSkills submission and run, and the save itself
-# reconciles each project's cron, so the server needs no restart for them.
-LIVE_FIELDS: frozenset[str] = frozenset(
-    {
-        "memory_skill_synthesis_enabled",
-        "memory_skill_synthesis_mode",
-        "memory_skill_synthesis_cadence",
-        "memory_skill_synthesis_time",
-    }
-)
-
-
 def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
     """Fields whose saved value changed since the server started.
 
     ``shadowed`` fields are left out: the environment overrides them, so a
     restart would not apply the saved value either. So are
-    :data:`LIVE_FIELDS`, which apply without one. Outside a server (no
+    :data:`~EvoScientist.config.settings.LIVE_FIELDS`, which apply without one. Outside a server (no
     baseline taken), the first call takes it.
     """
     capture_restart_baseline()

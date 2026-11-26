@@ -68,7 +68,7 @@ def _step_channels(
             "qrcode>=7.4",
             "certifi>=2024.0",
         ],
-        "qq": ["qq-botpy>=1.0", "cryptography>=41.0", "qrcode>=7.4"],
+        "qq": ["qq-botpy>=1.2.0", "cryptography>=41.0", "qrcode>=7.4"],
     }
 
     # Channel definitions:

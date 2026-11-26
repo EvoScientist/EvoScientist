@@ -1399,6 +1399,18 @@ def is_client_only(field: str) -> bool:
     return field in CLIENT_ONLY_FIELDS or field.startswith(CLIENT_ONLY_PREFIXES)
 
 
+# Read anew at every AutoSkills submission and run, and the save itself
+# reconciles each project's cron, so the server needs no restart for them.
+LIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "memory_skill_synthesis_enabled",
+        "memory_skill_synthesis_mode",
+        "memory_skill_synthesis_cadence",
+        "memory_skill_synthesis_time",
+    }
+)
+
+
 # What a project ``.env`` may set: settings that change only how the EvoSci
 # command itself runs and looks. An explicit list, so a new setting is not
 # settable from a cloned repo's ``.env`` unless added here; bind addresses and
