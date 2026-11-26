@@ -1822,6 +1822,9 @@ def run_textual_interactive(
             # correct position (between user input and model response).
             for w in file_warnings or []:
                 self._append_system(f"⚠ {w}", style="yellow")
+            # The wait runs before the spinner mounts, so an error or a stop
+            # here has no spinner to leave behind.
+            agent = await self._await_agent_ready()
             loading = LoadingWidget()
             await container.mount(loading)
             container.scroll_end(animate=False)
@@ -1871,7 +1874,6 @@ def run_textual_interactive(
 
             metadata = build_metadata(self._dirs, self._current_model)
             response = ""
-            agent = await self._await_agent_ready()
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -2101,6 +2103,15 @@ def run_textual_interactive(
             _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
+                    # A stop before the turn's first stream never enters
+                    # the try/finally that removes the spinner, so it goes
+                    # with the turn here.
+                    if not loading_removed:
+                        try:
+                            await loading.cleanup()
+                        except Exception:
+                            pass
+                        loading_removed = True
                     response = await _mark_cancelled_response()
                     break
                 # Loop-level total cap on the *completed* round count,
@@ -2564,8 +2575,7 @@ def run_textual_interactive(
                                     model_retry_text(event), msg_style="yellow"
                                 )
                                 await container.mount(notice)
-                                # A spinner that is up stays the last line. Asked
-                                # of the widget: a paused round removes it unflagged.
+                                # A spinner that is up stays the last line.
                                 if loading.parent is container:
                                     container.move_child(loading, after=notice)
                         elif event_type == "rubric_evaluation_deferred":
@@ -2999,6 +3009,7 @@ def run_textual_interactive(
                                     await loading.cleanup()
                                 except Exception:
                                     pass
+                                loading_removed = True
                             # Clean up transient indicators. Inline narration is
                             # transcript content, so finalize it without removing
                             # the widget.
