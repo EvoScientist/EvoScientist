@@ -36,6 +36,8 @@ class _IMessageAllowListMiddleware:
         self._channel = channel
 
     async def process_inbound(self, raw, context):
+        if not raw.is_group and self._channel.dm_policy == "open":
+            return raw
         chat_id = raw.metadata.get("chat_id")
         chat_guid = raw.metadata.get("chat_guid")
         if not self._channel._is_sender_allowed(raw.sender_id, chat_id, chat_guid):

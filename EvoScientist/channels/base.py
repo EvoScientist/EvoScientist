@@ -440,7 +440,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
                 )
             )
         # GroupHistory
-        if self.capabilities.groups:
+        if self.capabilities.groups and self.require_mention != "off":
             middlewares.append(GroupHistoryMiddleware())
         # MentionGating
         if self.capabilities.mentions:
