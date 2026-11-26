@@ -970,7 +970,8 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     missing = [
         name
         for name, server in config.items()
-        if server.get("transport") == "stdio"
+        if isinstance(server, dict)
+        and server.get("transport") == "stdio"
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
         # A path with a folder part (node_modules/.bin/npx) is not looked up

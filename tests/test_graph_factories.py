@@ -150,16 +150,20 @@ def _mcp_yaml():
     return mcp_client.USER_MCP_CONFIG
 
 
-def _write_mcp_yaml(text: str, tick: int):
-    """Write *text* with an mtime of *tick* seconds, so consecutive writes
+def _write_mcp_yaml_bytes(data: bytes, tick: int):
+    """Write *data* with an mtime of *tick* seconds, so consecutive writes
     differ in modification time however coarse the filesystem's clock is."""
     import os
 
     path = _mcp_yaml()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(data)
     os.utime(path, ns=(tick * 10**9, tick * 10**9))
     return path
+
+
+def _write_mcp_yaml(text: str, tick: int):
+    return _write_mcp_yaml_bytes(text.encode("utf-8"), tick)
 
 
 def test_graph_cache_rebuilds_after_an_mcp_yaml_edit(builds, tmp_path):
@@ -229,6 +233,20 @@ def test_graph_cache_keeps_graphs_while_mcp_yaml_does_not_parse(builds, tmp_path
     dirs = SessionDirs(Workspace(tmp_path))
     first = graphs.get("EvoScientist", dirs)
     _write_mcp_yaml("servers: [unclosed\n", 2)
+    assert graphs.get("EvoScientist", dirs) is first
+    _write_mcp_yaml("servers: {fs: {}}\n", 3)
+    assert graphs.get("EvoScientist", dirs) is not first
+
+
+def test_graph_cache_keeps_graphs_for_utf16_mcp_yaml(builds, tmp_path):
+    """A PowerShell UTF-16 edit is broken to the UTF-8 loader, so it must not
+    drop the working graphs. A later UTF-8 edit still rebuilds them."""
+    _write_mcp_yaml("servers: {}\n", 1)
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+    first = graphs.get("EvoScientist", dirs)
+    utf16 = b"\xff\xfe" + "servers: {fs: {}}\n".encode("utf-16le")
+    _write_mcp_yaml_bytes(utf16, 2)
     assert graphs.get("EvoScientist", dirs) is first
     _write_mcp_yaml("servers: {fs: {}}\n", 3)
     assert graphs.get("EvoScientist", dirs) is not first

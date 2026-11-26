@@ -202,7 +202,7 @@ class GraphCache:
         except OSError:
             return False
         try:
-            parsed = yaml.safe_load(data)
+            parsed = yaml.safe_load(data.decode("utf-8"))
         except Exception:
             broken = True
         else:
