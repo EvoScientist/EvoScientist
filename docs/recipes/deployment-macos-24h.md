@@ -1,182 +1,100 @@
-# Running EvoScientist 24/7 on macOS (Telegram Bot + STT + ccproxy)
+# Running EvoScientist 24/7 on macOS (Telegram + Voice STT + Claude OAuth)
 
-This guide covers deploying EvoScientist as a fully automated 24/7 service on macOS
-(tested on Mac Mini with Apple Silicon), using:
+Deploy EvoScientist as an always-on background service on an Apple silicon Mac (e.g., Mac Mini) using `launchd`, with Telegram messaging, offline voice transcription (`faster-whisper`), and Claude Pro/Max subscription routing (`ccproxy` managed automatically by `EvoSci server`).
 
-- **EvoScientist** — the AI research agent
-- **ccproxy** — local proxy that routes API calls through your Claude Code subscription
-- **Telegram channel** — messaging interface
-- **STT** — automatic voice message transcription (faster-whisper)
-
----
+```txt
+Telegram (text / voice) ──▶ EvoSci serve (Telegram + faster-whisper STT)
+                                │
+Anthropic API ◀── ccproxy ◀── EvoSci background server
+```
 
 ## Prerequisites
 
-- macOS 13+ on Apple silicon
-- [Claude Code](https://claude.ai/code) installed and subscription active
-- [uv](https://astral.sh/uv) installed
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot))
+- macOS 13+ on Apple silicon, [uv](https://docs.astral.sh/uv), and an active Claude Pro/Max subscription (or an API key)
+- A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric user ID from [@userinfobot](https://t.me/userinfobot)
 
----
+> **Set up with an older version of this recipe?** Stop and remove its LaunchAgents first. Otherwise the old bot keeps polling Telegram next to the new one, and the old `com.evosci.ccproxy` job keeps running (`EvoSci server stop` doesn't stop it; the server now manages `ccproxy` itself):
+>
+> ```bash
+> for job in com.evosci.serve com.evosci.ccproxy; do
+>   launchctl unload ~/Library/LaunchAgents/$job.plist 2>/dev/null
+>   rm -f ~/Library/LaunchAgents/$job.plist
+> done
+> ```
+>
+> The old recipe also pointed `anthropic_base_url` at that proxy. If you're switching to an API key, clear it and restart the background server, or requests keep going to the stopped proxy: `EvoSci config set anthropic_base_url "" && EvoSci server stop`. (OAuth mode sets the proxy URL itself, so it doesn't matter there.)
 
-## 1. Clone repositories
+## 1. Install EvoScientist With Extras
+
+Install with the [one-line installer](../guides/install.md):
 
 ```bash
-mkdir -p ~/Dev/tools
-cd ~/Dev/tools
-
-git clone git@github.com:jhfnetboy/EvoScientist.git
-git clone git@github.com:jhfnetboy/ccproxy-api.git
+curl -fsSL https://evoscientist.ai/install.sh | bash
 ```
 
-> Both repos should sit as siblings in the same parent directory.
-
----
-
-## 2. Install ccproxy from source
-
-> **Do not** `pip install ccproxy-api` from PyPI — it lacks the adaptive thinking
-> and OAuth header fixes required for Claude 4+ models. Install from the patched fork.
+**Open a new terminal** so `EvoSci` is on your `PATH`, then add the extras pinned to the same release's tested dependencies (`EvoSci update` keeps them from then on):
 
 ```bash
-cd ~/Dev/tools/ccproxy-api
-git checkout jhf-research
-pip install -e .
-which ccproxy   # verify: should print a path
+V=$(EvoSci --version | awk '{print $2}')
+uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' "${EVOSCIENTIST_DATA_DIR:-$HOME/.evoscientist}/tools/uv.json")   # the installer's own uv
+"$uv" tool install --force --python 3.12 --managed-python \
+  --with-executables-from ccproxy-api \
+  -c "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$V/constraints.txt" \
+  "EvoScientist[telegram,stt,oauth]==$V"
+which EvoSci ccproxy && EvoSci --version
 ```
 
----
+*(`--with-executables-from` puts `ccproxy` on your `PATH` for step 2. Reinstalling over an existing install drops packages EvoScientist added for MCP servers or channels—re-add them afterwards.)*
 
-## 3. Authenticate ccproxy with your Claude subscription
+*(Working from a source checkout instead? Run `uv sync --extra telegram --extra stt --extra oauth` and then `<clone>/.venv/bin/EvoSci setup` inside your clone (it installs the agent's Python environment and anything else the installer would), and use `<clone>/.venv/bin/EvoSci` and `<clone>/.venv/bin/ccproxy` wherever this recipe says `EvoSci` or `ccproxy`.)*
 
-This step opens a browser window to log in with your Claude account.
-It only needs to be done once per machine.
+## 2. Authenticate Claude OAuth (Optional — Skip If Using an API Key)
+
+Log in once per machine—`EvoSci server` starts and stops `ccproxy` automatically when `anthropic_auth_mode` is `oauth` (see [Subscription OAuth](subscription-oauth.md)):
 
 ```bash
-ccproxy auth login claude-api
+ccproxy auth login claude_api
+ccproxy auth status claude_api
 ```
 
-Verify the token was saved:
+## 3. Pre-Download the Whisper STT Model
+
+Avoids a ~250 MB download delay on your first voice note:
 
 ```bash
-ls ~/.claude/.credentials.json   # note the leading dot
+uv run --with faster-whisper python -c "from faster_whisper import WhisperModel; WhisperModel('Systran/faster-whisper-small', device='cpu', compute_type='int8'); print('STT model ready')"
 ```
 
----
-
-## 4. Install EvoScientist from source
+## 4. Configure & Smoke Test
 
 ```bash
-cd ~/Dev/tools/EvoScientist
-git checkout jhf-research
-
-# Install with Telegram and STT support
-uv pip install -e '.[telegram,stt]'
-```
-
-> **Important:** always use `uv pip install`, not `pip install`, to ensure packages
-> land in the correct `.venv` that the service will use.
-
-Verify:
-
-```bash
-which EvoSci
-EvoSci -h
-```
-
----
-
-## 5. Pre-download the STT model
-
-The STT model (~250 MB) downloads from HuggingFace on first use.
-Pre-download it now to avoid a delay on the first voice message:
-
-```bash
-uv run python -c "
-from faster_whisper import WhisperModel
-WhisperModel('Systran/faster-whisper-small', device='cpu', compute_type='int8')
-print('STT model ready')
-"
-```
-
----
-
-## 6. Configure EvoScientist
-
-```bash
-cd ~/Dev/tools/EvoScientist
-
-EvoSci config set anthropic_base_url "http://localhost:8000/claude"
-EvoSci config set anthropic_api_key  "sk-dummy"
-EvoSci config set model              "claude-sonnet-5-5"
-
-# Telegram
-EvoSci config set telegram_bot_token      "YOUR_BOT_TOKEN"
+EvoSci config set provider anthropic
+EvoSci config set anthropic_auth_mode oauth            # Claude Pro/Max (step 2) only
+# or, with an API key:
+#   EvoSci config set anthropic_auth_mode api_key
+#   EvoSci config set anthropic_api_key "sk-ant-..."
+EvoSci config set channel_enabled telegram
+EvoSci config set telegram_bot_token       "YOUR_BOT_TOKEN"
 EvoSci config set telegram_allowed_senders "YOUR_TELEGRAM_USER_ID"
-
-# STT voice transcription
 EvoSci config set stt_enabled  true
-EvoSci config set stt_language zh     # zh / en / auto
-
-# Optional: set a default workspace directory
+EvoSci config set stt_language auto   # auto | en | zh
 EvoSci config set default_workdir "/absolute/path/to/your/workspace"
 ```
 
----
+Test interactively first:
 
-## 7. Smoke test before creating services
-
-Open two terminals:
-
-**Terminal 1 — ccproxy:**
 ```bash
-ccproxy serve --port 8000
-```
-
-**Terminal 2 — EvoSci:**
-```bash
-cd ~/Dev/tools/EvoScientist
 EvoSci serve --auto-approve
 ```
 
-Send a text message and a voice message to your Telegram bot.
-If both work, proceed to set up the background services.
+Send both a text message and a voice note to your Telegram bot. Once both work, stop `EvoSci serve` (`Ctrl+C`) and register `launchd`.
 
----
-
-## 8. Create launchd services (auto-start on login)
-
-Run this script once to create both plist files:
+## 5. Register a `launchd` Auto-Start Service
 
 ```bash
-CCPROXY=$(which ccproxy)
-EVOSCI_DIR="$HOME/Dev/tools/EvoScientist"   # adjust if your path differs
-EVOSCI_BIN="${EVOSCI_DIR}/.venv/bin/EvoSci"
+EVOSCI_BIN=$(which EvoSci)   # source checkout: EVOSCI_BIN=/path/to/clone/.venv/bin/EvoSci
+WORKDIR="/absolute/path/to/your/workspace"   # adjust to your workspace
 
-# ── ccproxy service ──────────────────────────────────────────────────
-cat > ~/Library/LaunchAgents/com.evosci.ccproxy.plist << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>com.evosci.ccproxy</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${CCPROXY}</string>
-        <string>serve</string>
-        <string>--port</string>
-        <string>8000</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>/tmp/ccproxy.log</string>
-    <key>StandardErrorPath</key><string>/tmp/ccproxy.log</string>
-</dict>
-</plist>
-EOF
-
-# ── EvoSci serve service ─────────────────────────────────────────────
 cat > ~/Library/LaunchAgents/com.evosci.serve.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -189,7 +107,7 @@ cat > ~/Library/LaunchAgents/com.evosci.serve.plist << EOF
         <string>serve</string>
         <string>--auto-approve</string>
     </array>
-    <key>WorkingDirectory</key><string>${EVOSCI_DIR}</string>
+    <key>WorkingDirectory</key><string>${WORKDIR}</string>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>/tmp/evosci.log</string>
@@ -198,135 +116,27 @@ cat > ~/Library/LaunchAgents/com.evosci.serve.plist << EOF
 </plist>
 EOF
 
-# ── Load both services ───────────────────────────────────────────────
-launchctl load ~/Library/LaunchAgents/com.evosci.ccproxy.plist
 launchctl load ~/Library/LaunchAgents/com.evosci.serve.plist
-
-echo "Services loaded:"
 launchctl list | grep evosci
 ```
 
----
+Watch live logs anytime with `tail -f /tmp/evosci.log`.
 
-## 9. Check status and logs
+A LaunchAgent starts when you log in, not at boot. To come back on its own after a power cut or update reboot, turn on the setting that starts the Mac after a power failure (desktop Macs such as a Mac mini: **System Settings → Energy**, called **Energy Saver** before macOS 15, or `sudo pmset -a autorestart 1`) and automatic login (**System Settings → Users & Groups**). macOS doesn't offer automatic login while FileVault is on. Anyone who can restart the Mac then gets into that account without a password, so only do this with a standard (non-admin) account on a machine in a place you trust.
 
-```bash
-# Are both services running?
-launchctl list | grep evosci
-
-# Live logs
-tail -f /tmp/evosci.log
-tail -f /tmp/ccproxy.log
-```
-
----
-
-## Managing services
+## Day-to-Day Management
 
 | Action | Command |
-|--------|---------|
-| Restart EvoSci | `launchctl kickstart -k gui/$(id -u)/com.evosci.serve` |
-| Restart ccproxy | `launchctl kickstart -k gui/$(id -u)/com.evosci.ccproxy` |
-| Stop EvoSci | `launchctl unload ~/Library/LaunchAgents/com.evosci.serve.plist` |
-| Stop ccproxy | `launchctl unload ~/Library/LaunchAgents/com.evosci.ccproxy.plist` |
-| Stop the agent server (it outlives `EvoSci serve`) | `EvoSci server stop` |
-| After updating EvoScientist | `EvoSci server stop`, then restart EvoSci |
-| Reload after plist edit | `launchctl unload <plist> && launchctl load <plist>` |
-
----
+|---|---|
+| Restart `EvoSci serve` | `launchctl kickstart -k gui/$(id -u)/com.evosci.serve` |
+| Stop `EvoSci serve` | `launchctl unload ~/Library/LaunchAgents/com.evosci.serve.plist` |
+| Stop the background agent server (and its managed `ccproxy`) | `EvoSci server stop` *(outlives `EvoSci serve`; run this before restarting after an update)* |
+| Reload after editing the plist | `launchctl unload ~/Library/LaunchAgents/com.evosci.serve.plist && launchctl load ~/Library/LaunchAgents/com.evosci.serve.plist` |
 
 ## Troubleshooting
 
-### `ccproxy not found`
-ccproxy is not installed. Run:
-```bash
-cd ~/Dev/tools/ccproxy-api && pip install -e .
-```
-
-### `ValueError: No valid OAuth access token available`
-ccproxy cannot find your Claude login token. Run:
-```bash
-ccproxy auth login claude-api
-```
-A browser window will open. Log in with your Claude subscription account.
-Verify the token was saved at `~/.claude/.credentials.json` (hidden file, note the leading dot).
-
-### `Channel telegram fatal error: python-telegram-bot not installed`
-The package was installed in the wrong Python environment. Use `uv pip`:
-```bash
-cd ~/Dev/tools/EvoScientist
-uv pip install 'python-telegram-bot>=21.0'
-```
-
-### `zsh: no matches found: evoscientist[telegram]`
-Shell interprets `[` as a glob. Always quote the package name:
-```bash
-uv pip install 'EvoScientist[telegram,stt]'   # correct
-uv pip install  EvoScientist[telegram,stt]    # wrong — shell eats the brackets
-```
-
-### Agent keeps asking to approve ffmpeg / shell commands
-Add `--auto-approve` to the EvoSci serve command in the plist (see step 8).
-
-### Voice messages not transcribed / agent receives `[voice: ...]` annotation
-STT is disabled or not installed:
-```bash
-EvoSci config set stt_enabled true
-uv pip install faster-whisper
-```
-
-### Whisper outputs gibberish (`字幕by索兰娅` etc.)
-This is a known Whisper hallucination on silent/very short audio. It is filtered
-automatically by the built-in VAD filter and `no_speech_prob` threshold introduced
-in PR #28. Make sure you are on the `jhf-research` branch or a release that includes
-that fix.
-
-### `Could not find service "com.evosci.*" in domain`
-The plist was never loaded. Run:
-```bash
-launchctl load ~/Library/LaunchAgents/com.evosci.ccproxy.plist
-launchctl load ~/Library/LaunchAgents/com.evosci.serve.plist
-```
-
-### heredoc `cat > file << EOF` hangs in terminal
-The shell variable inside the heredoc was not expanded because `EOF` was quoted
-(`<< 'EOF'`). Use unquoted `<< EOF` when the content contains `$VARIABLES` that
-should be expanded, or pre-set the variables before running the command.
-
-### Services on external drive not starting at boot
-`/Volumes/...` paths are only available after the external drive mounts.
-With `KeepAlive: true`, launchd will keep retrying every few seconds and
-the services will start automatically once the drive is available.
-This is normal behaviour for a Mac Mini where the drive is always connected.
-
-### `pip install` installs to conda base instead of `.venv`
-Always use `uv pip install` inside the EvoScientist project directory,
-or explicitly target the venv:
-```bash
-cd ~/Dev/tools/EvoScientist
-uv pip install 'some-package'
-```
-
----
-
-## Architecture overview
-
-```
-Telegram app
-    │  voice / text message
-    ▼
-python-telegram-bot (polling)
-    │
-    ▼
-EvoScientist channel layer
-    │  STT hook in _enqueue_raw()
-    │  .ogg → faster-whisper → plain text
-    ▼
-EvoScientist agent
-    │  tool calls / LLM requests
-    ▼
-ccproxy  (localhost:8000)
-    │  OAuth token from ~/.claude/.credentials.json
-    ▼
-Anthropic Claude API  (claude.ai subscription)
-```
+- **`zsh: no matches found`:** Quote package extras (`'EvoScientist[telegram,stt,oauth]'`).
+- **Claude OAuth token expired/missing:** Run `ccproxy auth login claude_api` and check `ccproxy auth status claude_api`. If `ccproxy` isn't found (`EvoSci update` doesn't keep it on your `PATH`), call it from next to `EvoSci`: `E=$(command -v EvoSci); "$(dirname "$(readlink "$E" || echo "$E")")/ccproxy" auth login claude_api`.
+- **Voice messages arrive as `[voice: ...]` instead of text:** Confirm `stt_enabled` is `true` and `faster-whisper` is installed in the same environment as `EvoSci`.
+- **Agent asks for shell approval in Telegram:** Make sure `--auto-approve` is included in `ProgramArguments`.
+- **Workspace on an external `/Volumes/...` drive:** `KeepAlive: true` automatically retries until the drive mounts after reboot.

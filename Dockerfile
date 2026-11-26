@@ -73,7 +73,7 @@ WORKDIR /workspace
 LABEL org.opencontainers.image.title="EvoScientist" \
       org.opencontainers.image.description="EvoScientist agent with core + all-channels dependencies pre-installed." \
       org.opencontainers.image.source="https://github.com/EvoScientist/EvoScientist" \
-      org.opencontainers.image.documentation="https://github.com/EvoScientist/EvoScientist#-docker" \
+      org.opencontainers.image.documentation="https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/install.md#docker" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 ENTRYPOINT ["tini", "--", "evosci"]

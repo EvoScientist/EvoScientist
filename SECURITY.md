@@ -1,21 +1,27 @@
 # Security Policy
 
-## Trust model
+## Trust Model
 
-EvoScientist runs on one person's machine, for that person. Its background server (the backend on port 6174) and the WebUI (port 4716) treat anyone who can reach them as their operator: the WebUI, SDK clients, LangGraph Studio and the `EvoSci` command all act with the operator's rights.
+EvoScientist is a **single-user local tool**. Its background server (port `6174`) and WebUI (port `4716`) assume anyone who can reach them *is* the machine's operator—so the WebUI, CLI, SDK clients, and LangGraph Studio all act with your local user permissions.
 
-- **Approval settings belong to the operator.** `auto_approve`, `auto_mode` and `dangerous_mode` apply to every run that does not bring its own choice. Runs from the WebUI, SDK clients and Studio follow the server's setting, as the terminal follows its own. With approvals off, the agent's shell commands, deletions, background processes and scheduled tasks run without a prompt, including when content the model reads steers them; that is the risk the setting accepts.
-- **The command guard stays on.** Blocked commands (`sudo`, `chmod`, `pkill` and others) and catastrophic deletions (such as `rm -rf ~`) are refused in every mode. `dangerous_mode` turns every approval off (it implies `auto_approve`) and lifts the workspace sandbox and the dangerous-command check.
-- **The WebUI's settings page cannot change protection settings.** The settings API refuses `auto_approve`, `auto_mode`, `dangerous_mode`, `shell_allow_list`, the bind hosts, the allowed browser origins and the channel access settings; they change from the operator's own terminal (`EvoSci config set`, `EvoSci onboard`, command-line flags, environment variables) or in `config.yaml`. With approvals off, an agent run from any client runs commands as the operator, so it can change that file too.
-- **Other machines are the operator's own.** A server opened to other machines (`--host`) is meant for the operator's own devices on a network the operator trusts; see "Opening it from another machine" in the README.
-- **One user per machine.** Loopback keeps the servers off the network, not away from other accounts on the same machine. EvoScientist does not separate users: for a shared machine or a team, give each person a machine, VM or container of their own, or put authentication and isolation in front of the service.
+Keep these five boundaries in mind:
 
-Behaviour that follows from this model, such as a run that executes without approval on a server with approvals off, is expected.
+1. **Approval settings apply globally to the operator's runs.** Setting `auto_approve`, `auto_mode`, or `dangerous_mode` disables interactive confirmation for shell commands, deletions, background processes, and scheduled tasks—even if untrusted content the model reads tries to steer it. That trade-off is explicit when you disable approvals.
+2. **Hard-blocked commands vs. dangerous mode.** Privileged/destructive commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`, `pkill`, `killall`) and catastrophic deletions (`rm -rf /`, `rm -rf ~`) are **always refused as shell commands**, even in `dangerous_mode`. What `dangerous_mode` changes is lifting workspace confinement (allowing real filesystem paths), skipping heuristic dangerous-command checks (such as piping into an interpreter), and implying `auto_approve`. The guard reads shell commands, not the code they run: a Python script that calls `os.chmod` isn't stopped. Treat it as a safety net, not a sandbox.
+3. **The WebUI cannot weaken safety settings.** The settings API refuses writes to `auto_approve`, `auto_mode`, `dangerous_mode`, `shell_allow_list`, bind hosts, `backend_allowed_origins`, and channel access lists. Change those only from your own terminal (`EvoSci config set`, `EvoSci onboard`, CLI flags, env vars) or `~/.config/evoscientist/config.yaml`. *(Note: if approvals are already off, an agent running shell commands as you can still edit `config.yaml` directly.)*
+4. **Exposing `--host` is for trusted networks only.** Binding beyond `127.0.0.1` exposes an unauthenticated API that can execute shell commands. Only widen it on a private network you control (or tunnel over SSH instead—see [README.md](README.md#opening-from-another-machine)).
+5. **One user per machine.** Loopback (`127.0.0.1`) blocks the network, not other local OS accounts. On a shared server, isolate each person in their own VM or container, or place authentication in front of the service.
 
-## Supported versions
+Behavior that follows directly from this model (such as a command running without a prompt when approvals are turned off) is expected, not a vulnerability.
 
-Fixes go into the next release. Earlier releases are not patched; update with `EvoSci update`.
+## Supported Versions
 
-## Reporting a vulnerability
+Security fixes ship in the latest release. Update with:
 
-Please report security issues privately through GitHub's [private vulnerability reporting](https://github.com/EvoScientist/EvoScientist/security/advisories/new) (the repository's **Security** tab, **Report a vulnerability**), not in a public issue.
+```bash
+EvoSci update
+```
+
+## Reporting a Vulnerability
+
+Please report vulnerabilities privately via GitHub's [Private Vulnerability Reporting](https://github.com/EvoScientist/EvoScientist/security/advisories/new) (**Security** tab → **Report a vulnerability**). Do not open a public issue.
