@@ -2576,8 +2576,7 @@ def run_textual_interactive(
                                     model_retry_text(event), msg_style="yellow"
                                 )
                                 await container.mount(notice)
-                                # A spinner that is up stays the last line. Asked
-                                # of the widget: a paused round removes it unflagged.
+                                # A spinner that is up stays the last line.
                                 if loading.parent is container:
                                     container.move_child(loading, after=notice)
                         elif event_type == "rubric_evaluation_deferred":
