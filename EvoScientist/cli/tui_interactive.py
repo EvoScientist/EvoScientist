@@ -3392,15 +3392,24 @@ def run_textual_interactive(
                         )
 
                 def _send_media(file_path: str) -> None:
-                    if msg.channel_ref:
-                        _send_to_channel(
-                            msg.channel_ref.send_media(
+                    from ..stream.display import release_media_snapshot
+
+                    channel_ref = msg.channel_ref
+                    if channel_ref is None:
+                        release_media_snapshot(file_path)
+                        return
+
+                    async def _send_then_cleanup() -> None:
+                        try:
+                            await channel_ref.send_media(
                                 recipient=msg.chat_id,
                                 file_path=file_path,
                                 metadata=msg.metadata,
-                            ),
-                            "Media",
-                        )
+                            )
+                        finally:
+                            release_media_snapshot(file_path)
+
+                    _send_to_channel(_send_then_cleanup(), "Media")
 
                 def _channel_hitl_prompt(action_requests: list, **kwargs):
                     """Send HITL approval prompt to channel user and wait for reply.

@@ -980,6 +980,15 @@ class ChannelManager:
                         )
                         failure_error = str(e)
                         delivery_failed = True
+                    finally:
+                        # A forward_media_result snapshot is owned by this
+                        # delivery; drop it once the send finishes or fails.
+                        cleanup = getattr(media_path, "cleanup", None)
+                        if cleanup is not None:
+                            try:
+                                cleanup()
+                            except Exception:
+                                logger.debug("Media snapshot cleanup failed")
 
                 if delivery_failed:
                     await self._send_failure_notice(

@@ -11,6 +11,8 @@ import inspect
 import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -76,6 +78,57 @@ _MEDIA_EXTENSIONS = {
 # File tool results that may name a media file to send to the channel.
 _MEDIA_TOOLS = ("write_file", "read_file")
 _MEDIA_RESULT_EVENTS = ("tool_result", "subagent_tool_result")
+
+
+class MediaSnapshot(str):
+    """A media path that points at a turn-owned copy of the file.
+
+    It is a plain ``str`` for every channel that takes a path, and carries
+    ``cleanup()`` for whoever finishes (or fails) the delivery. The copy is
+    made when the tool result arrives, so a later write or delete in the same
+    turn (or by another chat's worker) cannot change what this chat receives.
+    """
+
+    source: str
+    cleanup: Callable[[], None]
+
+    def __new__(
+        cls, path: str, source: str, cleanup: Callable[[], None]
+    ) -> "MediaSnapshot":
+        instance = super().__new__(cls, path)
+        instance.source = source
+        instance.cleanup = cleanup
+        return instance
+
+
+def release_media_snapshot(path: str) -> None:
+    """Delete a turn-owned media copy once delivery finishes or fails."""
+    cleanup = getattr(path, "cleanup", None)
+    if cleanup is not None:
+        cleanup()
+
+
+def _snapshot_media_file(path: str) -> MediaSnapshot | None:
+    """Copy *path* into a private folder, or ``None`` when it cannot be read."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    folder = Path(tempfile.mkdtemp(prefix="evosci-media-"))
+    name = Path(path).name or "media"
+    copy = folder / name
+    try:
+        copy.write_bytes(data)
+    except OSError:
+        shutil.rmtree(folder, ignore_errors=True)
+        return None
+
+    def cleanup() -> None:
+        shutil.rmtree(folder, ignore_errors=True)
+
+    return MediaSnapshot(str(copy), path, cleanup)
+
+
 _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
 
@@ -230,8 +283,11 @@ def forward_media_result(
         state_now = _file_state(real_path)
         if state_now and received_files.get(state_now[0]) == state_now[1]:
             return
+    snapshot = _snapshot_media_file(real_path)
+    if snapshot is None:
+        return
     media_sent.add(path)
-    send_fn(real_path)
+    send_fn(snapshot)
 
 
 class _ApprovalUnanswered(Exception):
