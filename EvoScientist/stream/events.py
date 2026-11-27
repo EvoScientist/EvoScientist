@@ -969,6 +969,11 @@ class _V3EventProcessor:
                 self._end_text_message(None)
         return events
 
+    def stop_value_messages(self) -> None:
+        """Stop emitting from value snapshots, as when the run had no baseline."""
+        self._value_recovery = False
+        self._process_value_message_snapshots = False
+
     def mark_messages_seen(self, messages: object) -> None:
         """Count ``messages`` as shown: value snapshots do not emit them."""
         self._seen_value_message_keys |= self._message_keys(messages)
