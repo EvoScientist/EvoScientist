@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
@@ -21,24 +20,17 @@ class OpenAICompatContentMixin:
     """Normalize message content before calling an OpenAI-compatible model."""
 
     def _content_compat(self) -> _OpenAICompatContent:
-        profile = getattr(self, "profile", None)
-        effective = profile if isinstance(profile, Mapping) else None
+        # The normalizer is built once in as_content_compat_model and
+        # carried in __dict__, so a copy shares what the model it was
+        # copied from learned about the media its endpoint refuses.
         compat = self.__dict__.get("_evosci_content_compat")
-        owner = self.__dict__.get("_evosci_content_compat_owner")
-        # A copy carries both, so the owner tells them apart: what one model
-        # learns about the media its endpoint refuses must not reach the model
-        # it was copied from.
-        if (
-            not isinstance(compat, _OpenAICompatContent)
-            or not isinstance(owner, weakref.ReferenceType)
-            or owner() is not self
-        ):
+        if not isinstance(compat, _OpenAICompatContent):
+            profile = getattr(self, "profile", None)
             compat = _OpenAICompatContent(
-                effective,
-                hoist_tool_media=self.__dict__.get("_evosci_hoist_tool_media", True),
+                profile if isinstance(profile, Mapping) else None,
+                hoist_tool_media=True,
             )
             self.__dict__["_evosci_content_compat"] = compat
-            self.__dict__["_evosci_content_compat_owner"] = weakref.ref(self)
         return compat
 
     def _generate(
@@ -115,7 +107,9 @@ def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any
     The normalization is a mixin whose methods read ``self``, so a copy of
     the model sends its own settings: a copy of a model whose methods were
     replaced by closures over the original's bound methods sends the
-    original's.
+    original's. The normalizer itself is built once, here, and carried in
+    the model's ``__dict__``, so a copy shares what the model it was
+    copied from learned about the media its endpoint refuses.
     """
     cls = type(model)
     if getattr(cls, "_generate", None) is None:
@@ -124,16 +118,9 @@ def as_content_compat_model(model: Any, *, hoist_tool_media: bool = True) -> Any
         return model
     if not issubclass(cls, OpenAICompatContentMixin):
         model.__class__ = _content_compat_class(cls)
-    model.__dict__["_evosci_hoist_tool_media"] = hoist_tool_media
-    compat = model.__dict__.get("_evosci_content_compat")
-    owner = model.__dict__.get("_evosci_content_compat_owner")
-    if (
-        isinstance(compat, _OpenAICompatContent)
-        and isinstance(owner, weakref.ReferenceType)
-        and owner() is model
-    ):
-        # Re-applying with a different flag must reach a normalizer that is
-        # already serving this model's requests. A copy shares the original's
-        # normalizer until its first request, and must leave it alone.
-        compat.hoist_tool_media = hoist_tool_media
+    profile = getattr(model, "profile", None)
+    model.__dict__["_evosci_content_compat"] = _OpenAICompatContent(
+        profile if isinstance(profile, Mapping) else None,
+        hoist_tool_media,
+    )
     return model
