@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -101,12 +101,24 @@ _BLOCKED_COMMAND_HINTS = dict.fromkeys(
 )
 _KILL_BY_LOOKUP_ERROR = (
     "Command blocked: kill takes only the id of a process you started (kill "
-    "12345, or stop_process with the id run_in_background returned). Ids looked "
-    "up by name or pattern (pgrep, ps, lsof) and -1 / 0 can reach EvoScientist "
+    "12345, or stop_process with the id run_in_background returned). Ids a "
+    "process lookup found (pgrep, pidof, ps, lsof, fuser), also through a "
+    "variable or a read loop beside one, and -1 / 0 can reach EvoScientist "
     "itself."
 )
-# `$HOME` / `${HOME}` at the start of a path.
-_HOME_VARIABLE_RE = re.compile(r"\$\{?HOME\b")
+# The home folder as a variable at the start of a path: `$HOME` / `${HOME}`,
+# `$USERPROFILE` (Git Bash) or cmd.exe's `%USERPROFILE%` (any case).
+_HOME_VARIABLE_RE = re.compile(r"\$\{?(?:HOME|USERPROFILE)\b|(?i:%USERPROFILE%)")
+# The home folder itself as an rm target: `~` or `~user` as written, or one
+# of the variables above, then only `/`, `/.`, `/*` or `/.*` steps. Each step
+# takes one slash, so a long run of slashes splits one way only (no
+# backtracking).
+_HOME_STEPS = r"(?:/\.?\*?)*"
+_HOME_TILDE_TARGET_RE = re.compile(rf"~(?:\w[\w.-]*)?{_HOME_STEPS}")
+_HOME_VARIABLE_TARGET_RE = re.compile(
+    rf"(?:\$(?:HOME|USERPROFILE)|\$\{{(?:HOME|USERPROFILE)\}}|(?i:%USERPROFILE%))"
+    rf"{_HOME_STEPS}"
+)
 # Commands that find processes by name, pattern or resource.
 _PROCESS_LOOKUP_COMMANDS = frozenset({"pgrep", "pidof", "ps", "lsof", "fuser"})
 # Of those, the ones whose only job is matching names.
@@ -716,6 +728,27 @@ def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     return Command(resume={interrupt_id: {"decisions": decisions}})
 
 
+def build_ask_user_resume(interrupt_id: str | None, payload: dict) -> "Command":
+    """Key an ask_user answer by the id of the interrupt the client displayed.
+
+    An event without a real id (the stream decoders' ``"default"``) resumes
+    flat: LangGraph reads ``resume`` as an id map only when every key is an
+    xxh3-128 digest, so a keyed ``{"default": payload}`` would be handed to
+    the node as the answer itself.
+
+    Keying matters when the agent calls ``ask_user`` twice in one message:
+    both interrupts are pending at once and a flat resume raises
+    ``RuntimeError: When there are multiple pending interrupts …``. The
+    keyed resume answers the interrupt the client displayed and re-parks the
+    rest, which re-emit on the next stream and are drained one at a time.
+    """
+    from langgraph.types import Command
+
+    if not interrupt_id or interrupt_id == "default":
+        return Command(resume=payload)  # single unkeyed interrupt
+    return Command(resume={interrupt_id: payload})
+
+
 _SSH_OPTIONS_WITH_VALUE = {
     "-B",
     "-b",
@@ -828,7 +861,7 @@ def _ssh_invocations(
 
     prev_end = 0
     for token in tokens:
-        ends_command = shell_syntax.COMMAND_NEWLINE_RE.search(
+        ends_command = shell_syntax.command_newline(
             command, prev_end, int(token["start"])
         )
         if token.get("type") == "op" or ends_command is not None:
@@ -971,13 +1004,63 @@ def _split_command_segments(command: str) -> list[str] | None:
     return segments
 
 
+# What a value can be glued to: a variable or option name and ``=`` (also ``a[i]=``,
+# ``+=``, ``:=``, ``-DX:PATH=``), or a short-option cluster (``-o``, ``-Wl,``).
+_GLUED_VALUE_PREFIX_RE = re.compile(
+    r"\+{0,2}[\w.-]+(?:\[[^]]*\])?(?::[A-Z]+)?[+:?!]*=|-[A-Za-z]+,?"
+)
+
+
 def _has_traversal_component(command: str) -> bool:
     """Check if command contains '..' as a path component (not substring)."""
     from pathlib import PurePosixPath
 
-    for token in command.split():
+    parsed = shell_syntax.parse(command)
+    tokens = parsed.tokens
+    decoded = (str(token["value"]) for token in tokens if token["type"] == "word")
+    # Quotes and escapes can split a literal path component as written.
+    # Inspect shell-decoded words too.
+    for token in (*command.split(), *decoded):
         if ".." in PurePosixPath(token).parts:
             return True
+        # A glued value can hold another prefix (CFLAGS=-I../x), a few deep at
+        # most; a variable's value can be a ':' list (PYTHONPATH=a:../b).
+        value = token
+        for _ in range(4):
+            glued = _GLUED_VALUE_PREFIX_RE.match(value)
+            if glued is None:
+                break
+            value = value[glued.end() :]
+            entries = [value] if glued[0].startswith("-") else value.split(":")
+            if any(".." in PurePosixPath(entry).parts for entry in entries):
+                return True
+
+    # The substitution helper reads shell words, not whole commands: comments
+    # and literal heredoc bodies must not affect its quote tracking.
+    def check_substitution(inner: str) -> tuple[str, bool]:
+        return inner, _has_traversal_component(inner)
+
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) not in parsed.delimiters:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                str(token["raw"]), check_substitution
+            )
+            if traversal:
+                return True
+    for start, end, expands in parsed.bodies:
+        if expands:
+            _, traversal = shell_syntax.rewrite_substitutions(
+                command[start:end], check_substitution, heredoc=True
+            )
+            if traversal:
+                return True
+    # A shell's script (bash -c '...') is a command line of its own: check
+    # inside it too, the way _extract_all_paths recurses into script words.
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] == "word" and int(token["start"]) in scripts:
+            if _has_traversal_component(str(token["value"])):
+                return True
     return False
 
 
@@ -1025,6 +1108,65 @@ def _is_under_allowed_prefix(path: str, allow_prefixes: tuple[str, ...]) -> bool
     return False
 
 
+_SEARCH_LIST_VARIABLES = frozenset(
+    {
+        "PATH",
+        "PYTHONPATH",
+        "LD_LIBRARY_PATH",
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "PKG_CONFIG_PATH",
+        "MANPATH",
+        "CLASSPATH",
+        "NODE_PATH",
+    }
+)
+
+
+def _is_toolchain_path_assignment(raw: str) -> bool:
+    """A literal toolchain location in an assignment is a setting, not an operand.
+
+    Not a read-only guarantee: a later ``$NAME`` can still write there.
+    """
+    if re.search(r"(?<!\\)[$`]", raw):
+        return False
+    try:
+        words = shlex.split(raw)
+    except ValueError:
+        return False
+    if len(words) != 1:
+        return False
+    # A quoted setting may contain path-list separators and compiler flags,
+    # but must not swallow a command list supplied to eval or another shell.
+    match = re.fullmatch(
+        r"(?:-D)?[A-Za-z_]\w*=(/[^\s;:|&<>]*(?:[;:]/[^\s;:|&<>]*)*)"
+        r"(?:\s+-[^\s;|&<>]+)*",
+        words[0],
+    )
+    return match is not None and _is_under_allowed_prefix(
+        match[1], ("/usr", "/opt", "/bin", "/sbin")
+    )
+
+
+def _is_search_path_assignment(raw: str) -> bool:
+    """Search-list values are data; commands substituted into them are not."""
+    match = re.match(r"([A-Za-z_]\w*)=", raw)
+    return match is not None and match[1] in _SEARCH_LIST_VARIABLES
+
+
+def _attached_path_word(raw: str) -> tuple[str, str] | None:
+    """Split a literal option/assignment prefix from its absolute path."""
+    if _is_search_path_assignment(raw):
+        return None
+    path_pattern = r"((?:/|[A-Za-z]:[\\/]).*)" if _is_windows() else r"(/.*)"
+    match = re.fullmatch(r"((?:--?[\w-]+|[A-Za-z_][\w]*)=)" + path_pattern, raw)
+    if match is None:
+        match = re.fullmatch(r"(-[A-Za-z])" + path_pattern, raw)
+    return (match[1], match[2]) if match is not None else None
+
+
 def _extract_all_paths(
     command: str,
     allow_prefixes: tuple[str, ...] = (),
@@ -1048,7 +1190,50 @@ def _extract_all_paths(
         r"(/(?:Users|home|tmp|var|etc|opt|usr|bin|sbin|dev|proc|sys|root)"
         r'(?:/[^\s\'",;|&<>)}\]]*)?)'  # rest of the path
     )
+    path_assignments: list[tuple[int, int]] = []
+    allowed_path_words: list[tuple[int, int]] = []
+    tokens = shell_syntax.parse(command).tokens
+    scripts = shell_syntax.shell_script_words(tokens)
+    for token in tokens:
+        if token["type"] != "word":
+            continue
+        if int(token["start"]) in scripts:
+            # A shell's script is a command line, not one assignment value.
+            paths.extend(_extract_all_paths(str(token["value"]), allow_prefixes))
+            path_assignments.append((int(token["start"]), int(token["end"])))
+            continue
+        raw = str(token["raw"])
+        value = str(token["value"])
+        attached = _attached_path_word(value)
+        path = attached[1] if attached is not None else value
+        if (
+            (
+                path.startswith("/")
+                or (_is_windows() and PureWindowsPath(path).is_absolute())
+            )
+            and _under_any(path, allow_prefixes)
+            and not re.search(r"[$`;\n|&<>]|\s/", path)
+        ):
+            # The raw regex splits spaced roots and quoted-root + /tmp
+            # concatenations. Keep a literal allowed path together, but do
+            # not exempt code or substitutions that can name other paths.
+            allowed_path_words.append((int(token["start"]), int(token["end"])))
+        if not (_is_search_path_assignment(raw) or _is_toolchain_path_assignment(raw)):
+            continue
+        path_assignments.append((int(token["start"]), int(token["end"])))
+
+        def collect_substitution(inner: str) -> tuple[str, bool]:
+            # Literal PATH entries are search-list data, but commands inside
+            # substitutions still read operands and must not bypass validation.
+            paths.extend(_extract_all_paths(inner, allow_prefixes))
+            return inner, False
+
+        shell_syntax.rewrite_substitutions(str(token["raw"]), collect_substitution)
     for m in path_re.finditer(command):
+        if any(start <= m.start(1) < end for start, end in allowed_path_words):
+            continue
+        if any(start <= m.start() < end for start, end in path_assignments):
+            continue
         # Skip paths that land at an executable-position offset
         if m.start(1) in exe_offsets:
             continue
@@ -1058,6 +1243,23 @@ def _extract_all_paths(
         if _is_under_allowed_prefix(extracted, allow_prefixes):
             continue
         paths.append(extracted)
+    # Attached option and assignment values have no whitespace before the
+    # slash, so the general literal scan deliberately does not match them.
+    for token in tokens:
+        if token["type"] != "word" or int(token["start"]) in scripts:
+            continue
+        if _is_toolchain_path_assignment(str(token["raw"])):
+            continue
+        attached = _attached_path_word(str(token["value"]))
+        if attached is None:
+            continue
+        path = attached[1]
+        if (
+            _is_system_path(path)
+            and path not in _PASSTHROUGH_DEVICE_PATHS
+            and not _is_under_allowed_prefix(path, allow_prefixes)
+        ):
+            paths.append(path)
     return paths
 
 
@@ -1110,16 +1312,53 @@ def _removal_problem(
     return None
 
 
-def _protected_removal_error(target: str) -> str:
+def _protected_removal_error(target: str, folder: str | None = None) -> str:
+    """The refusal of removing *target*; *folder*: the workspace folder, other
+    than the root, that the command may change into and *target* is read from."""
+    read_from = (
+        f" (read from '{folder}', a folder this command may change into)"
+        if folder
+        else ""
+    )
     return (
-        f"Command blocked: '{target}' is or holds a protected folder (skills, "
-        f"memories or media), which shell commands may not remove."
+        f"Command blocked: '{target}'{read_from} is or holds a protected folder "
+        f"(skills, memories or media), which shell commands may not remove."
     )
 
 
+def _outside_removal_error(operand: str) -> str:
+    """The refusal of a recursive rm of *operand*, outside the workspace."""
+    return (
+        f"Command blocked: rm would remove '{operand}', which is "
+        f"outside the workspace or may expand there. Remove a "
+        f"path inside the workspace (e.g., './build')."
+    )
+
+
+def _unknown_values_error(word: str) -> str:
+    """The refusal of a command whose *word* may name paths the check does
+    not follow (see :class:`shell_syntax.UnknownValues`)."""
+    return (
+        f"Command blocked: '{word}' may name paths the check does not follow: "
+        f"it uses a variable this command sets other than with a plain "
+        f"NAME=value (printf -v, unset, a loop over a variable's words, or any "
+        f"variable once the command runs eval), or one with too many values "
+        f"to check. Write the path out instead."
+    )
+
+
+def _workspace_folder(folder: str, root: str) -> str | None:
+    """*folder* relative to the workspace *root*, ``/`` separated; ``None``
+    for the root itself or a folder outside it."""
+    if folder == root or not _under_any(folder, (root,)):
+        return None
+    return folder[len(root.rstrip("/")) + 1 :]
+
+
 def _is_home_word(raw: str) -> bool:
-    """Whether a word as written starts in the home folder: ``~`` or
-    ``$HOME`` that the shell expands (not inside single quotes)."""
+    """Whether a word as written starts in the home folder: ``~``, ``$HOME``
+    or ``$USERPROFILE`` that the shell expands (not inside single quotes), or
+    cmd.exe's ``%USERPROFILE%``."""
     return raw.startswith("~") or bool(_HOME_VARIABLE_RE.match(raw.lstrip('"')))
 
 
@@ -1132,49 +1371,289 @@ def _bare_cd_goes_home() -> bool:
     return agent_shell.uses_bash()
 
 
+def _folder_target(
+    found: shell_syntax.SimpleCommand,
+    assigned: dict[str, tuple[str, ...] | None] | None = None,
+) -> tuple[str, dict[str, object] | None] | None:
+    """The target of a ``cd`` / ``pushd`` as written, with its token: the
+    first argument that is not an option as the shell reads it (``"-P"`` is
+    one, and so is ``$O`` when every value *assigned* to it is); ``None``
+    when it names none."""
+    for arg, token in zip(found.args, found.tokens, strict=True):
+        value = str(token["value"]) if token is not None else arg
+        if value.startswith("-") and value != "-":
+            continue
+        if assigned and "$" in arg:
+            values = shell_syntax.word_values(arg, value, assigned)
+            if values and all(each.startswith("-") and each != "-" for each in values):
+                continue
+        return arg, token
+    return None
+
+
 def _cd_target_outside(command: str, allow_prefixes: tuple[str, ...]) -> str | None:
     """The ``cd`` / ``pushd`` that leaves *allow_prefixes*, as written: an
     absolute target outside them (a drive path on Windows too), the home
-    folder (``~``, ``$HOME``) or a bare ``cd``."""
+    folder (``~``, ``$HOME``) or a bare ``cd``. A target that names a
+    variable the command sets is also read with each of its values, where a
+    ``..`` component leaves too (``T=..; cd "$T"``); one whose values are not
+    followed is read as written when only the run sets it (``read D``), as
+    a variable the command does not set. :class:`shell_syntax.UnknownValues`
+    when the check knows its values only in part (``T=.; T+=.``)."""
+
+    def absolute_outside(path: str) -> bool:
+        return (
+            path.startswith("/") or (_is_windows() and bool(_DRIVE_PATH_RE.match(path)))
+        ) and not _under_any(path, allow_prefixes)
+
+    assigned = shell_syntax.assigned_values(command) if "$" in command else {}
+    plain: shell_syntax.AssignedValues | None = None
     for found in shell_syntax.simple_commands(command):
-        if found.name not in ("cd", "pushd"):
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
             continue
-        targets = [
-            (arg, token)
-            for arg, token in zip(found.args, found.tokens, strict=True)
-            if not (arg.startswith("-") and arg != "-")
-        ]
-        if not targets:
+        try:
+            target = _folder_target(found, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:
+                raise
+            target = _folder_target(found)  # its options read as written
+        if target is None:
             if found.name == "cd" and _bare_cd_goes_home():
                 return "cd"
             continue
-        arg, token = targets[0]
+        arg, token = target
         # As the agent's shell reads it, so a Windows drive path is absolute too.
         path = _removal_target(token) if token is not None else arg
-        if _is_home_word(arg) or (
-            (path.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(path)))
-            and not _under_any(path, allow_prefixes)
+        if _is_home_word(arg) or absolute_outside(path):
+            return f"{found.name} {arg}"
+        if "$" not in arg:
+            continue
+        try:
+            values = shell_syntax.word_values(arg, path, assigned)
+        except shell_syntax.UnknownValues as exc:
+            if exc.partial:  # the values it may have are not all checked
+                raise
+            # The run may also set it (`read D`, `source`): what the run sets
+            # is read as written, as for a variable the command does not set
+            # (the rm check refuses it in front of a recursive rm), and its
+            # plain `=` values are still checked.
+            if plain is None:
+                plain = shell_syntax.assigned_values(command, plain_only=True)
+            try:
+                values = shell_syntax.word_values(arg, path, plain)
+            except shell_syntax.UnknownValues as plain_exc:
+                if plain_exc.partial:
+                    raise
+                continue
+        for value in values or ():
+            if (
+                _is_home_word(value)
+                or absolute_outside(value)
+                or ".." in re.split(r"[\\/]", value)
+            ):
+                return f"{found.name} {arg}"
+        # An empty value outside quotes leaves no argument: a bare cd.
+        if (
+            found.name == "cd"
+            and values
+            and not re.search("[\"']", arg)
+            and any(not value.strip() for value in values)
+            and _bare_cd_goes_home()
         ):
             return f"{found.name} {arg}"
     return None
+
+
+def _literal_folder(operand: str) -> str | None:
+    """The folder an operand names before its first expansion (``$`` or a
+    backtick), as the agent's shell reads it: ``skills`` for
+    ``skills/$(printf demo)`` and ``sk\\ills/$(printf demo)``; ``None`` when
+    no whole folder name comes first."""
+    prefix = re.split(r"[$`]", operand, maxsplit=1)[0]
+    if "/" not in prefix:
+        return None
+    tokens = shell_syntax.tokenize(prefix.rsplit("/", 1)[0])
+    if len(tokens) != 1 or tokens[0]["type"] != "word":
+        return None
+    return _removal_target(tokens[0]) or None
+
+
+# Most folders an rm is checked from; each `cd` may double them.
+_FOLDERS_CAP = 64
+
+
+class _TooManyFolders(Exception):
+    """A command may run in more folders than :data:`_FOLDERS_CAP`."""
+
+
+def _word_paths(
+    word: str,
+    token: dict[str, object] | None,
+    assigned: dict[str, tuple[str, ...] | None],
+    plain: dict[str, tuple[str, ...] | None] | None = None,
+) -> list[str]:
+    """The paths a word may name as the agent's shell reads it, with ``/``
+    separators: with each value of the variables its command sets (see
+    :func:`shell_syntax.word_values`), else itself, also when only the run
+    knows a value (``D=$(date +%F); rm -rf memories/$D``). With *plain* (see
+    :func:`shell_syntax.assigned_values`), a variable only the run sets
+    (``read D``) is read as written too, besides its plain `=` values;
+    :class:`shell_syntax.UnknownValues` otherwise."""
+    path = _removal_target(token) if token is not None else word
+    try:
+        values = shell_syntax.word_values(word, path, assigned)
+    except shell_syntax.UnknownValues as exc:
+        if exc.partial or plain is None:
+            raise
+        values = [*(shell_syntax.word_values(word, path, plain) or ()), path]
+    return [value.replace("\\", "/") for value in values] if values else [path]
+
+
+def _normpath(path: str) -> str:
+    """*path* normalised, with one leading ``/`` (``posixpath.normpath`` keeps
+    two, so ``env -C /`` would read ``//W/skills``)."""
+    return re.sub(r"^/+", "/", posixpath.normpath(path))
+
+
+def _folder_from(folder: str, target: str) -> str | None:
+    """The folder a ``cd`` to *target* from *folder* enters (an absolute
+    target as it is); ``None`` when only the run knows it (an expansion, a
+    glob, ``-``)."""
+    if not target or target == "-" or re.search(r"[$`%*?\[]", target):
+        return None
+    if target.startswith("/") or (_is_windows() and _DRIVE_PATH_RE.match(target)):
+        return _normpath(target)
+    return _normpath(f"{folder}/{target}")
+
+
+def _possible_folders(
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """The folders the commands of one command may run in, read in order,
+    each with the ``env -C`` folders of the command that entered it: the
+    workspace root, and each ``cd`` / ``pushd`` target read from every folder
+    found before it that the ``cd`` may run in (see :func:`_run_folders`),
+    also with the values of the variables the command sets. A target only the
+    run knows adds none, nor do ``cd -`` and ``popd``, which return to one of
+    them. :class:`_TooManyFolders` past :data:`_FOLDERS_CAP` folders."""
+    root = posixpath.normpath(workspace_root.replace("\\", "/"))
+    folders: list[tuple[str, tuple[str, ...]]] = [(root, ())]
+    for found in commands:
+        if found.name not in shell_syntax.FOLDER_COMMANDS:
+            continue
+        target = _folder_target(found, assigned)
+        if target is None:
+            continue
+        for value in _word_paths(*target, assigned):
+            for start in _run_folders(found.folders, list(folders), assigned):
+                entered = _folder_from(start, value)
+                if entered is None or (entered, found.folders) in folders:
+                    continue
+                if len(folders) >= _FOLDERS_CAP:
+                    raise _TooManyFolders
+                folders.append((entered, found.folders))
+    return folders
+
+
+# A function definition in text the parser does not read as code.
+_FUNCTION_TEXT_RE = re.compile(r"\(\s*\)\s*[{(]|\bfunction\s")
+
+
+def _runs_out_of_order(
+    command: str, commands: list[shell_syntax.SimpleCommand]
+) -> bool:
+    """Whether *command* (its *commands*) may change folder in a command
+    that may run again or before one written ahead of it: a ``cd`` /
+    ``pushd``, or code run from a string or a file, inside a loop or a
+    function body (see :class:`shell_syntax.SimpleCommand`), so that the
+    folders it may run in are not read in order. A string run as code
+    (``eval``, ``source``) is not parsed, so a function definition in its
+    text counts too."""
+    if any(
+        found.repeats
+        and (
+            found.name in shell_syntax.FOLDER_COMMANDS
+            or found.name in shell_syntax.CODE_RUNNER_NAMES
+            or found.name in ("source", ".")
+        )
+        for found in commands
+    ):
+        return True
+    return any(
+        found.name in shell_syntax.CODE_RUNNER_NAMES or found.name in ("source", ".")
+        for found in commands
+    ) and bool(_FUNCTION_TEXT_RE.search(command))
+
+
+def _run_folders(
+    chain: tuple[str, ...],
+    folders: list[tuple[str, tuple[str, ...]]],
+    assigned: dict[str, tuple[str, ...] | None],
+) -> list[str]:
+    """The folders a command under the ``env -C`` folders *chain* may run in:
+    each of *folders* (see :func:`_possible_folders`) entered under the start
+    of *chain*, so in the same shell (``env -C a sh -c 'cd b; rm -rf x'``),
+    with the rest of *chain* applied. An ``env -C`` folder only the run knows
+    keeps the folder it is read from, as a ``cd`` to it does
+    (``env -C "$(pwd)"``). :class:`_TooManyFolders` when ``env -C`` folders
+    with many values would take them past :data:`_FOLDERS_CAP`."""
+    reached: list[str] = []
+    for folder, entered_under in folders:
+        if chain[: len(entered_under)] != entered_under:
+            continue
+        starts = [folder]
+        for folder_word in chain[len(entered_under) :]:
+            # One argument already: its value is not split again.
+            values = shell_syntax.word_values(f'"{folder_word}"', folder_word, assigned)
+            starts = list(
+                dict.fromkeys(
+                    _folder_from(start, value.replace("\\", "/")) or start
+                    for start in starts
+                    for value in (values or [folder_word])
+                )
+            )
+            if len(starts) > _FOLDERS_CAP:
+                raise _TooManyFolders
+        reached.extend(starts)
+    reached = list(dict.fromkeys(reached))
+    if len(reached) > max(_FOLDERS_CAP, len(folders)):
+        raise _TooManyFolders
+    return reached
+
+
+def _removes_protected(
+    path: str, workspace_root: str, protected: tuple[str, ...]
+) -> bool:
+    """Whether removing *path* (absolute, ``/`` separators) removes a protected
+    folder: inside one anywhere, or holding one in the workspace."""
+    path = posixpath.normpath(path)
+    return (
+        _under_any(path, protected)
+        or _removal_problem(path, workspace_root, protected) == "protected"
+    )
 
 
 def _recursive_rm_operands(
     found: shell_syntax.SimpleCommand,
 ) -> list[tuple[str, dict[str, object] | None]]:
     """The operands of an ``rm`` that removes folders (``-r``, ``-R``,
-    ``--recursive``, in any spelling), with their tokens."""
+    ``--recursive``, in any spelling), with their tokens. Options are read as
+    the shell passes them to rm, so a quoted ``'-r'`` counts too."""
     if found.name != "rm":
         return []
     operands: list[tuple[str, dict[str, object] | None]] = []
     recursive = options_done = False
     for arg, token in zip(found.args, found.tokens, strict=True):
-        if not options_done and arg == "--":
+        value = str(token["value"]) if token is not None else arg
+        if not options_done and value == "--":
             options_done = True
-        elif not options_done and arg.startswith("-") and arg != "-":
+        elif not options_done and value.startswith("-") and value != "-":
             recursive = recursive or (
-                arg == "--recursive"
-                or (not arg.startswith("--") and bool({"r", "R"} & set(arg[1:])))
+                # GNU rm takes any unambiguous prefix of a long option.
+                (len(value) > 2 and "--recursive".startswith(value))
+                or (not value.startswith("--") and bool({"r", "R"} & set(value[1:])))
             )
         else:
             operands.append((arg, token))
@@ -1183,24 +1662,113 @@ def _recursive_rm_operands(
 
 def _whole_system_target(operand: str, token: dict[str, object] | None) -> bool:
     """Whether an rm operand is the file system root, a drive root or the home
-    folder itself (optionally followed by ``/`` or ``/*``)."""
+    folder itself, ``~user``'s too (optionally followed by ``/``, ``/.``,
+    ``/*`` or ``/.*``; rm itself refuses a ``.`` operand, but not every rm is
+    checked)."""
     path = _removal_target(token) if token is not None else operand
     if re.fullmatch(r"/+\*?|[A-Za-z]:/*\*?", path):
         return True
-    value = str(token["value"]) if token is not None else operand
-    home = r"(\$HOME|\$\{HOME\})(/\*?)?"
+    # The shell expands a tilde only while its prefix is unquoted; the steps
+    # after it are read as the shell passes them (`~/""` is `~/`).
+    tilde_prefix = operand.split("/", 1)[0]
     return bool(
-        (operand.startswith("~") and re.fullmatch(r"~(/\*?)?", operand))
-        or (_is_home_word(operand) and re.fullmatch(home, value))
+        (
+            operand.startswith("~")
+            and not re.search(r"[\"'\\]", tilde_prefix)
+            and _HOME_TILDE_TARGET_RE.fullmatch(path.replace("\\", "/"))
+        )
+        or (
+            _is_home_word(operand)
+            and _HOME_VARIABLE_TARGET_RE.fullmatch(path.replace("\\", "/"))
+        )
     )
 
 
+# `$NAME` / `${NAME...}`: the variable a word expands.
+_VARIABLE_REFERENCE_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+# Commands that read lines into variables: their options whose value is the
+# rest of the word or the next word, and the variable set without operands.
+_READ_COMMANDS = {
+    "read": (frozenset("adinNptu"), "REPLY"),
+    "mapfile": (frozenset("dnOsuCc"), "MAPFILE"),
+    "readarray": (frozenset("dnOsuCc"), "MAPFILE"),
+}
+
+
+def _runs_lookup(text: str) -> bool:
+    """Whether a word runs a process lookup in a ``$(...)`` or backticks."""
+    return ("$(" in text or "`" in text) and bool(
+        _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(text))
+    )
+
+
+def _read_variables(found: shell_syntax.SimpleCommand) -> list[str]:
+    """The variables a ``read``, ``mapfile`` or ``readarray`` sets: its
+    operands and a ``read -a`` array, or ``REPLY`` / ``MAPFILE``."""
+    options_with_value, default = _READ_COMMANDS[found.name]
+    values = [
+        str(token["value"]) if token is not None else arg
+        for arg, token in zip(found.args, found.tokens, strict=True)
+    ]
+    names: list[str] = []
+    index = 0
+    while index < len(values):
+        value = values[index]
+        index += 1
+        if value == "--":
+            names.extend(values[index:])
+            break
+        if not value.startswith("-") or value == "-":
+            names.append(value)
+            continue
+        for position, letter in enumerate(value[1:], start=1):
+            if letter not in options_with_value:
+                continue
+            target = value[position + 1 :]
+            if not target and index < len(values):
+                target = values[index]
+                index += 1
+            if letter == "a" and found.name == "read":
+                names.append(target)
+            break
+    # `read 'p[0]'` sets an element of the array `p`.
+    names = [
+        match[1]
+        for match in (re.fullmatch(r"([A-Za-z_]\w*)(?:\[[^\]]*\])?", n) for n in names)
+        if match is not None
+    ]
+    return names or [default]
+
+
+def _looked_up_variables(
+    command: str, commands: list[shell_syntax.SimpleCommand], looks_up: bool
+) -> frozenset[str]:
+    """The variables that may hold ids a process lookup found: set from a
+    substitution that runs one, looped over one in ``for``, or set by a
+    ``read`` in a command that runs one (*looks_up*), wherever its input
+    comes from."""
+    names = {
+        name for name, value in shell_syntax.assignments(command) if _runs_lookup(value)
+    }
+    for found in commands:
+        if found.name == "for" and found.args[1:2] == ("in",):
+            if any(_runs_lookup(arg) for arg in found.args[2:]):
+                names.add(found.args[0])
+        elif found.name in _READ_COMMANDS and looks_up:
+            names.update(_read_variables(found))
+    return frozenset(names)
+
+
 def _kill_by_lookup(
-    found: shell_syntax.SimpleCommand, looks_up: bool, by_name: bool
+    found: shell_syntax.SimpleCommand,
+    looks_up: bool,
+    by_name: bool,
+    looked_up: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether a kill reaches processes found by name or pattern, or -1, 0 or
     a process group. *looks_up*: the command runs a process lookup; *by_name*:
-    one that matches names (pgrep, pidof), so a variable holds its ids."""
+    one that matches names (pgrep, pidof), so a variable holds its ids;
+    *looked_up*: the variables that hold ids a lookup found."""
     if found.name == "fuser":
         return any(
             arg in ("-k", "--kill")
@@ -1231,12 +1799,165 @@ def _kill_by_lookup(
     return any(
         re.fullmatch(r"-\d+|0+|-\$.+", arg)  # -1, a process group, or 0
         or (by_name and "$" in arg and "$(" not in arg and arg not in ("$!", "${!}"))
+        or not looked_up.isdisjoint(_VARIABLE_REFERENCE_RE.findall(arg))
         or (
             ("$(" in arg or "`" in arg)
             and _PROCESS_LOOKUP_COMMANDS.intersection(shell_syntax.command_names(arg))
         )
         for arg in args
     )
+
+
+def _value_outside(path: str, workspace_root: str, protected: tuple[str, ...]) -> bool:
+    """Whether a value of a variable, read as the path an rm removes, climbs
+    with ``..``, starts at home or lies outside the workspace."""
+    return (
+        _is_home_word(path)
+        or ".." in path.split("/")
+        or (
+            (path.startswith("/") or bool(_DRIVE_PATH_RE.match(path)))
+            and _removal_problem(path, workspace_root, protected) == "outside"
+        )
+    )
+
+
+def _blank_substitutions(word: str) -> str:
+    """*word* with the body of each ``$(...)`` and backtick substitution
+    emptied."""
+    out: list[str] = []
+    index, quote = 0, None
+    while index < len(word):
+        char = word[index]
+        if quote == "'":
+            quote = None if char == "'" else quote
+        elif char == "\\":
+            out.append(word[index : index + 2])
+            index += 2
+            continue
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif word.startswith("$(", index):
+            close = shell_syntax.matching_paren(word, index + 2)
+            if close is not None:
+                out.append("$()")
+                index = close + 1
+                continue
+        elif char == "`":
+            close = word.find("`", index + 1)
+            if close != -1:
+                out.append("``")
+                index = close + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _folder_removal_error(
+    command: str,
+    commands: list[shell_syntax.SimpleCommand],
+    workspace_root: str,
+    protected: tuple[str, ...],
+) -> str | None:
+    """The refusal of a recursive rm in *command* (its *commands*) that
+    removes a protected folder, with every operand read from every folder the
+    rm may run in, and with the values of the variables the command sets:
+    only a protected folder is refused (rm itself refuses `.`). A first
+    segment that expands may be anything, so it is left alone, unless the
+    folder it is read from is itself in a protected folder."""
+    removals = [
+        (found, operand, token)
+        for found in commands
+        for operand, token in _recursive_rm_operands(found)
+    ]
+    if not removals:
+        return None
+    relative = any(
+        not (path.startswith("/") or _DRIVE_PATH_RE.match(path))
+        for _found, operand, token in removals
+        for path in [_removal_target(token) if token is not None else operand]
+    )
+    changes_folder = any(
+        found.name in shell_syntax.FOLDER_COMMANDS for found in commands
+    )
+    # `cd NAME` may enter the folder in $NAME.
+    hides_folder_changes = any(
+        found.name == "shopt" and "cdable_vars" in found.args for found in commands
+    )
+    if relative and (
+        hides_folder_changes
+        or (changes_folder and _runs_out_of_order(command, commands))
+    ):
+        return (
+            "Command blocked: the folder each recursive rm runs in is not "
+            "followed, as the command changes folder in a loop or a function "
+            "(or with cdable_vars). Run the rm as a command of its own, or "
+            "name its path from the workspace root."
+        )
+    assigned = shell_syntax.assigned_values(command)
+    # A variable only the run sets (`read D`) is read as written, as one the
+    # command does not set, besides its plain `=` values.
+    plain = shell_syntax.assigned_values(command, plain_only=True)
+    # Built once, and only when a relative path needs it.
+    folders: list[tuple[str, tuple[str, ...]]] | None = None
+    for found, operand, token in removals:
+        if token is not None:
+            operand_paths = _word_paths(operand, token, assigned, plain)
+            # A value of a variable the command sets, checked as a written
+            # path is: it may not climb with `..`, start at home or lie
+            # outside.
+            for path in operand_paths:
+                if path == _removal_target(token):
+                    continue
+                if _value_outside(path, workspace_root, protected):
+                    return _outside_removal_error(operand)
+        else:
+            # Its values too, with each substitution emptied and the quotes
+            # dropped, so the words inside a substitution are not read as
+            # values.
+            blank = _blank_substitutions(operand)
+            for path in _word_paths(blank, None, assigned, plain):
+                if path == blank:
+                    continue
+                if _value_outside(re.sub("[\"']", "", path), workspace_root, protected):
+                    return _outside_removal_error(operand)
+            # Glued to a substitution: whatever it expands to stays under the
+            # literal folder written before it, or under the folder the rm
+            # runs in when none is.
+            try:
+                written_values = shell_syntax.word_values(operand, operand, assigned)
+            except shell_syntax.UnknownValues as exc:
+                if exc.partial:
+                    raise
+                written_values = [
+                    *(shell_syntax.word_values(operand, operand, plain) or ()),
+                    operand,
+                ]
+            operand_paths = [
+                _literal_folder(written) or written
+                for written in written_values or [operand]
+            ]
+        relative_paths = []
+        for path in operand_paths:
+            if not (path.startswith("/") or _DRIVE_PATH_RE.match(path)):
+                relative_paths.append(path)
+            elif _removes_protected(path, workspace_root, protected):
+                return _protected_removal_error(operand)
+        if not relative_paths:
+            continue
+        if folders is None:
+            folders = _possible_folders(commands, workspace_root, assigned)
+        for folder in _run_folders(found.folders, folders, assigned):
+            for path in relative_paths:
+                if _removes_protected(
+                    _normpath(f"{folder}/{path}"), workspace_root, protected
+                ):
+                    return _protected_removal_error(
+                        operand, _workspace_folder(folder, folders[0][0])
+                    )
+    return None
 
 
 def validate_command(
@@ -1258,8 +1979,10 @@ def validate_command(
             absolute system paths). Privileged commands (:data:`BLOCKED_COMMANDS`)
             and catastrophic patterns (:data:`_DESTRUCTIVE_PATTERNS`) are still
             enforced.
-        workspace_root: The workspace; ``cd`` may enter it, and a destructive
-            pattern whose target lies strictly inside it is allowed.
+        workspace_root: The workspace; ``cd`` may enter it, a destructive
+            pattern whose target lies strictly inside it is allowed, and the
+            relative operands of a recursive rm are resolved against it and
+            every folder a ``cd`` or ``pushd`` in the command may enter.
 
     Returns:
         None if command is safe, error message string if blocked.
@@ -1282,9 +2005,12 @@ def validate_command(
                     f"Use relative paths (e.g., './file.py') instead."
                 )
 
-        outside = _cd_target_outside(
-            command, (workspace_root,) if workspace_root else ()
-        )
+        try:
+            outside = _cd_target_outside(
+                command, (workspace_root,) if workspace_root else ()
+            )
+        except shell_syntax.UnknownValues as exc:
+            return _unknown_values_error(exc.word)
         if outside is not None:
             return (
                 f"Command blocked: '{outside}' leaves the workspace. "
@@ -1341,11 +2067,21 @@ def validate_command(
                 if problem == "protected":
                     return _protected_removal_error(operand)
                 if problem is not None:
-                    return (
-                        f"Command blocked: rm would remove '{operand}', which is "
-                        f"outside the workspace or may expand there. Remove a "
-                        f"path inside the workspace (e.g., './build')."
-                    )
+                    return _outside_removal_error(operand)
+        try:
+            refusal = _folder_removal_error(
+                command, commands, workspace_root, protected
+            )
+        except shell_syntax.UnknownValues as exc:
+            refusal = _unknown_values_error(exc.word)
+        except _TooManyFolders:
+            refusal = (
+                f"Command blocked: it may change into more than {_FOLDERS_CAP} "
+                f"folders, more than the check follows. Split it into shorter "
+                f"commands."
+            )
+        if refusal is not None:
+            return refusal
 
     # Dangerous mode allows rm anywhere, but never of the whole system or home.
     if dangerous:
@@ -1360,6 +2096,11 @@ def validate_command(
     # Blocked commands and kills by lookup, wherever they run — always enforced.
     looks_up = any(found.name in _PROCESS_LOOKUP_COMMANDS for found in commands)
     by_name = any(found.name in _NAME_LOOKUP_COMMANDS for found in commands)
+    looked_up = (
+        _looked_up_variables(command, commands, looks_up)
+        if any(found.name in _KILL_COMMANDS for found in commands)
+        else frozenset()
+    )
     for found in commands:
         if found.name in BLOCKED_COMMANDS:
             hint = _BLOCKED_COMMAND_HINTS.get(
@@ -1369,7 +2110,9 @@ def validate_command(
                 f"Command blocked: '{found.name}' is not allowed in sandbox mode. "
                 f"{hint}"
             )
-        if found.name in _KILL_COMMANDS and _kill_by_lookup(found, looks_up, by_name):
+        if found.name in _KILL_COMMANDS and _kill_by_lookup(
+            found, looks_up, by_name, looked_up
+        ):
             return _KILL_BY_LOOKUP_ERROR
 
     # Absolute-system-path check — skipped in dangerous mode.
@@ -1533,6 +2276,7 @@ def _rewrite_quoted_path(
     skills_dir: str | Path | None = None,
     media_dirs: tuple[Path, ...] = (),
     anchor: str | None = None,
+    workspace_root: str | None = None,
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
@@ -1541,7 +2285,7 @@ def _rewrite_quoted_path(
     """
     if not path or "://" in path[max(0, len(path) - 10) :]:
         return None
-    if not path.startswith("/"):
+    if not path.startswith("/") or path in _PASSTHROUGH_DEVICE_PATHS:
         return None
 
     def in_workspace(relative: str) -> str:
@@ -1550,7 +2294,7 @@ def _rewrite_quoted_path(
             return _platform_quote(
                 anchor.rstrip("/") + ("/" + relative if relative else "/.")
             )
-        return shlex.quote("./" + relative if relative else ".")
+        return _platform_quote("./" + relative if relative else ".")
 
     resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
@@ -1560,6 +2304,22 @@ def _rewrite_quoted_path(
         ):
             resolved = in_workspace("skills/" + skill if skill else "skills")
         return _guard_bare_absolute(resolved)  # already shlex.quoted
+
+    if workspace_root and _is_under_allowed_prefix(path, (workspace_root,)):
+        protected = tuple(
+            str(folder)
+            for folder in (
+                skills_dir,
+                paths.GLOBAL_SKILLS_DIR,
+                paths.MEMORIES_DIR,
+                _BUILTIN_SKILLS_DIR,
+                *media_dirs,
+            )
+            if folder is not None
+        )
+        if _under_any(path, protected):
+            return None
+        return in_workspace(path[len(workspace_root.rstrip("/")) :].lstrip("/"))
 
     # Fix hallucinated system absolute paths that reference the workspace.
     if workspace_name:
@@ -1573,6 +2333,11 @@ def _rewrite_quoted_path(
                     return _guard_bare_absolute(in_workspace(""))
                 break
 
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return in_workspace(path.lstrip("/"))
+    if _is_system_path(path) and workspace_root:
+        if Path(workspace_root + path).exists():
+            return in_workspace(path.lstrip("/"))
     return None
 
 
@@ -1607,6 +2372,7 @@ def _rewrite_path_word(
     skills_dir: str | Path | None,
     media_dirs: tuple[Path, ...],
     absolute: bool,
+    attached: bool = False,
 ) -> tuple[str | None, bool]:
     """Replacement for an unquoted path word (``None`` keeps it), and whether it
     maps to the workspace's ``tmp/``. After a ``cd`` (*absolute*) workspace
@@ -1682,6 +2448,12 @@ def _rewrite_path_word(
             return in_workspace(path), False
         return None, False
 
+    if attached and not (
+        path != "/" and workspace_root and Path(workspace_root + path).exists()
+    ):
+        # Attached slash values can be separators, routes or patterns.
+        # Only known workspace files get the bare-word fallback here.
+        return None, False
     return in_workspace("" if path == "/" else path), False
 
 
@@ -1708,6 +2480,11 @@ def _convert_command_paths(
         "media_dirs": media_dirs,
     }
     scripts = shell_syntax.shell_script_words(words.tokens)
+    # A variable can be read after a cd or in another folder, so its value names
+    # the workspace path, unless that path needs quoting ($VAR would split).
+    anchor_values = (
+        bool(workspace_root) and _platform_quote(workspace_root)[0] not in "'\""
+    )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
@@ -1715,6 +2492,9 @@ def _convert_command_paths(
             continue
         raw = command[start:end]
         absolute = after_cd or any(cd_start < start for cd_start in cd_starts)
+        value_absolute = absolute or (
+            anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
+        )
         script = raw[1:-1]
         if (
             start in scripts
@@ -1733,24 +2513,54 @@ def _convert_command_paths(
                 if raw[0] == "'"
                 else '"' + converted + '"'
             )
-        elif quoted:
-            anchor = workspace_root if absolute else None
-            replacement: str | None = _QUOTED_SPAN_RE.sub(
-                lambda m, anchor=anchor: (
-                    # Single quotes would freeze a $(...) or $VAR in the path.
-                    m.group(0)
-                    if m.group(1) == '"' and re.search(r"(?<!\\)[$`]", m.group(2))
-                    else _rewrite_quoted_path(
-                        re.sub(r"\\(.)", r"\1", m.group(2)),
-                        workspace_name,
-                        skills_dir,
-                        media_dirs,
-                        anchor,
-                    )
-                    or m.group(0)
-                ),
+        elif quoted and _is_search_path_assignment(raw):
+            replacement, tmp = shell_syntax.rewrite_substitutions(
                 raw,
+                lambda inner, absolute=absolute: _convert_command_paths(
+                    inner, **rules, after_cd=absolute
+                ),
             )
+            uses_tmp = uses_tmp or tmp
+        elif quoted:
+            anchor = workspace_root if value_absolute else None
+
+            def replace_quoted(
+                match: re.Match[str], anchor: str | None = anchor
+            ) -> str:
+                nonlocal uses_tmp
+                # Expansion can introduce traversal not visible to validation.
+                # Leave dynamic absolute paths intact so validation refuses them.
+                if match[1] == '"' and re.search(r"(?<!\\)[$`]", match[2]):
+                    return match[0]
+                # A span after host: or pod: is a remote path, not a local one.
+                if match.string[: match.start()].endswith(":"):
+                    return match[0]
+                path = match[2]
+                if match[1] == '"':
+                    path = re.sub(r'\\([\\"$`\n])', r"\1", path)
+                attached = _attached_path_word(path)
+                prefix = attached[0] if attached else ""
+                path = attached[1] if attached else path
+                result = _rewrite_quoted_path(
+                    path,
+                    workspace_name,
+                    skills_dir,
+                    media_dirs,
+                    anchor,
+                    workspace_root,
+                )
+                if (
+                    result is not None
+                    and (path == "/tmp" or path.startswith("/tmp/"))
+                    and not (
+                        workspace_root
+                        and _is_under_allowed_prefix(path, (workspace_root,))
+                    )
+                ):
+                    uses_tmp = True
+                return (prefix + result) if result is not None else match[0]
+
+            replacement: str | None = _QUOTED_SPAN_RE.sub(replace_quoted, raw)
             replacement, tmp = shell_syntax.rewrite_substitutions(
                 replacement,
                 lambda inner, absolute=absolute: _convert_command_paths(
@@ -1758,16 +2568,22 @@ def _convert_command_paths(
                 ),
             )
             uses_tmp = uses_tmp or tmp
-            # The unquoted head of a word such as /results/"$RUN" is a path.
-            head = re.match(r"/[^'\"]*", replacement)
+            # Split an attached option/assignment before mapping an unquoted
+            # path head, e.g. --output=/tmp/"out file".
+            attached = _attached_path_word(replacement)
+            prefix, path_word = attached or ("", replacement)
+            head = re.match(r"/[^'\"]*", path_word)
             if head is not None:
                 rewritten, tmp = _rewrite_path_word(
-                    head.group(0), **rules, absolute=absolute
+                    head.group(0),
+                    **rules,
+                    absolute=value_absolute,
+                    attached=attached is not None,
                 )
                 if rewritten is not None:
                     if head.group(0).endswith("/") and not rewritten.endswith("/"):
                         rewritten += "/"
-                    replacement = rewritten + replacement[head.end() :]
+                    replacement = prefix + rewritten + path_word[head.end() :]
                     uses_tmp = uses_tmp or tmp
         elif (
             raw.startswith("/")
@@ -1776,7 +2592,15 @@ def _convert_command_paths(
             replacement, tmp = _rewrite_path_word(raw, **rules, absolute=absolute)
             uses_tmp = uses_tmp or tmp
         else:
-            continue
+            attached = _attached_path_word(raw)
+            if attached is None:
+                continue
+            prefix, path = attached
+            rewritten, tmp = _rewrite_path_word(
+                path, **rules, absolute=value_absolute, attached=True
+            )
+            uses_tmp = uses_tmp or tmp
+            replacement = prefix + rewritten if rewritten is not None else None
         if replacement is not None and replacement != raw:
             edits.append((start, end, replacement))
     for body_start, body_end, expands in words.bodies:
@@ -1810,9 +2634,13 @@ def convert_virtual_paths_in_command(
 ) -> str:
     """Map virtual paths in a shell command into the workspace.
 
-    Only unquoted words starting with ``/`` are paths; quoted text and
-    here-document bodies are data (``print(6 / 3)``), except a quoted whole
-    mount path and commands substituted inside double quotes.
+    Words starting with ``/`` are paths. A quoted whole path, or an option
+    or assignment value glued to one (``--out=/x``, ``-o/x``, ``X=/x``), is
+    mapped when it names ``/tmp``, a mount or a workspace file; an assignment's
+    value maps to the workspace path itself, as words after a ``cd`` do, unless
+    that path needs quoting. Search lists such as ``PATH``, other quoted text
+    and here-document bodies are data (``print(6 / 3)``), except commands
+    substituted inside double quotes.
     """
     return _convert_command_paths(
         command, workspace_name, skills_dir, media_dirs, workspace_root

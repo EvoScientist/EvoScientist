@@ -303,6 +303,23 @@ def _no_health_server(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _restore_logging_setup():
+    """Put back what the CLI and standalone logging setups change: the capped
+    logger levels and the root handlers' formatters (pytest's log capture
+    handlers are root handlers too, and live for the whole run)."""
+    from EvoScientist.channels.logging_caps import CREDENTIAL_URL_LOGGERS
+
+    names = ("langchain_google_genai._function_utils", *CREDENTIAL_URL_LOGGERS)
+    levels = {name: logging.getLogger(name).level for name in names}
+    formatters = [(h, h.formatter) for h in logging.getLogger().handlers]
+    yield
+    for name, level in levels.items():
+        logging.getLogger(name).setLevel(level)
+    for handler, formatter in formatters:
+        handler.setFormatter(formatter)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_process_workspace():
     """``process_workspace()`` and ``process_session_dirs()`` are read once
     per process; tests change env/cwd."""

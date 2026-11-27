@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from EvoScientist import shell_syntax
 
 
@@ -95,6 +97,63 @@ class TestWordsAndScripts:
             command.index("'")
         }
 
+    @pytest.mark.parametrize(
+        "options",
+        [
+            "-o pipefail",
+            "-O extglob",
+            "-euo pipefail",
+            "+o pipefail",
+            "-o pipefail -O extglob",
+            "-o pipefail -lc",
+        ],
+    )
+    def test_named_shell_options_are_skipped_before_the_script(self, options):
+        option_c = "" if options.endswith("-lc") else " -c"
+        command = f"timeout 5 bash {options}{option_c} 'cat /tmp/a'"
+        assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
+            command.index("'")
+        }
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -c -e 'ls /x'",
+            "bash -co pipefail 'ls /x'",
+            "zsh -O -c 'ls /x'",
+            "zsh -eo pipefail -c 'ls /x'",
+            "zsh -opipefail -c 'ls /x'",
+            "zsh -eonomatch -c 'ls /x'",
+        ],
+    )
+    def test_the_script_after_any_options_is_found(self, command):
+        assert shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == {
+            command.index("'")
+        }
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bash -o",
+            "bash -O; echo x",
+            "bash -o pipefail",
+            "bash -c",
+            "bash -o pipefail; echo -c 'not a script'",
+        ],
+    )
+    def test_missing_named_option_or_script_does_not_consume_next_command(
+        self, command
+    ):
+        assert not shell_syntax.shell_script_words(shell_syntax.parse(command).tokens)
+
+    @pytest.mark.parametrize(
+        "command", ["bash -o pipefail ./run.sh -c", "bash -o -c 'ls /x'", "bash -c --"]
+    )
+    def test_an_option_value_or_script_file_is_no_script(self, command):
+        assert (
+            shell_syntax.shell_script_words(shell_syntax.parse(command).tokens) == set()
+        )
+
     def test_substitutions_in_double_quotes_are_converted(self):
         assert shell_syntax.rewrite_substitutions(
             "\"$(ls /a) and `cat /b`\" '$(ls /c)'",
@@ -161,6 +220,365 @@ class TestSimpleCommands:
         [rm, echo] = shell_syntax.simple_commands("rm -rf /a /b > /dev/null 2>&1; echo")
         assert rm.args == ("-rf", "/a", "/b")
         assert echo.args == ()
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("env -S 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -S'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -iS 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env --split-string='pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env --split 'pkill -f x'", ("pkill", ("-f", "x"))),
+            ("env -S 'kill -9' -1", ("kill", ("-9", "-1"))),
+            ("env -S 'pkill\\_-f x'", ("pkill", ("-f", "x"))),
+            ("env -S 'pkill\\c' -f worker", ("pkill", ("-f", "worker"))),
+            ("env -S 'kill -9\\c ignored' -1", ("kill", ("-9", "-1"))),
+            ("env -S 'sh -c \"echo safe\\npkill x\"'", ("pkill", ("x",))),
+            ("env -S 'echo a\\nb\\tc d'", ("echo", ("a'\n'b'\t'c", "d"))),
+            ("env -S \"echo 'a\\nb'\"", ("echo", ("'a\\nb'",))),
+            ("env -S '-i -S \"pkill x\"'", ("pkill", ("x",))),
+            (
+                "env -S 'cat \"name with space.txt\"'",
+                ("cat", ('"name with space.txt"',)),
+            ),
+            (
+                "env -S \"cat 'name with space.txt'\"",
+                ("cat", ("'name with space.txt'",)),
+            ),
+            (
+                "env -S 'cat name\\ with\\ space.txt'",
+                ("cat", ("name\\ with\\ space.txt",)),
+            ),
+            ("env -S \"cat 'a\\_b'\"", ("cat", ("'a\\_b'",))),
+        ],
+    )
+    def test_env_runs_the_words_it_splits(self, command, expected):
+        commands = shell_syntax.simple_commands(command)
+        assert expected in [(found.name, found.args) for found in commands]
+        assert all(found.via == ("env",) for found in commands[1:])
+
+    def test_env_split_strings_are_also_read_as_code(self):
+        assert ("pkill", ("env",)) in self._found("env -S 'a; pkill x'")
+        assert ("pkill", ("env",)) in self._found("env -S 'sh -c \"pkill x\"'")
+        # A bare `--` ends env's options; it is no `--split-string` prefix.
+        assert self._found("env -- pkill x") == [("env", ()), ("pkill", ("env",))]
+        assert self._found("env -u S python x.py") == [
+            ("env", ()),
+            ("python", ("env",)),
+        ]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "env -iC build pkill x",
+            "env --ch build pkill x",
+            "env -iu A pkill x",
+            "env -au pkill x",
+            "env -P bin pkill x",
+            "env --argv0 x pkill x",
+        ],
+    )
+    def test_env_options_take_their_value_clustered_or_shortened(self, command):
+        assert ("pkill", ("env",)) in self._found(command)
+
+    def test_assignments_wherever_a_variable_is_set(self):
+        assert shell_syntax.assignments(
+            'A=1; B=$(ps aux | grep x) :; export C=`lsof -t`; local -r D="$(ps)" E'
+        ) == [
+            ("A", "1"),
+            ("B", "$(ps aux | grep x)"),
+            ("C", "`lsof -t`"),
+            ("D", '"$(ps)"'),
+        ]
+        assert shell_syntax.assignments("arr[0]=$(ps) n+=1") == [
+            ("arr", "$(ps)"),
+            ("n", "1"),
+        ]
+        assert sorted(
+            shell_syntax.assignments("bash -c 'P=$(pgrep x)'; echo $(Q=1)")
+        ) == [("P", "$(pgrep x)"), ("Q", "1")]
+        assert shell_syntax.assignments("echo A=1; FOO='x=1'") == [("FOO", "'x=1'")]
+        # Quoted names; the value keeps the quotes opened before the `=`.
+        assert shell_syntax.assignments(
+            "export \"P=$(lsof -t)\" 'Q'=$(ps) 'R=$(ps)' -x=1 \"$X\"=1"
+        ) == [("P", '"$(lsof -t)"'), ("Q", "''$(ps)"), ("R", "'$(ps)'")]
+
+    @pytest.mark.parametrize(
+        ("command", "folders"),
+        [
+            ("env -C build rm x", ("build",)),
+            ("env -iC build rm x", ("build",)),
+            ("env -iCbuild rm x", ("build",)),
+            ("env --chdir=build rm x", ("build",)),
+            ("env --ch build rm x", ("build",)),
+            ("env -C 'my dir' rm x", ("my dir",)),
+            ("env -C a env -C b rm x", ("a", "b")),
+            # One env changes folder once, to its last -C.
+            ("env -C a -C b rm x", ("b",)),
+            ("env -C a --chdir=b env -C c -Cd rm x", ("b", "d")),
+            ("nohup env -C a rm x", ("a",)),
+            ("env -C a sh -c 'rm x'", ("a",)),
+            ("env -C a -S \"sh -c 'rm x'\"", ("a",)),
+            ("env -u C rm x", ()),
+            ('env -C a echo "$(rm x)"', ()),  # expands before env runs
+        ],
+    )
+    def test_commands_carry_the_env_folders_they_run_in(self, command, folders):
+        removals = [
+            each for each in shell_syntax.simple_commands(command) if each.name == "rm"
+        ]
+        assert removals
+        assert all(each.folders == folders for each in removals)
+
+    def test_a_function_body_is_read_as_commands(self):
+        found = shell_syntax.simple_commands("function f { cd a; rm -rf x; }; f")
+        assert {each.name for each in found} >= {"cd", "rm", "f", "function"}
+
+    @pytest.mark.parametrize(
+        ("command", "defines"),
+        [
+            ("f() { cd a; }; f", True),
+            ("g () ( cd b )", True),
+            ("bash -c 'f() { cd a; }'", True),
+            ('python -c "main()"', False),
+            ('git commit -m "rename function foo"', False),
+        ],
+    )
+    def test_a_function_definition_is_a_command_named_function(self, command, defines):
+        names = {each.name for each in shell_syntax.simple_commands(command)}
+        assert ("function" in names) is defines
+
+    @pytest.mark.parametrize(
+        ("command", "repeating"),
+        [
+            ("for d in a; do cd $d; done; cd b", {"cd $d"}),
+            ("while cd a; do :; done; cd b", {"cd a", ":"}),
+            ("f() { cd a; }; { cd b; }", {"cd a"}),
+            ("function f { :; cd a; }; cd b", {":", "cd a"}),
+            ("function f() { cd a; }; cd b", {"cd a"}),
+            ("for i in 1; do bash -c 'cd a'; done; cd b", {"bash -c", "cd a"}),
+        ],
+    )
+    def test_a_command_in_a_loop_or_function_body_repeats(self, command, repeating):
+        found = shell_syntax.simple_commands(command)
+        assert {
+            " ".join([each.name, *each.args[:1]]).strip()
+            for each in found
+            if each.repeats and each.name not in ("for", "}", "done")
+        } == repeating
+
+    @pytest.mark.parametrize(
+        ("command", "name", "args"),
+        [
+            ("function w { cd $(mktemp -d) && touch x; }; w", "cd", ("$(mktemp -d)",)),
+            ("function s { kill $(lsof -t -i:8000); }; s", "kill", ("$(lsof -t -i:8000)",)),
+            ("function f { rm -rf x/$(date +%F); }; f", "rm", ("-rf", "x/$(date +%F)")),
+        ],
+    )  # fmt: skip
+    def test_a_function_body_ending_in_a_substitution_is_read_whole(
+        self, command, name, args
+    ):
+        found = shell_syntax.simple_commands(command)
+        assert args in [each.args for each in found if each.name == name]
+
+    def test_the_same_script_in_two_env_folders_is_read_in_both(self):
+        found = shell_syntax.simple_commands("env -C a sh -c X; env -C b sh -c X")
+        assert [each.folders for each in found if each.name == "X"] == [
+            ("a",),
+            ("b",),
+        ]
+
+    def test_assigned_values_as_the_shell_reads_them(self):
+        assert shell_syntax.assigned_values(
+            'T=..; A="$HOME"; export B=$A/x \'C\'=~; declare "D=a b"; E='
+        ) == {
+            "T": ("..",),
+            "A": ("${HOME}",),
+            "B": ("${HOME}/x",),
+            "C": ("~",),
+            "D": ("a b",),
+            "E": ("",),
+        }
+        # In any order and in nested code; every value of a name.
+        assert shell_syntax.assigned_values("cd \"$T\"; bash -c 'T=sub'; T=..") == {
+            "T": ("..", "sub")
+        }
+        assert shell_syntax.assigned_values("X=1 Y=${X}2") == {
+            "X": ("1",),
+            "Y": ("12",),
+        }
+
+    def test_assigned_values_leave_out_what_only_the_run_knows(self):
+        assert shell_syntax.assigned_values('A=$(pwd) B=`pwd` C="$(pwd)/x"') == {
+            "A": (),
+            "B": (),
+            "C": (),
+        }
+
+    def test_a_name_that_refers_back_to_itself_is_not_followed(self):
+        assert shell_syntax.assigned_values("A=$A/x") == {"A": None}
+        assert shell_syntax.assigned_values("D=.evoscientist; D=$D/memories") == {
+            "D": None
+        }
+        assert shell_syntax.assigned_values("B=skills; A=$B; B=$A") == {
+            "A": None,
+            "B": None,
+        }
+        # A chain without a cycle is followed.
+        assert shell_syntax.assigned_values("A=..; B=$A/x") == {
+            "A": ("..",),
+            "B": ("../x",),
+        }
+
+    def test_variables_set_other_ways_are_not_followed(self):
+        assert shell_syntax.assigned_values(
+            "printf -v P x; read -r R; declare -a N=E; : ${S:=x}; "
+            "for L in $X; do :; done; export -x E=a; builtin export B=b"
+        ) == {
+            "P": None,
+            "R": None,
+            "REPLY": None,  # read sets it when it names no variable
+            "N": None,
+            "S": None,
+            "L": None,
+            "E": ("a",),
+            "B": ("b",),
+        }
+        assert shell_syntax.assigned_values("env 'Q=a b' sh -c :") == {"Q": ("a b",)}
+        assert shell_syntax.assigned_values(
+            "D=x; unset D; for B in {a,b}; do :; done; mapfile"
+        ) == {"D": None, "B": ("a", "b"), "MAPFILE": None}
+        # The word picked, or empty on a reply that picks none.
+        assert shell_syntax.assigned_values("select S in a b; do :; done") == {
+            "S": None,
+            "REPLY": None,
+        }
+        # A brace expansion is read as the words it makes, if it is read.
+        assert shell_syntax.assigned_values(
+            'for S in s_{0..2} {a,b}x; do :; done; for Q in "{a,b}" {0..99}; do :; done'
+        ) == {"S": ("s_0", "s_1", "s_2", "ax", "bx"), "Q": None}
+        # A nameref or eval may set any of them.
+        assert shell_syntax.assigned_values("D=x; declare -n R=D") == {
+            "D": None,
+            "R": None,
+        }
+        assert shell_syntax.assigned_values("D=x; eval y") == {"D": None}
+        assert shell_syntax.assigned_values('D=x; printf "-v" D y; read "E"') == {
+            "D": None,
+            "E": None,
+            "REPLY": None,
+        }
+
+    def test_more_values_than_the_cap_are_reported(self):
+        values = dict.fromkeys("VWXYZ", ("a", "b"))
+        assert len(shell_syntax.expand_references("$V$W$X$Y", values)) == 16
+        with pytest.raises(shell_syntax.UnknownValues):
+            shell_syntax.expand_references("$V$W$X$Y$Z", values)
+        assigned = shell_syntax.assigned_values(
+            "; ".join(f"T=a{i}" for i in range(17)) + "; U=$T/x; V=1"
+        )
+        # Only the words that name them are refused.
+        assert assigned == {"T": None, "U": None, "V": ("1",)}
+        with pytest.raises(shell_syntax.UnknownValues) as raised:
+            shell_syntax.word_values('"$U"', "$U", assigned)
+        assert raised.value.word == '"$U"'
+        assert shell_syntax.word_values("$V", "$V", assigned) == ["1"]
+
+    def test_a_name_ends_where_it_is_written_not_where_quotes_end(self):
+        assert shell_syntax.braced_value('"$D"ills') == "${D}ills"
+        assert shell_syntax.braced_value("'$D'ills") == "$Dills"
+        assert shell_syntax.braced_value("a b") is None
+        assert shell_syntax.assigned_values('A=sk; D="$A"ills') == {
+            "A": ("sk",),
+            "D": ("skills",),
+        }
+        assigned = {"D": ("sk",)}
+        assert shell_syntax.word_values('"$D"ills', "$Dills", assigned) == ["skills"]
+        [env_rm] = [
+            each
+            for each in shell_syntax.simple_commands('env -C "$D"ills rm x')
+            if each.name == "rm"
+        ]
+        assert env_rm.folders == ("${D}ills",)
+
+    def test_a_variable_with_known_and_run_only_values_has_none_to_read(self):
+        assert shell_syntax.assigned_values(
+            "X=build; X=$(echo skills); Y=a; Y=(b c); Z=a; Z=$R; R=`pwd`; S=$(pwd)"
+        ) == {"X": None, "Y": None, "Z": None, "R": (), "S": ()}
+
+    def test_an_unquoted_value_splits_into_the_words_it_makes(self):
+        assigned = {"D": ("x .evoscientist",)}
+        assert shell_syntax.word_values("$D", "$D", assigned) == ["x", ".evoscientist"]
+        assert shell_syntax.word_values('"$D"', "$D", assigned) == ["x .evoscientist"]
+        with pytest.raises(shell_syntax.UnknownValues):
+            shell_syntax.word_values("$D", "$D", {**assigned, "IFS": (":",)})
+        assert shell_syntax.word_values('"$D"', "$D", {**assigned, "IFS": (":",)})
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "D=x :",
+            "D=x export E",
+            "D=x declare E",
+            "D=x cd .",
+            "f() { :; }; D=x f",
+            "D=x bash -c :",
+            "D=x xargs sh -c :",
+            "env D=x bash -c :",
+            "D=x env -S 'ls'",
+            "D=x time :",
+        ],
+    )
+    def test_an_assignment_before_a_builtin_or_shell_code_counts(self, command):
+        assert shell_syntax.assigned_values(command) == {"D": ("x",)}
+        assert shell_syntax.assigned_values("D=x eval :") == {"D": None}
+
+    @pytest.mark.parametrize(
+        "command", ["D=x\nls", "D=x # note\nls", "D=x\nif :; then :; fi"]
+    )
+    def test_an_assignment_on_a_line_of_its_own_counts(self, command):
+        assert shell_syntax.assigned_values(command) == {"D": ("x",)}
+
+    @pytest.mark.parametrize(
+        "command",
+        ["IFS= read -r line", "D=x python y.py", "D=x A=y true", "env D=x python y.py"],
+    )
+    def test_an_assignment_before_any_other_command_is_that_commands_only(
+        self, command
+    ):
+        assert "D" not in shell_syntax.assigned_values(command)
+        assert "IFS" not in shell_syntax.assigned_values(command)
+
+    def test_loop_words_and_env_assignments_are_values(self):
+        assert shell_syntax.assigned_values(
+            "for d in skills x; do :; done; env -i E='a b' bash x.sh; L=(a b)"
+        ) == {"d": ("skills", "x"), "E": ("a b",), "L": None}
+        with pytest.raises(shell_syntax.UnknownValues):
+            shell_syntax.word_values('"${d%/}"', "${d%/}", {"d": ("x",)})
+        assert shell_syntax.word_values('"${e%/}"', "${e%/}", {"d": ("x",)}) is None
+
+    def test_a_variable_set_in_part_has_no_values_to_read(self):
+        # Its value depends on the order of the assignments.
+        assert shell_syntax.assigned_values(
+            "D=sk; D+=ills; export E+=x; a[0]=x; F=$D/y; G=1"
+        ) == {"D": None, "E": None, "a": None, "F": None, "G": ("1",)}
+
+    def test_word_values_follow_unquoted_references_only(self):
+        assigned = {"T": ("..", "sub"), "U": ()}
+        assert shell_syntax.word_values('"$T/x"', "$T/x", assigned) == [
+            "../x",
+            "sub/x",
+        ]
+        assert shell_syntax.word_values("${T}", "${T}", assigned) == ["..", "sub"]
+        assert shell_syntax.word_values("'$T'", "$T", assigned) is None
+        assert shell_syntax.word_values("\\$T", "$T", assigned) is None
+        assert shell_syntax.word_values("$OTHER", "$OTHER", assigned) is None
+        assert shell_syntax.word_values("$U", "$U", assigned) == []
+
+    def test_a_name_inside_a_substitution_is_not_the_words_own(self):
+        assert shell_syntax.variable_references('"$(dirname "$f")"') == set()
+        assert shell_syntax.variable_references("`echo $f`/$D") == {"D"}
+        assert shell_syntax.variable_references('"$(echo "$(cat $x)")"$y') == {"y"}
 
     def test_a_substitution_is_one_argument(self):
         [kill, pgrep] = shell_syntax.simple_commands("kill `pgrep -f python`")

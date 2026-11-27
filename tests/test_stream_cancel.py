@@ -271,8 +271,17 @@ def test_cancel_terminates_active_shell_process_tree(tmp_path):
 
     worker = threading.Thread(target=lambda: asyncio.run(_consume()))
     worker.start()
+
+    # The shell creates the file before it writes to it, so wait for the text,
+    # not for the file.
+    def _started() -> bool:
+        try:
+            return started.read_text().strip() == "started"
+        except OSError:
+            return False
+
     deadline = time.monotonic() + 3
-    while not started.exists() and time.monotonic() < deadline:
+    while not _started() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert started.read_text().strip() == "started"
 

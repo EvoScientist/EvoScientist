@@ -25,6 +25,7 @@ from EvoScientist.deploy import server as deploy_server
 from EvoScientist.langgraph_dev import registration
 from EvoScientist.langgraph_dev.assistants import workspace_assistant_id
 from EvoScientist.paths import Workspace
+from EvoScientist.setup import protocol
 from tests.fakes.langgraph_dev import LockHolder
 
 
@@ -37,7 +38,6 @@ def _config(**overrides):
         "openai_auth_mode": "api_key",
         "log_level": "warning",
         "langgraph_dev_jobs_per_worker": 10,
-        "langgraph_dev_file_persistence": True,
         "dangerous_mode": False,
     }
     base.update(overrides)
@@ -990,7 +990,7 @@ def test_stdin_closed_before_start_starts_nothing(h, capsys, monkeypatch):
 
 
 def test_a_long_stdin_line_without_newline_is_dropped(h, capsys, monkeypatch):
-    monkeypatch.setattr(json_mode, "_MAX_LINE", 8)
+    monkeypatch.setattr(protocol, "_MAX_LINE", 8)
     read, write = os.pipe()
     h.stdin_kind = os.fdopen(read, "r")
     os.write(write, b"x" * 20 + b'"command": "stop"}\n{"command": "stop"}\n')

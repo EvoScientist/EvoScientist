@@ -280,18 +280,12 @@ async def _async_main(
             if previous is not None:
                 signal.signal(sig, previous)
         if consumer is not None:
-            from ..middleware.code_interpreter import aclose_code_interpreters
-
-            # A forced exit leaves the consumer's turns running; settle them
-            # first so none reopens an interpreter after the close.
+            # A forced exit leaves the consumer's turns running; settle them.
             current = asyncio.current_task()
             leftover = [t for t in asyncio.all_tasks() if t is not current]
-            try:
-                for t in leftover:
-                    t.cancel()
-                await asyncio.gather(*leftover, return_exceptions=True)
-            finally:
-                await aclose_code_interpreters()
+            for t in leftover:
+                t.cancel()
+            await asyncio.gather(*leftover, return_exceptions=True)
     return channel_exited
 
 
@@ -370,16 +364,11 @@ def run_standalone(
     """
     from ..paths import process_workspace
 
-    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
-    # API puts the bot token in the URL path), and httpx logs every request
-    # URL at INFO. A standalone channel started with DEBUG logging (each
-    # serve.py) would therefore write secrets to stdout and any redirected
-    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
-    # has. Keep this in run_standalone (shared by every channel), not in a
-    # single channel's serve.py.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.INFO)
+    # Keep channel credentials out of HTTP request logs.
+    from .logging_caps import quiet_credential_url_loggers, redact_root_handlers
+
+    quiet_credential_url_loggers()
+    redact_root_handlers()
 
     config = None
     backend = None

@@ -19,6 +19,7 @@ import pytest
 import typer
 
 from EvoScientist.deploy import server as deploy_server
+from EvoScientist.deploy import stop_signals as stop_signals_mod
 from tests.fakes.langgraph_dev import Server
 
 
@@ -36,7 +37,6 @@ def _make_config(
     openai_auth_mode: str = "api_key",
     log_level: str = "warning",
     langgraph_dev_jobs_per_worker: int = 10,
-    langgraph_dev_file_persistence: bool = True,
     dangerous_mode: bool = False,
 ):
     return SimpleNamespace(
@@ -47,7 +47,6 @@ def _make_config(
         openai_auth_mode=openai_auth_mode,
         log_level=log_level,
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
-        langgraph_dev_file_persistence=langgraph_dev_file_persistence,
         dangerous_mode=dangerous_mode,
         provider="anthropic",
         auxiliary_provider="",
@@ -217,7 +216,6 @@ def _run_deploy_once(
             captured["port_passed"] = spawn["port"]
             captured["host_passed"] = spawn["host"]
             captured["jobs_per_worker_passed"] = spawn["jobs_per_worker"]
-            captured["file_persistence_passed"] = spawn["file_persistence"]
             captured["tunnel_passed"] = spawn["tunnel"]
     return captured
 
@@ -764,8 +762,8 @@ def test_deploy_stop_ignores_the_signals_that_end_it(monkeypatch, tmp_path):
     )
 
     during = captured["stops"][0]["handlers"]
-    for sig in deploy_server._stop_signals():
-        assert during[sig] is deploy_server._ignore
+    for sig in stop_signals_mod.stop_signals():
+        assert during[sig] is stop_signals_mod.ignore_stop_signal
         assert captured["signal_handlers"][sig] is signal.SIG_DFL
 
 
@@ -777,8 +775,8 @@ def test_deploy_signals_interrupt_while_it_serves(monkeypatch, tmp_path):
     )
 
     serving = captured["handlers_while_serving"]
-    for sig in deploy_server._stop_signals():
-        assert serving[sig] is deploy_server._interrupt
+    for sig in stop_signals_mod.stop_signals():
+        assert serving[sig] is stop_signals_mod.interrupt_stop_signal
         with pytest.raises(KeyboardInterrupt):
             serving[sig](sig, None)
 
@@ -788,15 +786,15 @@ def test_deploy_interrupt_ignores_the_signals_that_follow(monkeypatch):
     ``ensure_server`` makes of a server it was starting."""
     import signal
 
-    stops = deploy_server._stop_signals()
-    handlers = dict.fromkeys(stops, deploy_server._interrupt)
+    stops = stop_signals_mod.stop_signals()
+    handlers = dict.fromkeys(stops, stop_signals_mod.interrupt_stop_signal)
     monkeypatch.setattr(signal, "signal", lambda sig, h: handlers.__setitem__(sig, h))
     monkeypatch.setattr(signal, "getsignal", handlers.get)
 
     with pytest.raises(KeyboardInterrupt):
-        deploy_server._interrupt(signal.SIGTERM, None)
+        stop_signals_mod.interrupt_stop_signal(signal.SIGTERM, None)
 
-    assert handlers == dict.fromkeys(stops, deploy_server._ignore)
+    assert handlers == dict.fromkeys(stops, stop_signals_mod.ignore_stop_signal)
 
 
 @pytest.mark.skipif(
@@ -813,8 +811,8 @@ def test_deploy_takes_two_stop_signals_at_once_quietly():
     # The child waits on stdin until both signals are sent.
     script = (
         "import sys\n"
-        "from EvoScientist.deploy import server\n"
-        "with server._stop_signals_interrupt():\n"
+        "from EvoScientist.deploy import stop_signals\n"
+        "with stop_signals.interrupt_on_stop_signals():\n"
         "    try:\n"
         "        print('ready', flush=True)\n"
         "        sys.stdin.readline()\n"
@@ -849,8 +847,8 @@ def test_deploy_signals_interrupt_while_the_server_starts(monkeypatch, tmp_path)
     )
 
     starting = captured["handlers_while_starting"]
-    for sig in deploy_server._stop_signals():
-        assert starting[sig] is deploy_server._interrupt
+    for sig in stop_signals_mod.stop_signals():
+        assert starting[sig] is stop_signals_mod.interrupt_stop_signal
 
 
 @pytest.mark.skipif(
@@ -870,8 +868,8 @@ def test_deploy_under_nohup_outlives_its_terminal(monkeypatch, tmp_path):
 
     serving = captured["handlers_while_serving"]
     assert serving[signal.SIGHUP] is signal.SIG_IGN
-    assert serving[signal.SIGINT] is deploy_server._interrupt
-    assert serving[signal.SIGTERM] is deploy_server._interrupt
+    assert serving[signal.SIGINT] is stop_signals_mod.interrupt_stop_signal
+    assert serving[signal.SIGTERM] is stop_signals_mod.interrupt_stop_signal
     assert captured["signal_handlers"][signal.SIGHUP] is signal.SIG_IGN
     assert captured["signal_handlers"][signal.SIGINT] is signal.SIG_IGN
 
@@ -882,7 +880,7 @@ def test_deploy_under_nohup_outlives_its_terminal(monkeypatch, tmp_path):
 def test_deploy_ends_when_its_terminal_closes():
     import signal
 
-    assert signal.SIGHUP in deploy_server._stop_signals()
+    assert signal.SIGHUP in stop_signals_mod.stop_signals()
 
 
 def test_deploy_stops_its_server_when_the_terminal_is_gone(monkeypatch):
@@ -901,6 +899,28 @@ def test_deploy_stops_its_server_when_the_terminal_is_gone(monkeypatch):
     monkeypatch.setattr(deploy_server, "console", _GoneTerminal())
 
     deploy_server._stop_own_server(proc)
+
+    assert stops == [(proc, True)]
+
+
+def test_deploy_stops_its_server_when_its_pipe_is_gone(monkeypatch):
+    """With no reader on the pipe, rich ends the print with ``SystemExit``:
+    the stop still runs."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    class _GonePipe:
+        def print(self, *_a, **_k):
+            raise SystemExit(1)
+
+    proc = object()
+    stops: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda p, *, clean: stops.append((p, clean))
+    )
+    monkeypatch.setattr(deploy_server, "console", _GonePipe())
+
+    with pytest.raises(SystemExit):
+        deploy_server._stop_own_server(proc)
 
     assert stops == [(proc, True)]
 
@@ -927,8 +947,10 @@ def test_deploy_stops_its_server_when_it_ends_before_serving(
 
     captured = _run_deploy_once.captured
     assert [s["proc"] for s in captured["stops"]] == captured["server"].procs
-    for sig in deploy_server._stop_signals():
-        assert captured["stops"][0]["handlers"][sig] is deploy_server._ignore
+    for sig in stop_signals_mod.stop_signals():
+        assert (
+            captured["stops"][0]["handlers"][sig] is stop_signals_mod.ignore_stop_signal
+        )
 
 
 def test_deploy_stops_the_server_a_start_left_when_interrupted(monkeypatch, tmp_path):

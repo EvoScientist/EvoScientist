@@ -59,12 +59,7 @@ class DiscordChannel(Channel):
             or None
         )
 
-        logger.info(
-            "Discord connect: token=%s...%s proxy=%s",
-            self.config.bot_token[:8],
-            self.config.bot_token[-4:],
-            proxy or "(none)",
-        )
+        logger.info("Discord connect (%s)", "via proxy" if proxy else "direct")
 
         intents = discord.Intents.default()
         intents.message_content = True

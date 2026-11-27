@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from EvoScientist import agent_shell
 from EvoScientist.langgraph_dev import boundary, manager
 from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs, reloaded
 
@@ -30,6 +31,24 @@ def test_start_sets_server_process_env(monkeypatch, tmp_path, runtime_paths, inh
         manager._spawn_server(port=16174)
 
     assert captured["env"]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
+
+
+@pytest.mark.parametrize("inherited", [None, "", "0", "false"])
+def test_start_turns_off_langgraph_cli_analytics(
+    monkeypatch, tmp_path, runtime_paths, inherited
+):
+    """langgraph-cli sends usage data at every ``langgraph dev`` start unless
+    ``LANGGRAPH_CLI_NO_ANALYTICS`` is ``"1"``, so the server always gets it."""
+    if inherited is None:
+        monkeypatch.delenv("LANGGRAPH_CLI_NO_ANALYTICS", raising=False)
+    else:
+        monkeypatch.setenv("LANGGRAPH_CLI_NO_ANALYTICS", inherited)
+    captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+
+    with pytest.raises(PopenAbort):
+        manager._spawn_server(port=16175)
+
+    assert captured["env"]["LANGGRAPH_CLI_NO_ANALYTICS"] == "1"
 
 
 def test_start_runs_server_in_server_home(monkeypatch, tmp_path, runtime_paths):
@@ -382,6 +401,7 @@ def test_start_knows_server_leads_its_process_group_only_on_windows(
     patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", set())
     monkeypatch.setattr(manager.os, "name", os_name)
+    monkeypatch.setattr(agent_shell, "join_server_job", lambda process: None)
     monkeypatch.setattr(
         subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242)
     )
@@ -439,9 +459,46 @@ def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime
     assert captured["recorded"] is proc
 
 
-def test_start_without_a_job_keeps_the_spawn_flags(
-    monkeypatch, tmp_path, runtime_paths
+@pytest.mark.parametrize("with_job", [False, True])
+def test_only_a_server_without_a_callers_job_joins_a_server_job(
+    monkeypatch, tmp_path, runtime_paths, with_job
 ):
+    """``deploy --json``'s kill-on-close job already ends every member."""
+    patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_BREAK_GROUP_PIDS", set())
+    monkeypatch.setattr(manager.os, "name", "nt", raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    proc = SimpleNamespace(pid=7)
+    captured = {}
+
+    def _popen(args, **kwargs):
+        captured["flags"] = kwargs["creationflags"]
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    joined = []
+
+    def _join(process):
+        # Recorded first, so a caller's stop reaches it.
+        assert manager._PROCESS is process
+        joined.append(process)
+
+    class _Job:
+        creationflags = 0  # a BackendJob that could not create its job
+
+        def started(self, process):
+            pass
+
+    monkeypatch.setattr(agent_shell, "join_server_job", _join)
+    manager._spawn_server(port=16179, job=_Job() if with_job else None)
+    assert joined == ([] if with_job else [proc])
+    suspended = 0 if with_job else agent_shell._CREATE_SUSPENDED
+    assert captured["flags"] == 0x200 | 0x08000000 | suspended
+
+
+def test_start_without_a_job_sets_the_spawn_flags(monkeypatch, tmp_path, runtime_paths):
     captured = patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
 
     def _popen(args, **kwargs):
@@ -452,8 +509,11 @@ def test_start_without_a_job_keeps_the_spawn_flags(
     with pytest.raises(PopenAbort):
         manager._spawn_server(port=16179)
     if manager.os.name == "nt":
+        # Suspended until it joins its server job.
         assert captured["kwargs"]["creationflags"] == (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+            | agent_shell._CREATE_SUSPENDED
         )
     else:
         assert captured["kwargs"]["start_new_session"] is True

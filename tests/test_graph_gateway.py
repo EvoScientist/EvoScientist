@@ -12,6 +12,7 @@ import httpx
 import pytest
 import typer
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph_sdk.errors import NotFoundError
 
 from EvoScientist.gateway import (
     GraphTarget,
@@ -40,14 +41,17 @@ from tests.fakes.common import (
 
 @pytest.fixture(autouse=True)
 def _fast_thread_replay_skip_timeouts(monkeypatch):
-    """Keep ``_ThreadEvents.skip_replay`` off the wall clock in the suite.
+    """Keep the replay skip and the wait for a run off the wall clock.
 
     Production defaults stay in ``EvoScientist.gateway.server``; skip_replay
-    reads them at call time when the constructor left timeouts unset.
+    and the status wait read them at call time.
     """
     monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_QUIET_SECONDS", 0.01)
     monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_FIRST_EVENT_SECONDS", 0.05)
     monkeypatch.setattr("EvoScientist.gateway.server._REPLAY_MAX_SECONDS", 0.5)
+    # A turn that loses its stream waits for the run by its status.
+    monkeypatch.setattr("EvoScientist.gateway.server._QUIET_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("EvoScientist.gateway.server._FINISHED_GRACE_SECONDS", 0.02)
 
 
 async def test_local_gateway_streams_from_injected_streamer():
@@ -2094,42 +2098,6 @@ async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
     ]
 
 
-@pytest.mark.parametrize(
-    ("interrupts", "paused"), [([{"id": "i1"}], True), ([], False)]
-)
-def test_the_server_tracker_says_when_a_child_only_paused(interrupts, paused):
-    """The result of the task a child run belongs to tells whether the child
-    stopped at an interrupt or finished."""
-    from EvoScientist.gateway.server import _ServerSubagentTracker
-    from EvoScientist.stream.emitter import StreamEventEmitter
-    from EvoScientist.stream.events import _SubagentRegistry
-
-    tracker = _ServerSubagentTracker(
-        emitter=StreamEventEmitter(), registry=_SubagentRegistry()
-    )
-    started = {
-        "method": "lifecycle",
-        "params": {"namespace": ["tools:task-1"], "data": {"event": "started"}},
-    }
-    result = {
-        "method": "tasks",
-        "params": {
-            "namespace": [],
-            "data": {
-                "id": "task-1",
-                "name": "tools",
-                "error": None,
-                "interrupts": interrupts,
-                "result": {},
-            },
-        },
-    }
-    events = [*tracker.process(started), *tracker.process(result)]
-    (end,) = [event for event in events if event["type"] == "subagent_end"]
-    assert bool(end.get("paused")) is paused
-    assert ("paused" in end) is paused
-
-
 def test_the_server_tracker_does_not_call_a_child_paused_when_the_stream_stops():
     """A child that is still open when the stream ends gets an end event, and
     nothing says that it paused."""
@@ -2218,6 +2186,80 @@ async def test_langgraph_server_gateway_streams_subagent_protocol_events():
             "type": "subagent_end",
             "name": "data-analysis-agent",
             "instance_id": "data-analysis-agent:tool-1",
+        },
+        {"type": "done", "content": "", "response": ""},
+    ]
+
+
+async def test_langgraph_server_gateway_names_a_subagent_in_server_order():
+    """A real server sends the child's input values before its lifecycle start
+    and mirrors the task result to messages under ``tools:<call id>``."""
+    child = ["tools:task-1"]
+    mirror = ["tools:call-1"]
+    events = await _collect_server_gateway_stream(
+        [
+            _value_snapshot([], namespace=child),
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": child,
+                    "data": {
+                        "event": "started",
+                        "graph_name": "code-agent",
+                        "trigger_call_id": "task-1",
+                        "cause": {"type": "toolCall", "tool_call_id": "call-1"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": child,
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "sub text"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": mirror,
+                    "data": {
+                        "event": "message-start",
+                        "role": "tool",
+                        "tool_call_id": "call-1",
+                    },
+                },
+            },
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": child,
+                    "data": {"event": "completed"},
+                },
+            },
+        ]
+    )
+
+    assert events == [
+        {
+            "type": "subagent_start",
+            "name": "code-agent",
+            "description": "",
+            "instance_id": "tools:task-1",
+            "tool_call_id": "call-1",
+        },
+        {
+            "type": "subagent_text",
+            "subagent": "code-agent",
+            "content": "sub text",
+            "instance_id": "tools:task-1",
+        },
+        {
+            "type": "subagent_end",
+            "name": "code-agent",
+            "instance_id": "tools:task-1",
         },
         {"type": "done", "content": "", "response": ""},
     ]
@@ -4131,3 +4173,137 @@ async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_du
     texts = [event["content"] for event in events if event["type"] == "text"]
     assert texts == ["WRO", "new"]
     assert events[-1]["response"] == "new"
+
+
+async def test_server_gateway_delete_missing_thread_stops_at_exact_lookup():
+    threads = FakeLangGraphThreadsClient(threads=[])
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock()
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread("11111111-1111-1111-1111-111111111111")
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_server_gateway_delete_does_not_resolve_unique_prefix():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": DEFAULT_GRAPH_ID}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread(thread_id[:8])
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_failed_run_cancellation_prevents_unreported_server_delete():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(side_effect=RuntimeError("cancel unavailable"))
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    store = LangGraphServerThreadStore(client=client)
+    with pytest.raises(RuntimeError, match="cancel unavailable"):
+        await store.delete_thread("11111111-1111-1111-1111-111111111111")
+    client.threads.delete.assert_not_awaited()
+
+
+async def test_cancel_many_failure_keeps_server_registry_for_retry():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(return_value=[{"run_id": "r1"}]),
+            cancel_many=AsyncMock(side_effect=RuntimeError("cancel rejected")),
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    store = LangGraphServerThreadStore(client=client)
+    with pytest.raises(RuntimeError, match="cancel rejected"):
+        await store.delete_thread("11111111-1111-1111-1111-111111111111")
+    client.threads.delete.assert_not_awaited()
+
+
+def _cancel_not_found():
+    return NotFoundError(
+        "not found",
+        response=httpx.Response(
+            404, request=httpx.Request("GET", "http://localhost/runs")
+        ),
+        body=None,
+    )
+
+
+async def test_runs_ending_before_cancel_still_delete_the_thread():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(
+            list=AsyncMock(return_value=[{"run_id": "r1"}]),
+            cancel_many=AsyncMock(side_effect=_cancel_not_found()),
+        ),
+        threads=SimpleNamespace(delete=AsyncMock()),
+    )
+    assert await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.runs.cancel_many.assert_awaited_once()
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_thread_gone_before_cancel_still_attempts_delete_and_returns_false():
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=_cancel_not_found())),
+    )
+    assert not await LangGraphServerThreadStore(client=client).delete_thread(
+        "11111111-1111-1111-1111-111111111111"
+    )
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_cancel_list_not_found_does_not_hide_later_server_delete_error():
+    error = RuntimeError("delete unavailable")
+    client = SimpleNamespace(
+        runs=SimpleNamespace(list=AsyncMock(side_effect=_cancel_not_found())),
+        threads=SimpleNamespace(delete=AsyncMock(side_effect=error)),
+    )
+    with pytest.raises(RuntimeError) as raised:
+        await LangGraphServerThreadStore(client=client).delete_thread(
+            "11111111-1111-1111-1111-111111111111"
+        )
+    assert raised.value is error
+    client.threads.delete.assert_awaited_once()
+
+
+async def test_server_gateway_delete_rejects_other_graph_before_cancellation():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": "other"}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert not await gateway.delete_thread(thread_id)
+    assert threads.deleted == threads.searches == []
+    client.runs.list.assert_not_awaited()
+
+
+async def test_server_gateway_delete_uses_explicit_graph_target():
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": thread_id, "metadata": {"graph_id": "custom"}}]
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs.list = AsyncMock(return_value=[])
+    gateway = LangGraphServerGateway(
+        thread_store=LangGraphServerThreadStore(client=client)
+    )
+    assert await gateway.delete_thread(thread_id, GraphTarget(graph_id="custom"))
+    assert threads.deleted == [thread_id]
+    assert threads.searches == []

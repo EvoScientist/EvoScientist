@@ -12,11 +12,11 @@ import logging
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -29,7 +29,7 @@ from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
-from .diff_format import build_edit_diff
+from .diff_format import build_edit_diff, diff_text
 from .formatter import ToolResultFormatter
 from .state import (
     StreamState,
@@ -142,6 +142,43 @@ def resolve_media_path(
     return str(real_path) if real_path is not None and real_path.is_file() else ""
 
 
+def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Which file *path* names (device, inode) and its size and modification time.
+
+    ``None`` when there is no file, or when its filesystem gives no inode number.
+    """
+    try:
+        status = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    if not status.st_ino:
+        return None
+    return (status.st_dev, status.st_ino), (status.st_size, status.st_mtime_ns)
+
+
+ReceivedFiles: TypeAlias = dict[tuple[int, int], tuple[int, int]]
+"""A turn's received files: file id ``(device, inode)`` -> ``(size, mtime_ns)``."""
+
+
+def received_media_state(
+    received_media: Iterable[str] | None,
+) -> ReceivedFiles:
+    """The received files as they are when recorded for the current turn.
+
+    Keyed by the file itself, so a read matches however the agent spells it.
+    """
+    return dict(filter(None, map(_file_state, received_media or ())))
+
+
+def record_received_media(
+    received_files: ReceivedFiles | None,
+    media: Iterable[str] | None,
+) -> None:
+    """Add files the user sent mid-turn to the turn's received files."""
+    if received_files is not None:
+        received_files.update(received_media_state(media))
+
+
 def forward_media_result(
     state: StreamState,
     event: dict[str, Any],
@@ -152,6 +189,7 @@ def forward_media_result(
     media_dir: str | Path | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
+    received_files: ReceivedFiles | None = None,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
 
@@ -162,6 +200,10 @@ def forward_media_result(
     all resolve paths the same way: as the agent's backend does, with *routes*
     in front of the sandbox rooted at *work_dir* with *media_dir*, in
     dangerous mode when *dangerous* is set.
+
+    A file in *received_files* (:func:`received_media_state`) came from the
+    user during this turn; a read of it is not sent back while it is
+    still as it arrived.
     """
     if (
         event.get("type") not in _MEDIA_RESULT_EVENTS
@@ -182,9 +224,14 @@ def forward_media_result(
         routes=routes,
         tool_name=event.get("name"),
     )
-    if real_path:
-        media_sent.add(path)
-        send_fn(real_path)
+    if not real_path:
+        return
+    if event.get("name") == "read_file" and received_files:
+        state_now = _file_state(real_path)
+        if state_now and received_files.get(state_now[0]) == state_now[1]:
+            return
+    media_sent.add(path)
+    send_fn(real_path)
 
 
 class _ApprovalUnanswered(Exception):
@@ -554,7 +601,7 @@ def format_tool_result_compact(
         if old_str and new_str and old_str != new_str:
             diff_markup = build_edit_diff(path, old_str, new_str)
             if diff_markup:
-                elements.append(Text.from_markup(diff_markup))
+                elements.append(diff_text(diff_markup))
                 return elements
 
     # Special handling for write_todos (a failed call shows its error instead)
@@ -1867,6 +1914,7 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
+    received_files: ReceivedFiles | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
@@ -1891,7 +1939,8 @@ def _run_streaming(
             deduplication across resume/HITL cycles so the same thinking
             is not replayed, but genuinely new thinking is still sent.
         on_todo: Optional sync callback receiving todo items list.
-            Called once when write_todos tool_call is detected.
+            Called at most once per round, at the first successful
+            write_todos result that leaves a non-empty list.
         on_file_write: Optional sync callback receiving the real filesystem path
             when the agent or a sub-agent writes or reads a media file
             (image/pdf/audio/video) via write_file or read_file.
@@ -1904,6 +1953,9 @@ def _run_streaming(
             calls name real files anywhere.
         routes: The agent's file tool routes (``file_tool_routes``), so a
             path under ``/skills/`` or ``/memories/`` names that tier's file.
+        received_files: The files that came from the user during this turn
+            (:func:`received_media_state`); a read of one is not sent back
+            while it is unchanged.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1937,6 +1989,7 @@ def _run_streaming(
                 cancel_scope=cancel_scope,
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
+                received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
@@ -1992,7 +2045,12 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
+                # Ask the first ask_user, as the TUI and the consumer do; the
+                # others come back on the resume stream.
+                pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
+                if event_type == "ask_user" and pending_ask_user_before is not None:
+                    state.pending_ask_user = pending_ask_user_before
 
                 # Relay thinking to channel when transitioning away from
                 # thinking phase.  Uses content comparison so that replayed
@@ -2009,12 +2067,14 @@ def _run_streaming(
                         on_thinking(current)
                         _sent_thinking_text = current
 
-                # Send todo list to channel on first write_todos tool_call
+                # Send the todo list to the channel at the first successful
+                # write_todos result (a rejected list is never sent)
                 if (
                     on_todo
                     and not _todo_sent
-                    and event_type == "tool_call"
+                    and event_type == "tool_result"
                     and event.get("name") == "write_todos"
+                    and event.get("success", True)
                     and state.todo_items
                 ):
                     on_todo(state.todo_items)
@@ -2031,6 +2091,7 @@ def _run_streaming(
                         media_dir=media_dir,
                         routes=routes,
                         dangerous=dangerous,
+                        received_files=received_files,
                     )
 
                 if on_stream_event is not None:
@@ -2289,13 +2350,14 @@ def _run_streaming(
                         )
                     except _StreamPromptCancelled:
                         return _stopped_response()
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from ..backends import build_ask_user_resume
 
+                interrupt_id = state.pending_ask_user.get("interrupt_id")
                 state.pending_ask_user = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
-                message = Command(resume=result)
+                message = build_ask_user_resume(interrupt_id, result)
                 approve_all_carry = turn_granted or _session_auto_approve
                 continue
 

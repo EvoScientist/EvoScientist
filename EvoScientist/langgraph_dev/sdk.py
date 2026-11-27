@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
+
+import httpx
 
 DEFAULT_LANGGRAPH_DEV_PORT = 6174
 # Mirrors ``config.langgraph_dev_host`` / ``manager._DEFAULT_HOST``. The value
@@ -93,6 +97,50 @@ def get_langgraph_sync_client(
     )
 
 
+class _PerLoopTransport(httpx.AsyncBaseTransport):
+    """One connection pool per event loop.
+
+    A pooled connection belongs to the loop that opened it: anyio waits on an
+    ``asyncio.Event`` created on that loop, so a request from another loop that
+    reuses the connection fails with "... is bound to a different event loop".
+    The Rich CLI uses one client on its main loop and on the async runtime's
+    loop (#880). A pool lives until it is closed on its own loop or the
+    client is closed: its idle connections hold their loop, so it is not
+    dropped when the loop ends.
+    """
+
+    def __init__(self, **transport_kwargs: Any) -> None:
+        self._transport_kwargs = transport_kwargs
+        self._lock = threading.Lock()
+        self._pools: dict[asyncio.AbstractEventLoop, httpx.AsyncHTTPTransport] = {}
+
+    def _pool(self) -> httpx.AsyncHTTPTransport:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            pool = self._pools.get(loop)
+            if pool is None:
+                pool = httpx.AsyncHTTPTransport(**self._transport_kwargs)
+                self._pools[loop] = pool
+        return pool
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._pool().handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """Close the calling loop's pool and forget the others.
+
+        Another loop's pool cannot be closed from here: once that loop is
+        gone its close fails with "Event loop is closed", and while it runs
+        its sockets would be closed from the wrong thread.
+        """
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            pool = self._pools.pop(loop, None)
+            self._pools.clear()
+        if pool is not None:
+            await pool.aclose()
+
+
 def get_langgraph_async_client(
     *,
     url: str,
@@ -102,11 +150,26 @@ def get_langgraph_async_client(
     """Build an async LangGraph SDK client with EvoScientist's default headers.
 
     ``timeout`` (seconds) caps the underlying ``httpx.AsyncClient``; ``None``
-    leaves the SDK default (``read=300s``) in place.
+    leaves the SDK default (``read=300s``) in place. The client keeps one
+    connection pool per event loop, so it can be used from any loop.
     """
     from langgraph_sdk import get_client
+    from langgraph_sdk.client import LangGraphClient
 
-    return get_client(url=url, headers=langgraph_dev_headers(headers), timeout=timeout)
+    # ``get_client`` resolves the base URL, the headers (with the API key it
+    # reads from the environment) and the timeout, but takes no transport:
+    # build the same client again on the per-loop one. ``retries=5`` is the
+    # transport ``get_client`` uses.
+    built = get_client(url=url, headers=langgraph_dev_headers(headers), timeout=timeout)
+    http = built.http.client
+    return LangGraphClient(
+        httpx.AsyncClient(
+            base_url=http.base_url,
+            headers=http.headers,
+            timeout=http.timeout,
+            transport=_PerLoopTransport(retries=5),
+        )
+    )
 
 
 _ASYNC_CLIENT_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], object] = {}
@@ -124,16 +187,15 @@ def cached_langgraph_async_client(
 ):
     """Return a cached async SDK client, keyed on URL and normalized headers.
 
-    The async client wraps an ``httpx.AsyncClient`` bound to the event loop it
-    is first used on; caching avoids leaking a new connection pool on every
-    call. The key includes the *normalized* headers, so ``headers=None``
-    (defaults) and an explicit copy of the default headers share one client,
-    while genuinely different header sets get their own — a caller passing
-    different headers must never silently receive a client built for
-    someone else's. The CLI drives its whole session from a single
-    ``asyncio.run`` loop, so one cached client per key is safe. Callers that
-    only read (e.g. the async-task completion poll) reuse this rather than
-    constructing per poll.
+    Caching avoids a new connection pool on every call. The key includes the
+    *normalized* headers, so ``headers=None`` (defaults) and an explicit copy
+    of the default headers share one client, while genuinely different header
+    sets get their own — a caller passing different headers must never
+    silently receive a client built for someone else's. The client keeps one
+    connection pool per event loop, so one cached client per key serves every
+    loop of the process (the Rich CLI has two). Callers that only read (e.g.
+    the async-task completion poll) reuse this rather than constructing per
+    poll.
     """
     normalized = langgraph_dev_headers(headers)
     key = (url, tuple(sorted(normalized.items())))
@@ -156,9 +218,8 @@ async def langgraph_async_client_scoped(
     """An async SDK client for one read, closed on exit.
 
     Built here instead of through ``get_client`` so the transport makes no
-    retries: the shared client is bound to the first loop that used it, and
-    a read from another loop (the graph's own loop in the Rich CLI) must not
-    spend 7.5 s retrying a connection the caller already knows is down.
+    retries: a single read must not spend 7.5 s retrying a connection the
+    caller already knows is down.
     """
     import httpx
     from langgraph_sdk.client import LangGraphClient

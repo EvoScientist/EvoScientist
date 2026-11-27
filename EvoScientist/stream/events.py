@@ -13,12 +13,20 @@ from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeAlias
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    ToolMessage,
+    convert_to_messages,
+    messages_from_dict,
+)
 from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 from pydantic import ValidationError
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
+from ..middleware.message_timestamp import created_at_now, with_created_at
 from ..middleware.tool_history_repair import (
     _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
 )
@@ -342,6 +350,9 @@ async def _recover_interrupted_graph_state(
         else:
             patch = _interrupted_dangling_patch(list(messages))
         if patch:
+            # Written outside the agent, so no hook stamps these results.
+            now = created_at_now()
+            patch = [with_created_at(m, now) for m in patch]
             # Attribute the synthetic results to the stuck execution node so
             # they land in history exactly where the real results would have.
             write_node = (
@@ -503,6 +514,37 @@ def _count(value: Any) -> int:
     return max(value, 0)
 
 
+def _message_id(message: object) -> str | None:
+    message_map = _as_raw_map(message)
+    raw_id = (
+        message_map.get("id")
+        if message_map is not None
+        else getattr(message, "id", None)
+    )
+    return str(raw_id) if raw_id else None
+
+
+def _message_ids(messages: object) -> set[str]:
+    if not isinstance(messages, list):
+        return set()
+    return {mid for message in messages if (mid := _message_id(message))}
+
+
+def _as_message(message: object) -> BaseMessage:
+    """A state message as a message object, keeping fields such as ``usage_metadata``.
+
+    ``convert_to_messages`` builds a dict's message from a few fields only.
+    """
+    if isinstance(message, BaseMessage):
+        return message
+    message_map = _as_raw_map(message)
+    if message_map is not None and isinstance(message_map.get("type"), str):
+        return messages_from_dict(
+            [{"type": message_map["type"], "data": dict(message_map)}]
+        )[0]
+    return convert_to_messages([message])[0]
+
+
 class _V3EventProcessor:
     """Translate v3 protocol channel events into EvoScientist UI events."""
 
@@ -539,6 +581,18 @@ class _V3EventProcessor:
         ] = {}
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
+        # Root tool results emitted, and whether root thinking has streamed
+        # for a message whose text or end has not: a completion from final
+        # state repeats neither.
+        self._shown_tool_results: set[str] = set()
+        self._root_thinking_open = False
+        # Root messages by the id their ``message-start`` gives: the one
+        # streaming, the one the open thinking belongs to, and those whose
+        # end (with its usage) arrived. Without ids, a completion from final
+        # state matches messages by their text alone.
+        self._root_message_id: str | None = None
+        self._root_thinking_message_id: str | None = None
+        self._root_finished_message_ids: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
         # Whitespace each message holds back until its next text (key: sub-agent
         # instance, None for the main agent); no key yet = the message has no text.
@@ -915,6 +969,188 @@ class _V3EventProcessor:
                 self._end_text_message(None)
         return events
 
+    def mark_messages_seen(self, messages: object) -> None:
+        """Count ``messages`` as shown: value snapshots do not emit them."""
+        self._seen_value_message_keys |= self._message_keys(messages)
+
+    def complete_turn_from_messages(
+        self, messages: object, start_messages: object
+    ) -> list[dict[str, Any]] | None:
+        """Emit what the turn has not shown, from the run's final messages.
+
+        ``start_messages`` are the thread's messages when the run started
+        (its input checkpoint); the turn's messages follow them. Their text
+        is matched against the text shown so far, message by message. The
+        message the shown text stops in gets its tail; every later one is
+        emitted whole (thinking, text, tool calls, usage), except the thinking
+        of a message the live stream had begun. Each tool result not shown
+        yet is emitted in its place, and a message whose end did not arrive
+        live gets its usage. Sub-agent activity is not in these messages and
+        stays unshown.
+
+        Returns ``None`` when the shown text is not the start of theirs.
+        """
+        if not isinstance(messages, list) or not isinstance(start_messages, list):
+            return None
+        # The turn starts after the last message the thread had when the run
+        # started. Without one (state rewritten by a summary), at the first
+        # assistant message the start did not have.
+        start_ids = _message_ids(start_messages)
+        start_keys = self._message_keys(start_messages)
+        ids = [_message_id(message) for message in messages]
+        known = [i for i, mid in enumerate(ids) if mid in start_ids]
+        if known:
+            first = known[-1] + 1
+        else:
+            first = next(
+                (
+                    index
+                    for index, message in enumerate(messages)
+                    if (parsed := self._assistant_value_message(message)) is not None
+                    and parsed.key not in start_keys
+                ),
+                len(messages),
+            )
+        try:
+            turn = [_as_message(message) for message in messages[first:]]
+        except Exception:
+            # The caller reports the turn as lost.
+            return None
+
+        def message_field(message: object, name: str) -> Any:
+            message_map = _as_raw_map(message)
+            if message_map is not None:
+                return message_map.get(name)
+            return getattr(message, name, None)
+
+        # A call the start left without a result (a stopped turn, a malformed
+        # call): the result the next run's middleware writes is not this turn's.
+        dangling_call_ids = {
+            str(call.get("id"))
+            for message in start_messages
+            for key in ("tool_calls", "invalid_tool_calls")
+            for call in message_field(message, key) or ()
+            if isinstance(call, Mapping) and call.get("id")
+        } - {
+            str(call_id)
+            for message in start_messages
+            if (call_id := message_field(message, "tool_call_id"))
+        }
+
+        def answer_text(message: AIMessage) -> str:
+            return _strip_legacy_thinking_tags(
+                _text_from_content(message.content)
+            ).strip()
+
+        # Where the shown text stops: the message, and how much of it is shown.
+        shown = self.full_response
+        position = 0
+        cut: int | None = None
+        cut_shown = 0
+        last_shown: int | None = None
+        for index, message in enumerate(turn):
+            if not isinstance(message, AIMessage):
+                continue
+            text = answer_text(message)
+            while position < len(shown) and shown[position].isspace():
+                position += 1
+            rest = shown[position:]
+            if text and rest.startswith(text):
+                position += len(text)
+                last_shown = index
+                continue
+            if not text and rest:
+                continue
+            if not text.startswith(rest):
+                return None
+            cut, cut_shown = index, len(rest)
+            break
+        if cut is None and shown[position:].strip():
+            return None
+        # The last message whose text is all shown did not get its end, which
+        # carries the usage: live text is still open and none of the cut's
+        # message is shown, also when a later message holds the cut.
+        unfinished = (
+            last_shown if self._main_message_has_text and not cut_shown else None
+        )
+        # Thinking that streamed with no text or end after it, and its message
+        # when the stream named it.
+        thinking_open = self._root_thinking_open
+        thinking_owner = self._root_thinking_message_id
+
+        events: list[dict[str, Any]] = []
+        for index, message in enumerate(turn):
+            if isinstance(message, ToolMessage):
+                if (
+                    message.tool_call_id not in self._shown_tool_results
+                    and message.tool_call_id not in dangling_call_ids
+                ):
+                    events.extend(
+                        self._process_tool_event(
+                            (),
+                            {
+                                "event": "tool-finished",
+                                "tool_call_id": message.tool_call_id,
+                                "tool_name": message.name,
+                                "output": message,
+                            },
+                            None,
+                        )
+                    )
+                continue
+            if not isinstance(message, AIMessage):
+                continue
+            # From here a call with an earlier id is this turn's own.
+            dangling_call_ids -= {
+                str(call.get("id"))
+                for call in (*message.tool_calls, *message.invalid_tool_calls)
+            }
+            if cut is None or index < cut or cut_shown:
+                # Its text is shown, in full or up to the cut.
+                if index == cut:
+                    # The tail brings its own whitespace: drop what the live
+                    # stream was holding back for the next word.
+                    if None in self._held_space:
+                        self._held_space[None] = ""
+                    events.extend(
+                        self._emit_text(answer_text(message)[cut_shown:], None)
+                    )
+                    cut_shown = 0
+                events.extend(self._emit_tool_calls(message, None, ()))
+                if index in (cut, unfinished):
+                    # Its end, which carries the usage, was not shown.
+                    events.extend(self._usage_event(message))
+                continue
+            # Not started in the shown text. Thinking that streamed before the
+            # cut, or a tool call already shown, means the live stream had
+            # begun this message: its thinking is not repeated. Thinking the
+            # stream did not tie to a message belongs to the first one here.
+            owns_thinking = thinking_open and thinking_owner in (None, message.id)
+            if owns_thinking:
+                thinking_open = False
+            # A message whose end arrived live has begun too, also without
+            # text or a tool call (thinking only).
+            begun = (
+                owns_thinking
+                or message.id in self._root_finished_message_ids
+                or any(
+                    ((), str(call.get("id") or "")) in self._emitted_tool_calls
+                    for call in message.tool_calls
+                )
+            )
+            self._root_thinking_open = False
+            self._end_text_message(None)
+            if begun:
+                events.extend(self._emit_text(answer_text(message), None))
+                events.extend(self._emit_tool_calls(message, None, ()))
+                if message.id not in self._root_finished_message_ids:
+                    # Its end, which carries the usage, was not shown.
+                    events.extend(self._usage_event(message))
+            else:
+                events.extend(self._process_whole_message(message, None, ()))
+        self._end_text_message(None)
+        return events
+
     def _process_message_event(
         self,
         data: object,
@@ -975,6 +1211,8 @@ class _V3EventProcessor:
 
         if event_type == "message-start":
             self._end_text_message(subagent)
+            if subagent is None and payload.get("role", "ai") == "ai":
+                self._root_message_id = str(payload.get("id") or "") or None
             return []
 
         if event_type == "message-finish":
@@ -995,6 +1233,8 @@ class _V3EventProcessor:
                 self._count_text(len(pending))
             self._end_text_message(subagent)
             if subagent is None:
+                if self._root_message_id is not None:
+                    self._root_finished_message_ids.add(self._root_message_id)
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
                 if inp or out:
@@ -1100,6 +1340,24 @@ class _V3EventProcessor:
         if not isinstance(msg, AIMessageChunk) or msg.chunk_position == "last":
             self._end_text_message(subagent)
 
+        events.extend(self._emit_tool_calls(msg, subagent, namespace))
+
+        if subagent is None:
+            events.extend(self._usage_event(msg))
+        return events
+
+    def _usage_event(self, msg: AIMessage) -> list[dict[str, Any]]:
+        inp, out = _usage_counts(msg.usage_metadata)
+        return [self.emitter.usage_stats(inp, out).data] if inp or out else []
+
+    def _emit_tool_calls(
+        self,
+        msg: AIMessage,
+        subagent: _SubagentInfo | None,
+        namespace: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        """The message's tool calls that were not emitted yet."""
+        events: list[dict[str, Any]] = []
         if msg.tool_calls:
             events.extend(self._selector.flush_selection())
         for raw_tool_call_block in msg.tool_calls:
@@ -1119,11 +1377,6 @@ class _V3EventProcessor:
                     tool_call_id=tool_call_id,
                 )
             )
-
-        if subagent is None:
-            inp, out = _usage_counts(msg.usage_metadata)
-            if inp or out:
-                events.append(self.emitter.usage_stats(inp, out).data)
         return events
 
     def _process_tool_event(
@@ -1227,6 +1480,7 @@ class _V3EventProcessor:
                     ).data
                 )
                 return events
+            self._shown_tool_results.add(tool_call_id)
             events.append(
                 self.emitter.tool_result(
                     name, content, success, tool_call_id=tool_call_id
@@ -1330,6 +1584,7 @@ class _V3EventProcessor:
         self._held_space.pop(subagent.instance_id if subagent else None, None)
         if subagent is None:
             self._main_message_has_text = False
+            self._root_thinking_open = False
 
     def _append_main_text(self, text: str) -> str:
         # Put the separator in the emitted delta too: stateful frontends and
@@ -1337,6 +1592,7 @@ class _V3EventProcessor:
         if not self._main_message_has_text:
             text = paragraph_break(self.full_response, text) + text
         self._main_message_has_text = True
+        self._root_thinking_open = False
         self.full_response += text
         return text
 
@@ -1384,6 +1640,8 @@ class _V3EventProcessor:
         if suppressed:
             return events
         self._count_thinking(len(text))
+        self._root_thinking_open = True
+        self._root_thinking_message_id = self._root_message_id
         events.append(self.emitter.thinking(text).data)
         return events
 

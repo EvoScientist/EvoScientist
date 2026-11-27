@@ -656,10 +656,6 @@ async def test_second_ctrl_c_before_notifier_request_keeps_the_batch(
         await ready.wait()
         return object()
 
-    async def held_close():
-        closing.set()
-        await closed.wait()
-
     runs = _Runs()
     app = await _app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
@@ -667,10 +663,15 @@ async def test_second_ctrl_c_before_notifier_request_keeps_the_batch(
             await pilot.pause()
             _wire(app, workspace, runs)
             app._await_agent_ready = AsyncMock(side_effect=load_agent)
-            monkeypatch.setattr(
-                "EvoScientist.middleware.code_interpreter.aclose_code_interpreters",
-                held_close,
-            )
+            refresh = app._refresh_status_snapshot
+
+            async def held_cleanup(*args, **kwargs):
+                if kwargs.get("reset_streaming_text"):
+                    closing.set()
+                    await closed.wait()
+                return await refresh(*args, **kwargs)
+
+            app._refresh_status_snapshot = held_cleanup
             tid = app._conversation_tid
             _notification(app, "task-1")
             app._poll_channel_queue()

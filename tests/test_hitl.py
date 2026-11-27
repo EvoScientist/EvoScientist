@@ -671,13 +671,13 @@ class TestChannelReplyRegistry:
         reg.clear()
 
         async def _resolver():
-            await asyncio.sleep(0.01)  # let wait() register first
+            await asyncio.sleep(0.01)  # let wait_event() register first
             assert reg.try_resolve("telegram:chat123", "1") is True
 
         got, _ = await asyncio.gather(
-            reg.wait("telegram:chat123", timeout=1.0), _resolver()
+            reg.wait_event("telegram:chat123", timeout=1.0), _resolver()
         )
-        assert got == "1"
+        assert got.content == "1"
         assert "telegram:chat123" not in reg
 
     def test_try_resolve_no_pending(self):
@@ -694,7 +694,7 @@ class TestChannelReplyRegistry:
         reg = channel_mod._reply_registry
         reg.clear()
         # No reply delivered — wait should time out and clean up.
-        got = await reg.wait("telegram:timeout_chat", timeout=0.02)
+        got = await reg.wait_event("telegram:timeout_chat", timeout=0.02)
         assert got is None
         assert "telegram:timeout_chat" not in reg
 

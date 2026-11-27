@@ -36,6 +36,7 @@ from .interaction import (
 
 if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
+    from ..stream.display import ReceivedFiles
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +171,18 @@ class _ConsumerIO(InteractionIO):
     """
 
     def __init__(
-        self, consumer: InboundConsumer, msg: InboundMessage, session_key: str
+        self,
+        consumer: InboundConsumer,
+        msg: InboundMessage,
+        session_key: str,
+        *,
+        received_files: ReceivedFiles | None = None,
     ) -> None:
         self._consumer = consumer
         self._msg = msg
         self._session_key = session_key
         self._last_reply_message: InboundMessage | None = None
+        self._received_files = received_files
         channel = consumer._get_channel(msg.channel)
         self.capabilities = (
             channel.capabilities if channel is not None else ChannelCapabilities()
@@ -203,6 +210,10 @@ class _ConsumerIO(InteractionIO):
         self._last_reply_message = (
             reply.context if isinstance(reply.context, InboundMessage) else None
         )
+        if self._last_reply_message is not None:
+            from ..stream.display import record_received_media
+
+            record_received_media(self._received_files, self._last_reply_message.media)
         return reply.content
 
     def take_reply_context(self) -> InboundMessage | None:
@@ -518,8 +529,6 @@ class InboundConsumer:
         with unrecognized text, returns the intercepted inbound reply so the
         caller can refeed it as a new agent turn after this one unwinds.
         """
-        from langgraph.types import Command
-
         stream_input: GraphRunInput = msg.content
 
         try:
@@ -542,7 +551,10 @@ class InboundConsumer:
             approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
             from ..EvoScientist import file_tool_routes
-            from ..stream.display import forward_media_result
+            from ..stream.display import (
+                forward_media_result,
+                received_media_state,
+            )
             from ..stream.state import StreamState
 
             # Media files the agent writes or reads are sent as their results
@@ -553,6 +565,7 @@ class InboundConsumer:
             media: list[str] = []
             media_sent: set[str] = set()
             media_routes = file_tool_routes(self._dirs.workspace)
+            received_files = received_media_state(msg.media)
 
             while True:
                 _hitl_round += 1
@@ -615,6 +628,7 @@ class InboundConsumer:
                             media_dir=self._dirs.sandbox_media_dir,
                             dangerous=self._dangerous,
                             routes=media_routes,
+                            received_files=received_files,
                         )
                         for path in media:
                             await self._send_media(msg, path)
@@ -631,17 +645,23 @@ class InboundConsumer:
                             if thinking_text:
                                 thinking_buffer.append(thinking_text)
 
-                        elif event_type == "tool_call":
-                            if event.get("name") == "write_todos" and not todo_sent:
-                                todos = event.get("args", {}).get("todos", [])
-                                if todos and channel:
-                                    await _flush_thinking_buffer()
-                                    await channel.send_todo_message(
-                                        msg.sender_id,
-                                        _format_todo_list(todos),
-                                        msg.metadata,
-                                    )
-                                    todo_sent = True
+                        elif event_type == "tool_result":
+                            # The list stream_state took at the first
+                            # successful write_todos result of this round.
+                            if (
+                                channel
+                                and not todo_sent
+                                and event.get("name") == "write_todos"
+                                and event.get("success", True)
+                                and stream_state.todo_items
+                            ):
+                                await _flush_thinking_buffer()
+                                await channel.send_todo_message(
+                                    msg.sender_id,
+                                    _format_todo_list(stream_state.todo_items),
+                                    msg.metadata,
+                                )
+                                todo_sent = True
 
                         elif event_type == "text":
                             final_content += event.get("content", "")
@@ -721,9 +741,14 @@ class InboundConsumer:
                         msg,
                         interrupt_data,
                         session_key,
+                        received_files=received_files,
                     )
 
-                    stream_input = Command(resume=result)
+                    from ..backends import build_ask_user_resume
+
+                    stream_input = build_ask_user_resume(
+                        interrupt_data.get("interrupt_id"), result
+                    )
                     approve_all_carry = self._approval_policy.is_session_granted(
                         session_key
                     )
@@ -864,6 +889,8 @@ class InboundConsumer:
         msg: InboundMessage,
         event_data: dict,
         session_key: str,
+        *,
+        received_files: ReceivedFiles | None = None,
     ) -> dict:
         """Handle an ask_user interrupt via the shared engine.
 
@@ -878,7 +905,7 @@ class InboundConsumer:
         ``{"status": "cancelled"}``.
         """
         questions = event_data.get("questions", [])
-        io = _ConsumerIO(self, msg, session_key)
+        io = _ConsumerIO(self, msg, session_key, received_files=received_files)
         return await resolve_ask_user(questions, io, timeout=ASK_USER_TIMEOUT)
 
     # ── internal ──

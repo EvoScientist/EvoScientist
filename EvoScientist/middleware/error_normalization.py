@@ -19,16 +19,19 @@ recognized provider SDK client, wraps the exception in a
 ``Exception`` subclass, not a dataclass). The wrapper carries the SSE
 envelope pre-baked on its instance attributes.
 
-Contract: the wrap decision is based on the **model**, not the
-exception. Every exception raised inside a call to a recognized
-provider model gets wrapped — SDK exceptions, httpx errors,
+Contract: apart from the pass-through exceptions below, the wrap decision
+is based on the **model**, not the exception. Exceptions raised inside a
+call to a recognized provider model get wrapped — SDK exceptions, httpx errors,
 langchain-wrapper failures, and even builtins like ``RuntimeError``.
 At the middleware boundary we can tell which provider was in use, but
 not the exception's precise origin; a uniform envelope is more useful
 to the WebUI than gambling on the exception class. If the model isn't
 from a recognized provider, or the request carries no ``.model``, the
 exception re-raises unchanged and upstream's whitelist / catch-all
-behavior takes over.
+behavior takes over. LangGraph handles its own signals, deepagents'
+summarization middleware handles context overflow, and its task tool turns
+sync subagent refusals into notices for the parent model. Other refusals
+are normalized so the WebUI can display their message.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.exceptions import ModelAuthenticationError
 
 if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
@@ -172,6 +176,55 @@ def _check_truncated_output(response: ModelResponse) -> ModelResponse:
     )
 
 
+def _check_refusal_output(response: ModelResponse) -> ModelResponse:
+    """Catch response-level refusals missing from v3's assembled content blocks."""
+    from langchain_core.exceptions import ModelRefusalError
+    from langchain_core.messages import AIMessage
+
+    for message in getattr(response, "result", None) or []:
+        if not isinstance(message, AIMessage):
+            continue
+        if message.response_metadata.get("stop_reason") != "refusal":
+            continue
+        # v3 marks the assembled list as v1, bypassing the Anthropic
+        # translator that normally derives this block from stop_details.
+        # (langchain-ai/langchain#42026)
+        details = message.response_metadata.get("stop_details")
+        if not isinstance(details, dict):
+            details = {}
+        refusal = {"type": "refusal", "refusal": details.get("explanation") or ""}
+        if category := details.get("category"):
+            refusal["extras"] = {"category": category}
+        content = [*message.content_blocks, refusal]
+        message = message.model_copy(update={"content": content})
+        raise ModelRefusalError.from_refusal(refusal, raw_message=message)
+    return response
+
+
+class ModelRefusalDetectionMiddleware(AgentMiddleware):
+    """Raise ModelRefusalError for refusals recorded only in response metadata.
+
+    List it after ModelCallBoundaryMiddleware: each fallback attempt is checked,
+    and a refused attempt's streamed output is dropped like a failed one's.
+    """
+
+    name = "model_refusal_detection"
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return _check_refusal_output(handler(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return _check_refusal_output(await handler(request))
+
+
 def _should_pass_through(exc: BaseException) -> bool:
     """True if *exc* is a LangGraph-level signal that must propagate
     untouched — either a control-flow signal or a structural error
@@ -241,7 +294,10 @@ def _is_provider_error(exc: BaseException) -> bool:
 
 
 def _normalize(
-    request: ModelRequest | None, exc: BaseException
+    request: ModelRequest | None,
+    exc: BaseException,
+    *,
+    pass_through_refusals: bool = False,
 ) -> ProviderStreamError | None:
     """Return a :class:`ProviderStreamError` wrapping *exc* if the model
     on *request* comes from a recognized provider SDK, or ``None`` if
@@ -267,9 +323,12 @@ def _normalize(
       **outside** the user middleware stack to compress history and
       retry. Wrapping it here would change the type and break that
       self-healing fallback.
+    - ``ModelRefusalError`` when ``pass_through_refusals`` is set — sync
+      subagents preserve its type for deepagents' task tool, which reports
+      the refusal to the parent model.
     - Models we don't recognize as a provider SDK.
     """
-    from langchain_core.exceptions import ContextOverflowError
+    from langchain_core.exceptions import ContextOverflowError, ModelRefusalError
 
     from ..llm.errors import (
         ProviderStreamError,
@@ -294,6 +353,8 @@ def _normalize(
     # SummarizationMiddleware sits outside our stack and catches this
     # by exact type to trigger reactive history compression + retry.
     if isinstance(exc, ContextOverflowError):
+        return None
+    if pass_through_refusals and isinstance(exc, ModelRefusalError):
         return None
 
     provider = _provider_from_model(getattr(request, "model", None))
@@ -321,61 +382,8 @@ def _normalize(
     )
 
 
-class MissingApiKeyError(ValueError):
+class MissingApiKeyError(ModelAuthenticationError, ValueError):
     """The chat model has no API key, so the request cannot authenticate."""
-
-
-def _check_api_key(request: ModelRequest) -> None:
-    """Fail at once when an Anthropic model has no API key.
-
-    Without a key ``ChatAnthropic`` hands the SDK an empty one, which sends a
-    bare ``Authorization: Bearer`` header; the HTTP layer refuses it and the
-    SDK reports "Connection error." after its retries (#782). The check runs
-    at call time, not in ``get_chat_model``, so the model still builds before
-    a key is saved. Claude sign-in through ccproxy sets a placeholder key and
-    routed providers resolve their own, so neither is empty here.
-    """
-    model = getattr(request, "model", None)
-    if not any(
-        cls.__module__.startswith("langchain_anthropic") for cls in type(model).__mro__
-    ):
-        return
-    key = getattr(model, "anthropic_api_key", None)
-    value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
-    if value:
-        return
-    raise MissingApiKeyError(
-        "No Anthropic API key is set. Save it with "
-        "`EvoSci config set anthropic_api_key <key>`, set the "
-        "ANTHROPIC_API_KEY environment variable, or run `EvoSci onboard`."
-    )
-
-
-class MissingApiKeyMiddleware(AgentMiddleware):
-    """Stop a model call that has no API key before it reaches the provider.
-
-    Mount it inside ``ConfigurableModelMiddleware`` and the fallback chain so
-    it checks the model that is actually called: a per-run override or a
-    fallback model with a key still runs when the primary has none.
-    """
-
-    name = "missing_api_key"
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
-        _check_api_key(request)
-        return handler(request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse:
-        _check_api_key(request)
-        return await handler(request)
 
 
 class ErrorNormalizationMiddleware(AgentMiddleware):
@@ -385,9 +393,16 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
     Place this middleware right inside the retry layer, ahead of everything
     else in the list, so it catches exceptions raised by inner middlewares
     as well as the model handler itself.
+
+    Sync subagents set ``pass_through_refusals`` so deepagents' task tool
+    can return a refusal notice to the parent model.
     """
 
     name = "error_normalization"
+
+    def __init__(self, *, pass_through_refusals: bool = False) -> None:
+        super().__init__()
+        self._pass_through_refusals = pass_through_refusals
 
     def wrap_model_call(
         self,
@@ -397,7 +412,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return _check_truncated_output(handler(request))
         except Exception as exc:
-            normalized = _normalize(request, exc)
+            normalized = _normalize(
+                request, exc, pass_through_refusals=self._pass_through_refusals
+            )
             if normalized is None:
                 raise
             raise normalized from exc
@@ -410,7 +427,9 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         try:
             return _check_truncated_output(await handler(request))
         except Exception as exc:
-            normalized = _normalize(request, exc)
+            normalized = _normalize(
+                request, exc, pass_through_refusals=self._pass_through_refusals
+            )
             if normalized is None:
                 raise
             raise normalized from exc

@@ -317,8 +317,9 @@ async def _acancel_thread_runs(
     thread_id: str,
     *,
     name: str,
+    strict: bool = False,
 ) -> None:
-    """Async variant of :func:`_cancel_thread_runs`."""
+    """Async variant of :func:`_cancel_thread_runs`; ``strict`` re-raises failures."""
     try:
         run_ids: list[str] = []
         for status in _CANCELABLE_RUN_STATUSES:
@@ -339,6 +340,8 @@ async def _acancel_thread_runs(
                 thread_id=thread_id, run_ids=list(dict.fromkeys(run_ids))
             )
     except Exception:
+        if strict:
+            raise
         logger.warning(
             "Failed to cancel %s runs on thread %s", name, thread_id, exc_info=True
         )
