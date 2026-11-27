@@ -215,6 +215,17 @@ class SessionDirs:
         """The folder the agent works in."""
         return self.run_dir or self.workspace.root
 
+    @property
+    def sandbox_media_dir(self) -> Path | None:
+        """The workspace's media folder, when the agent works outside the root.
+
+        Channel attachments land in ``<root>/media`` and are referenced by their
+        real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
+        told about the folder to reach them; in the root it is already inside
+        the sandbox.
+        """
+        return None if self.run_dir is None else self.workspace.media_dir
+
     def metadata(self) -> dict[str, str]:
         """Thread metadata and ``configurable`` keys for this session.
 

@@ -41,8 +41,8 @@ from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import (
     async_notifier,
+    login_cmd,  # noqa: F401 — registers `EvoSci login` / `EvoSci logout`
     server_cmd,  # noqa: F401 — registers `EvoSci server` commands
-    service_cmd,  # noqa: F401 — registers `EvoSci service`
     workspace_cmd,  # noqa: F401 — registers `EvoSci workspace`
 )
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
@@ -1982,8 +1982,14 @@ def _serve_process_message(
             action_requests, msg, human_budget_exhausted=human_budget_exhausted
         )
 
+    from ..stream.display import received_media_state
+
+    received_files = received_media_state(msg.media)
+
     def _ask_user_prompt(ask_user_data: dict) -> dict:
-        return channel_ask_user_prompt(ask_user_data, msg)
+        return channel_ask_user_prompt(
+            ask_user_data, msg, received_files=received_files
+        )
 
     # ---- Slash command dispatch (cmd_manager, not the agent) ----
     # Headless equivalent of the Rich CLI / TUI slash branch so channel
@@ -2045,6 +2051,9 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
+        from ..EvoScientist import file_tool_routes
+        from ..gateway.runtime import sandbox_dangerous_mode
+
         meta = _serve_turn_metadata(
             dirs, model, runtime_state.thread_id, channel_runtime
         )
@@ -2066,7 +2075,13 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
+                received_files=received_files,
                 work_dir=str(dirs.work_dir),
+                media_dir=dirs.sandbox_media_dir,
+                routes=file_tool_routes(dirs.workspace),
+                dangerous=sandbox_dangerous_mode(
+                    runtime_gateways.graph_gateway, runtime_state.config
+                ),
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
@@ -2592,8 +2607,9 @@ def config_set(
 
 
 def _apply_autoskills_settings(config: Any = None) -> None:
-    """Have a running server reschedule every project's AutoSkills cron,
-    reached at *config*'s address (by default the current configuration's)."""
+    """Have a running server reschedule every project's AutoSkills cron:
+    the one its record names, else the one at *config*'s address (by
+    default the current configuration's)."""
     from ..config import get_effective_config
     from ..langgraph_dev.registration import apply_autoskills_settings
 
@@ -3538,15 +3554,6 @@ def _main_callback(
                         console.print(f"[yellow]{notice}[/yellow]")
                         raise typer.Exit(exit_code)
                 finally:
-                    # Model failures can bypass middleware ``after_agent``
-                    # hooks. Close any remaining QuickJS workers while this
-                    # event loop is still available; their synchronous GC
-                    # fallback can deadlock during interpreter shutdown.
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
                     try:
                         print_resume_hint(tid, console=console)
                     except Exception:
@@ -3600,6 +3607,11 @@ def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
 
+    from ..channels.logging_caps import (
+        quiet_credential_url_loggers,
+        redact_root_handlers,
+        scrub_url_secrets,
+    )
     from ..config import get_effective_config
 
     def _resolve_log_level() -> int:
@@ -3623,7 +3635,8 @@ def _configure_logging():
                 record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
-                msg = record.getMessage()
+                # Printed directly, so the formatter's scrub never sees it.
+                msg = scrub_url_secrets(record.getMessage())
                 console.print(
                     f"[dim yellow]\u26a0\ufe0f  Warning:[/dim yellow] [dim]{escape(msg)}[/dim]"
                 )
@@ -3650,3 +3663,7 @@ def _configure_logging():
     # Suppress noisy schema warnings from langchain_google_genai
     # (e.g. "Key '$schema' is not supported in schema, ignoring")
     logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
+
+    # Keep channel credentials out of HTTP request logs.
+    quiet_credential_url_loggers()
+    redact_root_handlers()

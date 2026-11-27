@@ -12,11 +12,11 @@ import logging
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -27,10 +27,9 @@ from rich.text import Text  # type: ignore[import-untyped]
 
 from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
-from ..paths import resolve_virtual_path
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
-from .diff_format import build_edit_diff
+from .diff_format import build_edit_diff, diff_text
 from .formatter import ToolResultFormatter
 from .state import (
     StreamState,
@@ -42,6 +41,7 @@ from .utils import (
     EXECUTE_STATUS,
     DisplayLimits,
     ToolStatus,
+    _tool_path_arg,
     failure_summary,
     format_tool_compact,
     format_tool_compact_with_result,
@@ -59,9 +59,179 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 # Media file extensions that should trigger on_file_write callback
-_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+_MEDIA_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".svg",
+    ".pdf",
+    ".mp3",
+    ".wav",
+    ".mp4",
+}
+
+# File tool results that may name a media file to send to the channel.
+_MEDIA_TOOLS = ("write_file", "read_file")
+_MEDIA_RESULT_EVENTS = ("tool_result", "subagent_tool_result")
 _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
+
+
+def tool_result_file_path(state: StreamState, event: dict[str, Any]) -> str:
+    """The path named by the file tool call a tool result event answers.
+
+    One model step can hold several calls of a tool, so the call is found
+    by the result's id.
+    """
+    call_id = event.get("id")
+    if not call_id:
+        return ""
+    for tc in _result_tool_calls(state, event):
+        if tc.get("id") == call_id:
+            return _tool_path_arg(tc.get("args"))
+    return ""
+
+
+def _result_tool_calls(state: StreamState, event: dict[str, Any]) -> list[dict]:
+    """The tool calls of the agent a result event belongs to.
+
+    A sub-agent's calls live on its own state, found by ``instance_id``.
+    """
+    if event.get("type") != "subagent_tool_result":
+        return state.tool_calls
+    instance_id = event.get("instance_id")
+    for sa in state.subagents:
+        if sa.instance_id == instance_id:
+            return sa.tool_calls
+    return []
+
+
+def resolve_media_path(
+    path: str,
+    work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
+    tool_name: str | None = None,
+) -> str:
+    """The file on disk a file tool's *path* names, or ``""`` if there is none.
+
+    The path is mapped as the sandbox maps it (see
+    :func:`~EvoScientist.backends.sandbox_file_path`), so only a file inside
+    ``work_dir`` or ``media_dir`` is found, and a host-looking path names the
+    workspace file at that path as written, never the host file. In
+    dangerous mode a host path is the real file it names. A path
+    under one of the agent's *routes* names that route's tier file instead.
+    """
+    if work_dir is None:
+        return ""
+    from ..backends import sandbox_file_path
+
+    real_path = sandbox_file_path(
+        path,
+        work_dir,
+        media_dir=media_dir,
+        dangerous=dangerous,
+        routes=routes,
+        tool_name=tool_name,
+    )
+    return str(real_path) if real_path is not None and real_path.is_file() else ""
+
+
+def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Which file *path* names (device, inode) and its size and modification time.
+
+    ``None`` when there is no file, or when its filesystem gives no inode number.
+    """
+    try:
+        status = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    if not status.st_ino:
+        return None
+    return (status.st_dev, status.st_ino), (status.st_size, status.st_mtime_ns)
+
+
+ReceivedFiles: TypeAlias = dict[tuple[int, int], tuple[int, int]]
+"""A turn's received files: file id ``(device, inode)`` -> ``(size, mtime_ns)``."""
+
+
+def received_media_state(
+    received_media: Iterable[str] | None,
+) -> ReceivedFiles:
+    """The received files as they are when recorded for the current turn.
+
+    Keyed by the file itself, so a read matches however the agent spells it.
+    """
+    return dict(filter(None, map(_file_state, received_media or ())))
+
+
+def record_received_media(
+    received_files: ReceivedFiles | None,
+    media: Iterable[str] | None,
+) -> None:
+    """Add files the user sent mid-turn to the turn's received files."""
+    if received_files is not None:
+        received_files.update(received_media_state(media))
+
+
+def forward_media_result(
+    state: StreamState,
+    event: dict[str, Any],
+    media_sent: set[str],
+    send_fn: Callable[[str], Any],
+    work_dir: str | Path | None,
+    *,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
+    received_files: ReceivedFiles | None = None,
+) -> None:
+    """Send the media file a successful file tool result names to the channel.
+
+    Covers ``write_file`` and ``read_file`` results of the main agent and of
+    sub-agents; *state* must already hold the event. Each path is sent once
+    per turn, tracked in *media_sent*. Every channel surface (the Rich loop,
+    the TUI, the standalone runner) forwards through this function, so they
+    all resolve paths the same way: as the agent's backend does, with *routes*
+    in front of the sandbox rooted at *work_dir* with *media_dir*, in
+    dangerous mode when *dangerous* is set.
+
+    A file in *received_files* (:func:`received_media_state`) came from the
+    user during this turn; a read of it is not sent back while it is
+    still as it arrived.
+    """
+    if (
+        event.get("type") not in _MEDIA_RESULT_EVENTS
+        or event.get("name") not in _MEDIA_TOOLS
+        or not event.get("success")
+    ):
+        return
+    path = tool_result_file_path(state, event)
+    if not path or path in media_sent:
+        return
+    if os.path.splitext(path)[1].lower() not in _MEDIA_EXTENSIONS:
+        return
+    real_path = resolve_media_path(
+        path,
+        work_dir,
+        media_dir=media_dir,
+        dangerous=dangerous,
+        routes=routes,
+        tool_name=event.get("name"),
+    )
+    if not real_path:
+        return
+    if event.get("name") == "read_file" and received_files:
+        state_now = _file_state(real_path)
+        if state_now and received_files.get(state_now[0]) == state_now[1]:
+            return
+    media_sent.add(path)
+    send_fn(real_path)
 
 
 class _ApprovalUnanswered(Exception):
@@ -408,7 +578,7 @@ def format_tool_result_compact(
         if old_str and new_str and old_str != new_str:
             diff_markup = build_edit_diff(path, old_str, new_str)
             if diff_markup:
-                elements.append(Text.from_markup(diff_markup))
+                elements.append(diff_text(diff_markup))
                 return elements
 
     # Special handling for write_todos (a failed call shows its error instead)
@@ -1708,6 +1878,9 @@ def _run_streaming(
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
@@ -1718,6 +1891,7 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
+    received_files: ReceivedFiles | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
@@ -1742,11 +1916,23 @@ def _run_streaming(
             deduplication across resume/HITL cycles so the same thinking
             is not replayed, but genuinely new thinking is still sent.
         on_todo: Optional sync callback receiving todo items list.
-            Called once when write_todos tool_call is detected.
+            Called at most once per round, at the first successful
+            write_todos result that leaves a non-empty list.
         on_file_write: Optional sync callback receiving the real filesystem path
-            when the agent writes a media file (image/pdf) via write_file.
+            when the agent or a sub-agent writes or reads a media file
+            (image/pdf/audio/video) via write_file or read_file.
         work_dir: The folder the agent works in; virtual paths in tool calls
-            resolve against it before ``on_file_write`` is called.
+            resolve against it before ``on_file_write`` is called (see
+            :func:`resolve_media_path`).
+        media_dir: The workspace's media folder when the sandbox is told about
+            it (``SessionDirs.sandbox_media_dir``); files there are sent too.
+        dangerous: The sandbox runs in dangerous mode, so host paths in tool
+            calls name real files anywhere.
+        routes: The agent's file tool routes (``file_tool_routes``), so a
+            path under ``/skills/`` or ``/memories/`` names that tier's file.
+        received_files: The files that came from the user during this turn
+            (:func:`received_media_state`); a read of one is not sent back
+            while it is unchanged.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1768,6 +1954,9 @@ def _run_streaming(
                 on_todo=on_todo,
                 on_file_write=on_file_write,
                 work_dir=work_dir,
+                media_dir=media_dir,
+                routes=routes,
+                dangerous=dangerous,
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
@@ -1777,6 +1966,7 @@ def _run_streaming(
                 cancel_scope=cancel_scope,
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
+                received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
@@ -1832,7 +2022,12 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     _stopped_response()
                     return
+                # Ask the first ask_user, as the TUI and the consumer do; the
+                # others come back on the resume stream.
+                pending_ask_user_before = state.pending_ask_user
                 event_type = state.handle_event(event)
+                if event_type == "ask_user" and pending_ask_user_before is not None:
+                    state.pending_ask_user = pending_ask_user_before
 
                 # Relay thinking to channel when transitioning away from
                 # thinking phase.  Uses content comparison so that replayed
@@ -1849,68 +2044,32 @@ def _run_streaming(
                         on_thinking(current)
                         _sent_thinking_text = current
 
-                # Send todo list to channel on first write_todos tool_call
+                # Send the todo list to the channel at the first successful
+                # write_todos result (a rejected list is never sent)
                 if (
                     on_todo
                     and not _todo_sent
-                    and event_type == "tool_call"
+                    and event_type == "tool_result"
                     and event.get("name") == "write_todos"
+                    and event.get("success", True)
                     and state.todo_items
                 ):
                     on_todo(state.todo_items)
                     _todo_sent = True
 
-                # Send media file to channel when write_file succeeds
-                if (
-                    on_file_write
-                    and event_type == "tool_result"
-                    and event.get("name") == "write_file"
-                    and event.get("success")
-                ):
-                    wf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "write_file":
-                            p = tc.get("args", {}).get("path", "")
-                            if p and p not in _media_sent:
-                                wf_path = p
-                                break
-                    if wf_path:
-                        ext = os.path.splitext(wf_path)[1].lower()
-                        if ext in _MEDIA_EXTENSIONS:
-                            real_path = (
-                                str(resolve_virtual_path(work_dir, wf_path))
-                                if work_dir is not None
-                                else wf_path
-                            )
-                            if os.path.isfile(real_path):
-                                _media_sent.add(wf_path)
-                                on_file_write(real_path)
-
-                # Send media file to channel when read_file returns an image
-                if (
-                    on_file_write
-                    and event_type == "tool_result"
-                    and event.get("name") == "read_file"
-                    and event.get("success")
-                ):
-                    rf_path = ""
-                    for tc in reversed(state.tool_calls):
-                        if tc.get("name") == "read_file":
-                            p = tc.get("args", {}).get("file_path", "") or tc.get(
-                                "args", {}
-                            ).get("path", "")
-                            if p and p not in _media_sent:
-                                rf_path = p
-                                break
-                    if rf_path:
-                        ext = os.path.splitext(rf_path)[1].lower()
-                        if ext in _MEDIA_EXTENSIONS:
-                            real_path = rf_path
-                            if not os.path.isfile(real_path) and work_dir is not None:
-                                real_path = str(resolve_virtual_path(work_dir, rf_path))
-                            if os.path.isfile(real_path):
-                                _media_sent.add(rf_path)
-                                on_file_write(real_path)
+                # Send the media file a write_file / read_file result names
+                if on_file_write:
+                    forward_media_result(
+                        state,
+                        event,
+                        _media_sent,
+                        on_file_write,
+                        work_dir,
+                        media_dir=media_dir,
+                        routes=routes,
+                        dangerous=dangerous,
+                        received_files=received_files,
+                    )
 
                 if on_stream_event is not None:
                     callback_result = on_stream_event(event_type, state)
@@ -2153,13 +2312,14 @@ def _run_streaming(
                         )
                     except _StreamPromptCancelled:
                         return _stopped_response()
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from ..backends import build_ask_user_resume
 
+                interrupt_id = state.pending_ask_user.get("interrupt_id")
                 state.pending_ask_user = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
-                message = Command(resume=result)
+                message = build_ask_user_resume(interrupt_id, result)
                 approve_all_carry = turn_granted or _session_auto_approve
                 continue
 

@@ -365,8 +365,29 @@ class TestBuildTodoStats:
 
 
 class TestTodoCaptureFromArgs:
+    @staticmethod
+    def _write(state, call_id, todos, *, success=True):
+        state.handle_event(
+            {
+                "type": "tool_call",
+                "id": call_id,
+                "name": "write_todos",
+                "args": {"todos": todos},
+            }
+        )
+        state.handle_event(
+            {
+                "type": "tool_result",
+                "id": call_id,
+                "name": "write_todos",
+                "content": "Updated todo list" if success else "Error: invalid",
+                "success": success,
+            }
+        )
+
     def test_capture_from_tool_call_args(self):
-        """write_todos tool_call args should update todo_items."""
+        """write_todos tool_call args become todo_items at its successful
+        result, not at the call."""
         state = StreamState()
         todos = [
             {"status": "todo", "content": "Task A"},
@@ -380,7 +401,66 @@ class TestTodoCaptureFromArgs:
                 "args": {"todos": todos},
             }
         )
+        assert state.todo_items == []
+        state.handle_event(
+            {
+                "type": "tool_result",
+                "id": "tc1",
+                "name": "write_todos",
+                "content": "Updated todo list",
+            }
+        )
         assert state.todo_items == todos
+
+    def test_rejected_write_keeps_previous_list(self):
+        state = StreamState()
+        first = [{"status": "todo", "content": "A"}]
+        self._write(state, "tc1", first)
+        self._write(state, "tc2", [{"status": "bogus", "content": "B"}], success=False)
+        assert state.todo_items == first
+
+    def test_parallel_writes_without_results_keep_previous_list(self):
+        """Parallel write_todos calls are answered before the tools run, so
+        no result arrives for either; the list stays."""
+        state = StreamState()
+        first = [{"status": "todo", "content": "A"}]
+        self._write(state, "tc1", first)
+        for call_id in ("tc2", "tc3"):
+            state.handle_event(
+                {
+                    "type": "tool_call",
+                    "id": call_id,
+                    "name": "write_todos",
+                    "args": {"todos": [{"status": "todo", "content": call_id}]},
+                }
+            )
+        assert state.todo_items == first
+
+    def test_rejected_first_write_leaves_no_list(self):
+        state = StreamState()
+        self._write(state, "tc1", [{"status": "bogus", "content": "B"}], success=False)
+        assert state.todo_items == []
+
+    def test_accepted_empty_write_clears_the_list(self):
+        state = StreamState()
+        self._write(state, "tc1", [{"status": "todo", "content": "A"}])
+        self._write(state, "tc2", [])
+        assert state.todo_items == []
+
+    def test_call_without_todos_takes_the_list_from_the_result(self):
+        state = StreamState()
+        state.handle_event(
+            {"type": "tool_call", "id": "tc1", "name": "write_todos", "args": {}}
+        )
+        state.handle_event(
+            {
+                "type": "tool_result",
+                "id": "tc1",
+                "name": "write_todos",
+                "content": "Updated todo list to [{'content': 'A', 'status': 'todo'}]",
+            }
+        )
+        assert state.todo_items == [{"content": "A", "status": "todo"}]
 
     def test_capture_from_tool_result_fallback(self):
         """write_todos tool_result should also update todo_items."""
@@ -400,7 +480,8 @@ class TestTodoCaptureFromArgs:
         assert state.todo_items[0]["status"] == "done"
 
     def test_args_capture_takes_priority(self):
-        """Args capture (structured) should override result parse."""
+        """At a successful result the call's args (structured) win over a
+        list parsed from the result text."""
         import json
 
         state = StreamState()
@@ -414,8 +495,6 @@ class TestTodoCaptureFromArgs:
                 "args": {"todos": args_todos},
             }
         )
-        assert state.todo_items[0]["content"] == "From args"
-        # Result arrives but args already captured — result updates too
         state.handle_event(
             {
                 "type": "tool_result",
@@ -424,8 +503,7 @@ class TestTodoCaptureFromArgs:
                 "content": json.dumps(result_todos),
             }
         )
-        # Result overwrites (both sources are valid, last write wins)
-        assert state.todo_items[0]["content"] == "From result"
+        assert state.todo_items == args_todos
 
     def test_read_todos_result_updates(self):
         """read_todos tool_result should also update todo_items."""
@@ -979,6 +1057,7 @@ class TestRubricState:
 
         state = StreamState()
         state.handle_event({"type": "text", "content": "First draft."})
+        state.handle_event({"type": "text", "content": "\n\n"})
         state.handle_event(
             {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
         )
@@ -1112,6 +1191,7 @@ def test_discard_keeps_the_clean_prefix_of_a_boundary_crossing_narration_segment
 
     state = StreamState()
     state.handle_event({"type": "text", "content": "DRAFT"})
+    state.handle_event({"type": "text", "content": "\n\n"})
     state.handle_event(
         {
             "type": "rubric_evaluation",

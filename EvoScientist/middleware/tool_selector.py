@@ -146,9 +146,43 @@ def _coerce_stringified_tools(selection: Any) -> Any:
     return selection
 
 
-class _AutoToolChoiceSelectorModel:
-    """Selection model for models that reject forced ``tool_choice`` (Claude
-    Fable 5.1 / Opus 5.5): binds the schema with ``tool_choice="auto"``."""
+def _names_as_enum(schema: dict[str, Any]) -> dict[str, Any]:
+    """The selection schema with the tool names as one ``enum``, their
+    descriptions in the field text: as a function declaration on OpenRouter,
+    Gemini loses langchain's ``const`` names and then never answers."""
+    try:
+        field = schema["properties"]["tools"]
+        items = field["items"]
+        options = items.get("anyOf") or [items]
+        names = [option["const"] for option in options]
+    except (AttributeError, KeyError, TypeError):
+        return schema
+    # Indented, so a description's own bullets are not read as more tools.
+    listing = "\n".join(
+        f"- {option['const']}: "
+        + str(option.get("description", "")).replace("\n", "\n  ")
+        for option in options
+    )
+    return {
+        **schema,
+        "properties": {
+            **schema["properties"],
+            "tools": {
+                **field,
+                "description": (
+                    f"{field.get('description', '')}\n\nAvailable tools:\n{listing}"
+                ).strip(),
+                "items": {"type": "string", "enum": names},
+            },
+        },
+    }
+
+
+class _SelectorModel:
+    """The model the selector asks for structured output: hands the selection
+    schema on with the tool names as an ``enum``."""
+
+    _shape_reported = False
 
     def __init__(self, model: BaseChatModel) -> None:
         self._model = model
@@ -160,7 +194,29 @@ class _AutoToolChoiceSelectorModel:
             raise AttributeError(name)
         return getattr(self._model, name)
 
+    def _selection_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        rewritten = _names_as_enum(schema)
+        if rewritten is schema and not self._shape_reported:
+            # Otherwise a model that needs the enum stops answering without a trace.
+            self._shape_reported = True
+            logger.warning(
+                "tool_selector.schema_shape rewritten=false; the selection schema "
+                "has an unexpected shape and is sent as langchain built it"
+            )
+        return rewritten
+
+    def with_structured_output(self, schema: dict[str, Any], **kwargs: Any) -> Runnable:
+        return self._model.with_structured_output(
+            self._selection_schema(schema), **kwargs
+        )
+
+
+class _AutoToolChoiceSelectorModel(_SelectorModel):
+    """Selection model for models that reject forced ``tool_choice`` (Claude
+    Fable 5.1 / Opus 5.5): binds the schema with ``tool_choice="auto"``."""
+
     def with_structured_output(self, schema: dict[str, Any], **_: Any) -> Runnable:
+        schema = self._selection_schema(schema)
         name = schema.get("title", "ToolSelectionResponse")
         return (
             self._model.bind_tools([schema], tool_choice="auto")
@@ -476,11 +532,15 @@ def create_tool_selector_middleware(
     def selector_factory(
         always_include: list[str], prompt: str = system_prompt
     ) -> AgentMiddleware:
-        return LLMToolSelectorMiddleware(
+        selector = LLMToolSelectorMiddleware(
             model=safe_model,
             system_prompt=prompt,
             always_include=always_include,
         )
+        # The constructor only accepts a BaseChatModel; selection only calls
+        # ``with_structured_output`` on it.
+        selector.model = _SelectorModel(safe_model)
+        return selector
 
     # These models keep thinking on, so a low effort keeps selection fast.
     auto_model = safe_model
@@ -495,8 +555,6 @@ def create_tool_selector_middleware(
             + " Always respond by calling the ToolSelectionResponse tool; "
             "never answer the user directly.",
         )
-        # The constructor only accepts a BaseChatModel; selection only calls
-        # ``with_structured_output`` on it.
         selector.model = _AutoToolChoiceSelectorModel(auto_model)
         return selector
 

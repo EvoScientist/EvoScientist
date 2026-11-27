@@ -553,13 +553,11 @@ async def _ensure_thread_meta_index(conn: aiosqlite.Connection, db_path: str) ->
 def _reduce_messages_delta(
     state: list[AnyMessage] | None, writes: list[Any]
 ) -> list[AnyMessage]:
-    """Inline copy of deepagents' ``_messages_delta_reducer``.
+    """Inline copy of langgraph's ``_messages_delta_reducer``.
 
-    The upstream reducer lives in ``deepagents._messages_reducer`` (a
-    private module) and itself adapts langgraph's experimental
-    ``_messages_delta_reducer`` (PR #7729). Both surfaces are
-    pre-stable — langgraph marks DeltaChannel as Beta, and the deepagents
-    file's leading underscore signals it's not part of the public API.
+    deepagents' ``messages`` DeltaChannel uses langgraph's experimental
+    reducer (``langgraph.graph.message._messages_delta_reducer``); the
+    leading underscore and DeltaChannel's Beta status mark it pre-stable.
 
     We copy the implementation here so a future upstream rename or
     semantic shift doesn't silently break thread reconstruction.
@@ -575,9 +573,8 @@ def _reduce_messages_delta(
     through JSON) reconstruct correctly without a separate coercion
     step.
 
-    ``state`` may be None on ``DeltaChannel.replay_writes`` for threads
-    whose earliest checkpoint did not seed ``messages: []``, and is
-    treated as the empty list.
+    A ``None`` state is treated as the empty list; callers already pass a
+    list, so this is only defensive.
     """
     flat: list[Any] = []
     for w in writes:
@@ -635,7 +632,7 @@ async def _load_checkpoint_messages(
     nearest ancestor whose ``channel_values["messages"]`` carries a seed
     (``_DeltaSnapshot`` blob or plain list) and returns that plus every
     on-path pending write oldest→newest. The local
-    ``_reduce_messages_delta`` (inline copy of deepagents' reducer; see
+    ``_reduce_messages_delta`` (inline copy of langgraph's reducer; see
     that function's docstring) is then applied in a single batched call,
     preserving dedup-by-id, ``RemoveMessage`` tombstones, and
     ``REMOVE_ALL_MESSAGES`` reset semantics.

@@ -455,19 +455,6 @@ def test_stage_unreadable_restart_record_is_dropped(started):
     assert not (paths.SERVER_HOME / "restart-after-update.json").exists()
 
 
-def test_service_stop_is_server_stop_with_notice(monkeypatch):
-    stopped = []
-    monkeypatch.setattr(
-        manager, "stop_server", lambda **_k: stopped.append("server") or 42
-    )
-
-    result = CliRunner().invoke(app, ["service", "stop"])
-
-    assert result.exit_code == 0, result.output
-    assert stopped == ["server"]
-    assert "deprecated" in result.output
-
-
 def _recorded_server(monkeypatch, record, stopped: list) -> None:
     """*record* names the running server; ending it is recorded in
     *stopped*."""
@@ -494,6 +481,26 @@ def test_server_stop_leaves_deploy_owned_server(monkeypatch):
     assert "not the background server" in output
     # Its owner may be gone.
     assert server_cmd.manual_stop_command(6174) in output
+
+
+def test_server_stop_points_to_itself_while_named_owner_runs(monkeypatch):
+    """A record that names its owner: once that owner is gone, the stop
+    itself ends the server, so no manual kill command."""
+    from EvoScientist.cli import server_cmd
+    from EvoScientist.langgraph_dev import server_record
+
+    stopped = []
+    owner = {server_record.OWNER_PID_KEY: 77}
+    _recorded_server(monkeypatch, _record(lasting=False, fields=owner), stopped)
+    monkeypatch.setattr(manager, "owner_running", lambda _record: True)
+
+    result = CliRunner().invoke(app, ["server", "stop"])
+
+    assert result.exit_code == 0, result.output
+    assert stopped == []
+    output = " ".join(result.output.split())
+    assert "run EvoSci server stop again" in output
+    assert server_cmd.manual_stop_command(6174) not in output
 
 
 def test_server_stop_stops_server_nobody_else_owns(monkeypatch):
@@ -678,8 +685,7 @@ def test_server_status_shows_starting_record_as_starting(monkeypatch):
     assert "not responding" not in output
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_names_lock_held_without_record(monkeypatch, group):
+def test_stop_names_lock_held_without_record(monkeypatch):
     from EvoScientist.langgraph_dev import server_home
 
     stopped: list = []
@@ -688,7 +694,7 @@ def test_stop_names_lock_held_without_record(monkeypatch, group):
     monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.HELD)
     monkeypatch.setattr(manager, "stop_server", lambda **_k: stopped.append(1))
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 1
     assert stopped == []
@@ -832,16 +838,6 @@ def test_server_status_shows_no_ccproxy_without_oauth(monkeypatch):
     assert "ccproxy" not in _status_output()
 
 
-def test_service_start_is_server_start_with_notice(started, tmp_path):
-    result = CliRunner().invoke(app, ["service", "start", "--workdir", str(tmp_path)])
-
-    assert result.exit_code == 0, result.output
-    assert started == [(tmp_path, "langgraph_server")]
-    output = " ".join(result.output.split())
-    assert "deprecated" in output
-    assert "EvoSci server stop" in output
-
-
 def test_server_start_oauth_points_at_server_ccproxy(started, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -947,6 +943,31 @@ def test_server_stop_asks_nothing_of_owned_busy_server(busy_server, monkeypatch)
     assert "left running" in result.output
 
 
+@pytest.mark.parametrize("yes", [False, True])
+def test_server_stop_asks_before_stopping_busy_server_its_owner_left(
+    busy_server, monkeypatch, yes
+):
+    """EvoSci deploy was killed and left its server: the stop ends it like
+    the background server, so its work is asked about first."""
+    from EvoScientist.langgraph_dev import server_record
+
+    owner = {server_record.OWNER_PID_KEY: 77}
+    monkeypatch.setattr(
+        manager, "read_record", lambda **_k: _record(lasting=False, fields=owner)
+    )
+    monkeypatch.setattr(manager, "_parent_pid", lambda pid: 1)
+
+    result = CliRunner().invoke(app, ["server", "stop", *(["--yes"] if yes else [])])
+
+    if yes:
+        assert result.exit_code == 0, result.output
+        assert busy_server == ["server"]
+    else:
+        assert result.exit_code == 1
+        assert "--yes" in result.output
+        assert busy_server == []
+
+
 def test_server_stop_says_to_retry_a_server_it_could_not_open(busy_server, monkeypatch):
     """The stop says to try again, not that it has no record, nor how to
     kill it by hand, and exits 1 for a script."""
@@ -1011,10 +1032,9 @@ def test_stop_asks_recorded_server_on_another_port(busy_server, monkeypatch):
     assert all(":7000" in url for url in asked)
 
 
-@pytest.mark.parametrize("command", [["server", "stop"], ["service", "stop"]])
-def test_stop_without_terminal_refuses_busy_server(busy_server, command):
+def test_stop_without_terminal_refuses_busy_server(busy_server):
     """It serves every project; a script must say --yes to end its work."""
-    result = CliRunner().invoke(app, command)
+    result = CliRunner().invoke(app, ["server", "stop"])
 
     assert result.exit_code == 1
     assert busy_server == []
@@ -1056,13 +1076,12 @@ def test_stop_question_says_what_a_stop_does(
     assert unsaid not in output
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_with_yes_stops_busy_server(busy_server, monkeypatch, group):
+def test_stop_with_yes_stops_busy_server(busy_server, monkeypatch):
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     monkeypatch.setattr(ccproxy_mod, "stop_recorded_ccproxy", lambda: None)
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 0, result.output
     assert busy_server == ["server"]
@@ -1138,15 +1157,14 @@ def test_server_status_names_unreadable_lock(monkeypatch):
     assert "server.lock" in "".join(output.split())
 
 
-@pytest.mark.parametrize("group", ["server", "service"])
-def test_stop_names_unreadable_lock(monkeypatch, group):
+def test_stop_names_unreadable_lock(monkeypatch):
     from EvoScientist.langgraph_dev import server_home
 
     monkeypatch.setattr(manager, "read_record", lambda **_k: None)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: False)
     monkeypatch.setattr(server_home, "lock_state", lambda wait=0: server_home.UNKNOWN)
 
-    result = CliRunner().invoke(app, [group, "stop", "--yes"])
+    result = CliRunner().invoke(app, ["server", "stop", "--yes"])
 
     assert result.exit_code == 1
     output = " ".join(result.output.split())

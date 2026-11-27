@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..capabilities import SIGNAL as SIGNAL_CAPS
 from ..config import BaseChannelConfig
 
@@ -241,9 +241,9 @@ class SignalChannel(Channel):
                 "audio/opus",
             }
             attachments = data_msg.get("attachments", [])
-            for att in attachments:
+            for index, att in enumerate(attachments):
                 att_size = att.get("size", 0)
-                att_name = att.get("filename", "attachment")
+                att_name = att.get("filename") or "attachment"
                 att_file = att.get("file")  # signal-cli provides local path
                 content_type = att.get("contentType", "")
                 is_voice = content_type in _VOICE_TYPES or att.get("voiceNote", False)
@@ -260,7 +260,12 @@ class SignalChannel(Channel):
                                 f"[{media_label}: {att_name} - too large ({att_path.stat().st_size} bytes)]"
                             )
                         else:
-                            local = self._media_path(f"signal_{att_name}")
+                            name = attachment_filename(
+                                att_name,
+                                f"{source_number}_{msg_ts}" if msg_ts else "",
+                                index,
+                            )
+                            local = self._media_path(f"signal_{name}")
                             import shutil
 
                             shutil.copy2(str(att_path), str(local))

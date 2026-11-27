@@ -447,20 +447,21 @@ async def test_delete_legacy_local_only():
     assert not execute.called("delete_thread")
 
 
-async def test_delete_server_error_is_non_fatal():
+async def test_delete_server_error_propagates_without_local_cleanup():
     read = RecordingGateway("r", delete_result=True)
     execute = RecordingGateway("e", delete_result=True)
     execute.delete_raises = True
+    with pytest.raises(RuntimeError, match="boom"):
+        await _composite(read, execute).delete_thread(UUID)
+    assert not read.called("delete_thread")
+
+
+async def test_delete_missing_server_thread_still_deletes_local():
+    read = RecordingGateway("r", delete_result=True)
+    execute = RecordingGateway("e", delete_result=False)
     assert await _composite(read, execute).delete_thread(UUID) is True
-
-
-async def test_delete_server_error_after_a_failed_local_delete(caplog):
-    read = RecordingGateway("r", delete_result=False)
-    execute = RecordingGateway("e", delete_result=True)
-    execute.delete_raises = True
-    with caplog.at_level(logging.WARNING):
-        assert await _composite(read, execute).delete_thread(UUID) is False
-    assert "local delete failed" in caplog.text
+    assert read.called("delete_thread")
+    assert execute.called("delete_thread")
 
 
 def test_execute_gateway_exposes_execution_side():
@@ -490,6 +491,39 @@ def test_create_runtime_gateways_split_builds_composite():
     )
     assert isinstance(gws.graph_gateway, CompositeGraphGateway)
     assert isinstance(gws.thread_store, LocalThreadStore)
+
+
+@pytest.mark.parametrize(
+    ("read_backend", "headers", "auth_scheme"),
+    [
+        pytest.param("local", {"x-auth-scheme": "langsmith"}, "langsmith", id="split"),
+        pytest.param(None, {"x-auth-scheme": "langsmith"}, "langsmith", id="uniform"),
+        pytest.param(None, None, None, id="no-headers"),
+    ],
+)
+def test_server_gateway_from_a_url_keeps_one_pool_per_event_loop(
+    read_backend, headers, auth_scheme
+):
+    """#880: the server gateway built from a URL gets the per-loop client;
+    ``headers=None`` adds no headers of ours, as ``get_client`` did."""
+    from EvoScientist.langgraph_dev.sdk import _PerLoopTransport
+
+    gws = create_runtime_gateways(
+        backend="langgraph_server",
+        read_backend=read_backend,
+        base_url="http://127.0.0.1:1",
+        headers=headers,
+    )
+    execute = (
+        gws.graph_gateway._execute
+        if isinstance(gws.graph_gateway, CompositeGraphGateway)
+        else gws.graph_gateway
+    )
+    http = execute.thread_store.client.http.client
+
+    assert isinstance(http._transport, _PerLoopTransport)
+    assert str(http.base_url) == "http://127.0.0.1:1"
+    assert http.headers.get("x-auth-scheme") == auth_scheme
 
 
 def test_create_runtime_gateways_passthrough_unchanged():
@@ -582,3 +616,47 @@ def test_gateways_for_config_backend_none_falls_back_to_global():
         SimpleNamespace(gateway_backend="local"), backend=None
     )
     assert isinstance(gws.graph_gateway, LocalGraphGateway)
+
+
+async def test_server_delete_finishes_before_local_cleanup():
+    order = []
+    read = RecordingGateway("r", delete_result=False)
+    execute = RecordingGateway("e", delete_result=True)
+    original_read = read.delete_thread
+    original_execute = execute.delete_thread
+
+    async def local_delete(*args):
+        order.append("local")
+        return await original_read(*args)
+
+    async def server_delete(*args):
+        order.append("server")
+        return await original_execute(*args)
+
+    read.delete_thread = local_delete
+    execute.delete_thread = server_delete
+    assert await _composite(read, execute).delete_thread(UUID)
+    assert order == ["server", "local"]
+
+
+async def test_local_cleanup_error_after_server_delete_warns_and_returns_success(
+    caplog,
+):
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    read.delete_raises = True
+    with caplog.at_level(logging.WARNING):
+        assert await _composite(read, execute).delete_thread(UUID) is True
+    assert "Server deletion completed" in caplog.text
+    assert UUID in caplog.text
+    assert "local cleanup failed" in caplog.text
+    assert "boom" in caplog.text
+
+
+async def test_local_cleanup_error_without_server_delete_keeps_original_error():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e", delete_result=False)
+    read.delete_raises = True
+    with pytest.raises(RuntimeError, match=r"^boom$") as error:
+        await _composite(read, execute).delete_thread(UUID)
+    assert error.value.__cause__ is None

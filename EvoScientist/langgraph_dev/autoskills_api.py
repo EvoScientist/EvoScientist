@@ -27,6 +27,7 @@ from EvoScientist.memory.autoskills.proposals import (
     _SKILL_SCOPES,
     InstallTarget,
     SkillProposal,
+    _content_digest,
     _failure_text,
     _read_regular,
     _resolves_within_root,
@@ -103,15 +104,22 @@ def _listed(proposal: SkillProposal, served: set[str]) -> str | None:
     return key
 
 
-def _inline(path: Path, folder: Path) -> tuple[str, bool]:
-    """The start of a draft's text file, and whether it was cut."""
-    # A character takes at most four bytes, so one byte more shows a longer text.
-    limit = MAX_INLINE_CHARS * 4 + 1
+def _read_inline(path: Path, folder: Path) -> tuple[str, bool, bytes | None]:
+    """The preview text, truncation flag, and bytes only for a lossless capture."""
+    # A character takes at most four bytes, so one byte more shows a longer
+    # text; read as far as the file route does, which calls a NUL byte binary.
+    limit = max(MAX_INLINE_CHARS * 4, MAX_FILE_BYTES) + 1
     data = _read_regular(path, limit) if _resolves_within_root(path, folder) else None
-    if data is None:
-        return "", False
+    if data is None or b"\x00" in data:
+        return "", False, None
     text = data.decode("utf-8", errors="replace")
-    return text[:MAX_INLINE_CHARS], len(text) > MAX_INLINE_CHARS
+    shown = text[:MAX_INLINE_CHARS]
+    truncated = len(text) > MAX_INLINE_CHARS
+    return (
+        shown,
+        truncated,
+        data if not truncated and shown.encode("utf-8") == data else None,
+    )
 
 
 def _install_target(proposal: SkillProposal, key: str) -> InstallTarget | str:
@@ -168,11 +176,40 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
     # polled and decided drafts only grow in number.
     skill_md: tuple[str | None, bool | None] = (None, None)
     rationale_md = skill_md
+    content_digest = None
+    review_incomplete = None
     target: InstallTarget | None = None
     install_error = None
     if proposal.status == "pending":
-        skill_md = _inline(folder / "SKILL.md", folder)
-        rationale_md = _inline(folder / "RATIONALE.md", folder)
+        skill = _read_inline(folder / "SKILL.md", folder)
+        skill_md = (skill[0], skill[1])
+        rationale = _read_inline(folder / "RATIONALE.md", folder)
+        rationale_md = (rationale[0], rationale[1])
+        captures = {"SKILL.md": skill}
+        try:
+            relatives = copied_files(folder)
+        except OSError:
+            relatives = []
+        for relative in relatives:
+            name = relative.as_posix()
+            if name == "SKILL.md":
+                continue
+            captures[name] = _read_inline(folder / relative, folder)
+        previews = (*captures.values(), rationale)
+        if any(truncated for _, truncated, _ in previews):
+            review_incomplete = "truncated"
+        elif Path("SKILL.md") not in relatives or any(
+            data is None for _, _, data in previews
+        ):
+            review_incomplete = "unavailable"
+        else:
+            content_digest = _content_digest(
+                {
+                    name: data
+                    for name, (_, _, data) in captures.items()
+                    if data is not None
+                }
+            )
         computed = _install_target(proposal, key)
         if isinstance(computed, str):
             install_error = computed
@@ -211,6 +248,8 @@ def _draft(proposal: SkillProposal, key: str) -> dict[str, Any]:
         "skill_md_truncated": skill_md[1],
         "rationale_md": rationale_md[0],
         "rationale_md_truncated": rationale_md[1],
+        "content_digest": content_digest,
+        "review_incomplete": review_incomplete,
         "files": _files(folder, base),
         "install_target": str(target.path) if target and target.path else None,
         "install_base": str(base) if base is not None else None,
@@ -324,7 +363,11 @@ def _refused(action: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     error = str(result.get("error") or "")
     if error.startswith("Only pending proposals"):
         return 409, {"error": "not_pending", "status": result.get("status")}
-    if error.startswith("Proposal changed since it was read"):
+    # "Changed since it was submitted" keeps the client's version, so reading
+    # the draft again changes nothing: it is answered as a failed approval.
+    if error.startswith(
+        ("Proposal changed since it was read", "Proposal changed since it was shown")
+    ):
         return 409, {"error": "draft_changed", "updated_at": result.get("updated_at")}
     return 409, {"error": f"{action}_failed", "detail": _failure_text(result)}
 
@@ -335,6 +378,7 @@ def _apply(
     action: str,
     scope: str | None,
     expected_updated_at: str | None,
+    expected_content_digest: str | None,
 ) -> tuple[int, dict[str, Any]]:
     if action == "approve":
         result = approve_skill_proposal(
@@ -346,6 +390,7 @@ def _apply(
             approved_by="user",
             exact=True,
             expected_updated_at=expected_updated_at,
+            expected_content_digest=expected_content_digest,
         )
         if result.get("approved"):
             return 200, {key: result.get(key) for key in _APPROVED_KEYS}
@@ -382,6 +427,9 @@ def _apply(
     payload: dict[str, Any] = {"error": code}
     if code == "revert_failed":
         payload["detail"] = str(result.get("detail") or "")
+    elif result.get("detail"):
+        # Why an Undo is unavailable: the only thing the client can tell the user.
+        payload["detail"] = str(result["detail"])
     if code == "draft_changed":
         payload["updated_at"] = result.get("updated_at")
     return _REVERT_STATUS.get(code, 409), payload
@@ -396,7 +444,11 @@ def _served(workspace: paths.Workspace) -> bool:
 
 
 def _decide_locked(
-    proposal_id: str, action: str, scope: str | None, expected_updated_at: str | None
+    proposal_id: str,
+    action: str,
+    scope: str | None,
+    expected_updated_at: str | None,
+    expected_content_digest: str | None,
 ) -> tuple[int, dict[str, Any]]:
     proposal = find_skill_proposal(paths.MEMORIES_DIR, proposal_id)
     if proposal is None:
@@ -407,7 +459,14 @@ def _decide_locked(
     workspace = paths.Workspace(key)
     if not _served(workspace):
         return 409, {"error": "project_not_served"}
-    return _apply(proposal, workspace, action, scope, expected_updated_at)
+    return _apply(
+        proposal,
+        workspace,
+        action,
+        scope,
+        expected_updated_at,
+        expected_content_digest,
+    )
 
 
 def _sendable(payload: dict[str, Any]) -> dict[str, Any]:
@@ -426,12 +485,18 @@ def decide(
     *,
     scope: object = None,
     expected_updated_at: object = None,
+    expected_content_digest: object = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Approve, reject or revert one draft of a served project; with
-    ``expected_updated_at``, a draft resubmitted or decided since is refused."""
+    """Decide one served draft, refusing a version or content the client did not read.
+
+    ``expected_content_digest`` is the digest of what the client was shown;
+    without one, the approval compares the digest recorded at submit.
+    """
     if action == "approve" and scope is not None and scope not in _SCOPES:
         return 400, {"error": "invalid_scope"}
-    if not isinstance(expected_updated_at, str | None):
+    if not isinstance(expected_updated_at, str | None) or not isinstance(
+        expected_content_digest, str | None
+    ):
         return 400, {"error": "invalid_body"}
     with _DECISIONS:
         try:
@@ -440,6 +505,7 @@ def decide(
                 action,
                 scope if isinstance(scope, str) else None,
                 expected_updated_at,
+                expected_content_digest,
             )
         except Exception as exc:
             # One failed decision answers the client instead of failing the request.

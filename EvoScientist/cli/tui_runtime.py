@@ -13,6 +13,7 @@ from .tui_backends import RichStreamingBackend, StreamingTUIBackend
 
 if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
+    from ..stream.display import ReceivedFiles
 
 DEFAULT_UI_BACKEND = "cli"
 # An unknown name lands where an unknown config.yaml value does (the field default).
@@ -115,6 +116,10 @@ def run_streaming(
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
     work_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
+    received_files: ReceivedFiles | None = None,
+    routes: dict[str, Any] | None = None,
+    dangerous: bool = False,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict | None = None,
@@ -141,6 +146,10 @@ def run_streaming(
         on_todo=on_todo,
         on_file_write=on_file_write,
         work_dir=work_dir,
+        media_dir=media_dir,
+        received_files=received_files,
+        routes=routes,
+        dangerous=dangerous,
         on_stream_event=on_stream_event,
         status_footer_builder=status_footer_builder,
         metadata=metadata,
@@ -174,15 +183,10 @@ async def run_streaming_async(
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
-        try:
-            response = await settle_cancelled_worker(
-                worker,
-                on_cancel=lambda: request_stream_cancel(kwargs.get("cancel_scope")),
-            )
-        finally:
-            from ..middleware.code_interpreter import aclose_code_interpreters
-
-            await aclose_code_interpreters()
+        response = await settle_cancelled_worker(
+            worker,
+            on_cancel=lambda: request_stream_cancel(kwargs.get("cancel_scope")),
+        )
         if recover_on_cancel:
             current = asyncio.current_task()
             if current is not None and current.uncancel() > 0:

@@ -24,6 +24,7 @@ from typing import Any
 
 from .base import Channel, OutboundMessage
 from .bus import MessageBus
+from .logging_caps import scrub_url_secrets
 from .middleware import OutboundMiddlewareBase
 from .plugin import ChannelPlugin
 
@@ -147,7 +148,8 @@ class AccountManager:
             logger.info(f"Account {key} started")
         except Exception as e:
             state.status = "error"
-            state.error = str(e)
+            # Served by the health endpoint, which bypasses logging.
+            state.error = scrub_url_secrets(str(e))
             logger.error(f"Failed to start account {key}: {e}")
             raise
 
@@ -171,9 +173,10 @@ class AccountManager:
             logger.info(f"Account {key} stopped")
         except Exception as e:
             state.status = "error"
-            state.error = str(e)
+            # Served by the health endpoint, which bypasses logging.
+            state.error = scrub_url_secrets(str(e))
             if state.snapshot is not None:
-                state.snapshot.mark_disconnected(error=str(e))
+                state.snapshot.mark_disconnected(error=state.error)
             logger.error(f"Error stopping account {key}: {e}")
             raise
 
@@ -876,7 +879,8 @@ class ChannelManager:
         health.consecutive_failures += 1
         health.total_failures += 1
         health.last_failure_time = time.time()
-        health.last_failure_error = error
+        # Reported by the channel status, which bypasses logging.
+        health.last_failure_error = scrub_url_secrets(error)
 
     async def _send_failure_notice(
         self,

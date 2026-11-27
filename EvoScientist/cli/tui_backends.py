@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..gateway import GraphGateway
-from ..stream.display import _run_streaming
+from ..stream.display import ReceivedFiles, _run_streaming
 
 if TYPE_CHECKING:
     from ..runtime import AsyncRuntime
@@ -31,6 +31,10 @@ class StreamingTUIBackend(Protocol):
         on_todo: Callable[[list[dict]], None] | None = None,
         on_file_write: Callable[[str], None] | None = None,
         work_dir: str | Path | None = None,
+        media_dir: str | Path | None = None,
+        received_files: ReceivedFiles | None = None,
+        routes: dict[str, Any] | None = None,
+        dangerous: bool = False,
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
@@ -66,6 +70,10 @@ class RichStreamingBackend:
         on_todo: Callable[[list[dict]], None] | None = None,
         on_file_write: Callable[[str], None] | None = None,
         work_dir: str | Path | None = None,
+        media_dir: str | Path | None = None,
+        received_files: ReceivedFiles | None = None,
+        routes: dict[str, Any] | None = None,
+        dangerous: bool = False,
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
@@ -90,6 +98,10 @@ class RichStreamingBackend:
             on_todo=on_todo,
             on_file_write=on_file_write,
             work_dir=work_dir,
+            media_dir=media_dir,
+            received_files=received_files,
+            routes=routes,
+            dangerous=dangerous,
             on_stream_event=on_stream_event,
             status_footer_builder=status_footer_builder,
             metadata=metadata,

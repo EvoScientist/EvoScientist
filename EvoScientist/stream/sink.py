@@ -73,6 +73,9 @@ class SessionEventSink:
         with self._lock:
             self._active = True
             self._total = total_tools
+            # A selection never shown no longer applies: this call may fail
+            # and keep every tool.
+            self._pending = None
 
     def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
         with self._lock:
@@ -87,15 +90,15 @@ class SessionEventSink:
         """Render a fallback lifecycle line verbatim."""
         self._display_fallback(text, style)
 
+    def emit_notice(self, text: str, style: str = "yellow") -> None:
+        """Render a gateway notice verbatim, where fallback lines are shown."""
+        self._display_fallback(text, style)
+
     # --- ToolSelectionView read side (runtime thread) -------------------
     @property
     def tool_selection_active(self) -> bool:
         with self._lock:
             return self._active
-
-    def tool_selection_pending(self) -> bool:
-        with self._lock:
-            return bool(self._pending)
 
     def consume_tool_selection(self) -> tuple[bool, list[str] | None]:
         with self._lock:
@@ -112,3 +115,7 @@ class SessionEventSink:
                 self._last_emitted = list(pending)
                 return (True, list(pending))
             return (True, None)
+
+    def discard_tool_selection(self) -> None:
+        with self._lock:
+            self._pending = None

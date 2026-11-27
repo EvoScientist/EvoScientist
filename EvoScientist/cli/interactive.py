@@ -359,6 +359,23 @@ def _new_session_dirs(
 # =============================================================================
 
 
+def _print_turn_error(exc: Exception) -> None:
+    """Report a failed turn; the session stays open for the next prompt.
+
+    An authentication or missing-key error gets the onboarding hint. The turn
+    fails, as in the TUI, so ``/model`` can still switch to a model that has
+    a key (#782).
+    """
+    error_msg = str(exc).lower()
+    if "authentication" in error_msg or "api_key" in error_msg:
+        console.print("[red]Error: API key not configured.[/red]")
+        console.print(
+            "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
+        )
+    else:
+        console.print(f"[red]Error: {escape(str(exc))}[/red]")
+
+
 async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
     """Run one Rich CLI turn with a fresh, turn-local SIGINT policy.
 
@@ -431,6 +448,10 @@ def cmd_interactive(
         dirs: The session's workspace, and its run folder under
             ``--mode=run`` (``/new`` then moves to a fresh run folder)
     """
+    if config is None:
+        from ..config import get_effective_config
+
+        config = get_effective_config()
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         load_agent = partial(
@@ -1090,9 +1111,15 @@ def cmd_interactive(
                             human_budget_exhausted=human_budget_exhausted,
                         )
 
+                    from ..stream.display import received_media_state
+
+                    received_files = received_media_state(msg.media)
+
                     def _channel_ask_user(ask_user_data: dict) -> dict:
                         """Send ask_user questions to channel user and wait for reply."""
-                        return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+                        return _ch_mod.channel_ask_user_prompt(
+                            ask_user_data, msg, received_files=received_files
+                        )
 
                     # ---- Slash command dispatch (cmd_manager, not the agent) ----
                     # Mirrors the TUI's behavior so ``/evoskills``, ``/mcp list``
@@ -1172,6 +1199,9 @@ def cmd_interactive(
                         sys.stdout.flush()
                         return
 
+                    from ..EvoScientist import file_tool_routes
+                    from ..gateway.runtime import sandbox_dangerous_mode
+
                     try:
                         ready_agent = await _await_agent_ready()
                         meta = build_metadata(state["dirs"], model)
@@ -1191,7 +1221,13 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
+                            received_files=received_files,
                             work_dir=str(state["dirs"].work_dir),
+                            media_dir=state["dirs"].sandbox_media_dir,
+                            routes=file_tool_routes(state["dirs"].workspace),
+                            dangerous=sandbox_dangerous_mode(
+                                runtime_gateways.graph_gateway, config
+                            ),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
@@ -1726,36 +1762,13 @@ def cmd_interactive(
                         state["running"] = False
                         break
                     except Exception as e:
-                        error_msg = str(e)
-                        if (
-                            "authentication" in error_msg.lower()
-                            or "api_key" in error_msg.lower()
-                        ):
-                            console.print("[red]Error: API key not configured.[/red]")
-                            console.print(
-                                "[dim]Run [bold]EvoSci onboard[/bold] to set up your API key.[/dim]"
-                            )
-                            state["running"] = False
-                            break
-                        else:
-                            console.print(f"[red]Error: {escape(str(e))}[/red]")
+                        _print_turn_error(e)
             finally:
                 queue_task.cancel()
                 try:
                     await queue_task
                 except asyncio.CancelledError:
                     pass
-                try:
-                    from ..middleware.code_interpreter import (
-                        aclose_code_interpreters,
-                    )
-
-                    await aclose_code_interpreters()
-                except Exception:
-                    _channel_logger.debug(
-                        "code interpreter cleanup failed",
-                        exc_info=True,
-                    )
                 # Best-effort: guard so a DB lookup failure here can't
                 # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")

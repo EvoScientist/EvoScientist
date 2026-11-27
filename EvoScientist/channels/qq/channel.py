@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
 
-from ..base import Channel, ChannelError, RawIncoming
+from ..base import Channel, ChannelError, RawIncoming, attachment_filename
 from ..capabilities import QQ as QQ_CAPS
 from ..config import BaseChannelConfig
 from ..formatter import UnifiedFormatter
@@ -92,7 +92,14 @@ def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
 
     class _Bot(botpy.Client):
         def __init__(self):
-            super().__init__(intents=intents)
+            # botpy sets its logger to DEBUG when "--debug" is in sys.argv
+            # (as with `EvoSci serve --debug`) and then logs every request's
+            # headers, including the Authorization token. log_level overrides
+            # that once the Client is built. ext_handlers=False stops botpy
+            # from writing its own botpy.log into the working directory.
+            super().__init__(
+                intents=intents, log_level=logging.INFO, ext_handlers=False
+            )
 
         async def on_ready(self):
             logger.info(f"QQ bot ready: {self.robot.name}")
@@ -189,14 +196,14 @@ class QQChannel(Channel):
             annotations: list[str] = []
             media_paths: list[str] = []
             attachments = getattr(message, "attachments", None) or []
-            for att in attachments:
+            for index, att in enumerate(attachments):
                 url = getattr(att, "url", "") or ""
                 filename = getattr(att, "filename", "attachment") or "attachment"
                 content_type = getattr(att, "content_type", "") or ""
                 if url:
                     local, ann = await self._download_attachment(
                         url,
-                        f"qq_{filename}",
+                        attachment_filename(filename, message.id, index),
                     )
                     if local:
                         media_paths.append(local)

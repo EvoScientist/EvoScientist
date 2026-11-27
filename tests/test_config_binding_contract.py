@@ -59,6 +59,14 @@ FIELD_CHANNELS: dict[str, str] = {
     "mirror": "download source, read from the config file at each install",
     "langgraph_dev_port": "named by the server's record; a session refuses a"
     " server on another port, deploy --json and the WebUI launcher warn of it",
+    "memory_skill_synthesis_enabled": "live-applied: read at each AutoSkills"
+    " submission and run (config.settings.LIVE_FIELDS)",
+    "memory_skill_synthesis_mode": "live-applied: read at each AutoSkills"
+    " submission and run (config.settings.LIVE_FIELDS)",
+    "memory_skill_synthesis_cadence": "live-applied: the save reconciles each"
+    " project's cron (config.settings.LIVE_FIELDS)",
+    "memory_skill_synthesis_time": "live-applied: the save reconciles each"
+    " project's cron (config.settings.LIVE_FIELDS)",
 }
 
 #: Channel justification for each prefix-based exclusion.

@@ -67,6 +67,39 @@ def test_merge_preserves_config_and_prioritizes_caller_without_mutation(monkeypa
     )
 
 
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_child_run_on_a_provider_less_model_sends_no_provider(
+    monkeypatch, is_async
+):
+    """On the wire: the sub-agent's run carries the caller's model and no
+    provider, so the server resolves it from the registry like the main run."""
+    monkeypatch.setattr(
+        patches,
+        "_read_cfg_configurable",
+        lambda: {"model": "claude-sonnet-5-5", "model_provider": "openrouter"},
+    )
+    create = AsyncMock() if is_async else MagicMock()
+    real = SimpleNamespace(
+        runs=SimpleNamespace(create=create, get=MagicMock(), cancel=MagicMock()),
+        threads=object(),
+    )
+    cache = MagicMock()
+    cache.get_sync.return_value = cache.get_async.return_value = real
+    proxy = patches._ClientCacheProxy(cache)
+    client = proxy.get_async("agent") if is_async else proxy.get_sync("agent")
+    token = patches._caller_configurable.set({"model": "gpt-6.1-sol"})
+    try:
+        result = client.runs.create(thread_id="child", assistant_id="agent")
+        if is_async:
+            await result
+    finally:
+        patches._caller_configurable.reset(token)
+    assert create.call_args.kwargs["config"]["configurable"] == {
+        "model": "gpt-6.1-sol",
+        "model_provider": None,
+    }
+
+
 @pytest.mark.parametrize("config", [None, "invalid", {"configurable": None}])
 def test_merge_handles_missing_or_non_mapping_config(monkeypatch, config):
     monkeypatch.setattr(patches, "_read_cfg_configurable", lambda: {"model": "live"})
@@ -142,4 +175,38 @@ def test_a_child_run_created_from_a_granted_call_has_no_approval_key(monkeypatch
         client.runs.create(thread_id="child", assistant_id="agent")
     finally:
         patches._caller_configurable.reset(token)
-    assert create.call_args.kwargs["config"] == {"configurable": {"model": "m"}}
+    assert create.call_args.kwargs["config"] == {
+        "configurable": {"model": "m", "model_provider": None}
+    }
+
+
+def test_a_provider_in_the_request_itself_does_not_pair_with_a_provider_less_model(
+    monkeypatch,
+):
+    """A provider the caller of runs.create put in its own config is dropped.
+
+    The caller picked a model without a provider, so no provider may ride
+    along -- not the server's, and not one the request already carried.
+    """
+    monkeypatch.setattr(
+        patches,
+        "_read_cfg_configurable",
+        lambda: {"model": "server-model", "model_provider": "server-provider"},
+    )
+    original = {
+        "config": {
+            "configurable": {"model": "gpt-6.1-sol", "model_provider": "req-provider"}
+        }
+    }
+    token = patches._caller_configurable.set({"model": "gpt-6.1-sol"})
+    try:
+        merged = patches._merge_runs_config_kwargs(original)
+    finally:
+        patches._caller_configurable.reset(token)
+
+    assert merged["config"]["configurable"] == {
+        "model": "gpt-6.1-sol",
+        "model_provider": None,
+    }
+    # The caller's own dict is not mutated.
+    assert original["config"]["configurable"]["model_provider"] == "req-provider"

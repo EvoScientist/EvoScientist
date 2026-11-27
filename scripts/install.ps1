@@ -61,8 +61,10 @@ function Install-EvoScientist {
     # environment's own Python and prints what a reinstall needs to keep, one
     # tab-separated line each: "python<TAB><request>" for the receipt's Python
     # (else this interpreter's X.Y), "extras<TAB>a,b" for EvoScientist's
-    # extras, "with<TAB><requirement>" and "with-editable<TAB><path>" for the
-    # other requirements (added with --with, e.g. by the MCP installer),
+    # extras, "with<TAB><requirement>", "with-executables-from<TAB><requirement>"
+    # (a package whose commands the tool exposes) and
+    # "with-editable<TAB><path>" for the other requirements (added with
+    # --with, e.g. by the MCP installer),
     # "warn<TAB><text>" for anything it cannot keep. Same code as install.sh;
     # tests/test_install_scripts.py runs both on the same receipts.
     $ReceiptReader = @'
@@ -115,6 +117,12 @@ except Exception as exc:
     sys.exit(0)
 python = tool.get("python")
 print("python\t" + (python if isinstance(python, str) else "%d.%d" % sys.version_info[:2]))
+# uv records --with-executables-from only as the "from" of an entry point.
+points = tool.get("entrypoints")
+executables = {
+    norm(e["from"]) for e in (points if isinstance(points, list) else [])
+    if isinstance(e, dict) and isinstance(e.get("from"), str)
+}
 own_extras = []
 for entry in entries:
     try:
@@ -123,6 +131,8 @@ for entry in entries:
             own_extras += [x for x in entry.get("extras") or [] if x not in own_extras]
             continue
         kind, value = requirement(entry)
+        if kind == "with" and norm(entry["name"]) in executables:
+            kind = "with-executables-from"
     except Exception as exc:
         print("warn\tcannot keep " + repr(entry.get("name", entry)) + " (" + str(exc) + ")")
         continue
@@ -470,6 +480,7 @@ if own_extras:
                             'python' { $PythonVersion = $value }
                             'extras' { $extras = "[$value]" }
                             'with' { $withArgs += @('--with', $value) }
+                            'with-executables-from' { $withArgs += @('--with-executables-from', $value) }
                             'with-editable' { $withArgs += @('--with-editable', $value) }
                             'warn' { Write-Warn "From ${receipt}: $value; it is not kept by the reinstall." }
                         }

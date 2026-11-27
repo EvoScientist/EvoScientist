@@ -205,7 +205,7 @@ def _tool_path_arg(args: dict | None) -> str:
     """Return the best-effort path argument used by file tools."""
     if not isinstance(args, dict):
         return ""
-    return str(args.get("path") or args.get("file_path") or "")
+    return str(args.get("file_path") or args.get("path") or "")
 
 
 def _is_memory_path(path: str) -> bool:

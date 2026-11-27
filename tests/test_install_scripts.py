@@ -118,6 +118,24 @@ def _cases(local: Path) -> dict[str, tuple[str, list[str]]]:
             "]\n",
             [f"python\t{THIS_PYTHON}", "with\tsix", "extras\toauth,telegram,stt"],
         ),
+        # uv records --with-executables-from only in the entrypoints table
+        # (#907): the package is a plain requirement there.
+        "commands from another package": (
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist", extras = ["oauth"] },\n'
+            '  { name = "ccproxy-api", specifier = ">=0.2" },\n'
+            '  { name = "six" },\n'
+            "]\nentrypoints = [\n"
+            '  { name = "EvoSci", install-path = "/bin/EvoSci", from = "evoscientist" },\n'
+            '  { name = "ccproxy", install-path = "/bin/ccproxy", from = "ccproxy_api" },\n'
+            "]\n",
+            [
+                f"python\t{THIS_PYTHON}",
+                "with-executables-from\tccproxy-api>=0.2",
+                "with\tsix",
+                "extras\toauth",
+            ],
+        ),
     }
 
 
@@ -143,7 +161,7 @@ def _uv_tool_lines(env: Path) -> list[str]:
     lines = [f"python\t{uv_tool.python_request(receipt)}"]
     for entry in receipt.others:
         try:
-            flag, value = uv_tool.requirement_args(entry)
+            flag, value = receipt.args_for(entry)
         except uv_tool.ReceiptError:
             lines.append(f"warn\t{entry['name']}")
             continue

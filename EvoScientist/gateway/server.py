@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -22,6 +24,7 @@ from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
 from ..langgraph_dev.assistants import launch_assistant_id
+from ..langgraph_dev.manager import RUNTIME
 from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
@@ -54,6 +57,38 @@ _ACTIVE_RUN_STATUSES = ("pending", "running")
 _REPLAY_QUIET_SECONDS = 2.0
 _REPLAY_FIRST_EVENT_SECONDS = 5.0
 _REPLAY_MAX_SECONDS = 30.0
+# A read-back of a finished run ends when no envelope arrives for this long.
+_READ_BACK_FIRST_EVENT_SECONDS = 5.0
+# The read-back's budget for a run started past the replay cap: its
+# first-event window plus a margin.
+_CAPPED_READ_BACK_SECONDS = 10.0
+# A turn asks for its run's status once it has had none of the run's envelopes
+# for this long, and again at this interval while that lasts.
+_QUIET_POLL_SECONDS = 5.0
+# How long a run that has finished gets to deliver its last live envelopes.
+_FINISHED_GRACE_SECONDS = 2.0
+# Status requests in a row that may fail after the turn's event stream ended,
+# before the turn ends with the stream's error.
+_CLOSED_STATUS_ATTEMPTS = 3
+_FINISHED_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+_ROOT_END_PHASES = frozenset({"completed", "failed", "interrupted"})
+_LOST_LIVE_EVENTS_ERROR = "Lost the run's live events"
+# The run succeeded, but neither its read-back nor its checkpoint shows the reply.
+_UNSHOWN_REPLY_ERROR = "The run finished, but its reply could not be shown"
+_STREAM_CLOSED_NOTICE = (
+    "Lost the live connection to this run; "
+    "the result is shown when the run has finished."
+)
+_REPLAY_CAP_NOTICE = (
+    "This thread's history is too long to follow live; "
+    "the result is shown when the run has finished."
+)
+_RECOVERED_TURN_NOTICE = (
+    "The live events of this turn were lost; "
+    "the result is shown now that the run has finished."
+)
+# langgraph-api's text for an exception it does not pass on to clients.
+_SERVER_HIDDEN_ERROR = "An internal error occurred"
 
 
 def _run_has_request_id(run: Mapping[str, Any], request_id: str) -> bool:
@@ -192,6 +227,14 @@ class _ReplayCapError(RuntimeError):
     """The thread SSE never went quiet within the replay cap."""
 
 
+class _RunGoneError(RuntimeError):
+    """The server no longer has the turn's run."""
+
+
+# ``_ThreadEvents.next_within`` got no envelope in time.
+_QUIET = object()
+
+
 def _resume_target(
     thread_id: str, response: object, pending: list[str]
 ) -> tuple[str, object]:
@@ -244,13 +287,27 @@ def _synth_event_run_id(event: Mapping[str, Any]) -> str | None:
     return run_id
 
 
-def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
-    """The phase of a root-namespace lifecycle envelope, else None."""
+def _root_lifecycle_data(event: Mapping[str, Any]) -> Mapping[str, object] | None:
+    """The data of a root-namespace lifecycle envelope, else None."""
     if event.get("method") != "lifecycle" or _event_namespace(event):
         return None
     params = _as_raw_map(event.get("params"))
-    data = _as_raw_map(params.get("data")) if params is not None else None
+    return _as_raw_map(params.get("data")) if params is not None else None
+
+
+def _root_lifecycle_phase(event: Mapping[str, Any]) -> object:
+    """The phase of a root-namespace lifecycle envelope, else None."""
+    data = _root_lifecycle_data(event)
     return data.get("event") if data is not None else None
+
+
+def _run_failure_message(event: Mapping[str, Any]) -> str:
+    """The turn's error for a root ``lifecycle: failed`` envelope."""
+    data = _root_lifecycle_data(event)
+    error = data.get("error") if data is not None else None
+    if not error or error == _SERVER_HIDDEN_ERROR:
+        return f"Run failed on the server; the cause is in {RUNTIME.log_file}"
+    return f"Run failed: {error}"
 
 
 class _ThreadEvents:
@@ -258,7 +315,8 @@ class _ThreadEvents:
 
     A fresh thread SSE replays every earlier run first, and the server sends a
     run's envelopes only to connections that finished the replay before the
-    run published them, so a turn starts its run after the replay.
+    run published them, so a turn starts its run after the replay. Past the
+    replay cap a turn starts it anyway and reads it back later (#710).
     """
 
     def __init__(
@@ -285,11 +343,16 @@ class _ThreadEvents:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop reading the stream and drop what is queued."""
         self._reader.cancel()
-        try:
-            await self._reader
-        except asyncio.CancelledError:
-            pass
+        # ``wait`` does not raise the reader's cancellation, so a cancel of
+        # the caller still reaches it.
+        await asyncio.wait([self._reader])
+        while not self._queue.empty():
+            self._queue.get_nowait()
 
     async def _read(self, events: AsyncIterator[Any]) -> None:
         try:
@@ -355,6 +418,24 @@ class _ThreadEvents:
         raise _ReplayCapError(
             f"Thread history replay did not finish within {max_seconds:g}s"
         )
+
+    async def next_within(self, seconds: float) -> Any:
+        """The next envelope, ``_QUIET`` when none arrives in time, ``None`` at the end."""
+        # ``wait_for`` with no time left times out before ``get`` runs, even
+        # with an envelope queued: take a queued one first.
+        try:
+            event = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            try:
+                event = await self._wait_for(self._queue.get(), seconds)
+            except TimeoutError:
+                return _QUIET
+        if event is None:
+            self._queue.put_nowait(None)
+            return None
+        if isinstance(event, Exception):
+            raise event
+        return event
 
     def __aiter__(self) -> _ThreadEvents:
         return self
@@ -572,7 +653,13 @@ class LangGraphServerThreadStore(ThreadStore):
         # Interrupt live runs first: the server's cascade delete clears
         # queued runs from the registry but does not stop a run that is
         # already executing (issue #358).
-        await _acancel_thread_runs(self.client, thread_id, name="thread delete")
+        try:
+            await _acancel_thread_runs(
+                self.client, thread_id, name="thread delete", strict=True
+            )
+        except NotFoundError:
+            # The listed runs have ended, or the thread is already gone.
+            pass
         try:
             await self.client.threads.delete(thread_id)
         except NotFoundError:
@@ -603,44 +690,106 @@ class LangGraphServerThreadStore(ThreadStore):
         return cloned_thread_id
 
 
+def _lifecycle_graph_name(data: Mapping[str, Any] | None) -> str | None:
+    """The sub-agent name a lifecycle start event carries, if any.
+
+    LangGraph's lifecycle transformer copies the nested run's
+    ``lc_agent_name`` (its own or one inherited from the parent) into
+    ``graph_name`` on its start event, and the namespace segment when there
+    is none. The server's stream suppresses the raw ``tasks`` events that
+    carry the same name in their metadata, so this is where the name
+    actually arrives.
+    """
+    if data is None:
+        return None
+    name = data.get("graph_name")
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    return stripped or None
+
+
+def _lifecycle_is_subagent(data: Mapping[str, Any] | None) -> bool:
+    """Whether the lifecycle event names a real sub-agent.
+
+    LangGraph's lifecycle transformer sets ``cause`` to a ``toolCall`` only
+    when the nested run was started by a tool call -- a run started by
+    anything else (an agent run inside a middleware hook, for instance) gets
+    no cause at all. The cause is therefore what tells the two apart, and it
+    decides on its own.
+
+    The absence of a cause means no tool call started a named run; a
+    tool-started run without a name keeps its namespace segment either way.
+    """
+    if data is None:
+        return False
+    cause = _as_raw_map(data.get("cause"))
+    if cause is None:
+        return False
+    return cause.get("type") == "toolCall"
+
+
+def _lifecycle_cause_tool_call_id(data: Mapping[str, Any] | None) -> str | None:
+    """The LLM tool call that started a nested run, if the event names it.
+
+    The transformer's cause carries the tool call the model made, so the
+    sub-agent can be announced under its own ``task`` line -- the way the
+    local gateway does -- rather than under the namespace segment.
+    """
+    if data is None:
+        return None
+    cause = _as_raw_map(data.get("cause"))
+    if cause is None:
+        return None
+    call_id = cause.get("tool_call_id")
+    if not isinstance(call_id, str):
+        return None
+    stripped = call_id.strip()
+    return stripped or None
+
+
 @dataclass(slots=True)
 class _ServerSubagentTracker:
     """Infer subagent start/end events from LangGraph server namespaces."""
 
     emitter: StreamEventEmitter
     registry: _SubagentRegistry
-    _active: dict[tuple[str, ...], tuple[str, str | None]] = field(default_factory=dict)
+    _active: dict[tuple[str, ...], str] = field(default_factory=dict)
+    # Paths whose child already ended. A late event for one of these must not
+    # announce a second start with no matching end.
+    _ended: set[tuple[str, ...]] = field(default_factory=set)
 
     def process(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         namespace = tuple(_event_namespace(event))
-        if namespace:
-            events.extend(self._ensure_registered(namespace[:1], tool_call_id=None))
-
         method = event.get("method")
         params = _as_raw_map(event.get("params"))
         data = _as_raw_map(params.get("data")) if params is not None else None
-        if data is None:
-            return events
 
         if method == "lifecycle":
-            phase = data.get("event")
+            phase = data.get("event") if data is not None else None
             if phase == "started" and namespace:
-                events.extend(self._ensure_registered(namespace, tool_call_id=None))
-            elif phase in ("completed", "failed") and namespace:
-                events.extend(self._end(namespace))
-        elif method == "tasks":
-            if "result" in data:
-                # A result that carries interrupts is a child that only paused.
+                # A nested run announces its own name in ``graph_name``: the
+                # server's lifecycle transformer copies the sub-agent's
+                # ``lc_agent_name`` there when the nested run is a sub-agent.
+                # Without it the name falls back to the namespace segment,
+                # which is the tool name -- so a sync sub-agent showed up as
+                # "tools" (#791).
                 events.extend(
-                    self._end_triggered_child(
+                    self._ensure_registered(
                         namespace,
-                        data.get("id"),
-                        paused=bool(data.get("interrupts")),
+                        tool_call_id=_lifecycle_cause_tool_call_id(data),
+                        name=self._lifecycle_name(data),
                     )
                 )
-            elif namespace:
-                events.extend(self._ensure_registered(namespace, tool_call_id=None))
+            elif phase in ("completed", "failed") and namespace:
+                events.extend(self._end(namespace))
+        elif namespace and self.registry.resolve(namespace[:1]) is None:
+            # A child's input values come before its lifecycle start, and the
+            # server mirrors tool results under ``tools:<call id>``: register
+            # the path for routing only, so only a lifecycle start announces.
+            head = namespace[:1]
+            self.registry.register(head, self._parse_namespace_segment(head[0])[0])
         return events
 
     def finish(self) -> list[dict[str, Any]]:
@@ -649,55 +798,64 @@ class _ServerSubagentTracker:
             self._active.keys(), key=lambda item: len(item), reverse=True
         ):
             events.extend(self._end(path))
+        self._active.clear()
+        self._ended.clear()
         self.registry.close()
         return events
+
+    def _lifecycle_name(self, data: Mapping[str, Any] | None) -> str | None:
+        """The name to announce for a nested run the lifecycle event names.
+
+        The transformer copies any ``lc_agent_name`` the nested run carries
+        into ``graph_name``, including one inherited from the parent (an
+        unnamed agent run inside a middleware hook), so the name counts only
+        when ``cause`` says a tool call started the run.
+        """
+        if not _lifecycle_is_subagent(data):
+            return None
+        return _lifecycle_graph_name(data)
 
     def _ensure_registered(
         self,
         path: tuple[str, ...],
         *,
         tool_call_id: str | None,
+        name: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not path or path in self._active:
+        if not path:
             return []
-        name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
-        trigger_call_id = tool_call_id or parsed_tool_call_id
+        if path in self._ended:
+            # The child already ended. A late start for it must not announce
+            # a second start, and must not overwrite the registry's name.
+            return []
+        active = self._active.get(path)
+        if active is not None:
+            # Already announced: the start is not repeated and the name is not
+            # rewritten, so a late event cannot rename a child the user
+            # already sees.
+            return []
+        fallback_name, parsed_tool_call_id = self._parse_namespace_segment(path[-1])
+        resolved = name or fallback_name
         instance_id = ":".join(path)
-        self._active[path] = (name, trigger_call_id)
-        self.registry.register(path, name)
+        self._active[path] = resolved
+        self.registry.register(path, resolved)
         return [
             self.emitter.subagent_start(
-                name,
+                resolved,
                 "",
                 instance_id=instance_id,
-                tool_call_id=trigger_call_id or "",
+                tool_call_id=tool_call_id or parsed_tool_call_id or "",
             ).data
         ]
 
-    def _end(
-        self, path: tuple[str, ...], *, paused: bool = False
-    ) -> list[dict[str, Any]]:
-        active = self._active.pop(path, None)
-        if active is None:
+    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+        name = self._active.get(path)
+        if name is None:
             return []
-        name, _tool_call_id = active
-        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        self._active.pop(path, None)
+        self._ended.add(path)
+        end = self.emitter.subagent_end(name, instance_id=":".join(path))
         return [end.data]
-
-    def _end_triggered_child(
-        self,
-        namespace: tuple[str, ...],
-        result_id: object,
-        *,
-        paused: bool = False,
-    ) -> list[dict[str, Any]]:
-        if not result_id:
-            return []
-        events: list[dict[str, Any]] = []
-        for path, (_name, tool_call_id) in list(self._active.items()):
-            if path[:-1] == namespace and tool_call_id == result_id:
-                events.extend(self._end(path, paused=paused))
-        return events
 
     @staticmethod
     def _parse_namespace_segment(segment: str) -> tuple[str, str | None]:
@@ -801,6 +959,11 @@ class LangGraphServerGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
+        metadata = await self.thread_store.get_thread_metadata(thread_id)
+        if metadata is None or metadata.get("graph_id") != self._target_graph_id(
+            target
+        ):
+            return False
         return await self.thread_store.delete_thread(thread_id)
 
     async def clone_thread(
@@ -1257,6 +1420,101 @@ class LangGraphServerGateway:
         run = await self.thread_store.client.runs.get(thread_id, run_id)
         return run["status"]
 
+    async def _finished_run_status(self, thread_id: str, run_id: str) -> str | None:
+        """The run's status once it has finished, else ``None``.
+
+        ``None`` also for a status this gateway does not know: the turn keeps
+        waiting. A run the server no longer has can never deliver, so that
+        raises ``_RunGoneError``; any other failed request raises as is.
+        """
+        try:
+            run = await self.thread_store.client.runs.get(thread_id, run_id)
+        except NotFoundError:
+            raise _RunGoneError(
+                f"Run {run_id} no longer exists on thread {thread_id}"
+            ) from None
+        status = run.get("status")
+        return status if status in _FINISHED_RUN_STATUSES else None
+
+    async def _finished_run_envelopes(
+        self, request: RunRequest, max_seconds: float | None = None
+    ) -> AsyncIterator[Any]:
+        """The thread's envelopes from a new connection, for a run that has finished.
+
+        A new connection replays every stored run, the finished one included.
+        Ends when no envelope arrives for the first-event window, after
+        ``max_seconds`` (default: the replay cap), or when the connection
+        fails (logged): the caller checks whether it saw the run's end.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (
+            _REPLAY_MAX_SECONDS if max_seconds is None else max_seconds
+        )
+        try:
+            stream = self.thread_store.client.threads.stream(
+                request.thread_id,
+                assistant_id=self._target_assistant_id(request.target),
+            )
+            async with stream, _ThreadEvents(stream.events) as events:
+                while (left := deadline - loop.time()) > 0:
+                    event = await events.next_within(
+                        min(_READ_BACK_FIRST_EVENT_SECONDS, left)
+                    )
+                    if event is _QUIET or event is None:
+                        return
+                    yield event
+        except Exception:
+            logger.warning(
+                "Could not read the finished run back on thread %s",
+                request.thread_id,
+                exc_info=True,
+            )
+
+    async def _run_start_messages(
+        self, thread_id: str, run_id: str
+    ) -> list[Any] | None:
+        """The thread's messages when the run started, from its input checkpoint.
+
+        The pre-run read can be stale: a run the new one queued behind adds its
+        messages after it. ``None`` when the run has no input checkpoint (a
+        resumed run writes none) or it cannot be read (logged).
+        """
+        try:
+            history = await self.thread_store.client.threads.get_history(
+                thread_id, limit=1, metadata={"run_id": run_id, "source": "input"}
+            )
+        except Exception:
+            logger.warning(
+                "Could not read the input checkpoint of run %s on thread %s",
+                run_id,
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        if not history:
+            return None
+        values = history[0].get("values")
+        messages = values.get("messages") if isinstance(values, dict) else None
+        return messages if isinstance(messages, list) else []
+
+    def _notify(self, text: str) -> None:
+        """One line in the turn for an attended frontend; headless ones
+        (``events is None``) have the WARNING log only."""
+        if self.events is None:
+            return
+        try:
+            self.events.emit_notice(text)
+        except Exception:
+            logger.debug("turn notice failed", exc_info=True)
+
+    def _notify_recovered_turn(self) -> None:
+        """Tell an attended frontend that this turn's result arrives late.
+
+        The TUI and the Rich CLI carry a sink and show the line in the turn;
+        headless frontends (``events is None``) have the WARNING log only.
+        """
+        self._notify(_RECOVERED_TURN_NOTICE)
+
     async def get_process_status(
         self,
         target: GraphTarget,
@@ -1444,12 +1702,62 @@ class LangGraphServerGateway:
         run_attempted = False
         run_id: str | None = None
         run_completed = False
+        # The server reported the run as over (a finished status, or a root
+        # ``failed``): the cleanup has nothing to cancel. A root ``completed``
+        # or ``interrupted`` sets ``run_completed`` instead.
+        run_ended = False
         emitted_interrupt = False
         run_cleaned_up = False
+        accepting_run = False
+        # Envelope ids processed live, so a read-back skips them.
+        live_event_ids: set[str] = set()
 
         def mark_run_attempted() -> None:
             nonlocal run_attempted
             run_attempted = True
+
+        async def feed(
+            event: object, *, read_back: bool = False
+        ) -> tuple[list[GraphEvent], dict[str, Any]] | None:
+            """One envelope through the turn's processing.
+
+            Returns the turn's events for it and the envelope, or ``None``
+            for an envelope that is not this run's or that a read-back
+            already had live. A read-back's middleware events are left to
+            ``released``, which shows them with the held events.
+            """
+            nonlocal accepting_run, emitted_interrupt
+            raw_event = _as_raw_map(event)
+            if raw_event is None:
+                return None
+            event_run_id = _synth_event_run_id(raw_event)
+            if event_run_id is not None:
+                accepting_run = event_run_id == run_id
+            if not accepting_run:
+                return None
+            event_id = raw_event.get("event_id")
+            if isinstance(event_id, str):
+                if read_back and event_id in live_event_ids:
+                    return None
+                if not read_back:
+                    live_event_ids.add(event_id)
+            out: list[GraphEvent] = (
+                [] if read_back else self._deliver_custom_middleware_events(raw_event)
+            )
+            event_map: dict[str, Any] = dict(raw_event)
+            out.extend(tracker.process(event_map))
+            for normalized in await processor.process(event_map):
+                emitted_interrupt = emitted_interrupt or _is_interrupt_event(normalized)
+                out.append(normalized)
+            return out, event_map
+
+        def released(
+            held: list[tuple[dict[str, Any], list[GraphEvent]]],
+        ) -> Iterator[GraphEvent]:
+            """Held read-back events, each envelope's middleware events first."""
+            for event_map, turn_events in held:
+                yield from self._deliver_custom_middleware_events(event_map)
+                yield from turn_events
 
         try:
             # Every turn reads ``stream.events`` and stops at its own run's end
@@ -1459,8 +1767,12 @@ class LangGraphServerGateway:
             # SDK's ``interrupted`` flag, so ``subscribe`` would never end at
             # the resumed run's next pause (#738).
             paused = False
-            # Past the replay cap the queue holds a busy run's live envelopes.
+            # An answer to a busy thread past the replay cap: the queue holds
+            # that run's live envelopes.
             behind_busy_run = False
+            # Any other turn past the replay cap: its run starts anyway and is
+            # read back when it has finished (#710).
+            past_replay_cap: _ReplayCapError | None = None
             async with stream, _ThreadEvents(stream.events) as events:
                 # A thread without state has no earlier runs to replay.
                 # Skip also when the state read failed: an empty baseline
@@ -1469,18 +1781,34 @@ class LangGraphServerGateway:
                 if state_values or not process_value_messages:
                     try:
                         await events.skip_replay()
-                    except _ReplayCapError:
-                        # Another task of the paused run can keep the SSE
-                        # from going quiet. The answer queues behind that
-                        # run, whose live envelopes mean this connection is
-                        # normally past the replay when the answer's run
-                        # starts.
-                        if not (
-                            isinstance(request.message, Command)
-                            and await self._thread_is_busy(request.thread_id)
-                        ):
-                            raise
-                        behind_busy_run = True
+                    except _ReplayCapError as exc:
+                        if isinstance(
+                            request.message, Command
+                        ) and await self._thread_is_busy(request.thread_id):
+                            # Another task of the paused run can keep the
+                            # SSE from going quiet. The answer queues behind
+                            # that run, whose live envelopes mean this
+                            # connection is normally past the replay when
+                            # the answer's run starts.
+                            behind_busy_run = True
+                        else:
+                            # A connection still replaying gets none of a
+                            # new run's envelopes, and on a long thread no
+                            # cursor skips the replay: start the run, wait
+                            # for it by its status and read it back. An
+                            # answer on an idle thread too, or a prompt
+                            # shown past the cap could never be answered.
+                            # A frontend with a sink shows the cap's line.
+                            logger.log(
+                                logging.WARNING
+                                if self.events is None
+                                else logging.INFO,
+                                "%s on thread %s; starting the run without "
+                                "reading it live",
+                                exc,
+                                request.thread_id,
+                            )
+                            past_replay_cap = exc
                 run_id = await self._start_or_resume(
                     stream,
                     request,
@@ -1495,55 +1823,296 @@ class LangGraphServerGateway:
                     raise RuntimeError(
                         f"Could not identify the run for thread {request.thread_id}"
                     )
+                if past_replay_cap is not None:
+                    # Said once the run has started: a refused start ends the
+                    # turn with its own error.
+                    self._notify(_REPLAY_CAP_NOTICE)
+                    # Nothing reads this connection any more: stop it from
+                    # buffering the rest of the replay while the run works.
+                    # Closing it does not stop the run. The SDK stream goes
+                    # first: unread, its bounded queue fills up, and closing
+                    # it then fails.
+                    await stream.close()
+                    await events.aclose()
                 # Envelopes without a run id (model tokens) belong to the run
                 # of the last tagged one: behind a busy run, wait for this
                 # run's own.
                 accepting_run = not behind_busy_run
-                # See #709
-                async for event in events:
-                    raw_event = _as_raw_map(event)
-                    if raw_event is None:
-                        continue
-                    event_run_id = _synth_event_run_id(raw_event)
-                    if event_run_id is not None:
-                        accepting_run = event_run_id == run_id
-                    if not accepting_run:
-                        continue
-                    for selection_event in self._deliver_custom_middleware_events(
-                        raw_event
-                    ):
-                        yield selection_event
-                    event_map: dict[str, Any] = dict(raw_event)
-                    for subagent_event in tracker.process(event_map):
-                        yield subagent_event
-                    for normalized in await processor.process(event_map):
-                        emitted_interrupt = emitted_interrupt or _is_interrupt_event(
-                            normalized
+                # Stop at this run's root completed/failed/interrupted. The
+                # server sends the root interrupted right after the pause's
+                # input.requested, also while another task of the run still
+                # works.
+                end_event: dict[str, Any] | None = None
+                # A run can finish without this connection getting its
+                # envelopes (#709): while none arrives, ask for its status.
+                loop = asyncio.get_running_loop()
+                finished_status: str | None = None
+                status_failures = 0
+                # A stream that ends or fails before the run's end does not
+                # end the run (#711): wait for it by its status instead.
+                # Past the replay cap the live connection is closed: the turn
+                # waits as for a closed stream, and gives up with the cap's
+                # error.
+                stream_closed = past_replay_cap is not None
+                stream_error: Exception | None = past_replay_cap
+                closed_status_failures = 0
+                # The turn already said its result comes when the run finishes
+                # (past the cap: the cap's line).
+                told_late = past_replay_cap is not None
+                quiet_deadline = loop.time() + (
+                    0.0 if stream_closed else _QUIET_POLL_SECONDS
+                )
+                while end_event is None:
+                    wait = max(0.0, quiet_deadline - loop.time())
+                    if stream_closed:
+                        await asyncio.sleep(wait)
+                        event = _QUIET
+                    else:
+                        try:
+                            event = await events.next_within(wait)
+                        except Exception as exc:
+                            # langgraph-sdk 0.4 ends ``stream.events`` on a
+                            # read error and keeps the error to itself; this
+                            # catches a transport that raises.
+                            logger.warning(
+                                "Reading the event stream of run %s on thread "
+                                "%s failed",
+                                run_id,
+                                request.thread_id,
+                                exc_info=True,
+                            )
+                            stream_error = exc
+                            event = None
+                    if event is None:
+                        if finished_status is None:
+                            # The rest of the run can take minutes: say so now.
+                            self._notify(_STREAM_CLOSED_NOTICE)
+                            told_late = True
+                        # The count tells a stream that never delivered (a
+                        # rejected open looks like an end) from one that
+                        # dropped mid-run; a frontend with a sink has its line.
+                        logger.log(
+                            logging.WARNING if self.events is None else logging.INFO,
+                            "The event stream of run %s on thread %s %s after "
+                            "%d of the run's envelopes%s",
+                            run_id,
+                            request.thread_id,
+                            "failed" if stream_error is not None else "ended",
+                            len(live_event_ids),
+                            "; waiting for the run to finish"
+                            if finished_status is None
+                            else "",
                         )
-                        yield normalized
-                    # Stop at this run's root completed/failed/interrupted.
-                    # The server sends the root interrupted right after the
-                    # pause's input.requested, also while another task of
-                    # the run still works.
-                    phase = _root_lifecycle_phase(event_map)
-                    if phase in {"completed", "failed"}:
-                        break
-                    if phase == "interrupted":
-                        paused = True
-                        break
-                else:
-                    raise RuntimeError(
-                        "Thread event stream ended before the run finished"
+                        stream_closed = True
+                        quiet_deadline = loop.time()
+                        continue
+                    if event is _QUIET:
+                        if finished_status is not None:
+                            break
+                        try:
+                            finished_status = await self._finished_run_status(
+                                request.thread_id, run_id
+                            )
+                        except _RunGoneError:
+                            raise
+                        except Exception as status_exc:
+                            # Keep waiting. A long silent tool call polls
+                            # for its whole length: one traceback is enough.
+                            status_failures += 1
+                            logger.log(
+                                logging.WARNING
+                                if status_failures == 1
+                                else logging.DEBUG,
+                                "Could not read the status of run %s on "
+                                "thread %s (failure %d)",
+                                run_id,
+                                request.thread_id,
+                                status_failures,
+                                exc_info=status_failures == 1,
+                            )
+                            finished_status = None
+                            if stream_closed:
+                                closed_status_failures += 1
+                                if closed_status_failures >= _CLOSED_STATUS_ATTEMPTS:
+                                    # The run cannot be followed any more:
+                                    # end the turn with the stream's read
+                                    # error (past the replay cap, the cap's
+                                    # error), or with "ended before the run
+                                    # finished", caused by the status request
+                                    # that failed last (a server that died
+                                    # answers neither).
+                                    if stream_error is not None:
+                                        raise stream_error from status_exc
+                                    raise RuntimeError(
+                                        "Thread event stream ended before the "
+                                        "run finished"
+                                    ) from status_exc
+                        else:
+                            closed_status_failures = 0
+                        run_ended = finished_status is not None
+                        if run_ended and stream_closed:
+                            # No live envelope can come any more.
+                            break
+                        quiet_deadline = loop.time() + (
+                            _FINISHED_GRACE_SECONDS
+                            if run_ended
+                            else _QUIET_POLL_SECONDS
+                        )
+                        continue
+                    fed = await feed(event)
+                    if fed is None:
+                        # Another run's envelope does not end the quiet.
+                        continue
+                    quiet_deadline = loop.time() + (
+                        _FINISHED_GRACE_SECONDS if run_ended else _QUIET_POLL_SECONDS
                     )
-                run_completed = True
-                for event in await self._paused_interrupt_events(
+                    turn_events, event_map = fed
+                    for turn_event in turn_events:
+                        yield turn_event
+                    if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
+                        end_event = event_map
+            # The live connection is closed before any read-back opens another.
+            recovered: list[tuple[dict[str, Any], list[GraphEvent]]] = []
+            if end_event is None:
+                # The run finished and its live envelopes stopped coming:
+                # read it back from a new connection, which replays it.
+                logger.warning(
+                    "%s of run %s on thread %s (status %s); reading the "
+                    "finished run back",
+                    "Did not read the live events"
+                    if past_replay_cap is not None
+                    else "Lost the live events",
+                    run_id,
                     request.thread_id,
-                    processor,
-                    paused=paused,
-                    prompted=emitted_interrupt,
-                    run_id=run_id,
+                    finished_status,
+                )
+                # A new message's run starts at its input checkpoint: what
+                # the thread had then is not this turn's, also in the value
+                # snapshots the read-back replays.
+                start_messages = (
+                    None
+                    if isinstance(request.message, Command)
+                    else await self._run_start_messages(request.thread_id, run_id)
+                )
+                if start_messages is not None:
+                    processor.mark_messages_seen(start_messages)
+                # The new connection replays earlier runs first. Its
+                # events are held until the turn knows it can end with
+                # a result, so the notice is never followed by a loss.
+                accepting_run = False
+                # Past the cap a long history makes the read-back hit the cap
+                # too: a short budget still reads back a short replay (a busy
+                # thread), and the checkpoint covers the rest.
+                async with aclosing(
+                    self._finished_run_envelopes(
+                        request,
+                        None if past_replay_cap is None else _CAPPED_READ_BACK_SECONDS,
+                    )
+                ) as envelopes:
+                    async for event in envelopes:
+                        fed = await feed(event, read_back=True)
+                        if fed is None:
+                            continue
+                        turn_events, event_map = fed
+                        recovered.append((event_map, turn_events))
+                        if _root_lifecycle_phase(event_map) in _ROOT_END_PHASES:
+                            end_event = event_map
+                            break
+                if end_event is not None:
+                    # A failed run ends the turn with its error, not a result.
+                    if not told_late and _root_lifecycle_phase(end_event) != "failed":
+                        self._notify_recovered_turn()
+                    for turn_event in released(recovered):
+                        yield turn_event
+            if end_event is None:
+                # The read-back did not reach the run's end: thread state
+                # still has the reply, or the prompts of a pause.
+                logger.warning(
+                    "Read-back of run %s on thread %s did not reach its "
+                    "end; using the thread state",
+                    run_id,
+                    request.thread_id,
+                )
+                if finished_status != "success":
+                    # Past the replay cap the read-back usually runs out of its
+                    # budget: say so, the run's own error is not reachable.
+                    raise RuntimeError(
+                        f"{_LOST_LIVE_EVENTS_ERROR}: the run ended with "
+                        f"status {finished_status}"
+                        + (f" ({past_replay_cap})" if past_replay_cap else "")
+                    ) from stream_error
+                # Past the cap, the cap is why the read-back fell short.
+                unshown_error = _UNSHOWN_REPLY_ERROR + (
+                    f" ({past_replay_cap})" if past_replay_cap else ""
+                )
+                # The run's last checkpoint, not the thread's latest state: a
+                # later run on the thread may already have added its own.
+                try:
+                    history = await self.thread_store.client.threads.get_history(
+                        request.thread_id, limit=1, metadata={"run_id": run_id}
+                    )
+                except Exception as exc:
+                    raise RuntimeError(unshown_error) from exc
+                # No checkpoint (a resume that pauses again in the same step
+                # writes none): a prompt the read-back holds is still a result.
+                state = history[0] if history else {}
+                # What the turn has not shown of its answer, matched
+                # against the text shown so far. A resumed run has no input
+                # checkpoint, and a run it queued behind can add messages
+                # after the pre-run read: only its prompts, which are its
+                # own, are taken.
+                values = state.get("values")
+                answer_events = (
+                    None
+                    if start_messages is None
+                    else processor.complete_turn_from_messages(
+                        values.get("messages") if isinstance(values, dict) else None,
+                        start_messages,
+                    )
+                )
+                state_events = list(answer_events or [])
+                for interrupt in _state_interrupts(state):
+                    state_events.extend(
+                        await processor.process(
+                            _input_requested_event_from_interrupt(interrupt)
+                        )
+                    )
+                # A prompt the read-back already holds is a result too: the
+                # state's copy of it is not emitted twice.
+                if (
+                    answer_events is None
+                    and not state_events
+                    and not any(
+                        _is_interrupt_event(e) for _, held in recovered for e in held
+                    )
                 ):
-                    yield event
+                    raise RuntimeError(
+                        _LOST_LIVE_EVENTS_ERROR if emitted_interrupt else unshown_error
+                    ) from stream_error
+                if not told_late and (
+                    any(held for _, held in recovered) or state_events
+                ):
+                    self._notify_recovered_turn()
+                for turn_event in itertools.chain(released(recovered), state_events):
+                    emitted_interrupt = emitted_interrupt or _is_interrupt_event(
+                        turn_event
+                    )
+                    yield turn_event
+            phase = None if end_event is None else _root_lifecycle_phase(end_event)
+            if phase == "failed":
+                # End the turn through the error path, like a local failure.
+                run_ended = True
+                raise RuntimeError(_run_failure_message(end_event))
+            paused = phase == "interrupted"
+            run_completed = True
+            for event in await self._paused_interrupt_events(
+                request.thread_id,
+                processor,
+                paused=paused,
+                prompted=emitted_interrupt,
+                run_id=run_id,
+            ):
+                yield event
             for event in tracker.finish():
                 yield event
         except _PauseStateReadError as exc:
@@ -1565,12 +2134,16 @@ class LangGraphServerGateway:
             # a consumer that stops iterating after the error event (aclose /
             # abandon) triggers GeneratorExit at the yield, so nothing after it
             # runs and the thread keeps its non-empty ``next`` — the failed step
-            # would replay on the next request.
-            cancelled_run_id = await self._cancel_incomplete_run(
-                request.thread_id,
-                run_id,
-                request_id if run_attempted else None,
-            )
+            # would replay on the next request. A run that is over (see
+            # ``run_ended``) or that the server no longer has needs no cancel,
+            # so only the repair is left.
+            cancelled_run_id = None
+            if not run_ended and not isinstance(exc, _RunGoneError):
+                cancelled_run_id = await self._cancel_incomplete_run(
+                    request.thread_id,
+                    run_id,
+                    request_id if run_attempted else None,
+                )
             run_cleaned_up = True
             can_repair = (
                 cancelled_run_id is not None
@@ -1595,6 +2168,7 @@ class LangGraphServerGateway:
                 and not run_completed
                 and not emitted_interrupt
                 and not run_cleaned_up
+                and not run_ended
             ):
                 await self._cancel_incomplete_run(
                     request.thread_id,

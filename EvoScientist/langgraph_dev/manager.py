@@ -47,6 +47,7 @@ from EvoScientist.config import (
 from EvoScientist.config.settings import (
     _ENV_MAPPINGS,
     ENV_ORIGINS_VAR,
+    LIVE_FIELDS,
     _same_value,
     config_value_origin,
     env_origin,
@@ -696,7 +697,9 @@ _SUBAGENTS_DIR = _PACKAGE_DIR / "subagents"
 # too, so a server started with such a flag is not drift, while a change in
 # the file still is.
 _FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
-_UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"})
+# The port is compared on its own; the live-applied settings take effect
+# without a restart.
+_UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"}) | LIVE_FIELDS
 
 
 def _server_config_fingerprint(config: EvoScientistConfig) -> str:
@@ -706,9 +709,11 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     ``EvoScientist.py``), so a running server keeps serving those values
     until restarted. Iterates the full ``EvoScientistConfig`` field list
     minus the fields that never reach the server
-    (:func:`~EvoScientist.config.settings.is_client_only`) and the port,
-    which the record names and every caller compares on its own — a new config
-    field counts toward drift by default — and folds in ``mcp.yaml`` plus the packaged
+    (:func:`~EvoScientist.config.settings.is_client_only`), the live-applied
+    settings (:data:`~EvoScientist.config.settings.LIVE_FIELDS`), which take
+    effect without a restart, and the port, which the record names and every
+    caller compares on its own — a new config field counts toward drift by
+    default — and folds in ``mcp.yaml`` plus the packaged
     ``subagents/*.yaml``, which are consumed at graph build too. The
     EvoScientist version is part of it, and for an editable install each
     source file's path and modification time, so a server left running
@@ -800,8 +805,38 @@ def _refused_cause() -> str:
 def owned_by_its_starter(record: ServerRecord | None) -> bool:
     """Whether the recorded server is one that ``EvoSci deploy`` or the
     desktop app owns, not the background server: ``EvoSci server stop``
-    leaves it running. A record that does not say counts as not."""
-    return record is not None and record.lasting is False
+    leaves it running. A record that does not say counts as not. Once its
+    owner is gone (killed, or crashed) it is that owner's leftover, which
+    nothing else would stop (:func:`owner_running`)."""
+    return record is not None and record.lasting is False and owner_running(record)
+
+
+def owner_running(record: ServerRecord) -> bool:
+    """Whether the process the record names as the server's owner still
+    runs: it is still the parent of the process it started. A record that
+    names no owner (an older release), or a parent that cannot be read,
+    counts as running; a server that is gone, as not."""
+    owner = _positive_int(record.fields.get(server_record.OWNER_PID_KEY))
+    if owner is None:
+        return True
+    try:
+        return _parent_pid(record.pid) == owner
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
+
+
+def _parent_pid(pid: int) -> int | None:
+    """The PID of ``pid``'s parent. POSIX hands an orphan to another parent
+    at once; Windows keeps the PID of one that exited, so there None once
+    it did, even when its PID was reused since. Lets ``psutil.Error``
+    through."""
+    process = psutil.Process(pid)
+    if os.name != "nt":
+        return process.ppid()
+    parent = process.parent()
+    return parent.pid if parent is not None else None
 
 
 def _request_clean_stop(pid: int) -> bool:
@@ -1052,9 +1087,10 @@ def stop_server(*, keep_owned: bool = False, record: object = _UNREAD) -> int | 
 
     *record* is what the caller read (``read_record(older=True)``); read here
     when not given. With *keep_owned* (``EvoSci server stop``), a server
-    that ``EvoSci deploy`` or the desktop app owns is left running:
-    :class:`ServerKeptError`. One the stop may not end (access refused) or
-    could not open is left running too: :class:`ServerStopFailedError`.
+    that ``EvoSci deploy`` or the desktop app owns is left running while
+    that owner runs (:func:`owned_by_its_starter`): :class:`ServerKeptError`.
+    One the stop may not end (access refused) or could not open is left
+    running too: :class:`ServerStopFailedError`.
     """
     if record is _UNREAD:
         record = read_record(older=True)
@@ -1244,7 +1280,6 @@ def _spawn_server(
     *,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
-    file_persistence: bool = True,
     jobs_per_worker: int = 10,
     tunnel: bool = False,
     config_fingerprint: str | None = None,
@@ -1266,10 +1301,6 @@ def _spawn_server(
             widening this exposes an unauthenticated API that serves every
             registered project and whose agent can run shell commands — only
             pass ``0.0.0.0`` on trusted networks.
-        file_persistence: When True (default), langgraph dev writes its full
-            ``.langgraph_api/`` cache in the server home so async-task / Store
-            / scheduler state survives subprocess restarts. Set False to
-            suppress periodic flushes (state is in-memory only).
         jobs_per_worker: Concurrent runs per worker (``--n-jobs-per-worker``).
         tunnel: When True, pass ``--tunnel`` so langgraph dev exposes the
             server over a public Cloudflare quick-tunnel. The random
@@ -1351,20 +1382,16 @@ def _spawn_server(
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
 
-    # By default, let langgraph dev write its full ``.langgraph_api/`` cache
-    # (in the server home) so future use cases — cross-session async tasks, Store API persistence,
-    # cron job state across CLI restarts — work without further changes. Users
-    # who want no cache on disk can opt out via:
-    #   EvoSci config set langgraph_dev_file_persistence false
-    if not file_persistence:
-        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
-
     # ``EVOSCIENTIST_SERVER_PROCESS`` marks the process as the server:
     # ``_ASYNC_SUBAGENTS_AVAILABLE`` starts True so async sub-agents dispatch
     # back to this server, main-graph middleware events go out over the
     # stream, and MCP setup never downloads Node here. The variable is unset
     # in the CLI process and on a plain ``import EvoScientist``.
     sub_env["EVOSCIENTIST_SERVER_PROCESS"] = "1"
+
+    # langgraph-cli reports usage at every ``langgraph dev`` start unless this
+    # is exactly "1", so any inherited value is overwritten.
+    sub_env["LANGGRAPH_CLI_NO_ANALYTICS"] = "1"
 
     # Propagate the effective bind port into the subprocess's config resolution
     # via the standard ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` override (see
@@ -1419,10 +1446,20 @@ def _spawn_server(
         _spawn_kwargs = {"creationflags": flags}
     else:
         _spawn_kwargs = {"start_new_session": True}
+    server_job = False
     if job is not None:
         _spawn_kwargs["creationflags"] = (
             _spawn_kwargs.get("creationflags", 0) | job.creationflags
         )
+    elif os.name == "nt":
+        # Suspended until it joins its server job; ``deploy --json``'s
+        # kill-on-close job already ends every member.
+        from EvoScientist.agent_shell import _CREATE_SUSPENDED
+
+        _spawn_kwargs["creationflags"] = (
+            _spawn_kwargs.get("creationflags", 0) | _CREATE_SUSPENDED
+        )
+        server_job = True
 
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
@@ -1461,6 +1498,10 @@ def _spawn_server(
     _PROCESS = proc
     if os.name == "nt":
         _BREAK_GROUP_PIDS.add(proc.pid)
+    if server_job:
+        from EvoScientist.agent_shell import join_server_job
+
+        join_server_job(proc)
     if job is not None:
         job.started(proc)
     logger.info("Started langgraph dev (pid=%d)", proc.pid)
@@ -1532,8 +1573,7 @@ def stop_langgraph_dev(
 
     ``.langgraph_api/`` is kept: it holds langgraph dev's persisted
     async-task / scheduler / Store state for the next server. It lives in the
-    server home; set ``langgraph_dev_file_persistence: false`` in config to
-    suppress writes.
+    server home.
     """
     global _PROCESS
     with _LOCK:
@@ -2562,9 +2602,6 @@ def _spawn(
             proc = _spawn_server(
                 port=port,
                 host=host,
-                file_persistence=bool(
-                    getattr(config, "langgraph_dev_file_persistence", True)
-                ),
                 jobs_per_worker=int(
                     getattr(config, "langgraph_dev_jobs_per_worker", 10)
                 ),
