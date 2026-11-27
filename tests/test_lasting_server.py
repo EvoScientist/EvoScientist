@@ -238,6 +238,43 @@ def test_offer_restart_hint_follows_default_workdir(
     assert "--workdir" not in output
 
 
+@pytest.mark.parametrize(
+    ("changed", "older", "port"),
+    [
+        (False, False, 6174),
+        (True, False, 6174),
+        (False, True, 6174),
+        (False, False, 7001),
+    ],
+    ids=["unchanged", "changed", "older-release", "other-port"],
+)
+def test_offer_restart_hint_only_on_drift(monkeypatch, changed, older, port):
+    """The hint shows only when settings the server reads, its port included,
+    changed since its launch, or when an older release started the server."""
+    from EvoScientist.cli import commands
+    from EvoScientist.config import get_effective_config
+
+    fingerprint = manager._server_config_fingerprint(get_effective_config())
+    recorded = "stale" if changed else fingerprint
+    _running_service(
+        monkeypatch,
+        _record(port=port, fields={"config_fingerprint": recorded}, older=older),
+    )
+    asked = _answer(monkeypatch, True)
+    steps = _record_steps(monkeypatch)
+
+    with commands.console.capture() as captured:
+        commands._offer_server_start()
+
+    assert asked == []
+    assert steps == []
+    output = " ".join(captured.get().split())
+    if changed or older or port != 6174:
+        assert "EvoSci server stop" in output
+    else:
+        assert output == ""
+
+
 def test_offer_server_start_failure_is_reported(monkeypatch, tmp_path):
     """The configuration is saved; no traceback."""
     from EvoScientist.cli import commands, server_cmd
