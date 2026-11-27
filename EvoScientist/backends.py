@@ -2342,6 +2342,23 @@ def _rewrite_quoted_path(
 
 
 _QUOTED_SPAN_RE = re.compile(r'(["\'])((?:\\.|(?!\1).)*?)\1')
+_VARIABLE_USE_RE = re.compile(r"\$([A-Za-z_]\w*)|\$\{([A-Za-z_]\w*)\}")
+
+
+def _quote_variable_uses(text: str, names: set[str]) -> str:
+    """Quote references to *names* so their value stays one shell word.
+
+    An assignment holding a workspace path with spaces has to quote the root
+    (`D='/W s'/x`). Quotes are removed when the variable is assigned, so a
+    later unquoted `$D` would split at the space; quoting the *use* keeps it
+    one word without changing the path the shell sees.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        return '"' + match.group(0) + '"' if name in names else match.group(0)
+
+    return _VARIABLE_USE_RE.sub(replace, text)
 
 
 def _is_system_path(path: str) -> bool:
@@ -2487,6 +2504,12 @@ def _convert_command_paths(
     )
     edits: list[tuple[int, int, str]] = []
     uses_tmp = False
+    # An assignment rewritten to a quoted workspace path loses those quotes
+    # when the shell expands it later. Track the names so their unquoted uses
+    # can be quoted in place (see :func:`_quote_variable_uses`).
+    quoted_vars: dict[str, bool] = {}
+    quoted_root = _platform_quote(workspace_root) if workspace_root else None
+    root_needs_quotes = bool(quoted_root and quoted_root[0] in "'\"")
     for start, end, quoted in shell_syntax.glued_words(words.tokens):
         if start in words.delimiters or start in words.arithmetic:
             continue
@@ -2495,6 +2518,13 @@ def _convert_command_paths(
         value_absolute = absolute or (
             anchor_values and bool(shell_syntax.ASSIGNMENT_RE.match(raw.lstrip("'\"")))
         )
+        wrapped_raw = raw
+        quoted_names = {name for name, needs in quoted_vars.items() if needs}
+        if quoted_names and not quoted and "$" in raw:
+            # A substitution runs code of its own; its variable uses are
+            # rewritten in the recursive call for that body instead.
+            if "$(" not in raw and "`" not in raw:
+                wrapped_raw = _quote_variable_uses(raw, quoted_names)
         script = raw[1:-1]
         if (
             start in scripts
@@ -2594,13 +2624,27 @@ def _convert_command_paths(
         else:
             attached = _attached_path_word(raw)
             if attached is None:
-                continue
-            prefix, path = attached
-            rewritten, tmp = _rewrite_path_word(
-                path, **rules, absolute=value_absolute, attached=True
-            )
-            uses_tmp = uses_tmp or tmp
-            replacement = prefix + rewritten if rewritten is not None else None
+                replacement = wrapped_raw
+            else:
+                prefix, path = attached
+                rewritten, tmp = _rewrite_path_word(
+                    path, **rules, absolute=value_absolute, attached=True
+                )
+                uses_tmp = uses_tmp or tmp
+                replacement = prefix + rewritten if rewritten is not None else None
+        if replacement is None:
+            replacement = wrapped_raw
+        elif replacement != raw and replacement != wrapped_raw and "$" in replacement:
+            if not quoted and "$(" not in replacement and "`" not in replacement:
+                replacement = _quote_variable_uses(replacement, quoted_names)
+        if root_needs_quotes:
+            assignment = re.match(r"([A-Za-z_]\w*)=", raw.lstrip("'\""))
+            if assignment is not None:
+                quoted_vars[assignment.group(1)] = bool(
+                    replacement
+                    and quoted_root is not None
+                    and quoted_root in replacement
+                )
         if replacement is not None and replacement != raw:
             edits.append((start, end, replacement))
     for body_start, body_end, expands in words.bodies:
