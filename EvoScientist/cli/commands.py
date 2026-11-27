@@ -1966,16 +1966,24 @@ def _serve_process_message(
             )
 
     def _send_media(file_path: str) -> None:
-        if msg.channel_ref:
-            _send_to_channel(
-                msg.channel_ref.send_media(
+        from ..stream.display import release_media_snapshot
+
+        channel_ref = msg.channel_ref
+        if channel_ref is None:
+            release_media_snapshot(file_path)
+            return
+
+        async def _send_then_cleanup() -> None:
+            try:
+                await channel_ref.send_media(
                     recipient=msg.chat_id,
                     file_path=file_path,
                     metadata=msg.metadata,
-                ),
-                "Media",
-                timeout=30,
-            )
+                )
+            finally:
+                release_media_snapshot(file_path)
+
+        _send_to_channel(_send_then_cleanup(), "Media", timeout=30)
 
     def _hitl_outcome(action_requests: list, human_budget_exhausted: bool):
         return channel_hitl_prompt(

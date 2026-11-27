@@ -46,7 +46,7 @@ from ..gateway import (
 from ..paths import SessionDirs
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
-from ..stream.display import _fix_markdown_heading_spacing
+from ..stream.display import _fix_markdown_heading_spacing, release_media_snapshot
 from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
@@ -1090,16 +1090,22 @@ def cmd_interactive(
                             )
 
                     def _send_media_to_channel(file_path: str) -> None:
-                        if msg.channel_ref:
-                            _send_to_channel(
-                                msg.channel_ref.send_media(
+                        channel_ref = msg.channel_ref
+                        if channel_ref is None:
+                            release_media_snapshot(file_path)
+                            return
+
+                        async def _send_then_cleanup() -> None:
+                            try:
+                                await channel_ref.send_media(
                                     recipient=msg.chat_id,
                                     file_path=file_path,
                                     metadata=msg.metadata,
-                                ),
-                                "Media",
-                                timeout=30,
-                            )
+                                )
+                            finally:
+                                release_media_snapshot(file_path)
+
+                        _send_to_channel(_send_then_cleanup(), "Media", timeout=30)
 
                     def _channel_hitl_outcome(
                         action_requests: list, human_budget_exhausted: bool

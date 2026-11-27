@@ -130,12 +130,22 @@ def _make_files(root) -> None:
         (root / name).write_bytes(b"x")
 
 
+def _source(path: str) -> str:
+    """The file a snapshot was made from, for assertions about file identity."""
+    source = getattr(path, "source", path)
+    display_mod.release_media_snapshot(path)
+    return source
+
+
 def _bytes_sent_to(sent: list[bytes]):
     """A send callback that records what each file holds when it is sent."""
 
     def _send(path: str) -> None:
-        with open(path, "rb") as fh:
-            sent.append(fh.read())
+        try:
+            with open(path, "rb") as fh:
+                sent.append(fh.read())
+        finally:
+            display_mod.release_media_snapshot(path)
 
     return _send
 
@@ -155,7 +165,7 @@ def _rich_sent(events, work_dir, received_media=None) -> list[str]:
         gateway=FakeGraphGateway(events=events),
         _state=display_mod.StreamState(),
     )
-    return sent
+    return [_source(path) for path in sent]
 
 
 async def _tui_sent(monkeypatch, workspace, events, received_media=None) -> list[str]:
@@ -172,7 +182,7 @@ async def _tui_sent(monkeypatch, workspace, events, received_media=None) -> list
         on_media_cb=sent.append,
         received_files=display_mod.received_media_state(received_media),
     )
-    return sent
+    return [_source(path) for path in sent]
 
 
 class TestRichLoop:
@@ -381,7 +391,7 @@ async def _consumer_turn(consumer, media=None) -> list:
 
 
 def _queued_media(queued) -> list[str]:
-    return [path for out in queued for path in out.media]
+    return [_source(path) for out in queued for path in out.media]
 
 
 class TestStandaloneConsumer:
@@ -417,7 +427,7 @@ class TestStandaloneConsumer:
         events = _file_tool_turn("write_file", {"file_path": "/fig.png"})
         consumer = stub_consumer(workspace, FakeGraphGateway(events=events))
         queued = await _consumer_turn(consumer)
-        assert [(out.content, out.media) for out in queued] == [
+        assert [(out.content, [_source(p) for p in out.media]) for out in queued] == [
             ("", [str((workspace.root / "fig.png").resolve())]),
             ("finished", []),
         ]
