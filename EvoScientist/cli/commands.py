@@ -316,6 +316,7 @@ def _offer_server_start() -> None:
             recorded_fp = record.fields.get("config_fingerprint")
             if (
                 not record.older
+                and record.port == port
                 and isinstance(recorded_fp, str)
                 and recorded_fp == manager._server_config_fingerprint(config)
             ):
