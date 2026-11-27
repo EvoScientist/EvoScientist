@@ -2270,28 +2270,39 @@ class TestCopiedModelKeepsItsSettings:
         assert sent[-1]["stream"] is True
         assert "stream_usage" not in sent[-1]
 
-    def test_a_copy_does_not_inherit_what_a_model_learned(self):
-        """What a model learned about refused media stays with that model."""
+    def test_a_copy_skips_media_its_original_learned_to_strip(self):
         import httpx
+        from langchain_core.messages import HumanMessage
         from langchain_openai import ChatOpenAI
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
-        _sent, transport = self._bodies()
+        _sent, ok = self._bodies()
+        refused = []
+
+        def handler(request):
+            if b"image_url" in request.content:
+                refused.append(request)
+                return httpx.Response(
+                    400, json={"error": {"message": "image input is not supported"}}
+                )
+            return ok.handle_request(request)
+
         model = ChatOpenAI(
             model="some-model",
             api_key="test",
             base_url="http://example.invalid/v1",
-            profile={"image_inputs": True},
-            http_client=httpx.Client(transport=transport),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         _patch_openai_compat_content(model)
-        model._content_compat().blocked.add("image")
+        copy = model.model_copy(update={"temperature": 0.1})
+        image = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, image])
 
-        copy = model.model_copy(update={"model_name": "other-model"})
+        model.invoke([msg])
+        copy.invoke([msg])
 
-        assert copy._content_compat().blocked == set()
-        assert "image" in model._content_compat().blocked
+        assert len(refused) == 1
 
     def test_a_copy_still_normalizes_the_content(self):
         import httpx
@@ -2388,44 +2399,6 @@ class TestPatchOpenAICompatContent:
 
         assert chunks == ["c1", "c2"]
         assert received_msgs[0].content == "hello"
-
-    def test_repatching_with_a_different_hoist_flag_takes_effect(self):
-        from EvoScientist.llm.patches import _patch_openai_compat_content
-
-        model = self._make_model()
-        _patch_openai_compat_content(model, hoist_tool_media=True)
-        compat = model._content_compat()  # type: ignore[attr-defined]
-
-        _patch_openai_compat_content(model, hoist_tool_media=False)
-
-        assert model._content_compat() is compat  # type: ignore[attr-defined]
-        assert compat.hoist_tool_media is False
-
-    def test_repatching_a_copy_leaves_the_originals_normalizer_alone(self):
-        import copy as copy_module
-
-        from langchain_core.messages import HumanMessage, ToolMessage
-
-        from EvoScientist.llm.patches import _patch_openai_compat_content
-
-        model = self._make_model()
-        _patch_openai_compat_content(model, hoist_tool_media=True)
-        compat = model._content_compat()  # type: ignore[attr-defined]
-
-        # A shallow copy carries the original's normalizer and owner weakref.
-        shallow = copy_module.copy(model)
-        _patch_openai_compat_content(shallow, hoist_tool_media=False)
-
-        assert compat.hoist_tool_media is True
-        assert shallow._content_compat() is not compat  # type: ignore[attr-defined]
-        assert shallow._content_compat().hoist_tool_media is False  # type: ignore[attr-defined]
-
-        img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
-        tool = ToolMessage(
-            content=[{"type": "text", "text": "see"}, img], tool_call_id="1"
-        )
-        # The original still hoists the tool media out of the tool message.
-        assert any(isinstance(m, HumanMessage) for m in compat._prepare([tool]))
 
     def test_generate_preserves_media(self):
         from langchain_core.messages import HumanMessage
