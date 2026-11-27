@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.table import Table
@@ -181,7 +182,7 @@ class MCPCommand(Command):
 
         try:
             kwargs = parse_mcp_add_args(tokens)
-            entry = add_mcp_server(**kwargs)
+            entry = await asyncio.to_thread(add_mcp_server, **kwargs)
             ctx.ui.append_system(
                 f"Added MCP server: {kwargs['name']} ({entry['transport']})",
                 style="green",
@@ -202,7 +203,7 @@ class MCPCommand(Command):
 
         try:
             name, fields = parse_mcp_edit_args(tokens)
-            edit_mcp_server(name, **fields)
+            await asyncio.to_thread(edit_mcp_server, name, **fields)
             ctx.ui.append_system(f"Updated MCP server: {name}", style="green")
             ctx.ui.append_system("Reload with /new to apply.", style="dim")
         except Exception as exc:

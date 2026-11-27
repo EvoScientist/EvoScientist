@@ -1526,7 +1526,9 @@ def test_server_config_fingerprint_ignores_gateway_backend():
     assert manager._server_config_fingerprint(cfg) == base
 
 
-def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch):
+def test_server_config_fingerprint_ignores_mcp_yaml_content(tmp_path, monkeypatch):
+    """``mcp.yaml`` is applied by the running server's graph cache, so it
+    does not count as launch drift."""
     from EvoScientist.config import settings as settings_mod
 
     monkeypatch.setattr(settings_mod, "get_config_dir", lambda: tmp_path)
@@ -1534,9 +1536,9 @@ def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch
     base = manager._server_config_fingerprint(cfg)
     (tmp_path / "mcp.yaml").write_text("server-a:\n  transport: stdio\n")
     changed = manager._server_config_fingerprint(cfg)
-    assert changed != base
+    assert changed == base
     (tmp_path / "mcp.yaml").write_text("server-b:\n  transport: http\n")
-    assert manager._server_config_fingerprint(cfg) != changed
+    assert manager._server_config_fingerprint(cfg) == changed
 
 
 def test_server_config_fingerprint_tracks_subagent_yaml_content(tmp_path, monkeypatch):

@@ -557,6 +557,7 @@ def add_mcp_server(
     user_cfg = _load_user_config()
     user_cfg[name] = entry
     _save_user_config(user_cfg)
+    _ensure_node_for_stdio(user_cfg)
     return entry
 
 
@@ -598,6 +599,7 @@ def edit_mcp_server(name: str, **fields: Any) -> dict[str, Any]:
 
     user_cfg[name] = entry
     _save_user_config(user_cfg)
+    _ensure_node_for_stdio(user_cfg)
     return entry
 
 
@@ -968,7 +970,8 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     missing = [
         name
         for name, server in config.items()
-        if server.get("transport") == "stdio"
+        if isinstance(server, dict)
+        and server.get("transport") == "stdio"
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
         # A path with a folder part (node_modules/.bin/npx) is not looked up

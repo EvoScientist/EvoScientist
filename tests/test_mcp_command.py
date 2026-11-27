@@ -1,5 +1,6 @@
 """Tests for the /mcp command (MCPCommand subcommand dispatch)."""
 
+import threading
 from unittest.mock import MagicMock, patch
 
 from EvoScientist.paths import SessionDirs
@@ -131,3 +132,32 @@ class TestMCPCommandDispatch:
         await MCPCommand().execute(ctx, ["bogus"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("MCP commands:" in m for m in msgs)
+
+    async def test_add_writes_off_the_event_loop(self):
+        from EvoScientist.commands.implementation.mcp import MCPCommand
+
+        threads = []
+
+        def add_mcp_server(**kwargs):
+            threads.append(threading.current_thread())
+            return {"transport": kwargs["transport"]}
+
+        ctx, _ui = _ctx()
+        with patch("EvoScientist.mcp.add_mcp_server", add_mcp_server):
+            await MCPCommand().execute(ctx, ["add", "fs", "npx"])
+        assert len(threads) == 1
+        assert threads[0] is not threading.current_thread()
+
+    async def test_edit_writes_off_the_event_loop(self):
+        from EvoScientist.commands.implementation.mcp import MCPCommand
+
+        threads = []
+
+        def edit_mcp_server(_name, **_fields):
+            threads.append(threading.current_thread())
+
+        ctx, _ui = _ctx()
+        with patch("EvoScientist.mcp.edit_mcp_server", edit_mcp_server):
+            await MCPCommand().execute(ctx, ["edit", "fs", "--command", "npx"])
+        assert len(threads) == 1
+        assert threads[0] is not threading.current_thread()

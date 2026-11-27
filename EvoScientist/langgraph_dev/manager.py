@@ -712,10 +712,11 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     (:func:`~EvoScientist.config.settings.is_client_only`), the live-applied
     settings (:data:`~EvoScientist.config.settings.LIVE_FIELDS`), which take
     effect without a restart, and the port, which the record names and every
-    caller compares on its own — a new config field counts toward drift by
-    default — and folds in ``mcp.yaml`` plus the packaged
-    ``subagents/*.yaml``, which are consumed at graph build too. The
-    EvoScientist version is part of it, and for an editable install each
+    caller compares on its own. A new config field counts toward drift by
+    default. The hash folds in the packaged ``subagents/*.yaml``, which are
+    consumed at graph build too. ``mcp.yaml`` stays out because ``GraphCache``
+    watches it and rebuilds on edits without a server restart. The EvoScientist
+    version is part of it, and for an editable install each
     source file's path and modification time, so a server left running
     across an upgrade, or across a source checkout's new commit, counts as
     drift as well. Secrets
@@ -745,14 +746,6 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     except importlib.metadata.PackageNotFoundError:
         parts.append(("version", None))
     digest = hashlib.sha256(repr(parts).encode("utf-8"))
-    try:
-        from EvoScientist.config.settings import get_config_dir
-
-        mcp_yaml = get_config_dir() / "mcp.yaml"
-        if mcp_yaml.exists():
-            digest.update(mcp_yaml.read_bytes())
-    except OSError:
-        pass
     try:
         for yaml_path in sorted(_SUBAGENTS_DIR.glob("*.yaml")):
             digest.update(yaml_path.name.encode("utf-8"))

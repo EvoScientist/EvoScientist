@@ -1046,18 +1046,25 @@ class TestRestartRules:
             )
         assert response.json()["restart_fields"] == ["tavily_api_key"]
 
-    def test_mcp_specs_and_version_need_a_restart(self, server, monkeypatch, tmp_path):
+    def test_specs_and_version_need_a_restart(self, server, monkeypatch, tmp_path):
         import importlib.metadata
 
-        from EvoScientist.config.settings import get_config_dir
-
-        get_config_dir().mkdir(parents=True, exist_ok=True)
-        (get_config_dir() / "mcp.yaml").write_text("servers: {}\n", encoding="utf-8")
         (tmp_path / "research.yaml").write_text("name: research\n", encoding="utf-8")
         monkeypatch.setattr(settings_api, "_SUBAGENTS_DIR", str(tmp_path))
         monkeypatch.setattr(importlib.metadata, "version", lambda _name: "999.0")
         body = server.get("/api/settings").json()
-        assert body["restart_fields"] == ["mcp.yaml", "subagents", "version"]
+        assert body["restart_fields"] == ["subagents", "version"]
+
+    def test_mcp_yaml_alone_needs_no_restart(self, server):
+        """The server's graph cache rebuilds on an mcp.yaml edit, so the
+        change applies without a restart."""
+        from EvoScientist.config.settings import get_config_dir
+
+        get_config_dir().mkdir(parents=True, exist_ok=True)
+        (get_config_dir() / "mcp.yaml").write_text("servers: {}\n", encoding="utf-8")
+        body = server.get("/api/settings").json()
+        assert body["restart_fields"] == []
+        assert body["restart_required"] is False
 
 
 class TestTestKeyStoredValues:

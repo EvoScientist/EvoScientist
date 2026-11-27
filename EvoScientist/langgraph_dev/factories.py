@@ -145,7 +145,11 @@ class GraphCache:
     built; graphs built for a run folder are dropped, least recently used
     first, past ``RUN_FOLDER_GRAPHS``. An unregistered project's graphs stay
     too: resolving an access refuses that project before its graph is asked
-    for.
+    for. A valid ``mcp.yaml`` edit drops every cached graph: builds bind the
+    MCP tools loaded at build time, so the next access rebuilds lazily with
+    the new file. A broken file is stamped without dropping existing graphs;
+    builds first made against it bind no MCP tools and are cached until the
+    file is fixed.
     """
 
     RUN_FOLDER_GRAPHS = 32
@@ -154,6 +158,61 @@ class GraphCache:
         self._build_lock = threading.Lock()
         self._lock = threading.Lock()
         self._graphs: OrderedDict[tuple[str, str, str | None], Any] = OrderedDict()
+        # ``(mtime_ns, size, digest)`` of the ``mcp.yaml`` the cached graphs
+        # were built against, or None when there is none.
+        self._mcp_stamp: tuple[int, int, str] | None = None
+        # Bumped on every invalidation, so a build that overlapped an
+        # ``mcp.yaml`` edit can tell its result is stale.
+        self._generation = 0
+
+    def _mcp_yaml_changed(self) -> bool:
+        """Whether ``mcp.yaml`` changed since the cached graphs were built.
+
+        Compared by modification time and size; the content is read and
+        digested only when those differ. Broken YAML is still stamped: graphs
+        built before the break keep their tools, builds made against the broken
+        file bind the empty config and are cached under its digest, and fixing
+        the file changes the digest so the next access rebuilds. A parseable
+        list or scalar counts as broken because ``load_mcp_config`` reads it as
+        no servers. Called under ``self._lock``.
+        """
+        import hashlib
+
+        import yaml
+
+        from ..mcp.client import USER_MCP_CONFIG
+
+        try:
+            stat = USER_MCP_CONFIG.stat()
+        except OSError:
+            changed = self._mcp_stamp is not None
+            self._mcp_stamp = None
+            return changed
+        if (
+            self._mcp_stamp is not None
+            and (
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
+            == self._mcp_stamp[:2]
+        ):
+            return False
+        try:
+            data = USER_MCP_CONFIG.read_bytes()
+        except OSError:
+            return False
+        try:
+            parsed = yaml.safe_load(data.decode("utf-8"))
+        except Exception:
+            broken = True
+        else:
+            broken = parsed is not None and not isinstance(parsed, dict)
+        digest = hashlib.sha256(data).hexdigest()
+        stamp = (stat.st_mtime_ns, stat.st_size, digest)
+        previous, self._mcp_stamp = self._mcp_stamp, stamp
+        if broken:
+            return False
+        return previous is None or digest != previous[2]
 
     def _cached(self, key: tuple[str, str, str | None]) -> Any:
         with self._lock:
@@ -162,19 +221,52 @@ class GraphCache:
                 self._graphs.move_to_end(key)
             return graph
 
+    def _drop_graphs_if_mcp_yaml_changed(self) -> bool:
+        """Drop the cached graphs when ``mcp.yaml`` changed on disk.
+
+        The generation bump also tells a build in flight that its result is
+        stale. Returns whether the graphs were dropped.
+        """
+        with self._lock:
+            if not self._mcp_yaml_changed():
+                return False
+            self._generation += 1
+            self._graphs.clear()
+            return True
+
     def get(self, graph_id: str, dirs: SessionDirs) -> Any:
         """The graph for *dirs*, built on a miss. Blocking."""
         if graph_id not in FOLDER_GRAPH_IDS:
             dirs = SessionDirs(dirs.workspace)
         run_dir = dirs.run_dir.as_posix() if dirs.run_dir is not None else None
         key = (graph_id, dirs.workspace.key, run_dir)
+        self._drop_graphs_if_mcp_yaml_changed()
         if (graph := self._cached(key)) is not None:
             return graph
         with self._build_lock:
             if (graph := self._cached(key)) is not None:
                 return graph
+            with self._lock:
+                generation = self._generation
+                build_mcp_stamp = self._mcp_stamp
             graph = _build(graph_id, dirs)
             with self._lock:
+                # An ``mcp.yaml`` edit during the build is not in this graph:
+                # drop the cache instead of caching it, so the next access
+                # rebuilds. The built graph still goes back to its access.
+                if self._mcp_yaml_changed():
+                    self._generation += 1
+                    self._graphs.clear()
+                    return graph
+                if self._generation != generation:
+                    # Another access invalidated while this built: serve the
+                    # graph but do not cache it.
+                    return graph
+                if self._mcp_stamp != build_mcp_stamp:
+                    # The file was replaced while this built, even if the same
+                    # bytes came back. Which bytes the build read is unknowable
+                    # here, so serve the graph but do not cache it.
+                    return graph
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]
                 for stale in run_folder_keys[: -self.RUN_FOLDER_GRAPHS]:

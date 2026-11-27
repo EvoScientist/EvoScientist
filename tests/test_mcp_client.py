@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from EvoScientist import paths
+from EvoScientist.mcp import client as mcp_client
 from EvoScientist.mcp.client import (
     _build_connections,
     _filter_tools,
@@ -29,6 +30,8 @@ from EvoScientist.mcp.client import (
     remove_mcp_server,
 )
 from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
+
+_REAL_ENSURE_NODE_FOR_STDIO = mcp_client._ensure_node_for_stdio
 
 
 def _lower_keys(env: dict[str, str]) -> dict[str, str]:
@@ -1510,6 +1513,9 @@ def user_mcp_dir(tmp_path, monkeypatch):
     cfg_file = cfg_dir / "mcp.yaml"
     monkeypatch.setattr("EvoScientist.mcp.client.USER_CONFIG_DIR", cfg_dir)
     monkeypatch.setattr("EvoScientist.mcp.client.USER_MCP_CONFIG", cfg_file)
+    monkeypatch.setattr(
+        "EvoScientist.mcp.client._ensure_node_for_stdio", lambda _config: None
+    )
     return cfg_file
 
 
@@ -1585,6 +1591,24 @@ class TestAddMcpServer:
         data = yaml.safe_load(user_mcp_dir.read_text())
         assert "a" in data
         assert "b" in data
+
+    def test_add_ensures_node_after_saving(self, user_mcp_dir, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        configs = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", configs.append)
+        add_mcp_server("fs", "stdio", command="npx", args=[])
+        assert configs == [yaml.safe_load(user_mcp_dir.read_text())]
+
+    def test_add_http_server_skips_a_malformed_neighbor(
+        self, user_mcp_dir, monkeypatch
+    ):
+        user_mcp_dir.write_text("bad: null\n")
+        monkeypatch.setattr(
+            mcp_client, "_ensure_node_for_stdio", _REAL_ENSURE_NODE_FOR_STDIO
+        )
+        entry = add_mcp_server("api", "http", url="http://localhost:8080/mcp")
+        assert entry["transport"] == "http"
 
 
 class TestRemoveMcpServer:
@@ -1736,6 +1760,27 @@ class TestEditMcpServer:
         assert entry["tools"] == ["a"]
         assert entry["args"] == ["-y", "srv"]
         assert entry["expose_to"] == ["code-agent"]
+
+    def test_edit_ensures_node_after_saving(self, user_mcp_dir, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        add_mcp_server("fs", "stdio", command="echo", args=[])
+        configs = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", configs.append)
+        edit_mcp_server("fs", command="npx")
+        assert configs == [yaml.safe_load(user_mcp_dir.read_text())]
+
+    def test_edit_http_server_skips_a_malformed_neighbor(
+        self, user_mcp_dir, monkeypatch
+    ):
+        user_mcp_dir.write_text(
+            "bad: null\napi:\n  transport: http\n  url: http://old:8080/mcp\n"
+        )
+        monkeypatch.setattr(
+            mcp_client, "_ensure_node_for_stdio", _REAL_ENSURE_NODE_FOR_STDIO
+        )
+        entry = edit_mcp_server("api", url="http://new:9090/mcp")
+        assert entry["url"] == "http://new:9090/mcp"
 
 
 # ---- parse_mcp_edit_args ----
@@ -3241,6 +3286,20 @@ class TestEnsureNodeForStdio:
         monkeypatch.setenv("PATH", str(_fake_npx(tmp_path / "bin")))
         mcp_client._ensure_node_for_stdio({"s": server})
         assert calls == {"ensure": 0, "activate": 0}
+
+    def test_malformed_neighbor_does_not_hide_a_missing_node(
+        self, monkeypatch, calls, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setenv("PATH", str(tmp_path))
+        mcp_client._ensure_node_for_stdio(
+            {
+                "bad": None,
+                "fs": {"transport": "stdio", "command": "npx"},
+            }
+        )
+        assert calls == {"ensure": 1, "activate": 1}
 
     def test_failure_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         from EvoScientist.mcp import client as mcp_client
