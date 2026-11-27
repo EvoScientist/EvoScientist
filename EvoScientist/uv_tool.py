@@ -4,9 +4,9 @@
 the tool's own requirement (with its extras, or the directory, git or URL it
 came from), every ``--with`` requirement, the packages whose commands it
 exposes (``--with-executables-from``, recorded only as the ``from`` of their
-entry points), the constraints and the requested Python. A reinstall that leaves any of them out drops it, so the MCP
-installer's ``--with`` reinstall and ``EvoSci update`` both rebuild their
-``uv tool install`` from this file.
+entry points), the constraints and the requested Python. A reinstall that
+leaves any of them out drops it, so the MCP installer's ``--with`` reinstall
+and ``EvoSci update`` both rebuild their ``uv tool install`` from this file.
 
 The receipt belongs to uv; it is read defensively and an entry this module
 cannot turn back into a requirement raises :class:`ReceiptError` instead of

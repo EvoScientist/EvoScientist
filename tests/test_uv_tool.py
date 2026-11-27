@@ -309,3 +309,29 @@ def test_uv_environment_keeps_user_settings(monkeypatch):
     assert "UV_SYSTEM_CERTS" not in env
     assert env["UV_HTTP_TIMEOUT"] == "30"
     assert "UV_DEFAULT_INDEX" not in env
+
+
+def test_with_args_keep_commands_from_other_packages(tmp_path):
+    text = (
+        "[tool]\nrequirements = [\n"
+        '  { name = "evoscientist" },\n'
+        '  { name = "ccproxy-api", specifier = ">=0.2" },\n'
+        '  { name = "loc-pkg" },\n'
+        '  { name = "loc-pkg", editable = "/opt/src/loc" },\n'
+        '  { name = "six" },\n'
+        "]\nentrypoints = [\n"
+        '  { name = "EvoSci", install-path = "/b/EvoSci", from = "evoscientist" },\n'
+        '  { name = "ccproxy", install-path = "/b/ccproxy", from = "ccproxy-api" },\n'
+        '  { name = "loc-cmd", install-path = "/b/loc-cmd", from = "loc-pkg" },\n'
+        "]\n"
+    )
+    assert uv_tool.read_receipt(_env(tmp_path, text)).with_args() == [
+        "--with-executables-from",
+        "ccproxy-api>=0.2",
+        "--with-executables-from",
+        "loc-pkg",
+        "--with-editable",
+        "/opt/src/loc",
+        "--with",
+        "six",
+    ]
