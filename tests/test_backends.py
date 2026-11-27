@@ -1,6 +1,7 @@
 """Tests for EvoScientist/backends.py — validate_command, path conversion, resolve_path."""
 
 import asyncio
+import json
 import locale
 import re
 import shlex
@@ -4260,7 +4261,7 @@ def test_memory_maintenance_excludes_delete_tool():
 
 
 def test_autoskill_composite_route_blocks_or_excludes_delete():
-    """Codex finding: /autoskill-proposals/ routes to a plain FilesystemBackend whose
+    """Codex finding: /autoskill-proposals/ routes to a FilesystemBackend whose
     delete works; the agent-level tool exclusion is the guard that must cover it."""
     from EvoScientist.memory.agents.autoskills import _AUTOSKILLS_EXCLUDED_TOOLS
 
@@ -4290,6 +4291,108 @@ def test_autoskill_proposals_route_delete_is_not_backend_blocked(tmp_path):
 
     assert result.error is None
     assert not (proposals_dir / "some-skill").exists()
+
+
+# What a model's tool-call JSON decodes to when an escape pair is broken.
+_UNPAIRED = json.loads('"x\\ud83dy"')
+_PAIRED = json.loads('"x\\ud83d\\ude00y"')
+
+
+def _agent_file_route(route, tmp_path, workspace, monkeypatch):
+    """(backend, file path, disk path) for an agent-writable route, built as the agent builds it."""
+    import EvoScientist.EvoScientist as es_mod
+
+    memories = tmp_path / "memories"
+    monkeypatch.setattr(paths, "MEMORIES_DIR", memories)
+    main = es_mod._get_default_backend(workspace)
+    routes = {
+        "workspace": (main, "/notes.md", workspace.root / "notes.md"),
+        "workspace-skills": (
+            main,
+            "/skills/demo/SKILL.md",
+            workspace.skills_dir / "demo" / "SKILL.md",
+        ),
+        "memory-profile": (
+            main,
+            "/memories/profile/USER_PROFILE.md",
+            memories / "profile" / "USER_PROFILE.md",
+        ),
+        "memory-agent-workspace": (
+            backends.build_memory_agent_backend(
+                workspace_dir=workspace.root, memory_dir=memories
+            ),
+            "/notes.md",
+            workspace.root / "notes.md",
+        ),
+        "autoskill-proposal": (
+            backends.build_autoskill_agent_backend(
+                memory_dir=memories,
+                proposals_dir=tmp_path / "proposals",
+                skills_dir=tmp_path / "skills",
+            ),
+            "/autoskill-proposals/demo/SKILL.md",
+            tmp_path / "proposals" / "demo" / "SKILL.md",
+        ),
+    }
+    backend, file_path, disk = routes[route]
+    disk.parent.mkdir(parents=True, exist_ok=True)
+    disk.write_bytes(b"hello world\n")
+    return backend, file_path, disk
+
+
+_AGENT_FILE_ROUTES = [
+    "workspace",
+    "workspace-skills",
+    "memory-profile",
+    "memory-agent-workspace",
+    "autoskill-proposal",
+]
+
+
+@pytest.mark.parametrize("route", _AGENT_FILE_ROUTES)
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_edit_with_an_unpaired_surrogate_leaves_the_file(
+    route, use_async, tmp_path, workspace, monkeypatch
+):
+    backend, file_path, disk = _agent_file_route(
+        route, tmp_path, workspace, monkeypatch
+    )
+    edit = backend.aedit if use_async else backend.edit
+
+    refused = edit(file_path, "hello", _UNPAIRED)
+    refused = await refused if use_async else refused
+    assert refused.error is not None
+    assert "new_string has an unpaired surrogate" in refused.error
+    assert disk.read_bytes() == b"hello world\n"
+
+    done = edit(file_path, "hello", _PAIRED)
+    done = await done if use_async else done
+    assert done.error is None
+    assert disk.read_bytes() == "x\U0001f600y world\n".encode()
+
+
+@pytest.mark.parametrize(
+    "route", [r for r in _AGENT_FILE_ROUTES if r != "memory-profile"]
+)
+@pytest.mark.parametrize("use_async", [False, True])
+async def test_write_with_an_unpaired_surrogate_leaves_the_file(
+    route, use_async, tmp_path, workspace, monkeypatch
+):
+    backend, file_path, disk = _agent_file_route(
+        route, tmp_path, workspace, monkeypatch
+    )
+    write = backend.awrite if use_async else backend.write
+
+    refused = write(file_path, _UNPAIRED)
+    refused = await refused if use_async else refused
+    assert refused.error is not None
+    assert "content has an unpaired surrogate" in refused.error
+    assert disk.read_bytes() == b"hello world\n"
+
+    done = write(file_path, _PAIRED)
+    done = await done if use_async else done
+    assert done.error is None
+    assert disk.read_bytes() == "x\U0001f600y".encode()
 
 
 def test_memory_worker_excludes_delete_tool():

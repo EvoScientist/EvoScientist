@@ -2647,6 +2647,44 @@ def convert_virtual_paths_in_command(
     )[0]
 
 
+def _unencodable_text_error(text: str, argument: str) -> str | None:
+    """Why UTF-8 cannot store ``text`` (an unpaired surrogate), else None."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return (
+            f"{argument} has an unpaired surrogate ({text[exc.start]!r} at index "
+            f"{exc.start}) that UTF-8 cannot store, so the file was not changed. "
+            "Write the character itself instead of a \\u escape."
+        )
+    return None
+
+
+class _EncodableTextMixin:
+    """Refuse text UTF-8 cannot store before deepagents opens the file:
+    its ``FilesystemBackend`` truncates first, so the file would be left empty."""
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        if error := _unencodable_text_error(content, "content"):
+            return WriteResult(error=f"Error writing file '{file_path}': {error}")
+        return super().write(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if error := _unencodable_text_error(new_string, "new_string"):
+            return EditResult(error=f"Error editing file '{file_path}': {error}")
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+
+class WritableFilesystemBackend(_EncodableTextMixin, FilesystemBackend):
+    """``FilesystemBackend`` for agent-writable folders."""
+
+
 class ReadOnlyFilesystemBackend(FilesystemBackend):
     """
     Read-only filesystem backend.
@@ -2687,7 +2725,7 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
         )
 
 
-class MemoryFilesystemBackend(FilesystemBackend):
+class MemoryFilesystemBackend(WritableFilesystemBackend):
     """Filesystem backend for memory files with structured-write enforcement.
 
     Agents may read memory files and edit existing profile notes, but raw file
@@ -2745,7 +2783,9 @@ def build_memory_agent_backend(
     from deepagents.backends import CompositeBackend
 
     return CompositeBackend(
-        default=FilesystemBackend(root_dir=str(workspace_dir), virtual_mode=True),
+        default=WritableFilesystemBackend(
+            root_dir=str(workspace_dir), virtual_mode=True
+        ),
         routes={
             "/memories/": MemoryFilesystemBackend(
                 root_dir=str(memory_dir),
@@ -2818,7 +2858,7 @@ def build_autoskill_agent_backend(
                 secondary_dir=str(_BUILTIN_SKILLS_DIR),
                 writable_primary=False,
             ),
-            "/autoskill-proposals/": FilesystemBackend(
+            "/autoskill-proposals/": WritableFilesystemBackend(
                 root_dir=str(proposals_dir),
                 virtual_mode=True,
             ),
@@ -2847,7 +2887,7 @@ class MergedSkillsBackend(BackendProtocol):
         writable_primary: bool = True,
     ):
         primary_backend = (
-            FilesystemBackend if writable_primary else ReadOnlyFilesystemBackend
+            WritableFilesystemBackend if writable_primary else ReadOnlyFilesystemBackend
         )
         self._primary = primary_backend(root_dir=primary_dir, virtual_mode=True)
         self._global = (
@@ -3120,7 +3160,7 @@ class _ExecuteCancelEvent(threading.Event):
         return super().is_set() or (self._parent is not None and self._parent.is_set())
 
 
-class CustomSandboxBackend(LocalShellBackend):
+class CustomSandboxBackend(_EncodableTextMixin, LocalShellBackend):
     """
     Custom sandbox backend - inherits LocalShellBackend with added safety.
 
