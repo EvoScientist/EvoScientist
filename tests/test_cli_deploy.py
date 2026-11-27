@@ -597,7 +597,7 @@ def test_deploy_names_who_runs_recorded_server(monkeypatch, tmp_path, lasting):
     output = " ".join(" ".join(printed).split())
     assert "4242" in output
     assert "EvoSci server status" in output
-    assert ("not the background service" in output) is not lasting
+    assert ("not the background agent server" in output) is not lasting
     assert server.spawns == []
 
 
