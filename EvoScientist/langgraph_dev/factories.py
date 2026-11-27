@@ -39,6 +39,13 @@ from .folder_check import (
 logger = logging.getLogger(__name__)
 
 
+def _mcp_epoch() -> int:
+    """The MCP-load epoch, read lazily to avoid an import cycle."""
+    from ..EvoScientist import mcp_tools_epoch
+
+    return mcp_tools_epoch()
+
+
 def _main(dirs: SessionDirs) -> Any:
     from ..EvoScientist import build_main_graph
 
@@ -154,6 +161,20 @@ class GraphCache:
         self._build_lock = threading.Lock()
         self._lock = threading.Lock()
         self._graphs: OrderedDict[tuple[str, str, str | None], Any] = OrderedDict()
+        self._epoch = _mcp_epoch()
+
+    def _sync_epoch(self) -> None:
+        """Drop graphs built before an MCP server recovered.
+
+        A load that failed at start-up is retried by ``_load_mcp_tools_cached``
+        after a short backoff. The graphs built from that empty tool set are
+        otherwise kept for the server's whole life.
+        """
+        epoch = _mcp_epoch()
+        if epoch != self._epoch:
+            with self._lock:
+                self._epoch = epoch
+                self._graphs.clear()
 
     def _cached(self, key: tuple[str, str, str | None]) -> Any:
         with self._lock:
@@ -164,6 +185,7 @@ class GraphCache:
 
     def get(self, graph_id: str, dirs: SessionDirs) -> Any:
         """The graph for *dirs*, built on a miss. Blocking."""
+        self._sync_epoch()
         if graph_id not in FOLDER_GRAPH_IDS:
             dirs = SessionDirs(dirs.workspace)
         run_dir = dirs.run_dir.as_posix() if dirs.run_dir is not None else None
@@ -175,6 +197,9 @@ class GraphCache:
                 return graph
             graph = _build(graph_id, dirs)
             with self._lock:
+                # A recovery may have happened during the build; the graph we
+                # just built already used the recovered tools.
+                self._epoch = _mcp_epoch()
                 self._graphs[key] = graph
                 run_folder_keys = [k for k in self._graphs if k[2] is not None]
                 for stale in run_folder_keys[: -self.RUN_FOLDER_GRAPHS]:

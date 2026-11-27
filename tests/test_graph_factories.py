@@ -106,6 +106,25 @@ def test_graph_cache_builds_one_graph_at_a_time(monkeypatch, tmp_path):
     assert sorted(calls) == ["EvoScientist", "scheduler"]
 
 
+def test_graph_cache_rebuilds_after_an_mcp_recovery(builds, monkeypatch, tmp_path):
+    """Graphs built from a failed MCP load are replaced once it recovers."""
+    epoch = [0]
+    monkeypatch.setattr(factories, "_mcp_epoch", lambda: epoch[0])
+    graphs = GraphCache()
+    dirs = SessionDirs(Workspace(tmp_path))
+
+    first = graphs.get("EvoScientist", dirs)
+    assert graphs.get("EvoScientist", dirs) is first
+    assert len(builds) == 1
+
+    epoch[0] += 1
+    second = graphs.get("EvoScientist", dirs)
+    assert second is not first
+    assert len(builds) == 2
+    assert graphs.get("EvoScientist", dirs) is second
+    assert len(builds) == 2
+
+
 def test_every_served_graph_has_a_builder():
     assert set(factories.BUILDERS) == set(served_graph_ids())
 
