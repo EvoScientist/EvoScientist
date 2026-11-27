@@ -1671,6 +1671,7 @@ async def build_agent_stream_input(
     *,
     media: list[str] | None = None,
     rubric: str | None = None,
+    bg_processes: dict[str, dict] | None = None,
     goal_request: dict[str, Any] | None = None,
 ) -> LangGraphStreamInput:
     """Build the LangGraph run input shared by local and server gateways.
@@ -1743,6 +1744,8 @@ async def build_agent_stream_input(
     }
     if rubric is not None:
         run_input["rubric"] = rubric
+    if bg_processes is not None:
+        run_input["bg_processes"] = bg_processes
     return run_input
 
 
@@ -1756,6 +1759,8 @@ async def stream_agent_events(
     configurable_extra: dict[str, Any] | None = None,
     rubric: str | None = None,
     goal_request: dict[str, Any] | None = None,
+    *,
+    bg_processes: dict[str, dict] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -1843,7 +1848,11 @@ async def stream_agent_events(
 
     clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(
-        message, media=media, rubric=rubric, goal_request=goal_request
+        message,
+        media=media,
+        rubric=rubric,
+        goal_request=goal_request,
+        bg_processes=bg_processes,
     )
 
     stream: Any | None = None

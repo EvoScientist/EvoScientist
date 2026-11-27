@@ -132,6 +132,7 @@ def run_streaming(
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
+    bg_processes: dict[str, dict] | None = None,
     goal_request: dict[str, Any] | None = None,
 ) -> str:
     """Run streaming with the selected backend."""
@@ -163,6 +164,7 @@ def run_streaming(
         rubric=rubric,
         approve_all_at_start=approve_all_at_start,
         goal_request=goal_request,
+        bg_processes=bg_processes,
     )
 
 

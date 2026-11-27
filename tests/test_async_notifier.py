@@ -443,7 +443,7 @@ async def test_consume_notifications_calls_runner_with_batched_message():
 
     captured: dict = {}
 
-    async def fake_runner(text: str, notifs: list) -> None:
+    async def fake_runner(text: str, notifs: list, **_) -> None:
         captured["text"] = text
         captured["notifs"] = notifs
 
@@ -461,7 +461,7 @@ async def test_consume_notifications_no_op_when_queue_empty():
 
     called = False
 
-    async def fake_runner(text: str, notifs: list):
+    async def fake_runner(text: str, notifs: list, **_):
         nonlocal called
         called = True
 
@@ -470,6 +470,236 @@ async def test_consume_notifications_no_op_when_queue_empty():
 
     await an.consume_notifications(fake_runner, fake_state_reader)
     assert called is False
+
+
+def _queue_exit(tid: str) -> None:
+    async_notifier.enqueue_bg_process_notification(
+        task_id="p1", agent_name="demo", status="success", origin_cli_thread_id=tid
+    )
+
+
+@pytest.mark.parametrize(
+    "status", ["success", "error", "interrupted", "running", "untracked"]
+)
+def test_serve_drops_or_marks_a_queued_exit(monkeypatch, status):
+    """A recorded exit drops the queued notice; any other record is marked."""
+    from EvoScientist.cli.commands import _serve_drain_notifications
+    from EvoScientist.gateway import RuntimeGateways
+    from EvoScientist.runtime import AsyncRuntime
+    from tests.fakes.serve import runtime_state
+
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {"p1": {"status": status}}}
+    )
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    _queue_exit("tid")
+    with AsyncRuntime(thread_name="test-notifier-dedup") as runtime:
+        state = runtime_state(
+            runtime_gateways=RuntimeGateways(
+                thread_store=gateway.thread_store, graph_gateway=gateway
+            ),
+            async_runtime=runtime,
+        )
+        state.agent = None  # The server executes this thread's graph.
+        _serve_drain_notifications(runtime_state=state, model=None, show_thinking=False)
+
+    if status in {"running", "untracked"}:
+        assert gateway.requests[0].bg_processes == {"p1": {"status": "success"}}
+    else:
+        assert gateway.requests == []
+    assert gateway.updated_states == []
+
+
+@pytest.mark.parametrize("record_status", ["running", "untracked", None, "offline"])
+@pytest.mark.parametrize("status", ["success", "error", "interrupted", "untracked"])
+async def test_consumer_carries_only_terminal_process_marks(
+    monkeypatch, record_status, status
+):
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    record = {"status": record_status, "returncode": None, "pid": 42}
+    known = record_status in {"running", "untracked"}
+    read = AsyncMock(return_value={"proc-1": record} if known else None)
+    if record_status == "offline":
+        read.side_effect = RuntimeError("offline")
+    notice = async_notifier.AsyncTaskNotification(
+        "proc-1", "demo", status, "", kind="bg-process"
+    )
+    task = async_notifier.AsyncTaskNotification("task-1", "writer", "success", "")
+    for n in (notice, task):
+        async_notifier.enqueue_task_notification(n)
+    runner = AsyncMock()
+    await async_notifier.consume_notifications(
+        runner,
+        AsyncMock(return_value={}),
+        read_bg_processes_state=read,
+    )
+    sent = [notice, task]
+    assert runner.await_args.args == (format_batch_message(sent), sent)
+    marked = known and status != "untracked"
+    expected = {"proc-1": {**record, "status": status}} if marked else None
+    assert runner.await_args.kwargs == {"bg_processes": expected}
+    assert record["status"] == record_status  # No write before the turn.
+
+
+@pytest.mark.parametrize("delivery", ["commit", "fail", "checked"])
+async def test_exit_notice_checkpoint_survives_a_fresh_reader(
+    monkeypatch, tmp_path, delivery
+):
+    from contextlib import nullcontext
+
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from EvoScientist import background
+    from EvoScientist.middleware.background import BackgroundExecutionMiddleware
+    from EvoScientist.stream.events import build_agent_stream_input
+    from tests.fakes.goal import Scripted
+
+    class Saver(InMemorySaver):
+        reject = False
+
+        async def aput(self, *args, **kwargs):
+            if self.reject:
+                raise RuntimeError("checkpoint unavailable")
+            return await super().aput(*args, **kwargs)
+
+    saver = Saver()
+    agent = create_agent(
+        model=Scripted(),
+        middleware=[BackgroundExecutionMiddleware(work_dir=tmp_path, skills_dir=None)],
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "legacy"}}
+    # A record without origin_thread_id, as older threads hold.
+    records = _bg_running_registry()["bg_processes"]
+    records["proc-1"].pop("origin_thread_id")
+    await agent.ainvoke({"messages": [], "bg_processes": records}, config)
+    gateway = LocalGraphGateway()
+    target = GraphTarget(local_graph=agent)
+    monkeypatch.setattr(background, "poll_status", lambda _: "success")
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "legacy"
+    )
+
+    async def deliver(text, notifs, **kwargs):
+        assert (await agent.aget_state(config)).values["bg_processes"] == records
+        if delivery == "checked":
+            # check_process lands after the consumer's read, before its input.
+            checked = {**records["proc-1"], "status": "success", "returncode": 0}
+            await agent.aupdate_state(config, {"bg_processes": {"proc-1": checked}})
+        run_input = await build_agent_stream_input(text, **kwargs)
+        saver.reject = delivery == "fail"
+        await agent.ainvoke(run_input, config)
+
+    failure = pytest.raises(RuntimeError, match="checkpoint unavailable")
+    with failure if delivery == "fail" else nullcontext():
+        await async_notifier.consume_notifications(
+            deliver,
+            AsyncMock(return_value={}),
+            current_thread_id="legacy",
+            read_bg_processes_state=lambda: (
+                async_notifier.read_bg_processes_from_gateway(gateway, target, "legacy")
+            ),
+        )
+    saver.reject = False
+    state = (await agent.aget_state(config)).values
+    committed = delivery in {"commit", "checked"}
+    assert state["bg_processes"]["proc-1"]["status"] == (
+        "success" if committed else "running"
+    )
+    assert any(m.type == "human" for m in state["messages"]) == committed
+    if delivery == "checked":
+        assert state["bg_processes"]["proc-1"]["returncode"] == 0
+    if delivery == "commit":
+        async for snapshot in agent.aget_state_history(config):
+            record = snapshot.values.get("bg_processes", {}).get("proc-1", {})
+            notice = any(m.type == "human" for m in snapshot.values.get("messages", []))
+            assert notice == (record.get("status") == "success")
+    _reset_notifier_state(async_notifier)
+    background._PROCESSES.clear()  # Neither module remembers, as after a restart.
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "legacy"
+    )
+    assert len(drain_notifications("legacy")) == (0 if committed else 1)
+
+
+@pytest.mark.parametrize("status", ["success", "running"])
+async def test_tui_notification_turn_carries_the_mark(monkeypatch, workspace, status):
+    from tests.fakes.tui import capture_app, prepare_app
+
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    app = await capture_app(monkeypatch, workspace)
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {"p1": {"status": status}}}
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        prepare_app(app, workspace, gateway)
+        _queue_exit(app._conversation_tid)
+        await app._consume_notifications_tui()
+        if status == "running":
+            await app._run_task
+    if status == "running":
+        [request] = gateway.requests
+        assert request.bg_processes == {"p1": {"status": "success"}}
+    else:
+        assert gateway.requests == []
+    assert gateway.updated_states == []
+
+
+def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
+    import asyncio
+    from contextlib import asynccontextmanager, nullcontext
+
+    from EvoScientist.cli import interactive
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.gateway import RuntimeGateways
+    from EvoScientist.paths import SessionDirs
+
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {"p1": {"status": "running"}}},
+        generated_thread_ids=["tid"],
+    )
+
+    @asynccontextmanager
+    async def checkpointer():
+        yield None
+
+    async def prompt(*args, **kwargs):
+        # The real queue poll delivers the notice while the prompt waits.
+        for _ in range(250):
+            if gateway.requests:
+                break
+            await asyncio.sleep(0.02)
+        raise EOFError
+
+    monkeypatch.setattr(
+        interactive, "PromptSession", lambda **kw: SimpleNamespace(prompt_async=prompt)
+    )
+    monkeypatch.setattr(interactive, "patch_stdout", lambda **_kw: nullcontext())
+    monkeypatch.setattr(interactive, "get_checkpointer", checkpointer)
+    monkeypatch.setattr(interactive, "_load_agent", lambda **kw: object())
+    monkeypatch.setattr(
+        interactive,
+        "create_runtime_gateways_for_config",
+        lambda *a, **kw: RuntimeGateways(
+            graph_gateway=gateway, thread_store=gateway.thread_store
+        ),
+    )
+    monkeypatch.setattr(
+        "EvoScientist.update_check.is_update_available", lambda: (False, None)
+    )
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar._get_default_chat_model",
+        lambda: SimpleNamespace(model_name="test"),
+    )
+    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 0)
+    _queue_exit("tid")
+    interactive.cmd_interactive(
+        dirs=SessionDirs(workspace), config=EvoScientistConfig()
+    )
+    assert gateway.requests[0].bg_processes == {"p1": {"status": "success"}}
 
 
 # ============================================================================
@@ -496,7 +726,7 @@ async def test_notification_consuming_flag_prevents_reentry():
 
     state = {"inject_count": 0, "consuming": False}
 
-    async def counting_runner(text: str, notifs: list) -> None:
+    async def counting_runner(text: str, notifs: list, **_) -> None:
         state["inject_count"] += 1
 
     async def fake_state_reader() -> dict:
@@ -535,7 +765,7 @@ async def test_notification_consuming_flag_prevents_reentry():
     state["consuming"] = False  # cleanup
 
     # Scenario 3: exception in runner → flag still cleared by finally.
-    async def raising_runner(text: str, notifs: list) -> None:
+    async def raising_runner(text: str, notifs: list, **_) -> None:
         raise RuntimeError("boom")
 
     async def guarded_consume_raising(notif):
@@ -614,7 +844,7 @@ async def test_consume_only_drains_matching_thread():
 
     captured: dict = {"runs": []}
 
-    async def runner(text: str, notifs: list) -> None:
+    async def runner(text: str, notifs: list, **_) -> None:
         captured["runs"].append([n.task_id for n in notifs])
 
     async def state_reader() -> dict:
@@ -637,7 +867,7 @@ async def test_unrouted_notifications_drain_on_any_thread():
 
     captured: dict = {}
 
-    async def runner(text: str, notifs: list) -> None:
+    async def runner(text: str, notifs: list, **_) -> None:
         captured["notifs"] = notifs
 
     async def state_reader() -> dict:
@@ -660,7 +890,7 @@ async def test_thread_switch_drains_pending():
 
     captured: dict = {"runs": []}
 
-    async def runner(text: str, notifs: list) -> None:
+    async def runner(text: str, notifs: list, **_) -> None:
         captured["runs"].append([n.task_id for n in notifs])
 
     async def state_reader() -> dict:
@@ -727,7 +957,7 @@ async def test_consume_notifications_propagates_inject_exception():
         an.AsyncTaskNotification("tX", "writing-agent", "success", "", "")
     )
 
-    async def boom_runner(text: str, notifs: list) -> None:
+    async def boom_runner(text: str, notifs: list, **_) -> None:
         raise RuntimeError("kaboom")
 
     async def state_reader() -> dict:

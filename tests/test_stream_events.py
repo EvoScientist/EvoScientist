@@ -42,6 +42,21 @@ from tests.fakes.stream_v3 import (
 )
 
 
+async def test_process_marks_are_added_to_message_input_not_to_a_resume():
+    from EvoScientist.stream.events import build_agent_stream_input
+
+    marks = {"p1": {"status": "success"}}
+    run_input = await build_agent_stream_input("done", bg_processes=marks)
+    assert run_input["bg_processes"] == marks
+    agent = FakeV3Agent([])
+    async for _event in stream_agent_events(agent, "done", "t1", bg_processes=marks):
+        pass
+    assert agent.astream_events.call_args.args[0]["bg_processes"] == marks
+    assert "bg_processes" not in await build_agent_stream_input("hello")
+    resume = Command(resume={"ok": True})
+    assert await build_agent_stream_input(resume, bg_processes=marks) is resume
+
+
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self

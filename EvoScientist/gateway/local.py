@@ -171,6 +171,7 @@ class LocalGraphGateway:
             configurable_extra=request.configurable_extra,
             rubric=request.rubric,
             goal_request=request.goal_request,
+            bg_processes=request.bg_processes,
         )
         try:
             async for event in inner:

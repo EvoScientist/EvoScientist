@@ -22,7 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Literal, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
@@ -390,9 +390,9 @@ async def enqueue_completions_from_state_throttled(
 
 # --- Background-process reader (mirror of the async-task reader above) --------
 # Process ids the bg-process reader has already surfaced an exit for. The mirrored
-# ``bg_processes[*].status`` only goes terminal once the agent observes the exit
-# via a tool (check/stop/list), so this idempotency set keeps one proactive exit →
-# one enqueue for the agent-didn't-check path, mirroring ``_reader_enqueued_task_ids``.
+# ``bg_processes[*].status`` goes terminal when a tool observes the exit or a
+# notification turn records it. This set keeps one enqueue per CLI process,
+# whether or not that turn completes, mirroring ``_reader_enqueued_task_ids``.
 _reader_enqueued_process_ids: set[str] = set()
 # Process ids a reader invocation is currently awaiting a status for. The
 # idle tick and a turn-boundary read can interleave at the status await;
@@ -409,8 +409,7 @@ UNTRACKED_STATUS: Final = "untracked"
 
 The reader writes it into thread state when it reports the process, so a later
 EvoSci process that resumes the thread does not report it again. It still polls
-a marked process once: a terminal status from a registry that does track it is
-reported as usual.
+a marked process until its status is unknown, or terminal and so reported.
 """
 
 UNTRACKED_HINT: Final = (
@@ -475,9 +474,9 @@ async def _mark_untracked(
       flight on the thread (409).
 
     The mark is built from the snapshot's record, not the one read at the top
-    of the poll, so a terminal status stored since is not overwritten. That
-    narrows the window to the gap between the snapshot and the write; the
-    channel's reducer is last-write-per-key, so there is no compare-and-set.
+    of the poll, so a terminal status stored since is not overwritten. In
+    the gap between the snapshot and the write, the channel's reducer keeps a
+    terminal status over this mark.
 
     ``as_node`` is left to the graph, which infers the node that ran last. An
     ``__end__`` clear counts the tasks it drops as run, and a closed approval and
@@ -560,14 +559,15 @@ async def enqueue_bg_process_completions_from_state(
     Mirror of :func:`enqueue_completions_from_state` for OS background processes.
     Reads the ``bg_processes`` registry the middleware mirrors into state and, for
     each process not already surfaced and not terminal-in-state (a terminal state
-    means the agent already observed the exit via check/stop/list — nothing to
+    means a tool or notification turn already recorded the exit — nothing to
     proactively surface, which is the state-based dedup), polls
     ``gateway.get_process_status``. Newly-terminal processes are enqueued as
     ``kind="bg-process"`` notifications via the shared queue. A process no
     registry this EvoSci process can ask has is marked ``untracked`` in state
     (:func:`_mark_untracked`) and then reported with that status; a marked
-    record is still polled once per EvoSci process, so a terminal status wins
-    over the mark. Returns the still-active count for the idle throttle.
+    record is still polled until its status is unknown or terminal, so a
+    terminal status wins over the mark. Returns the still-active count for the
+    idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
     if registry is None:
@@ -701,24 +701,30 @@ def drain_notifications(
 def dedup_notifications(
     notifs: list[AsyncTaskNotification],
     async_tasks: AsyncTasksState | None,
+    *,
+    bg_processes: dict[str, dict] | None = None,
 ) -> list[AsyncTaskNotification]:
-    """Filter notifications the agent has already 'seen' via prior check.
+    """Filter notifications the thread already records as seen.
 
-    Logic: skip a notification if `async_tasks[task_id]` exists with a TERMINAL
-    status and `last_checked_at >= last_updated_at` (timestamps are ISO-8601
-    so lexicographic comparison is correct). Also skip if `last_checked_at`
-    is empty (brand-new task where agent hasn't checked yet).
+    Async tasks require a terminal status checked at or after the task's last update.
+    Background processes use a terminal thread record or a local observation.
+    An ``untracked`` mark alone does not suppress a notice: the reader stores
+    that mark before enqueueing its first delivery.
     """
     from .. import background  # cli -> core import; lazy to avoid import-order issues
 
     async_tasks = async_tasks or {}
+    bg_processes = bg_processes or {}
     survivors: list[AsyncTaskNotification] = []
     for n in notifs:
         if n.kind == "bg-process":
-            # Background process: skip if the launching session already inspected it
-            # after it finished (check_process / list_processes) — mirrors the task
-            # dedup below. Per-thread: another session's check doesn't suppress this.
-            if background.was_observed_done(n.task_id, n.origin_cli_thread_id):
+            # Skip an exit this thread already records as terminal (a check from
+            # any client, or an earlier notice turn), or one this process's
+            # registry shows was checked from the launching thread. A
+            # server-owned process is absent from that registry.
+            if bg_processes.get(n.task_id, {}).get("status") in TERMINAL_STATUSES or (
+                background.was_observed_done(n.task_id, n.origin_cli_thread_id)
+            ):
                 logger.debug("Dedup: skipping shell notification for %s", n.task_id)
                 continue
             survivors.append(n)
@@ -855,10 +861,23 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
 NOTIFICATION_BATCH_GRACE_SECONDS = 0.3
 
 
+class RunMessage(Protocol):
+    def __call__(
+        self,
+        text: str,
+        notifs: list[AsyncTaskNotification],
+        *,
+        bg_processes: dict[str, dict] | None = None,
+    ) -> Awaitable[None]: ...
+
+
 async def consume_notifications(
-    run_message: Callable[[str, list[AsyncTaskNotification]], Awaitable[None]],
+    run_message: RunMessage,
     read_async_tasks_state: Callable[[], Awaitable[AsyncTasksState]],
     current_thread_id: str | None = None,
+    *,
+    read_bg_processes_state: Callable[[], Awaitable[dict[str, dict] | None]]
+    | None = None,
 ) -> None:
     """Drain queue, dedup, batch, and inject as a synthetic user message.
 
@@ -867,9 +886,12 @@ async def consume_notifications(
             ``llm_text`` is the full structured message for the LLM
             (from ``format_batch_message``).  ``notifs_list`` is the
             survivors list so callers can render per-task visual lines
-            without re-parsing the text.
+            without re-parsing the text. ``bg_processes`` holds the records to
+            checkpoint with the message, or ``None`` when none needs a mark.
         read_async_tasks_state: async callable returning current ``async_tasks``
                                 from the agent's state for dedup.
+        read_bg_processes_state: optional reader of ``bg_processes``, for dedup
+            and for the records to mark; ``None`` or a failed read marks nothing.
         current_thread_id: the active CLI thread id. When given, only
             notifications whose ``origin_cli_thread_id`` matches (or that
             were enqueued unrouted) are drained — notifications belonging
@@ -891,7 +913,16 @@ async def consume_notifications(
         logger.warning("Failed to read async_tasks state for dedup", exc_info=True)
         async_tasks = {}
 
-    survivors = dedup_notifications(notifs, async_tasks)
+    bg_processes = None
+    if read_bg_processes_state is not None and any(
+        n.kind == "bg-process" for n in notifs
+    ):
+        try:
+            bg_processes = await read_bg_processes_state()
+        except Exception:
+            logger.warning("Failed to read bg_processes state for dedup", exc_info=True)
+
+    survivors = dedup_notifications(notifs, async_tasks, bg_processes=bg_processes)
     if not survivors:
         logger.info(
             "All %d notifications deduped (already known to agent)", len(notifs)
@@ -899,4 +930,12 @@ async def consume_notifications(
         return
 
     text = format_batch_message(survivors)
-    await run_message(text, survivors)
+    marks = {
+        n.task_id: {**bg_processes[n.task_id], "status": n.status}
+        for n in survivors
+        if n.kind == "bg-process"
+        and n.status in TERMINAL_STATUSES
+        and bg_processes is not None
+        and n.task_id in bg_processes
+    }
+    await run_message(text, survivors, bg_processes=marks or None)

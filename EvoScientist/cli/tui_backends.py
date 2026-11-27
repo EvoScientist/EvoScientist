@@ -48,6 +48,7 @@ class StreamingTUIBackend(Protocol):
         rubric: str | None = None,
         approve_all_at_start: bool = False,
         goal_request: dict[str, Any] | None = None,
+        bg_processes: dict[str, dict] | None = None,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -87,6 +88,7 @@ class RichStreamingBackend:
         rubric: str | None = None,
         approve_all_at_start: bool = False,
         goal_request: dict[str, Any] | None = None,
+        bg_processes: dict[str, dict] | None = None,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -115,4 +117,5 @@ class RichStreamingBackend:
             rubric=rubric,
             approve_all_at_start=approve_all_at_start,
             goal_request=goal_request,
+            bg_processes=bg_processes,
         )

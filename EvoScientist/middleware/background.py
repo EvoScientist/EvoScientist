@@ -41,9 +41,23 @@ def _bg_processes_reducer(
     existing: "dict[str, BgProcessRecord] | None",
     update: "dict[str, BgProcessRecord]",
 ) -> "dict[str, BgProcessRecord]":
-    """Merge process-record updates into the existing registry (last write per key)."""
+    """Merge per process, keeping a recorded exit over an older snapshot."""
     merged = dict(existing or {})
-    merged.update(update)
+    for process_id, record in update.items():
+        current = merged.get(process_id, {})
+        if record.get("returncode") is None and (
+            # A tool may have stored the exit after the notification consumer
+            # read state. Its returncode must survive that stale input.
+            current.get("returncode") is not None
+            # A notice mark has no returncode, and an ``untracked`` mark built
+            # from an older snapshot must not undo it.
+            or (
+                current.get("status") in background.EXIT_STATUSES
+                and record.get("status") not in background.EXIT_STATUSES
+            )
+        ):
+            continue
+        merged[process_id] = record
     return merged
 
 
@@ -55,7 +69,8 @@ class BgProcessRecord(TypedDict, total=False):
     command: str
     pid: int
     # "running" | terminal (success/error/interrupted) | "untracked" (written by
-    # the client reader when no registry it can ask has the process)
+    # the client reader when no registry it can ask has the process). A notice
+    # turn can set a terminal status without a returncode.
     status: str
     returncode: int | None
     started_at: str

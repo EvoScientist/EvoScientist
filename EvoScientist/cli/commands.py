@@ -2120,7 +2120,9 @@ def _serve_drain_notifications(
 
     from .tui_runtime import run_streaming
 
-    def _run_notification_message(text: str, notifs: list) -> None:
+    def _run_notification_message(
+        text: str, notifs: list, *, bg_processes: dict[str, dict] | None = None
+    ) -> None:
         """Synchronous wrapper: run the agent on the synthetic notification text."""
         # Render the per-task visual frame (matches CLI/TUI aesthetic).
         from EvoScientist.cli.async_notifier import format_notification_lines
@@ -2136,6 +2138,7 @@ def _serve_drain_notifications(
                 ui_backend="cli",
                 agent=runtime_state.agent,
                 message=text,
+                bg_processes=bg_processes,
                 thread_id=tid,
                 show_thinking=show_thinking,
                 interactive=True,
@@ -2157,8 +2160,12 @@ def _serve_drain_notifications(
                     f"{origin.sender or origin.chat_id}[/dim]"
                 )
 
-    async def _run_notification_message_async(text: str, notifs: list) -> None:
-        await _aio.to_thread(_run_notification_message, text, notifs)
+    async def _run_notification_message_async(
+        text: str, notifs: list, *, bg_processes: dict[str, dict] | None = None
+    ) -> None:
+        await _aio.to_thread(
+            _run_notification_message, text, notifs, bg_processes=bg_processes
+        )
 
     async def _read_async_tasks() -> async_notifier.AsyncTasksState:
         thread_id = runtime_state.thread_id
@@ -2175,10 +2182,21 @@ def _serve_drain_notifications(
         return registry or {}
 
     async def _consume() -> None:
+        async def _read_bg_processes() -> dict[str, dict] | None:
+            return await async_notifier.read_bg_processes_from_gateway(
+                runtime_state.runtime_gateways.graph_gateway,
+                GraphTarget(
+                    local_graph=runtime_state.agent,
+                    **runtime_state.dirs.metadata(),
+                ),
+                runtime_state.thread_id,
+            )
+
         await async_notifier.consume_notifications(
             run_message=_run_notification_message_async,
             read_async_tasks_state=_read_async_tasks,
             current_thread_id=runtime_state.thread_id,
+            read_bg_processes_state=_read_bg_processes,
         )
 
     try:

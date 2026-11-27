@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -67,6 +68,7 @@ from .async_notifier import (
     enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
+    read_bg_processes_from_gateway,
 )
 from .channel import (
     ChannelMessage,
@@ -1347,6 +1349,17 @@ def run_textual_interactive(
             and silently kill notification + channel dispatch.
             """
             target_tid = self._conversation_tid
+
+            async def _read_bg_processes() -> dict[str, dict] | None:
+                return await read_bg_processes_from_gateway(
+                    self._graph_gateway(),
+                    GraphTarget(
+                        local_graph=self._agent_loader.agent,
+                        **self._dirs.metadata(),
+                    ),
+                    target_tid,
+                )
+
             try:
                 if self._busy:
                     # The poll found the app free, but input handled since then
@@ -1354,13 +1367,14 @@ def run_textual_interactive(
                     return
                 try:
                     await consume_notifications(
-                        run_message=lambda text, notifs: self._inject_notification_tui(
-                            text, notifs, target_thread_id=target_tid
+                        run_message=partial(
+                            self._inject_notification_tui, target_thread_id=target_tid
                         ),
                         read_async_tasks_state=lambda: self._read_async_tasks_tui(
                             target_tid
                         ),
                         current_thread_id=target_tid,
+                        read_bg_processes_state=_read_bg_processes,
                     )
                 except Exception:
                     import logging
@@ -1409,6 +1423,7 @@ def run_textual_interactive(
             notifs: list,
             *,
             target_thread_id: str | None = None,
+            bg_processes: dict[str, dict] | None = None,
         ) -> None:
             """Run a synthetic user turn for the batched async-task notification.
 
@@ -1452,6 +1467,7 @@ def run_textual_interactive(
                     # A notifier turn only finishes a grading the thread deferred.
                     rubric_mode="followup",
                     on_request_sent=mark_sent,
+                    bg_processes=bg_processes,
                 )
                 # Read here, not in the done-callback: a turn started from the
                 # queue clears the stop flag before that callback runs.
@@ -1768,6 +1784,7 @@ def run_textual_interactive(
             rubric_mode: str | None = "thread",
             approve_all_at_start: bool = False,
             goal_request: dict[str, Any] | None = None,
+            bg_processes: dict[str, dict] | None = None,
             on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
@@ -2162,6 +2179,7 @@ def run_textual_interactive(
                                 # Read only with the turn's first input; a
                                 # resume ignores it.
                                 goal_request=goal_request,
+                                bg_processes=bg_processes,
                             )
                         ),
                         cancel_scope,
@@ -3218,6 +3236,7 @@ def run_textual_interactive(
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
             goal_request: dict[str, Any] | None = None,
+            bg_processes: dict[str, dict] | None = None,
             on_request_sent: Callable[[], None] | None = None,
         ) -> str:
             """Handle a user turn: stream agent response with widgets.
@@ -3288,6 +3307,7 @@ def run_textual_interactive(
                     thread_id_override=thread_id_override,
                     rubric_mode=rubric_mode,
                     goal_request=goal_request,
+                    bg_processes=bg_processes,
                     on_request_sent=on_request_sent,
                 )
             except asyncio.CancelledError:

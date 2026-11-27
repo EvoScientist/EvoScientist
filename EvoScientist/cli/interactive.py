@@ -1283,6 +1283,7 @@ def cmd_interactive(
                 notifs: list,
                 *,
                 target_thread_id: str | None,
+                bg_processes: dict[str, dict] | None = None,
             ) -> None:
                 """Inject a batched async-task notification as a synthetic user message.
 
@@ -1302,6 +1303,7 @@ def cmd_interactive(
                     ui_backend=state["ui_backend"],
                     agent=ready_agent,
                     message=text,
+                    bg_processes=bg_processes,
                     # Falls back to live state["thread_id"] if no override is
                     # passed (legacy / direct-call paths). Dedup reader has no
                     # fallback and returns {} for a falsey id; the asymmetry
@@ -1386,6 +1388,20 @@ def cmd_interactive(
                 except Exception:
                     return {}
 
+            async def _read_current_bg_processes(
+                target_thread_id: str | None,
+            ) -> dict[str, dict] | None:
+                if not target_thread_id:
+                    return {}
+                return await async_notifier.read_bg_processes_from_gateway(
+                    runtime_gateways.graph_gateway,
+                    GraphTarget(
+                        local_graph=agent_loader.agent,
+                        **state["dirs"].metadata(),
+                    ),
+                    target_thread_id,
+                )
+
             async def _check_channel_queue() -> None:
                 """Poll the channel + notification queues and dispatch."""
                 while True:
@@ -1440,18 +1456,24 @@ def cmd_interactive(
                         )
                         try:
                             await async_notifier.consume_notifications(
-                                run_message=lambda text, notifs, _tid=current_tid: (
+                                run_message=lambda text, notifs, *, bg_processes=None, _tid=current_tid: (
                                     _run_serialized_turn(
                                         turn_lock,
                                         lambda: _inject_notification_message(
                                             text,
                                             notifs,
                                             target_thread_id=_tid,
+                                            bg_processes=bg_processes,
                                         ),
                                     )
                                 ),
                                 read_async_tasks_state=read_async_tasks_state,
                                 current_thread_id=current_tid,
+                                read_bg_processes_state=(
+                                    lambda _tid=current_tid: _read_current_bg_processes(
+                                        _tid
+                                    )
+                                ),
                             )
                         except Exception:
                             _channel_logger.warning(
