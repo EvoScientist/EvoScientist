@@ -571,8 +571,13 @@ def test_rejected_refresh_keeps_a_token_file_put_there_by_hand(expired, monkeypa
 
 
 def test_rejected_token_that_cannot_be_removed_names_the_file(expired, monkeypatch):
-    def _denied(path):
-        raise PermissionError(13, "Permission denied")
+    real_unlink = os.unlink
+
+    # Only the token file: filelock's own probe file must still go.
+    def _denied(path, *args, **kwargs):
+        if Path(path) == expired:
+            raise PermissionError(13, "Permission denied")
+        real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(chatgpt_oauth.os, "unlink", _denied)
     _token_endpoint(

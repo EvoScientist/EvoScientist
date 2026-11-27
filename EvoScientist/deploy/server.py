@@ -357,7 +357,7 @@ def _start_server(
             )
         elif not is_lasting(record):
             console.print(
-                f"[dim]It is not the background service: another "
+                f"[dim]It is not the background agent server: another "
                 f"EvoSci deploy, the desktop app or an older release "
                 f"runs it. Stop that one first.{status}[/dim]"
             )

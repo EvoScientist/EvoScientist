@@ -253,7 +253,7 @@ class PruningCheckpointer(AsyncSqliteSaver):
             return result
 
     # Safety cap on the snapshot walk. Upstream default
-    # ``snapshot_frequency`` is 1000; ``DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT``
+    # ``snapshot_frequency`` is 100; ``DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT``
     # is 5000. 10000 is a generous ceiling that catches pathological data
     # (cycles, malformed parents) without raising a hard limit on normal
     # operation.
