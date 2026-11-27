@@ -892,7 +892,27 @@ def load_mcp_config() -> dict[str, Any]:
         logger.warning("Failed to load MCP config %s: %s", USER_MCP_CONFIG, exc)
         return {}
 
-    return _interpolate_value(data)
+    servers: dict[str, Any] = {}
+    for name, server in data.items():
+        if not isinstance(server, dict):
+            logger.warning(
+                "Skipping MCP server %r in %s: it has no settings",
+                name,
+                USER_MCP_CONFIG,
+            )
+            continue
+        empty = [key for key, value in server.items() if value is None]
+        if empty:
+            logger.warning(
+                "Skipping MCP server %r in %s: %s has no value",
+                name,
+                USER_MCP_CONFIG,
+                ", ".join(map(str, empty)),
+            )
+            continue
+        servers[name] = server
+
+    return _interpolate_value(servers)
 
 
 def _is_path_key(key: str) -> bool:
