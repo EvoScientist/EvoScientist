@@ -1477,7 +1477,8 @@ class LangGraphServerGateway:
 
         The pre-run read can be stale: a run the new one queued behind adds its
         messages after it. ``None`` when the run has no input checkpoint (a
-        resumed run writes none); a failed read raises.
+        resumed run writes none, and pruning can drop a long run's); a failed
+        read raises.
         """
         history = await self.thread_store.client.threads.get_history(
             thread_id, limit=1, metadata={"run_id": run_id, "source": "input"}
@@ -1987,10 +1988,6 @@ class LangGraphServerGateway:
                             request.thread_id, run_id
                         )
                     except Exception:
-                        # The pre-run read can predate another run's answer:
-                        # judged against it, the value snapshots would show
-                        # that answer as this turn's. Skip them, as when the
-                        # pre-run read itself fails.
                         logger.warning(
                             "Could not read the input checkpoint of run %s on "
                             "thread %s; value-message processing disabled for "
@@ -1999,6 +1996,22 @@ class LangGraphServerGateway:
                             request.thread_id,
                             exc_info=True,
                         )
+                    else:
+                        if start_messages is None:
+                            # A new message's run always writes one; a long
+                            # run's pruned checkpoints can drop it.
+                            logger.warning(
+                                "Run %s on thread %s has no input checkpoint; "
+                                "value-message processing disabled for the "
+                                "read-back",
+                                run_id,
+                                request.thread_id,
+                            )
+                    if start_messages is None:
+                        # The pre-run read can predate another run's answer:
+                        # judged against it, the value snapshots would show
+                        # that answer as this turn's. Skip them, as when the
+                        # pre-run read itself fails.
                         processor.stop_value_messages()
                 if start_messages is not None:
                     processor.mark_messages_seen(start_messages)

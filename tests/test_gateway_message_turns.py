@@ -2497,12 +2497,15 @@ async def test_read_back_value_snapshots_start_at_the_runs_input_checkpoint(
     assert _texts(events) == ["Hello world"]
 
 
-async def test_read_back_with_an_unreadable_input_checkpoint_shows_no_other_runs_answer(
-    quiet_poll,
+@pytest.mark.parametrize("checkpoint", ["unreadable", "pruned"])
+async def test_read_back_without_a_readable_input_checkpoint_shows_no_other_runs_answer(
+    quiet_poll, caplog, checkpoint
 ):
-    """The input checkpoint cannot be read, so the pre-run read is the only
-    baseline, and it predates the other run's answer: the read-back's value
-    snapshots must not show that answer as this turn's."""
+    """No input checkpoint to start from, because the read fails or because a
+    long run's checkpoints were pruned (the read then finds none): the pre-run
+    read is the only baseline, and it predates the other run's answer, so the
+    read-back's value snapshots are skipped. This run's answer exists only in
+    those snapshots, so the turn ends as a successful, empty ``done``."""
     run = [
         _lifecycle("run-1", "running"),
         _values(_THIS_RUN_DONE["messages"][:-1], "1-0"),
@@ -2511,21 +2514,27 @@ async def test_read_back_with_an_unreadable_input_checkpoint_shows_no_other_runs
     ]
     stream = FakeLangGraphThreadStream(THREAD_ID, events=run, live_limit=0)
     gateway, threads = _gateway(stream, values=_EARLIER_STATE)
-    _start_after_another_run(
-        stream, threads, input_checkpoint={"values": _AFTER_THE_OTHER_RUN}
-    )
-    get_history = threads.get_history
+    if checkpoint == "pruned":
+        _start_after_another_run(stream, threads, input_checkpoint=None)
+    else:
+        _start_after_another_run(
+            stream, threads, input_checkpoint={"values": _AFTER_THE_OTHER_RUN}
+        )
+        get_history = threads.get_history
 
-    async def input_checkpoint_unreadable(thread_id, **kwargs):
-        if (kwargs.get("metadata") or {}).get("source") == "input":
-            raise RuntimeError("checkpoint pruned")
-        return await get_history(thread_id, **kwargs)
+        async def input_checkpoint_unreadable(thread_id, **kwargs):
+            if (kwargs.get("metadata") or {}).get("source") == "input":
+                raise RuntimeError("history unavailable")
+            return await get_history(thread_id, **kwargs)
 
-    threads.get_history = input_checkpoint_unreadable
+        threads.get_history = input_checkpoint_unreadable
 
-    events = await _turn(gateway, "hi")
+    with caplog.at_level("WARNING"):
+        events = await _turn(gateway, "hi")
 
-    assert "Other answer" not in "".join(_texts(events))
+    assert _texts(events) == []
+    assert events[-1] == {"type": "done", "content": "", "response": ""}
+    assert "value-message processing disabled for the read-back" in caplog.text
 
 
 async def test_state_completion_without_an_input_checkpoint_raises(quiet_poll):
