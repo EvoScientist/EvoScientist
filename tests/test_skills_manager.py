@@ -2431,13 +2431,18 @@ class TestGithubInstallConfinement:
             )
             fake_junction = tmp_path / "fake-junction"
             fake_junction.mkdir()
-            monkeypatch.setattr(
-                os,
-                "lstat",
-                lambda p: SimpleNamespace(
-                    st_reparse_tag=mount_tag if Path(p) == fake_junction else 0
-                ),
-            )
+            real_lstat = os.lstat
+
+            def fake_lstat(p, *args, **kwargs):
+                st = real_lstat(p, *args, **kwargs)
+                if Path(p) == fake_junction:
+                    return SimpleNamespace(
+                        st_mode=st.st_mode,
+                        st_reparse_tag=mount_tag,
+                    )
+                return st
+
+            monkeypatch.setattr(os, "lstat", fake_lstat)
             assert _is_reparse_link(fake_junction) is True
             assert _is_reparse_link(ordinary) is False
 
