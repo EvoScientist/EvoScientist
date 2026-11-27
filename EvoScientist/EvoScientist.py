@@ -19,6 +19,7 @@ Usage:
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -96,6 +97,21 @@ _auxiliary_chat_model_key: tuple[str | None, str | None] | None = None
 # to MCP servers on every `/new` when config is unchanged.
 _MCP_TOOLS_CACHE_KEY: str | None = None
 _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
+
+# A failed load is kept only for a short backoff: the next graph build after
+# it expires retries, so a server that was down at start-up recovers without
+# a server restart. A recovery bumps the epoch so graphs built from the
+# failed load are rebuilt (the server keeps graphs for its whole life).
+_MCP_RETRY_AFTER_SECONDS = 5.0
+_MCP_RETRY_AT = 0.0
+_MCP_LOAD_EPOCH = 0
+_mcp_now = time.monotonic  # indirect so tests can advance the clock
+
+
+def mcp_tools_epoch() -> int:
+    """Bumped whenever a previously failing MCP config loads successfully."""
+    return _MCP_LOAD_EPOCH
+
 
 # Default agent (no checkpointer) — used by LangSmith / notebooks; the server
 # builds its graphs per project (``build_main_graph``).
@@ -280,7 +296,8 @@ def _load_mcp_tools_cached(
             :func:`EvoScientist.mcp.load_mcp_tools`.  Only invoked on a
             cache miss — cached replays don't re-emit progress events.
     """
-    global _MCP_TOOLS_CACHE_KEY, _MCP_TOOLS_CACHE_VALUE
+    global _MCP_TOOLS_CACHE_KEY, _MCP_TOOLS_CACHE_VALUE, _MCP_RETRY_AT
+    global _MCP_LOAD_EPOCH
 
     from .mcp import load_mcp_tools
 
@@ -288,16 +305,37 @@ def _load_mcp_tools_cached(
     if not cfg_key:
         _MCP_TOOLS_CACHE_KEY = ""
         _MCP_TOOLS_CACHE_VALUE = {}
+        _MCP_RETRY_AT = 0.0
         return {}
 
+    now = _mcp_now()
     if _MCP_TOOLS_CACHE_KEY == cfg_key and _MCP_TOOLS_CACHE_VALUE is not None:
-        return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
+        if _MCP_RETRY_AT <= 0.0 or now < _MCP_RETRY_AT:
+            return {k: list(v) for k, v in _MCP_TOOLS_CACHE_VALUE.items()}
+
+    # A per-server failure is reported through the progress callback; a load
+    # that fails as a whole returns {} without any success event. We install
+    # our own callback so the failure is visible even when the caller did not
+    # ask for progress, while still forwarding every event to theirs.
+    events: list[str] = []
+
+    def _track(event: str, name: str, detail: str) -> None:
+        events.append(event)
+        if on_progress is not None:
+            on_progress(event, name, detail)
 
     loaded = load_mcp_tools(
         config=cfg,
-        on_progress=on_progress,
+        on_progress=_track,
         runtime=runtime,
     )
+    failed = "error" in events or "success" not in events
+    if failed:
+        _MCP_RETRY_AT = now + _MCP_RETRY_AFTER_SECONDS
+    else:
+        if _MCP_RETRY_AT > 0.0:
+            _MCP_LOAD_EPOCH += 1
+        _MCP_RETRY_AT = 0.0
     _MCP_TOOLS_CACHE_KEY = cfg_key
     _MCP_TOOLS_CACHE_VALUE = {k: list(v) for k, v in loaded.items()}
     return {k: list(v) for k, v in loaded.items()}
