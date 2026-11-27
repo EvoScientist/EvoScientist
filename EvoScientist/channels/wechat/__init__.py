@@ -87,6 +87,8 @@ def create_from_config(config):
             encoding_aes_key=config.wechat_mp_encoding_aes_key,
             webhook_port=port,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
             proxy=proxy,
         )
         return WeChatChannel(mp_config, backend="wechatmp")
@@ -99,6 +101,8 @@ def create_from_config(config):
         encoding_aes_key=config.wechat_wecom_encoding_aes_key,
         webhook_port=port,
         allowed_senders=allowed,
+        require_mention=config.require_mention,
+        dm_policy=config.dm_policy,
         proxy=proxy,
     )
     return WeChatChannel(wecom_config, backend="wecom")

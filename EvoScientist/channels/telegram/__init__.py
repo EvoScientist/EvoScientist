@@ -11,6 +11,8 @@ def create_from_config(config) -> TelegramChannel:
         TelegramConfig(
             bot_token=config.telegram_bot_token,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
             proxy=proxy,
         )
     )

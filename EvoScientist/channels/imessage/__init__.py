@@ -36,7 +36,13 @@ __all__ = [
 
 def create_from_config(config) -> IMessageChannel:
     allowed = _parse_csv(config.imessage_allowed_senders)
-    return IMessageChannel(IMessageConfig(allowed_senders=allowed))
+    return IMessageChannel(
+        IMessageConfig(
+            allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
+        )
+    )
 
 
 register_channel("imessage", create_from_config)

@@ -31,6 +31,8 @@ class BaseChannelConfig:
     include_attachments: bool = True
     debug_trace: bool = False
     accounts: dict | None = None  # multi-account config mapping
+    require_mention: str = "group"  # "always" | "group" | "off"
+    dm_policy: str = "allowlist"  # "open" | "allowlist" | "pairing"
 
 
 class SingleAccountConfigAdapter:

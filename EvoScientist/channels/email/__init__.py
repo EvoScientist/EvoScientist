@@ -36,6 +36,8 @@ def create_from_config(config) -> EmailChannel:
             max_body_chars=config.email_max_body_chars,
             subject_prefix=config.email_subject_prefix,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
         )
     )
 

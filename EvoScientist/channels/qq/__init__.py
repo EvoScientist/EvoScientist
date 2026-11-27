@@ -22,6 +22,8 @@ def create_from_config(config) -> QQChannel:
             app_id=config.qq_app_id,
             app_secret=config.qq_app_secret,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
         )
     )
 

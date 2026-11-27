@@ -23,6 +23,8 @@ def create_from_config(config) -> DingTalkChannel:
             client_id=config.dingtalk_client_id,
             client_secret=config.dingtalk_client_secret,
             allowed_senders=allowed,
+            require_mention=config.require_mention,
+            dm_policy=config.dm_policy,
             proxy=proxy,
         )
     )
