@@ -2381,3 +2381,146 @@ class TestGithubInstallConfinement:
         sep_idx = argv.index("--")
         assert argv[sep_idx + 1] == "https://github.com/owner/repo.git"
         assert argv[sep_idx + 2] == "--upload-pack=evil"
+
+    @staticmethod
+    def _link_dir(link_path: Path, target_dir: Path) -> None:
+        import os
+        import subprocess
+
+        try:
+            link_path.symlink_to(target_dir, target_is_directory=True)
+            return
+        except OSError:
+            if os.name != "nt":
+                pytest.skip("directory symlinks are not available")
+        proc = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            pytest.skip("junctions are not available")
+
+    def test_is_reparse_link_detects_junction_without_path_is_junction(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+        import stat
+        from types import SimpleNamespace
+
+        from EvoScientist.tools.skills_manager import _is_reparse_link
+
+        ordinary = tmp_path / "ordinary"
+        ordinary.mkdir()
+
+        # Simulate Python 3.11 where Path.is_junction does not exist.
+        monkeypatch.setattr(Path, "is_junction", None, raising=False)
+
+        if os.name == "nt":
+            target = tmp_path / "target"
+            target.mkdir()
+            junction = tmp_path / "junction"
+            self._link_dir(junction, target)
+            assert _is_reparse_link(junction) is True
+            assert _is_reparse_link(ordinary) is False
+        else:
+            mount_tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+            monkeypatch.setattr(
+                stat, "IO_REPARSE_TAG_MOUNT_POINT", mount_tag, raising=False
+            )
+            fake_junction = tmp_path / "fake-junction"
+            fake_junction.mkdir()
+            monkeypatch.setattr(
+                os,
+                "lstat",
+                lambda p: SimpleNamespace(
+                    st_reparse_tag=mount_tag if Path(p) == fake_junction else 0
+                ),
+            )
+            assert _is_reparse_link(fake_junction) is True
+            assert _is_reparse_link(ordinary) is False
+
+    def test_install_from_github_rejects_nested_escape_through_confined_dir_link(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
+        outside_dir = tmp_path / "outside-secrets"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("TOP_SECRET", encoding="utf-8")
+
+        def fake_clone(repo, ref, dest):
+            dest_path = Path(dest)
+            shared = dest_path / "shared"
+            shared.mkdir(parents=True)
+            self._link_dir(shared / "leak", outside_dir)
+
+            skill_dir = self._write_skill(dest_path / "two-hop-skill", "two-hop-skill")
+            self._link_dir(skill_dir / "assets", shared)
+
+        with patch(
+            "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+        ):
+            result = install_skill(
+                "owner/repo@two-hop-skill", str(temp_skills_dir), workspace=skills_ws
+            )
+
+        assert result["success"] is False
+        assert "escaping" in result["error"].lower()
+        assert not (temp_skills_dir / "two-hop-skill").exists()
+
+    def test_has_escaping_link_accepts_confined_dir_link_and_handles_cycles(
+        self, tmp_path
+    ):
+        from EvoScientist.tools.skills_manager import _has_escaping_link
+
+        clone_root = (tmp_path / "clone").resolve()
+        shared = clone_root / "shared"
+        shared.mkdir(parents=True)
+        (shared / "notes.txt").write_text("safe", encoding="utf-8")
+
+        skill_dir = self._write_skill(clone_root / "safe-skill", "safe-skill")
+        self._link_dir(skill_dir / "assets", shared)
+        self._link_dir(shared / "back", skill_dir)
+
+        assert _has_escaping_link(skill_dir, clone_root) is False
+
+    def test_fetch_remote_skill_index_skips_skill_with_resolution_runtime_error(
+        self, tmp_path
+    ):
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+
+        def fake_clone(repo, ref, dest):
+            skills_root = Path(dest) / "skills"
+            self._write_skill(skills_root / "good-skill", "good-skill")
+            bad_skill = self._write_skill(skills_root / "cyclic-skill", "cyclic-skill")
+            (bad_skill / "loop").write_text("placeholder", encoding="utf-8")
+
+        orig_resolve = Path.resolve
+
+        def resolve_with_py311_cycle(self, *args, **kwargs):
+            if self.name == "loop":
+                raise RuntimeError("Symlink loop from loop")
+            return orig_resolve(self, *args, **kwargs)
+
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager._clone_repo", side_effect=fake_clone
+            ),
+            patch(
+                "EvoScientist.tools.skills_manager._is_reparse_link",
+                side_effect=lambda p: p.name == "loop",
+            ),
+            patch.object(Path, "resolve", resolve_with_py311_cycle),
+        ):
+            index = fetch_remote_skill_index(repo="test/cycle")
+
+        assert [entry["name"] for entry in index] == ["good-skill"]
+
+    def test_resolve_within_clone_handles_runtime_error(self, tmp_path):
+        from EvoScientist.tools.skills_manager import _resolve_within_clone
+
+        clone_root = tmp_path.resolve()
+        with patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            assert _resolve_within_clone(clone_root, "loop-skill") is None

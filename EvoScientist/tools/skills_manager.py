@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -878,7 +879,16 @@ def _is_reparse_link(path: Path) -> bool:
     if path.is_symlink():
         return True
     is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction and is_junction())
+    if is_junction is not None:
+        return bool(is_junction())
+    mount_point_tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+    if mount_point_tag is None:
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return getattr(st, "st_reparse_tag", 0) == mount_point_tag
 
 
 def _resolve_within_clone(clone_root: Path, subpath: str | None) -> Path | None:
@@ -887,7 +897,7 @@ def _resolve_within_clone(clone_root: Path, subpath: str | None) -> Path | None:
         return clone_root
     try:
         candidate = (clone_root / subpath).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     if not candidate.is_relative_to(clone_root):
         return None
@@ -897,37 +907,49 @@ def _resolve_within_clone(clone_root: Path, subpath: str | None) -> Path | None:
 def _has_escaping_link(root: Path, boundary: Path) -> bool:
     """Return True if *root* or any link under it resolves outside *boundary*."""
     try:
+        resolved_boundary = boundary.resolve()
         resolved_root = root.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return True
-    if not resolved_root.is_relative_to(boundary):
+    if not resolved_root.is_relative_to(resolved_boundary):
         return True
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(dirpath)
-        kept_dirs: list[str] = []
-        for name in dirnames:
-            if name == ".git":
-                continue
-            entry = base / name
-            if _is_reparse_link(entry):
-                try:
-                    target = entry.resolve()
-                except OSError:
-                    return True
-                if not target.is_relative_to(boundary):
-                    return True
-                continue
-            kept_dirs.append(name)
-        dirnames[:] = kept_dirs
-        for name in filenames:
-            entry = base / name
-            if _is_reparse_link(entry):
-                try:
-                    target = entry.resolve()
-                except OSError:
-                    return True
-                if not target.is_relative_to(boundary):
-                    return True
+
+    visited: set[Path] = {resolved_root}
+    pending: list[Path] = [resolved_root]
+
+    while pending:
+        current = pending.pop()
+        for dirpath, dirnames, filenames in os.walk(current, followlinks=False):
+            base = Path(dirpath)
+            visited.add(base)
+            kept_dirs: list[str] = []
+            for name in dirnames:
+                if name == ".git":
+                    continue
+                entry = base / name
+                if _is_reparse_link(entry):
+                    try:
+                        target = entry.resolve()
+                        target_is_dir = target.is_dir()
+                    except (OSError, RuntimeError):
+                        return True
+                    if not target.is_relative_to(resolved_boundary):
+                        return True
+                    if target_is_dir and target not in visited:
+                        visited.add(target)
+                        pending.append(target)
+                    continue
+                kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+            for name in filenames:
+                entry = base / name
+                if _is_reparse_link(entry):
+                    try:
+                        target = entry.resolve()
+                    except (OSError, RuntimeError):
+                        return True
+                    if not target.is_relative_to(resolved_boundary):
+                        return True
     return False
 
 
