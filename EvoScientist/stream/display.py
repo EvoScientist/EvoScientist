@@ -347,7 +347,11 @@ def _register_stream_cancel_handle(
     *,
     ignored_request: int | None = None,
 ) -> None:
-    """Register an active owned task, honoring a pre-start stop request."""
+    """Register an active owned task, honoring a pre-start stop request.
+
+    A pending stop is not honored while the scope's stop count still equals
+    *ignored_request*.
+    """
     scope_key = _stream_cancel_scope_key(cancel_scope)
     with _stream_cancel_lock:
         handles = _stream_cancel_handles.setdefault(scope_key, set())

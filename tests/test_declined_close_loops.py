@@ -198,6 +198,7 @@ class TestRichLoopClosesAtADecline:
             display_mod.request_stream_cancel(cancel_scope)
             assert worker.result(timeout=2) == "partial\n[Stopped.]"
             assert close_cancelled.is_set()
+        assert cancel_scope not in display_mod._stream_cancel_handles
 
     @pytest.mark.parametrize(
         "outcome",

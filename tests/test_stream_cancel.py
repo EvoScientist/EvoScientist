@@ -167,6 +167,16 @@ def test_cancelled_stream_does_not_repaint_final_live_frame():
     live.refresh.assert_not_called()
 
 
+def test_a_stop_after_the_ignored_count_cancels_at_registration():
+    scope = "scope:close"
+    display_mod.request_stream_cancel(scope)
+    seen = display_mod._stream_cancel_request_count(scope)
+    display_mod.request_stream_cancel(scope)
+    handle = display_mod.RuntimeHandle()
+    display_mod._register_stream_cancel_handle(scope, handle, ignored_request=seen)
+    assert handle.cancelled()
+
+
 def test_cancel_unwinds_hitl_prompt_and_renderer(monkeypatch):
     """The real Rich HITL branch must release its prompt before returning."""
     cancel_scope = "scope:hitl-questionary"
