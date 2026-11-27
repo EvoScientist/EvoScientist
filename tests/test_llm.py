@@ -2028,19 +2028,311 @@ class TestFlattenMessageContent:
 # =============================================================================
 
 
+class _OpenAICompatDouble:
+    """A chat model double whose call paths live on the class.
+
+    The content normalization is a mixin, so a double that kept its methods
+    on the instance could not take it over.
+    """
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.generate = None
+        self.agenerate = None
+        self.stream = None
+        self.astream = None
+
+    def _generate(self, messages, *args, **kwargs):
+        self.calls.append(messages)
+        if self.generate is not None:
+            return self.generate(messages, *args, **kwargs)
+        return "gen_result"
+
+    async def _agenerate(self, messages, *args, **kwargs):
+        self.calls.append(messages)
+        if self.agenerate is not None:
+            return await self.agenerate(messages, *args, **kwargs)
+        return "agen_result"
+
+    def _stream(self, messages, *args, **kwargs):
+        self.calls.append(messages)
+        if self.stream is not None:
+            yield from self.stream(messages, *args, **kwargs)
+            return
+        yield "chunk1"
+
+    async def _astream(self, messages, *args, **kwargs):
+        self.calls.append(messages)
+        if self.astream is not None:
+            async for chunk in self.astream(messages, *args, **kwargs):
+                yield chunk
+            return
+        yield "c1"
+        yield "c2"
+
+
+class TestCopiedModelKeepsItsSettings:
+    """A copy of a model sends its own settings (#897).
+
+    The content normalization used to be closures over the original's bound
+    methods, so a copy called the original and every request carried the
+    original's settings.
+    """
+
+    @staticmethod
+    def _bodies() -> tuple[list[dict], object]:
+        import json
+
+        import httpx
+
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "x",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "ok"},
+                        }
+                    ],
+                },
+            )
+
+        return sent, httpx.MockTransport(handler)
+
+    def test_a_copy_of_an_openai_compatible_model_sends_its_own_settings(self):
+        import httpx
+        from langchain_openai import ChatOpenAI
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        sent, transport = self._bodies()
+        model = ChatOpenAI(
+            model="some-model",
+            api_key="test",
+            base_url="http://example.invalid/v1",
+            reasoning_effort="high",
+            temperature=0.7,
+            http_client=httpx.Client(transport=transport),
+        )
+        _patch_openai_compat_content(model)
+
+        copy = model.model_copy(
+            update={
+                "model_name": "other-model",
+                "reasoning_effort": "low",
+                "temperature": 0.1,
+            }
+        )
+        copy.invoke("hi")
+
+        assert sent[-1]["model"] == "other-model"
+        assert sent[-1]["reasoning_effort"] == "low"
+        assert sent[-1]["temperature"] == 0.1
+
+        # The original sends its own settings still.
+        model.invoke("hi")
+        assert sent[-1]["model"] == "some-model"
+        assert sent[-1]["reasoning_effort"] == "high"
+        assert sent[-1]["temperature"] == 0.7
+
+    @staticmethod
+    def _openrouter_client(sent: list[dict]) -> object:
+        """An OpenRouter SDK client whose transport records the request body."""
+        import json
+
+        import httpx
+        import openrouter
+
+        def reply(body: dict) -> httpx.Response:
+            if body.get("stream"):
+                chunk = {
+                    "id": "gen-1",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                payload = (
+                    "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+                ).encode()
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=payload,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "gen-1",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "m",
+                    "system_fingerprint": None,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "ok"},
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            )
+
+        def respond(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            return reply(body)
+
+        async def respond_async(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            return reply(body)
+
+        return openrouter.OpenRouter(
+            api_key="test",
+            server_url="http://example.invalid/api/v1",
+            client=httpx.Client(transport=httpx.MockTransport(respond)),
+            async_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(respond_async)
+            ),
+        )
+
+    def test_a_copy_of_an_openrouter_model_sends_its_own_settings(self, monkeypatch):
+        from langchain_openrouter import ChatOpenRouter
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+
+        sent: list[dict] = []
+        model = ChatOpenRouter(
+            model="vendor/some-model",
+            temperature=0.7,
+            client=self._openrouter_client(sent),
+        )
+        _patch_openai_compat_content(model)
+
+        copy = model.model_copy(
+            update={"model_name": "vendor/other-model", "temperature": 0.1}
+        )
+        copy.invoke("hi")
+
+        assert sent[-1]["model"] == "vendor/other-model"
+        assert sent[-1]["temperature"] == 0.1
+
+        # The original sends its own settings still.
+        model.invoke("hi")
+        assert sent[-1]["model"] == "vendor/some-model"
+        assert sent[-1]["temperature"] == 0.7
+
+    async def test_a_patched_openrouter_model_streams_asynchronously(self, monkeypatch):
+        """The normalization must forward the caller's kwargs, nothing else.
+
+        ChatOpenRouter hands its kwargs to the OpenRouter SDK's
+        ``chat.send_async``, which has no ``stream_usage`` parameter.
+        """
+        from langchain_openrouter import ChatOpenRouter
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+
+        sent: list[dict] = []
+        model = ChatOpenRouter(
+            model="vendor/some-model",
+            client=self._openrouter_client(sent),
+        )
+        _patch_openai_compat_content(model)
+
+        chunks = [chunk.content async for chunk in model.astream("hi")]
+
+        assert "".join(chunks) == "ok"
+        assert sent[-1]["stream"] is True
+        assert "stream_usage" not in sent[-1]
+
+    def test_a_copy_skips_media_its_original_learned_to_strip(self):
+        import httpx
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        _sent, ok = self._bodies()
+        refused = []
+
+        def handler(request):
+            if b"image_url" in request.content:
+                refused.append(request)
+                return httpx.Response(
+                    400, json={"error": {"message": "image input is not supported"}}
+                )
+            return ok.handle_request(request)
+
+        model = ChatOpenAI(
+            model="some-model",
+            api_key="test",
+            base_url="http://example.invalid/v1",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        _patch_openai_compat_content(model)
+        copy = model.model_copy(update={"temperature": 0.1})
+        image = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, image])
+
+        model.invoke([msg])
+        copy.invoke([msg])
+
+        assert len(refused) == 1
+
+    def test_a_copy_still_normalizes_the_content(self):
+        import httpx
+        from langchain_core.messages import HumanMessage
+        from langchain_openai import ChatOpenAI
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        sent, transport = self._bodies()
+        model = ChatOpenAI(
+            model="some-model",
+            api_key="test",
+            base_url="http://example.invalid/v1",
+            http_client=httpx.Client(transport=transport),
+        )
+        _patch_openai_compat_content(model)
+
+        copy = model.model_copy(update={"model_name": "other-model"})
+        copy.invoke([HumanMessage(content=[{"type": "text", "text": "hello"}])])
+
+        # The list content was flattened to a string on the wire.
+        assert sent[-1]["messages"][0]["content"] == "hello"
+
+
 class TestPatchOpenAICompatContent:
     """Verify content flattening covers _generate, _agenerate, _stream, _astream."""
 
     def _make_model(self):
-        """Create a minimal mock model with all 4 methods."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        model = MagicMock()
-        model._generate = MagicMock(return_value="gen_result")
-        model._agenerate = AsyncMock(return_value="agen_result")
-        model._stream = MagicMock(return_value=iter(["chunk1"]))
-        model._astream = AsyncMock()
-        return model
+        """Create a minimal model with all 4 methods."""
+        return _OpenAICompatDouble()
 
     def test_generate_flattened(self):
         from langchain_core.messages import HumanMessage
@@ -2048,13 +2340,12 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
         model._generate([msg])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == "hello"
 
     async def test_agenerate_flattened(self):
@@ -2063,13 +2354,12 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._agenerate
         _patch_openai_compat_content(model)
 
         msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
         await model._agenerate([msg])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == "hello"
 
     def test_stream_flattened(self):
@@ -2078,13 +2368,12 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._stream
         _patch_openai_compat_content(model)
 
         msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
         list(model._stream([msg]))
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == "hello"
 
     async def test_astream_flattened(self):
@@ -2100,7 +2389,7 @@ class TestPatchOpenAICompatContent:
             for chunk in ["c1", "c2"]:
                 yield chunk
 
-        model._astream = _fake_astream
+        model.astream = _fake_astream
         _patch_openai_compat_content(model)
 
         msg = HumanMessage(content=[{"type": "text", "text": "hello"}])
@@ -2117,14 +2406,13 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
         msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
         model._generate([msg])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
 
     async def test_agenerate_preserves_media(self):
@@ -2133,14 +2421,13 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._agenerate
         _patch_openai_compat_content(model)
 
         img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
         msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
         await model._agenerate([msg])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
 
     def test_stream_preserves_media(self):
@@ -2149,14 +2436,13 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._stream
         _patch_openai_compat_content(model)
 
         img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
         msg = HumanMessage(content=[{"type": "text", "text": "see"}, img])
         list(model._stream([msg]))
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
 
     async def test_astream_preserves_media(self):
@@ -2172,7 +2458,7 @@ class TestPatchOpenAICompatContent:
             for chunk in ["c1", "c2"]:
                 yield chunk
 
-        model._astream = _fake_astream
+        model.astream = _fake_astream
         _patch_openai_compat_content(model)
 
         img = {"type": "image", "base64": "AAA", "mime_type": "image/png"}
@@ -2190,7 +2476,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)  # hoist_tool_media=True (OpenAI-compat)
 
         # deepagents read_file emits this exact shape for an image file.
@@ -2203,7 +2488,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([tm])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         # Tool content becomes a string placeholder (OpenAI-compat requirement) ...
         assert isinstance(called_msgs[0].content, str)
         # ... and the image is hoisted into a following HumanMessage.
@@ -2220,7 +2505,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model, hoist_tool_media=False)  # Anthropic-routed
 
         tm = ToolMessage(
@@ -2232,7 +2516,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([tm])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         # No hoisting: image stays inline in the tool message content.
         assert len(called_msgs) == 1
         content = called_msgs[0].content
@@ -2245,7 +2529,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         ai = AIMessage(
@@ -2271,7 +2554,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([ai, t1, t2])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         # Tool results stay consecutive; one hoisted HumanMessage follows them.
         assert [m.type for m in called_msgs] == ["ai", "tool", "tool", "human"]
         assert isinstance(called_msgs[1].content, str)
@@ -2285,7 +2568,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         msg = AIMessage(
@@ -2296,7 +2578,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([msg])
 
-        called_msgs = orig.call_args[0][0]
+        called_msgs = model.calls[0]
         assert called_msgs[0].content == "hi"
 
     def test_tool_media_flushed_before_next_human(self):
@@ -2305,7 +2587,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         tm = ToolMessage(
@@ -2318,7 +2599,7 @@ class TestPatchOpenAICompatContent:
         nxt = HumanMessage(content="thanks")
         model._generate([tm, nxt])
 
-        called = orig.call_args[0][0]
+        called = model.calls[0]
         # tool(placeholder), hoisted image (human), then the original human msg
         assert [m.type for m in called] == ["tool", "human", "human"]
         assert isinstance(called[0].content, str)
@@ -2331,7 +2612,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         tm = ToolMessage(
@@ -2344,7 +2624,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([tm])
 
-        called = orig.call_args[0][0]
+        called = model.calls[0]
         # Tool keeps the text as its string content; image hoisted to a human msg.
         assert called[0].content == "chart description"
         assert any(b.get("type") == "image" for b in called[1].content)
@@ -2357,7 +2637,6 @@ class TestPatchOpenAICompatContent:
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        orig = model._generate
         _patch_openai_compat_content(model)
 
         tm = ToolMessage(
@@ -2371,7 +2650,7 @@ class TestPatchOpenAICompatContent:
         )
         model._generate([tm])
 
-        called = orig.call_args[0][0]
+        called = model.calls[0]
         # both text runs preserved in the tool placeholder; image hoisted
         assert "before" in called[0].content
         assert "after" in called[0].content
@@ -2398,13 +2677,7 @@ class TestNoVisionFallback:
         )
 
     def _make_model(self):
-        from unittest.mock import MagicMock
-
-        model = MagicMock()
-        model._agenerate = None
-        model._stream = None
-        model._astream = None
-        return model
+        return _OpenAICompatDouble()
 
     def test_media_error_types(self):
         from EvoScientist.llm.patches import (
@@ -2530,7 +2803,7 @@ class TestNoVisionFallback:
             calls.append(msgs)
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         assert model._generate([self._img_tool()]) == "ok"
@@ -2550,7 +2823,7 @@ class TestNoVisionFallback:
             calls.append(msgs)
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         assert model._generate([self._img_tool()]) == "ok"
@@ -2575,7 +2848,7 @@ class TestNoVisionFallback:
                 raise Exception("unknown variant `image_url`, expected `text`")
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         tm = self._img_tool()
@@ -2602,7 +2875,7 @@ class TestNoVisionFallback:
             calls.append(msgs)
             raise Exception("rate limit exceeded")
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         with pytest.raises(Exception, match="rate limit"):
@@ -2610,12 +2883,11 @@ class TestNoVisionFallback:
         assert len(calls) == 1
 
     def test_stream_falls_back(self):
-        from unittest.mock import MagicMock
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        model._generate = MagicMock(return_value="g")
+        model.generate = lambda *a, **k: "g"
         calls = []
 
         def _stream(msgs, *a, **k):
@@ -2624,7 +2896,7 @@ class TestNoVisionFallback:
                 raise Exception("No endpoints found that support image input")
             yield from ["x", "y"]
 
-        model._stream = _stream
+        model.stream = _stream
         _patch_openai_compat_content(model)
 
         out = list(model._stream([self._img_tool()]))
@@ -2632,12 +2904,11 @@ class TestNoVisionFallback:
         assert len(calls) == 2
 
     async def test_astream_falls_back(self):
-        from unittest.mock import MagicMock
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        model._generate = MagicMock(return_value="g")
+        model.generate = lambda *a, **k: "g"
         calls = []
 
         async def _astream(msgs, *a, **k):
@@ -2647,7 +2918,7 @@ class TestNoVisionFallback:
             for c in ["x", "y"]:
                 yield c
 
-        model._astream = _astream
+        model.astream = _astream
         _patch_openai_compat_content(model)
 
         out = [c async for c in model._astream([self._img_tool()])]
@@ -2669,7 +2940,7 @@ class TestNoVisionFallback:
             calls.append(msgs)
             raise _E("invalid tool schema")  # 400, not media; fails every time
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         tm = self._img_tool()
@@ -2708,7 +2979,7 @@ class TestNoVisionFallback:
                 raise Exception("file input is not supported")
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         pdf_tm = ToolMessage(
@@ -2752,7 +3023,7 @@ class TestNoVisionFallback:
                 raise _E("transient bad request")  # 400, no media marker
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         tm = self._img_tool()
@@ -2787,7 +3058,7 @@ class TestNoVisionFallback:
                 raise Exception("file input is not supported")
             return "ok"
 
-        model._generate = _gen
+        model.generate = _gen
         _patch_openai_compat_content(model)
 
         mixed = HumanMessage(
@@ -2814,12 +3085,11 @@ class TestNoVisionFallback:
     def test_stream_empty_retry_raises_original(self):
         # If the stripped streaming retry yields ZERO chunks, surface the
         # original error instead of silently returning an empty stream.
-        from unittest.mock import MagicMock
 
         from EvoScientist.llm.patches import _patch_openai_compat_content
 
         model = self._make_model()
-        model._generate = MagicMock(return_value="g")
+        model.generate = lambda *a, **k: "g"
         calls = []
 
         def _stream(msgs, *a, **k):
@@ -2829,7 +3099,7 @@ class TestNoVisionFallback:
             return  # retry yields nothing
             yield  # pragma: no cover  (makes this a generator)
 
-        model._stream = _stream
+        model.stream = _stream
         _patch_openai_compat_content(model)
 
         with pytest.raises(Exception, match="support image"):
