@@ -937,6 +937,5 @@ async def consume_notifications(
         and n.status in TERMINAL_STATUSES
         and bg_processes is not None
         and n.task_id in bg_processes
-        and bg_processes[n.task_id].get("status") not in TERMINAL_STATUSES
     }
     await run_message(text, survivors, bg_processes=marks or None)

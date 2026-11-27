@@ -668,9 +668,10 @@ def test_rich_notification_turn_carries_the_mark(monkeypatch, workspace):
 
     async def prompt(*args, **kwargs):
         # The real queue poll delivers the notice while the prompt waits.
-        async with asyncio.timeout(5):
-            while not gateway.requests:
-                await asyncio.sleep(0.02)
+        for _ in range(250):
+            if gateway.requests:
+                break
+            await asyncio.sleep(0.02)
         raise EOFError
 
     monkeypatch.setattr(
