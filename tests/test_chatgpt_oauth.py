@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai.chatgpt_oauth import (
     _ChatGPTOAuthRefreshError,
@@ -323,6 +324,38 @@ async def test_streaming_disabled_copy_returns_structured_output(signed_in):
 
     assert picked == {"tools": ["ls"]}
     assert wire.body_json["text"]["format"]["type"] == "json_schema"
+
+
+class _Tokens(BaseCallbackHandler):
+    def __init__(self) -> None:
+        self.tokens: list[str] = []
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        self.tokens.append(token)
+
+
+def test_streaming_disabled_copy_reports_tokens_to_callbacks(signed_in):
+    wire = Wire()
+    model = build_model("gpt-6-sol", reasoning=REASONING, **wire.clients())
+    handler = _Tokens()
+
+    disable_streaming(model).invoke(
+        [HumanMessage("hi")], config={"callbacks": [handler]}
+    )
+
+    assert "".join(handler.tokens) == "ok"
+
+
+async def test_streaming_disabled_copy_reports_tokens_to_callbacks_async(signed_in):
+    wire = Wire()
+    model = build_model("gpt-6-sol", reasoning=REASONING, **wire.clients())
+    handler = _Tokens()
+
+    await disable_streaming(model).ainvoke(
+        [HumanMessage("hi")], config={"callbacks": [handler]}
+    )
+
+    assert "".join(handler.tokens) == "ok"
 
 
 # --- build_model -------------------------------------------------------------

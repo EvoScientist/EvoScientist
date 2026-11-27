@@ -233,7 +233,9 @@ class EvoChatOpenAICodex(_ChatOpenAICodex):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return generate_from_stream(self._stream(messages, stop=stop, **kwargs))
+        return generate_from_stream(
+            self._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
+        )
 
     async def _agenerate(
         self,
@@ -242,7 +244,9 @@ class EvoChatOpenAICodex(_ChatOpenAICodex):
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return await agenerate_from_stream(self._astream(messages, stop=stop, **kwargs))
+        return await agenerate_from_stream(
+            self._astream(messages, stop=stop, run_manager=run_manager, **kwargs)
+        )
 
 
 def build_model(model_id: str, **kwargs: Any) -> EvoChatOpenAICodex:
