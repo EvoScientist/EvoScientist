@@ -12,11 +12,11 @@ import logging
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -29,7 +29,7 @@ from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
-from .diff_format import build_edit_diff
+from .diff_format import build_edit_diff, diff_text
 from .formatter import ToolResultFormatter
 from .state import (
     StreamState,
@@ -156,14 +156,27 @@ def _file_state(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]] | N
     return (status.st_dev, status.st_ino), (status.st_size, status.st_mtime_ns)
 
 
+ReceivedFiles: TypeAlias = dict[tuple[int, int], tuple[int, int]]
+"""A turn's received files: file id ``(device, inode)`` -> ``(size, mtime_ns)``."""
+
+
 def received_media_state(
     received_media: Iterable[str] | None,
-) -> dict[tuple[int, int], tuple[int, int]]:
-    """The files that arrived with a message, as they are when its turn starts.
+) -> ReceivedFiles:
+    """The received files as they are when recorded for the current turn.
 
     Keyed by the file itself, so a read matches however the agent spells it.
     """
     return dict(filter(None, map(_file_state, received_media or ())))
+
+
+def record_received_media(
+    received_files: ReceivedFiles | None,
+    media: Iterable[str] | None,
+) -> None:
+    """Add files the user sent mid-turn to the turn's received files."""
+    if received_files is not None:
+        received_files.update(received_media_state(media))
 
 
 def forward_media_result(
@@ -176,7 +189,7 @@ def forward_media_result(
     media_dir: str | Path | None = None,
     routes: dict[str, Any] | None = None,
     dangerous: bool = False,
-    received_files: Mapping[tuple[int, int], tuple[int, int]] | None = None,
+    received_files: ReceivedFiles | None = None,
 ) -> None:
     """Send the media file a successful file tool result names to the channel.
 
@@ -189,7 +202,7 @@ def forward_media_result(
     dangerous mode when *dangerous* is set.
 
     A file in *received_files* (:func:`received_media_state`) came from the
-    user with this turn's message; a read of it is not sent back while it is
+    user during this turn; a read of it is not sent back while it is
     still as it arrived.
     """
     if (
@@ -306,6 +319,12 @@ def _response_markdown_for_display(
 formatter = ToolResultFormatter()
 
 
+class _StreamCancelEvent(threading.Event):
+    # Count requests so a parked-turn close can ignore stops made before it
+    # began and still honor one made while it runs.
+    request_count: int = 0
+
+
 # Stream-cancel events keyed by logical stream scope. Channel messages pass a
 # per-message scope so `/stop` only affects that message's run; scope-less
 # callers retain the legacy process-wide default event.
@@ -314,8 +333,8 @@ _DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
 # scoped cancellation lookup.  Re-entrancy prevents the Python signal callback
 # from deadlocking if it interrupts one of these short registry sections.
 _stream_cancel_lock = threading.RLock()
-_stream_cancel_events: dict[str, threading.Event] = {
-    _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
+_stream_cancel_events: dict[str, _StreamCancelEvent] = {
+    _DEFAULT_STREAM_CANCEL_SCOPE: _StreamCancelEvent()
 }
 # The flag remains useful for cancellation requested before a stream starts and
 # at synchronous HITL boundaries.  Active Rich streams additionally register
@@ -334,12 +353,12 @@ def _get_stream_cancel_event(
     cancel_scope: str | None,
     *,
     create: bool = False,
-) -> threading.Event | None:
+) -> _StreamCancelEvent | None:
     scope_key = _stream_cancel_scope_key(cancel_scope)
     with _stream_cancel_lock:
         event = _stream_cancel_events.get(scope_key)
         if event is None and create:
-            event = threading.Event()
+            event = _StreamCancelEvent()
             _stream_cancel_events[scope_key] = event
         return event
 
@@ -350,9 +369,10 @@ def request_stream_cancel(cancel_scope: str | None = None) -> bool:
     with _stream_cancel_lock:
         event = _stream_cancel_events.get(scope_key)
         if event is None:
-            event = threading.Event()
+            event = _StreamCancelEvent()
             _stream_cancel_events[scope_key] = event
         already_requested = event.is_set()
+        event.request_count += 1
         event.set()
         handles = tuple(_stream_cancel_handles.get(scope_key, ()))
 
@@ -371,14 +391,24 @@ def request_stream_cancel(cancel_scope: str | None = None) -> bool:
 def _register_stream_cancel_handle(
     cancel_scope: str | None,
     handle: RuntimeHandle[Any],
+    *,
+    ignored_request: int | None = None,
 ) -> None:
-    """Register an active owned task, honoring a pre-start stop request."""
+    """Register an active owned task, honoring a pre-start stop request.
+
+    A pending stop is not honored while the scope's stop count still equals
+    *ignored_request*.
+    """
     scope_key = _stream_cancel_scope_key(cancel_scope)
     with _stream_cancel_lock:
         handles = _stream_cancel_handles.setdefault(scope_key, set())
         handles.add(handle)
         event = _stream_cancel_events.get(scope_key)
-        cancel_now = event is not None and event.is_set()
+        cancel_now = (
+            event is not None
+            and event.is_set()
+            and event.request_count != ignored_request
+        )
     if cancel_now:
         handle.cancel()
 
@@ -425,6 +455,12 @@ def _run_owned_questionary_prompt(
 def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
     event = _get_stream_cancel_event(cancel_scope)
     return event.is_set() if event is not None else False
+
+
+def _stream_cancel_request_count(cancel_scope: str | None) -> int | None:
+    """How many stops a scope has seen, for telling earlier stops from later ones."""
+    event = _get_stream_cancel_event(cancel_scope)
+    return event.request_count if event is not None else None
 
 
 def clear_stream_cancel(cancel_scope: str | None = None) -> None:
@@ -565,7 +601,7 @@ def format_tool_result_compact(
         if old_str and new_str and old_str != new_str:
             diff_markup = build_edit_diff(path, old_str, new_str)
             if diff_markup:
-                elements.append(Text.from_markup(diff_markup))
+                elements.append(diff_text(diff_markup))
                 return elements
 
     # Special handling for write_todos (a failed call shows its error instead)
@@ -1878,7 +1914,7 @@ def _run_streaming(
     *,
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
-    received_media: list[str] | None = None,
+    received_files: ReceivedFiles | None = None,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
@@ -1918,8 +1954,9 @@ def _run_streaming(
             calls name real files anywhere.
         routes: The agent's file tool routes (``file_tool_routes``), so a
             path under ``/skills/`` or ``/memories/`` names that tier's file.
-        received_media: Files attached to this turn, which are not echoed
-            when a read_file result names an unchanged attachment.
+        received_files: The files that came from the user during this turn
+            (:func:`received_media_state`); a read of one is not sent back
+            while it is unchanged.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1953,7 +1990,7 @@ def _run_streaming(
                 cancel_scope=cancel_scope,
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
-                received_media=received_media,
+                received_files=received_files,
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
@@ -1973,7 +2010,6 @@ def _run_streaming(
     state = _state if _state is not None else StreamState()
     if _media_sent is None:
         _media_sent = set()
-    received_files = received_media_state(received_media)
     _MIN_THINKING_LEN = 200
 
     def _stopped_response() -> str:
@@ -2098,6 +2134,9 @@ def _run_streaming(
         notice is printed, and channel callers (``hitl_outcome_fn``) also get
         it in the returned text, because the console line never reaches them.
         """
+        # Stops made before the close begins must not cancel it; only a stop
+        # made while it runs does.
+        ignored_request = _stream_cancel_request_count(cancel_scope)
         at_limit = reason == "round_limit"
         if at_limit:
             from ..channels.hitl_budget import (
@@ -2126,8 +2165,17 @@ def _run_streaming(
                 reason=reason,
             )
 
+        close_handle: RuntimeHandle[None] | None = None
+
+        def _register_close(handle: RuntimeHandle[None]) -> None:
+            nonlocal close_handle
+            close_handle = handle
+            _register_stream_cancel_handle(
+                cancel_scope, handle, ignored_request=ignored_request
+            )
+
         try:
-            runtime.run_sync(_run_close)
+            runtime.run_sync(_run_close, on_submitted=_register_close)
         except concurrent.futures.CancelledError:
             if not is_stream_cancel_requested(cancel_scope):
                 raise
@@ -2139,6 +2187,9 @@ def _run_streaming(
                 thread_id,
                 exc_info=True,
             )
+        finally:
+            if close_handle is not None:
+                _unregister_stream_cancel_handle(cancel_scope, close_handle)
         text = (state.response_text or "").strip()
         if not at_limit or hitl_outcome_fn is None:
             return text

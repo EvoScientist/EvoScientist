@@ -354,3 +354,82 @@ def test_serve_with_anthropic_oauth_uses_server_ccproxy(monkeypatch, tmp_path):
     run_serve_once(monkeypatch, config, workdir=ws)
 
     assert pointed == [8123]
+
+
+def test_configure_logging_caps_credential_url_loggers(monkeypatch):
+    """`EvoSci serve --debug` must not print channel credentials.
+
+    Telegram's Bot API embeds the bot token in the URL path and DingTalk/WeCom
+    send access_token as a query parameter, so the loggers that print request
+    URLs must stay above that level even when the root logger is at DEBUG.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    import EvoScientist.config as cfg_mod
+    from EvoScientist.channels.logging_caps import CREDENTIAL_URL_LOGGERS
+    from EvoScientist.cli.commands import _configure_logging
+
+    root = logging.getLogger()
+    root_handlers, root_level = root.handlers[:], root.level
+    try:
+        for name in CREDENTIAL_URL_LOGGERS:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+        monkeypatch.setattr(
+            cfg_mod,
+            "get_effective_config",
+            lambda *_a: SimpleNamespace(log_level="DEBUG"),
+        )
+        _configure_logging()
+        # The level each library logs its request URL at.
+        url_log_levels = {
+            "httpx": logging.INFO,
+            "telegram": logging.DEBUG,
+            "websockets": logging.DEBUG,
+            "slack_sdk": logging.DEBUG,
+        }
+        for name, level in url_log_levels.items():
+            assert not logging.getLogger(name).isEnabledFor(level)
+    finally:
+        root.handlers[:] = root_handlers
+        root.setLevel(root_level)
+
+
+def test_configure_logging_scrubs_url_secrets_from_errors_and_warnings(monkeypatch):
+    """Exception text from a library can quote a ticketed URL at ERROR level."""
+    import io
+    import logging
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    import EvoScientist.cli.commands as commands
+    import EvoScientist.config as cfg_mod
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buffer, width=500))
+    monkeypatch.setattr(
+        cfg_mod,
+        "get_effective_config",
+        lambda *_a: SimpleNamespace(log_level="DEBUG"),
+    )
+    root = logging.getLogger()
+    root_handlers, root_level = root.handlers[:], root.level
+    try:
+        commands._configure_logging()
+        log = logging.getLogger("slack_sdk.socket_mode.aiohttp")
+        try:
+            raise TimeoutError("Connection timeout to host wss://gw/link?ticket=t1")
+        except TimeoutError as e:
+            log.exception(f"Failed to connect (error: {e}); Retrying...")
+        log.warning("proxy http://user:proxy-secret@proxy:3128 is slow")
+    finally:
+        root.handlers[:] = root_handlers
+        root.setLevel(root_level)
+
+    output = buffer.getvalue()
+    assert "Failed to connect" in output
+    assert "is slow" in output
+    assert "ticket=t1" not in output
+    assert "proxy-secret" not in output

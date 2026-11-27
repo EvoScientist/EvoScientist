@@ -9,8 +9,10 @@ import pytest
 
 pytest.importorskip("textual")
 
+from EvoScientist.cli.widgets.loading_widget import LoadingWidget
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.middleware import events as mw_events
+from EvoScientist.stream import display as display_mod
 from tests.fakes.common import FakeGraphGateway
 from tests.fakes.tui import capture_app
 
@@ -94,6 +96,72 @@ async def test_pause_closes_stream_in_tui_turn_context(monkeypatch, workspace, p
     assert closed_in == started_in
     assert sink_at_start == [None, None]
     assert loop_errors == []
+
+
+async def test_a_stop_before_the_run_removes_the_spinner(monkeypatch, workspace):
+    """A /stop that lands before the run's first event leaves no spinner."""
+    app = await capture_app(monkeypatch, workspace)
+    gateway = FakeGraphGateway()  # must never be asked for a stream
+    scope = "test-channel:chat-1"
+    try:
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._runtime_gateways = RuntimeGateways(
+                thread_store=gateway.thread_store, graph_gateway=gateway
+            )
+            monkeypatch.setattr(
+                app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
+            )
+            display_mod.request_stream_cancel(scope)
+            response = await app._stream_with_widgets("hello", cancel_scope=scope)
+            await pilot.pause()
+            assert response == "[Stopped.]"
+            assert gateway.requests == []
+            assert not list(app.query(LoadingWidget))
+    finally:
+        display_mod.discard_stream_cancel(scope)
+
+
+async def test_an_agent_wait_error_removes_the_spinner(monkeypatch, workspace):
+    """A turn whose agent wait fails still takes its spinner down."""
+    app = await capture_app(monkeypatch, workspace)
+    gateway = FakeGraphGateway()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._runtime_gateways = RuntimeGateways(
+            thread_store=gateway.thread_store, graph_gateway=gateway
+        )
+        monkeypatch.setattr(
+            app,
+            "_await_agent_ready",
+            AsyncMock(side_effect=RuntimeError("load failed")),
+        )
+        with pytest.raises(RuntimeError, match="load failed"):
+            await app._stream_with_widgets("hello")
+        await pilot.pause()
+        assert gateway.requests == []
+        assert not list(app.query(LoadingWidget))
+
+
+async def test_an_agent_wait_cancelled_removes_the_spinner(monkeypatch, workspace):
+    """A turn cancelled in the agent wait still takes its spinner down."""
+    app = await capture_app(monkeypatch, workspace)
+    gateway = FakeGraphGateway()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._runtime_gateways = RuntimeGateways(
+            thread_store=gateway.thread_store, graph_gateway=gateway
+        )
+        monkeypatch.setattr(
+            app,
+            "_await_agent_ready",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await app._stream_with_widgets("hello")
+        await pilot.pause()
+        assert gateway.requests == []
+        assert not list(app.query(LoadingWidget))
 
 
 async def test_a_status_refresh_during_teardown_is_ignored(monkeypatch, workspace):

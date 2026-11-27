@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +13,7 @@ from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
 from EvoScientist.paths import Workspace
+from EvoScientist.runtime import AsyncRuntime
 from EvoScientist.stream import display as display_mod
 from tests.fakes.common import (
     FakeCheckpointAgent,
@@ -157,6 +161,46 @@ class TestRichLoopClosesAtADecline:
         self._assert_closed_as_rejected(agent, gateway)
 
     @pytest.mark.parametrize(
+        "stop_at_prompt", [False, True], ids=["declined", "stopped"]
+    )
+    def test_stop_interrupts_a_stalled_checkpoint_close(
+        self, monkeypatch, stop_at_prompt
+    ):
+        cancel_scope = "scope:stalled-close"
+        close_started = threading.Event()
+        close_cancelled = threading.Event()
+        agent = _parked_agent()
+        gateway = FakeGraphGateway(stream=_one_approval_then_done(), checkpoint=agent)
+
+        async def _stalled_read(_config):
+            close_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                close_cancelled.set()
+                raise
+
+        def _decline(_requests):
+            if stop_at_prompt:
+                display_mod.request_stream_cancel(cancel_scope)
+            return None
+
+        monkeypatch.setattr(agent, "aget_state", _stalled_read)
+        with ThreadPoolExecutor(max_workers=1) as executor, AsyncRuntime() as runtime:
+            worker = executor.submit(
+                self._run,
+                gateway,
+                runtime=runtime,
+                cancel_scope=cancel_scope,
+                hitl_prompt_fn=_decline,
+            )
+            assert close_started.wait(2)
+            display_mod.request_stream_cancel(cancel_scope)
+            assert worker.result(timeout=2) == "partial\n[Stopped.]"
+            assert close_cancelled.is_set()
+        assert cancel_scope not in display_mod._stream_cancel_handles
+
+    @pytest.mark.parametrize(
         "outcome",
         [
             ApprovalOutcome(prompted=True, rejected=True),
@@ -200,6 +244,24 @@ class TestRichLoopClosesAtADecline:
 
         gateway = self._stopped_run(agent, _stream, hitl_prompt_fn=_never_asked)
         self._assert_closed_as_rejected(agent, gateway)
+
+    def test_a_stop_after_the_approval_at_the_round_limit_closes_as_round_limit(
+        self, monkeypatch
+    ):
+        """The stop that ended the turn must not cancel the close it leads to."""
+        from EvoScientist.channels import hitl_budget
+
+        monkeypatch.setattr(hitl_budget, "MAX_HITL_TOTAL_ROUNDS", 1)
+        agent = _parked_agent()
+
+        async def _stream(_request):
+            yield {"type": "text", "content": "partial"}
+            yield interrupt_event(1)
+            display_mod.request_stream_cancel("scope-stop")
+
+        self._stopped_run(agent, _stream)
+        assert _closed(agent) == [ROUND_LIMIT]
+        assert agent.next == ()
 
     def test_a_stop_at_an_open_question_closes_nothing(self):
         """Only an approval is refused by a stop; a question keeps its pause."""

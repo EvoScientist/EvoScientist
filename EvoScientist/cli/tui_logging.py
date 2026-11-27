@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
 
+from ..channels.logging_caps import scrub_url_secrets
+
 if TYPE_CHECKING:
     from textual.app import App
 
@@ -56,6 +58,8 @@ class TUIWarningHandler(logging.Handler):
             message = f"{message}: {type(exc).__name__}"
             if text and text not in message:
                 message = f"{message}: {text}"
+        # Built without a formatter, so the root handlers' scrub never sees it.
+        message = scrub_url_secrets(message)
         # Keyed by level too, so an earlier warning never hides the same error.
         key = (record.levelno, message)
         if key in self.seen:

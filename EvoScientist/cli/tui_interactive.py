@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
     from ..backends import ParkedCloseReason
     from ..runtime import AsyncRuntime
+    from ..stream.display import ReceivedFiles
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -1773,7 +1774,7 @@ def run_textual_interactive(
             on_thinking_cb: Callable[[str], None] | None = None,
             on_todo_cb: Callable[[list[dict]], None] | None = None,
             on_media_cb: Callable[[str], None] | None = None,
-            received_media: list[str] | None = None,
+            received_files: ReceivedFiles | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
             channel_hitl_fn: Callable[..., Any] | None = None,
@@ -1816,7 +1817,6 @@ def run_textual_interactive(
                 forward_media_result,
                 is_stream_cancel_requested,
                 iter_with_stream_cancel,
-                received_media_state,
             )
 
             container = self.query_one("#chat", VerticalScroll)
@@ -1839,6 +1839,9 @@ def run_textual_interactive(
             # correct position (between user input and model response).
             for w in file_warnings or []:
                 self._append_system(f"⚠ {w}", style="yellow")
+            # The wait runs before the spinner mounts, so an error or a stop
+            # here has no spinner to leave behind.
+            agent = await self._await_agent_ready()
             loading = LoadingWidget()
             await container.mount(loading)
             container.scroll_end(animate=False)
@@ -1884,12 +1887,10 @@ def run_textual_interactive(
                 self._runtime_gateways.graph_gateway, config
             )
             _media_routes = file_tool_routes(self._dirs.workspace)
-            _received_files = received_media_state(received_media)
             _MIN_THINKING_LEN = 200
 
             metadata = build_metadata(self._dirs, self._current_model)
             response = ""
-            agent = await self._await_agent_ready()
 
             async def _remove_w(w: Widget | None) -> None:
                 """Safely remove a transient indicator widget."""
@@ -2119,6 +2120,15 @@ def run_textual_interactive(
             _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
+                    # A stop before the turn's first stream never enters
+                    # the try/finally that removes the spinner, so it goes
+                    # with the turn here.
+                    if not loading_removed:
+                        try:
+                            await loading.cleanup()
+                        except Exception:
+                            pass
+                        loading_removed = True
                     response = await _mark_cancelled_response()
                     break
                 # Loop-level total cap on the *completed* round count,
@@ -2255,7 +2265,7 @@ def run_textual_interactive(
                                 media_dir=self._dirs.sandbox_media_dir,
                                 dangerous=_media_dangerous,
                                 routes=_media_routes,
-                                received_files=_received_files,
+                                received_files=received_files,
                             )
 
                         # -- Remove loading spinner on first content event --
@@ -2583,8 +2593,7 @@ def run_textual_interactive(
                                     model_retry_text(event), msg_style="yellow"
                                 )
                                 await container.mount(notice)
-                                # A spinner that is up stays the last line. Asked
-                                # of the widget: a paused round removes it unflagged.
+                                # A spinner that is up stays the last line.
                                 if loading.parent is container:
                                     container.move_child(loading, after=notice)
                         elif event_type == "rubric_evaluation_deferred":
@@ -3018,6 +3027,7 @@ def run_textual_interactive(
                                     await loading.cleanup()
                                 except Exception:
                                     pass
+                                loading_removed = True
                             # Clean up transient indicators. Inline narration is
                             # transcript content, so finalize it without removing
                             # the widget.
@@ -3420,13 +3430,19 @@ def run_textual_interactive(
                     """
                     return _ch_mod.channel_hitl_prompt(action_requests, msg, **kwargs)
 
+                from ..stream.display import received_media_state
+
+                received_files = received_media_state(msg.media)
+
                 def _channel_ask_user(ask_user_data: dict) -> dict:
                     """Send ask_user questions to channel user and wait for reply.
 
                     This runs in a thread (called via asyncio.to_thread) so it can
                     block without freezing the Textual event loop.
                     """
-                    return _ch_mod.channel_ask_user_prompt(ask_user_data, msg)
+                    return _ch_mod.channel_ask_user_prompt(
+                        ask_user_data, msg, received_files=received_files
+                    )
 
                 # Handle slash commands from channel via the shared
                 # dispatcher (same path Rich CLI and headless serve use).
@@ -3471,7 +3487,7 @@ def run_textual_interactive(
                         else None,
                         on_todo_cb=_send_todo,
                         on_media_cb=_send_media,
-                        received_media=msg.media,
+                        received_files=received_files,
                         skip_user_message=True,
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,

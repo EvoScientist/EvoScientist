@@ -76,3 +76,174 @@ def test_different_headers_get_separate_clients(monkeypatch):
     assert default_again is default
     assert len(built) == 2
     assert built[1][2] == {"x-auth-scheme": "other"}
+
+
+# --- #880: one client, several event loops -----------------------------------
+
+
+@pytest.fixture
+def keep_alive_url():
+    """A local HTTP/1.1 server that keeps connections open, in a thread.
+
+    Without keep-alive no connection is reused and the bug cannot show.
+    """
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _reply(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            body = json.dumps({"thread_id": "t-1", "values": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _reply
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _use_on_two_loops(client) -> dict:
+    """Create a thread on one loop and, while it stays alive, read state on
+    another loop in a worker thread: the Rich CLI's shape. Closes the client."""
+    import asyncio
+
+    result: dict = {}
+
+    def on_second_loop() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(client.threads.get_state("t-1"))
+            result["ok"] = True
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            loop.close()
+
+    async def main() -> None:
+        try:
+            await client.threads.create()
+            await asyncio.to_thread(on_second_loop)
+        finally:
+            await client.aclose()
+
+    asyncio.run(main())
+    return result
+
+
+def test_one_client_works_from_two_event_loops(keep_alive_url):
+    client = sdk.get_langgraph_async_client(url=keep_alive_url)
+
+    assert _use_on_two_loops(client) == {"ok": True}
+
+
+def test_the_sdk_default_client_fails_from_two_event_loops(keep_alive_url):
+    """The premise of the test above, on this server: without a pool per loop
+    the second loop reuses the first loop's connection."""
+    import sys
+
+    from langgraph_sdk import get_client
+
+    if sys.platform == "win32":
+        pytest.skip(
+            "drives one Proactor loop's transport from another thread, "
+            "which can hang that loop"
+        )
+
+    result = _use_on_two_loops(get_client(url=keep_alive_url))
+
+    if result == {"ok": True}:
+        pytest.skip("httpx no longer binds a pooled connection to one event loop")
+    assert "bound to a different event loop" in result.get("error", "")
+
+
+def test_each_event_loop_gets_its_own_pool_and_keeps_it(monkeypatch, keep_alive_url):
+    """One pool per loop, built like the transport ``get_client`` uses."""
+    import asyncio
+
+    import httpx
+    from langgraph_sdk import get_client
+
+    sdk_retries = get_client(url=keep_alive_url).http.client._transport._pool._retries
+    made: list[object] = []
+    real = httpx.AsyncHTTPTransport
+
+    class _Counting(real):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            made.append(self._pool._retries)
+
+    # Built first: ``get_client`` inside it makes a transport of its own.
+    client = sdk.get_langgraph_async_client(url=keep_alive_url)
+    monkeypatch.setattr(sdk.httpx, "AsyncHTTPTransport", _Counting)
+
+    async def two_reads() -> None:
+        await client.threads.get_state("t-1")
+        await client.threads.get_state("t-1")
+
+    asyncio.run(two_reads())
+    assert made == [sdk_retries]
+    asyncio.run(two_reads())
+    assert made == [sdk_retries, sdk_retries]
+
+
+def test_the_client_keeps_the_sdk_defaults(monkeypatch):
+    """Base URL, headers (with the API key the SDK reads from the environment)
+    and timeouts are those ``get_client`` sets."""
+    from langgraph_sdk import get_client
+
+    monkeypatch.setenv("LANGGRAPH_API_KEY", "test-key")
+    url = "http://127.0.0.1:8123"
+    ours = sdk.get_langgraph_async_client(url=url).http.client
+    theirs = get_client(url=url, headers=dict(LANGGRAPH_DEV_AUTH_HEADERS)).http.client
+
+    assert ours.headers["x-api-key"] == "test-key"
+    assert ours.base_url == theirs.base_url
+    assert dict(ours.headers) == dict(theirs.headers)
+    assert ours.timeout == theirs.timeout
+    assert sdk.get_langgraph_async_client(url=url, timeout=10).http.client.timeout == (
+        get_client(url=url, timeout=10).http.client.timeout
+    )
+
+
+def test_closing_the_client_closes_this_loops_pool_and_forgets_the_others(
+    keep_alive_url,
+):
+    """``async with client`` (``arun_autoskill_now``) closes the calling loop's
+    connections; another loop's pool is dropped without being touched."""
+    import asyncio
+
+    client = sdk.get_langgraph_async_client(url=keep_alive_url)
+    transport = client.http.client._transport
+
+    async def read() -> None:
+        await client.threads.get_state("t-1")
+
+    asyncio.run(read())  # a pool on a loop that is now closed
+
+    async def read_then_close() -> list:
+        await client.threads.get_state("t-1")
+        pool = transport._pools[asyncio.get_running_loop()]
+        assert len(transport._pools) == 2
+        assert pool._pool.connections
+        await client.aclose()
+        return pool._pool.connections
+
+    assert asyncio.run(read_then_close()) == []
+    assert len(transport._pools) == 0

@@ -47,6 +47,7 @@ from EvoScientist.config import (
 from EvoScientist.config.settings import (
     _ENV_MAPPINGS,
     ENV_ORIGINS_VAR,
+    LIVE_FIELDS,
     _same_value,
     config_value_origin,
     env_origin,
@@ -202,8 +203,8 @@ SERVER_EXPOSURE: registration.ServerExposure | None = None
 CONFIG_DRIFT_MESSAGE = (
     "Configuration or version changed since the background agent server was "
     "launched — it still runs the old settings or version. Apply them with "
-    "EvoSci server stop (which ends its running background work), then restart "
-    "EvoSci."
+    "EvoSci server stop (its background jobs end, and a run in progress runs "
+    "again at the next start), then restart EvoSci."
 )
 SERVER_UNAVAILABLE_MESSAGE = (
     "The background agent server is unavailable for this project; async "
@@ -696,7 +697,9 @@ _SUBAGENTS_DIR = _PACKAGE_DIR / "subagents"
 # too, so a server started with such a flag is not drift, while a change in
 # the file still is.
 _FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
-_UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"})
+# The port is compared on its own; the live-applied settings take effect
+# without a restart.
+_UNFINGERPRINTED_FIELDS = frozenset({"langgraph_dev_port"}) | LIVE_FIELDS
 
 
 def _server_config_fingerprint(config: EvoScientistConfig) -> str:
@@ -706,9 +709,11 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     ``EvoScientist.py``), so a running server keeps serving those values
     until restarted. Iterates the full ``EvoScientistConfig`` field list
     minus the fields that never reach the server
-    (:func:`~EvoScientist.config.settings.is_client_only`) and the port,
-    which the record names and every caller compares on its own — a new config
-    field counts toward drift by default — and folds in ``mcp.yaml`` plus the packaged
+    (:func:`~EvoScientist.config.settings.is_client_only`), the live-applied
+    settings (:data:`~EvoScientist.config.settings.LIVE_FIELDS`), which take
+    effect without a restart, and the port, which the record names and every
+    caller compares on its own — a new config field counts toward drift by
+    default — and folds in ``mcp.yaml`` plus the packaged
     ``subagents/*.yaml``, which are consumed at graph build too. The
     EvoScientist version is part of it, and for an editable install each
     source file's path and modification time, so a server left running
