@@ -977,19 +977,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """Cancel the typing-indicator loop for *chat_id*."""
         await self._typing_manager.stop(chat_id)
 
-    # ── Mention gating ──────────────────────────────────────────────
-
-    def _should_process(self, raw: RawIncoming) -> bool:
-        """Decide whether to process a message based on mention gating."""
-        if self.require_mention == "off":
-            return True
-        # Both "always" and "group" allow DMs through unconditionally
-        if not raw.is_group:
-            return True
-        if self.require_mention == "always":
-            return raw.was_mentioned
-        # "group" — require mention only in groups
-        return raw.was_mentioned
+        # ── Mention gating ──────────────────────────────────────────────
 
     _mention_pattern: str | None = None
     _mention_strip_count: int = 0  # 0 = all occurrences, 1 = first only

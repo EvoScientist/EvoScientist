@@ -353,7 +353,7 @@ class TestPatch:
         names = {f.name for f in fields(EvoScientistConfig)}
         senders = {n for n in names if n.endswith("_allowed_senders")}
         assert senders  # one per channel
-        expected = senders | {"signal_cli_path", "dm_policy", "allowed_channels"}
+        expected = senders | {"signal_cli_path", "dm_policy"}
         assert expected <= settings_api.READ_ONLY_FIELDS
         assert settings_api.READ_ONLY_FIELDS <= names
 

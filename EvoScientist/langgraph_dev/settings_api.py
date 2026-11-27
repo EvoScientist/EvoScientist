@@ -81,7 +81,6 @@ READ_ONLY_FIELDS: frozenset[str] = frozenset(
         # Who reaches the agent through a channel.
         "dm_policy",
         "require_mention",
-        "allowed_channels",
         "discord_allowed_channels",
         "slack_allowed_channels",
         "wechat_personal_dm_policy",
