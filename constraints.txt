@@ -6,12 +6,12 @@ aiosignal==1.4.0
 aiosqlite==0.22.1
 annotated-doc==0.0.7
 annotated-types==0.8.0
-anthropic==2.12.0
+anthropic==2.14.0
 anyio==4.16.0
 apscheduler==3.11.3
 attrs==26.1.0
 audioop-lts==0.2.2 ; python_full_version >= '3.13'
-av==18.1.0 ; python_full_version < '3.12'
+av==18.1.1 ; python_full_version < '3.12'
 av==19.0.2 ; python_full_version >= '3.12'
 beautifulsoup4==4.15.0
 blockbuster==1.5.29
@@ -19,18 +19,18 @@ bracex==3.2.4
 bsdiff4==1.4.4
 build==1.6.1
 ccproxy-api==0.2.10
-certifi==2026.10.23
+certifi==2026.11.20
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
 cfgv==3.5.0
-charset-normalizer==3.5.2
+charset-normalizer==3.5.3
 click==8.5.1
 cloudpickle==3.1.3
 colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
-coverage==7.17.3
+coverage==7.17.5
 croniter==6.2.4
 cryptography==50.0.2
-ctranslate2==4.9.0
-deepagents==0.7.41
+ctranslate2==4.9.1
+deepagents==0.7.42
 detect-installer==0.2.1
 discord-py==2.7.1
 distlib==0.4.4
@@ -41,19 +41,19 @@ email-validator==2.4.0
 execnet==2.1.2
 fastapi==0.165.0
 fastapi-cli==0.0.34
-fastapi-cloud-cli==0.28.0
+fastapi-cloud-cli==0.28.1
 fastar==0.12.0
 faster-whisper==1.2.1
-filelock==4.2.12
+filelock==4.3.1
 filetype==1.2.0
 flatbuffers==25.12.19
-forbiddenfruit==0.1.4 ; implementation_name == 'cpython'
+forbiddenfruit==0.1.5 ; implementation_name == 'cpython'
 frozenlist==1.8.0
 fsspec==2026.9.0
-google-auth==2.62.2
+google-auth==2.63.1
 google-genai==2.34.0
 googleapis-common-protos==1.76.0
-grpcio==1.85.3
+grpcio==1.85.4
 grpcio-health-checking==1.81.2
 grpcio-tools==1.81.1
 h11==0.16.0
@@ -67,7 +67,7 @@ httpx==0.28.1
 httpx-sse==0.4.3
 httpx2==2.16.2
 httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
-huggingface-hub==2.4.0
+huggingface-hub==2.5.0
 hyperframe==6.1.0
 identify==2.6.20
 idna==3.20
@@ -81,27 +81,27 @@ jsonschema==4.26.0
 jsonschema-rs==0.44.1
 jsonschema-specifications==2025.9.1
 langchain==1.5.2
-langchain-anthropic==1.7.12
-langchain-core==1.8.4
+langchain-anthropic==1.7.13
+langchain-core==1.8.5
 langchain-deepseek==1.2.1
 langchain-google-genai==4.4.3
 langchain-mcp-adapters==0.3.2
 langchain-nvidia-ai-endpoints==1.5.0
-langchain-ollama==1.1.0
+langchain-ollama==1.2.0
 langchain-openai==1.8.5
 langchain-openrouter==0.3.0
 langchain-protocol==0.0.22
 langchain-quickjs==0.4.0
 langgraph==1.2.24
-langgraph-api==0.17.5
+langgraph-api==0.17.8
 langgraph-checkpoint==4.3.2
 langgraph-checkpoint-sqlite==3.1.3
-langgraph-cli==0.4.43
+langgraph-cli==0.4.44
 langgraph-prebuilt==1.1.3
-langgraph-runtime-inmem==0.37.5
+langgraph-runtime-inmem==0.37.8
 langgraph-sdk==0.4.14
-langsmith==0.15.1
-lark-oapi==1.8.0
+langsmith==0.16.2
+lark-oapi==1.9.0
 lazy-loader==0.6
 linkify-it-py==2.2.0
 markdown-it-py==4.3.0
@@ -129,7 +129,7 @@ opentelemetry-sdk==1.45.2
 opentelemetry-semantic-conventions==0.66b2
 orjson==3.13.0
 ormsgpack==1.13.1
-packaging==26.3
+packaging==26.4
 pathspec==1.1.1
 platformdirs==4.14.8
 pluggy==1.7.0
@@ -142,7 +142,7 @@ psutil==7.2.2
 pyasn1==0.6.5
 pyasn1-modules==0.4.2
 pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
-pycryptodome==4.5.0
+pycryptodome==4.6.0
 pydantic==2.14.4
 pydantic-core==2.50.5
 pydantic-extra-types==2.11.1
@@ -156,18 +156,18 @@ pytest-cov==7.1.0
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 python-dateutil==4.0.0
-python-discovery==1.9.6
+python-discovery==1.9.7
 python-dotenv==1.2.4
 python-multipart==0.0.34
 python-telegram-bot==22.8
 pywin32==312 ; sys_platform == 'win32'
-pyyaml==6.0.3
+pyyaml==6.0.4
 qq-botpy==1.2.1
 qrcode==8.2
 questionary==2.1.1
 quickjs-rs==0.3.0
 referencing==0.37.0
-regex==2026.11.19
+regex==2026.11.25
 requests==2.34.2
 requests-toolbelt==1.0.0
 rich==15.0.0
@@ -175,7 +175,7 @@ rich-toolkit==0.20.6
 rignore==0.8.1
 rpds-py==2026.9.1
 ruff==0.17.6
-sentry-sdk==2.75.0
+sentry-sdk==3.0.1
 setuptools==84.2.1
 shellingham==1.5.4
 slack-sdk==3.48.0
@@ -184,7 +184,7 @@ sortedcontainers==2.4.0
 soupsieve==2.10 ; python_full_version < '3.11.5'
 soupsieve==4.1.3 ; python_full_version >= '3.11.5'
 sqlite-vec==0.1.9
-sse-starlette==3.7.0
+sse-starlette==3.7.1
 starlette==1.10.0
 structlog==25.5.0
 tavily-python==0.8.5
@@ -194,7 +194,7 @@ tiktoken==0.14.0
 tokenizers==0.23.3
 tqdm==4.70.1
 truststore==0.10.5
-typer==0.29.2
+typer==0.29.3
 typing-extensions==4.16.0
 typing-inspection==0.4.5
 tzdata==2026.6
@@ -203,11 +203,11 @@ urllib3==2.8.0
 uuid-utils==0.19.0
 uvicorn==0.54.0
 uvloop==0.23.0 ; sys_platform != 'win32'
-virtualenv==21.15.9
+virtualenv==21.15.13
 wasmtime==51.0.0
 watchfiles==1.3.0
 wcmatch==12.0.4
-wcwidth==0.9.4
+wcwidth==0.9.5
 websockets==15.0.1
 xxhash==4.1.0
 yarl==1.25.1
