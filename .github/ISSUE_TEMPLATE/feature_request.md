@@ -1,24 +1,22 @@
 ---
 name: Feature request
-about: Suggest an idea for EvoScientist core functionality
+about: Propose a core feature or behavior change before opening a PR
 title: ''
 labels: enhancement
 assignees: ''
 type: Feature
-
 ---
 
-> **Note:** We only accept feature requests for core functionality that benefits the majority of users.
-> If your idea is a niche workflow or personal utility, consider contributing it to [EvoSkills](https://github.com/EvoScientist/EvoSkills) instead.
+> **Core vs. skills:** EvoScientist core stays focused on capabilities that benefit most users. Domain-specific workflows and research pipelines belong in [**EvoSkills**](https://github.com/EvoScientist/EvoSkills). See [CONTRIBUTING.md](https://github.com/EvoScientist/EvoScientist/blob/main/CONTRIBUTING.md).
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of the problem. Ex. "I'm always frustrated when [...]"
+**What problem does this solve?**
+Describe the real friction or workflow gap you hit.
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+**Proposed solution**
+What should change from the user's point of view? Which surfaces does it affect (CLI, TUI, WebUI/Desktop, channels, `stream-json`)?
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+**Alternatives considered**
+Could this be a skill, MCP server, config setting, or existing command instead?
 
 **Additional context**
-Add any other context or screenshots about the feature request here.
+Mockups, examples, or links to related issues.
