@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import json
 import logging
 import uuid
@@ -77,19 +78,23 @@ def _tool_label(tool: Any) -> str:
     return type(tool).__name__
 
 
+@functools.cache
+def _spy_class(model_cls: type) -> type:
+    return type(
+        f"ToolStripSpy_{model_cls.__name__}", (_ToolStripSpyMixin, model_cls), {}
+    )
+
+
 def install_tool_strip_spy(model: Any) -> Any:
     """Make *model* refuse to bind tools, in place, and return it.
 
     Reassigns ``model.__class__`` to a subclass that only overrides
     ``bind_tools``, so the pydantic layout is unchanged and
-    ``isinstance(model, <original class>)`` still holds.
+    ``isinstance(model, <original class>)`` still holds. A model that is
+    already a spy is returned as is.
     """
-    spy_cls = type(
-        f"ToolStripSpy_{type(model).__name__}",
-        (_ToolStripSpyMixin, type(model)),
-        {},
-    )
-    model.__class__ = spy_cls
+    if not isinstance(model, _ToolStripSpyMixin):
+        model.__class__ = _spy_class(type(model))
     return model
 
 
