@@ -84,17 +84,19 @@ def test_spy_refuses_tools_and_keeps_the_model_type():
         model.bind_tools([execute])
 
 
-def test_spy_installs_once_on_a_model_that_is_already_a_spy():
-    model = _model(AIMessage(content="x"))
-    install_tool_strip_spy(model)
+def test_spy_install_is_a_noop_on_a_model_that_is_already_a_spy():
+    model = install_tool_strip_spy(_model(AIMessage(content="x")))
     spy_cls = type(model)
 
     assert install_tool_strip_spy(model) is model
     assert type(model) is spy_cls
-    other = _model(AIMessage(content="y"))
-    assert (
-        type(install_tool_strip_spy(other)) is spy_cls
-    )  # one spy class per model class
+
+
+def test_spy_class_is_shared_by_models_of_the_same_class():
+    first = install_tool_strip_spy(_model(AIMessage(content="x")))
+    second = install_tool_strip_spy(_model(AIMessage(content="y")))
+
+    assert type(first) is type(second)
 
 
 def test_returns_the_final_text_with_tools_stripped():
