@@ -239,30 +239,40 @@ def test_offer_restart_hint_follows_default_workdir(
 
 
 @pytest.mark.parametrize(
-    ("changed", "older"),
-    [(False, False), (True, False), (False, True)],
-    ids=["unchanged", "changed", "older-release"],
+    ("changed", "older", "port"),
+    [
+        (False, False, 6174),
+        (True, False, 6174),
+        (False, True, 6174),
+        (False, False, 7001),
+    ],
+    ids=["unchanged", "changed", "older-release", "other-port"],
 )
-def test_offer_restart_hint_only_on_drift(monkeypatch, changed, older):
-    """The hint shows only when settings the server reads changed since its
-    launch, or when an older release started the server."""
+def test_offer_restart_hint_only_on_drift(monkeypatch, changed, older, port):
+    """The hint shows only when settings the server reads, its port included,
+    changed since its launch, or when an older release started the server."""
     from EvoScientist.cli import commands
     from EvoScientist.config import get_effective_config
 
     fingerprint = manager._server_config_fingerprint(get_effective_config())
     recorded = "stale" if changed else fingerprint
     _running_service(
-        monkeypatch, _record(fields={"config_fingerprint": recorded}, older=older)
+        monkeypatch,
+        _record(port=port, fields={"config_fingerprint": recorded}, older=older),
     )
-    _answer(monkeypatch, True)
+    asked = _answer(monkeypatch, True)
     steps = _record_steps(monkeypatch)
 
     with commands.console.capture() as captured:
         commands._offer_server_start()
 
+    assert asked == []
     assert steps == []
     output = " ".join(captured.get().split())
-    assert ("EvoSci server stop" in output) is (changed or older)
+    if changed or older or port != 6174:
+        assert "EvoSci server stop" in output
+    else:
+        assert output == ""
 
 
 def test_offer_server_start_failure_is_reported(monkeypatch, tmp_path):
