@@ -1290,8 +1290,8 @@ def fetch_remote_skill_index(
         found = _scan_skill_dirs(skills_root)
         for skill_dir in found:
             info = _parse_skill_md(skill_dir / "SKILL.md")
-            # Compute relative path from clone root for install source
-            rel = skill_dir.relative_to(Path(clone_dir))
+            # Compute POSIX relative path from clone root for install source
+            rel = skill_dir.relative_to(Path(clone_dir)).as_posix()
             install_source = f"{repo}@{rel}"
             index.append(
                 {

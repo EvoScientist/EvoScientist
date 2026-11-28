@@ -904,7 +904,7 @@ class TestFetchRemoteSkillIndex:
         assert "writing" in skill_a["tags"]
 
         # Verify install_source is set
-        assert "test/repo@" in skill_a["install_source"]
+        assert skill_a["install_source"] == "test/repo@skills/skill-a"
 
     def test_fetch_caches_results(self, tmp_path):
         """Second call within TTL uses cache without cloning again."""
