@@ -1,6 +1,7 @@
 """Tests for EvoScientist.mcp module."""
 
 import asyncio
+import logging
 import os
 import shutil
 import sys
@@ -109,6 +110,41 @@ class TestLoadMcpConfig:
         )
         result = load_mcp_config()
         assert result["my-server"]["headers"]["Authorization"] == "Bearer tok_abc"
+
+    @pytest.mark.parametrize(
+        ("bad_entry", "field"),
+        [
+            ("newsrv:\n", "newsrv"),
+            ("newsrv:\n  transport: stdio\n  command:\n", "command"),
+            (
+                "newsrv:\n  transport: stdio\n  command: echo\n  expose_to:\n",
+                "expose_to",
+            ),
+        ],
+    )
+    def test_malformed_entry_skipped_others_load(
+        self, mcp_config_file, caplog, bad_entry, field
+    ):
+        mcp_config_file.write_text(
+            "good:\n  transport: stdio\n  command: echo\n" + bad_entry
+        )
+        with caplog.at_level(logging.WARNING):
+            result = load_mcp_config()
+        assert list(result) == ["good"]
+        assert _build_connections(result)["good"]["transport"] == "stdio"
+        assert _route_tools(result, {"good": []}) == {"main": []}
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("newsrv" in m and field in m for m in messages)
+
+    @pytest.mark.parametrize("field", ["tools", "env"])
+    def test_null_optional_field_keeps_server(self, mcp_config_file, field):
+        mcp_config_file.write_text(
+            f"srv:\n  transport: stdio\n  command: echo\n  {field}:\n"
+        )
+        result = load_mcp_config()
+        assert list(result) == ["srv"]
+        assert _build_connections(result)["srv"]["transport"] == "stdio"
+        assert _route_tools(result, {"srv": ["t"]}) == {"main": ["t"]}
 
 
 # ---- _build_connections ----
