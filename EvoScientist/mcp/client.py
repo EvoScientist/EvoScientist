@@ -873,6 +873,10 @@ def parse_mcp_edit_args(tokens: list[str]) -> tuple[str, dict]:
 # =============================================================================
 
 
+# Server fields whose empty (null) value is valid in mcp.yaml.
+_NULLABLE_FIELDS = frozenset({"tools", "env"})
+
+
 def load_mcp_config() -> dict[str, Any]:
     """Load MCP configuration from user config.
 
@@ -901,7 +905,13 @@ def load_mcp_config() -> dict[str, Any]:
                 USER_MCP_CONFIG,
             )
             continue
-        empty = [key for key, value in server.items() if value is None]
+        # ``tools: null`` means "all tools" and ``env: null`` means no extra
+        # variables, so only an empty value in any other field is malformed.
+        empty = [
+            key
+            for key, value in server.items()
+            if value is None and key not in _NULLABLE_FIELDS
+        ]
         if empty:
             logger.warning(
                 "Skipping MCP server %r in %s: %s has no value",

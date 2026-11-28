@@ -136,6 +136,16 @@ class TestLoadMcpConfig:
         messages = [r.getMessage() for r in caplog.records]
         assert any("newsrv" in m and field in m for m in messages)
 
+    @pytest.mark.parametrize("field", ["tools", "env"])
+    def test_null_optional_field_keeps_server(self, mcp_config_file, field):
+        mcp_config_file.write_text(
+            f"srv:\n  transport: stdio\n  command: echo\n  {field}:\n"
+        )
+        result = load_mcp_config()
+        assert list(result) == ["srv"]
+        assert _build_connections(result)["srv"]["transport"] == "stdio"
+        assert _route_tools(result, {"srv": ["t"]}) == {"main": ["t"]}
+
 
 # ---- _build_connections ----
 
