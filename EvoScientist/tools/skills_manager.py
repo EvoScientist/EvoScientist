@@ -38,7 +38,6 @@ import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
 import tempfile
 import time
@@ -564,9 +563,7 @@ def resolve_remote_head(
     target = ref or "HEAD"
     repo_url = f"https://github.com/{repo}.git"
     try:
-        proc = run_git(
-            ["ls-remote", "--exit-code", "--", repo_url, target], timeout=timeout
-        )
+        proc = run_git(["ls-remote", "--exit-code", repo_url, target], timeout=timeout)
     except (GitNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -874,85 +871,6 @@ def _batch_install_local(
     }
 
 
-def _is_reparse_link(path: Path) -> bool:
-    """Return True if *path* is a symlink or a Windows directory junction."""
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    if is_junction is not None:
-        return bool(is_junction())
-    mount_point_tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
-    if mount_point_tag is None:
-        return False
-    try:
-        st = os.lstat(path)
-    except OSError:
-        return False
-    return getattr(st, "st_reparse_tag", 0) == mount_point_tag
-
-
-def _resolve_within_clone(clone_root: Path, subpath: str | None) -> Path | None:
-    """Resolve *subpath* inside *clone_root*, or return None if it escapes."""
-    if not subpath:
-        return clone_root
-    try:
-        candidate = (clone_root / subpath).resolve()
-    except (OSError, RuntimeError):
-        return None
-    if not candidate.is_relative_to(clone_root):
-        return None
-    return candidate
-
-
-def _has_escaping_link(root: Path, boundary: Path) -> bool:
-    """Return True if *root* or any link under it resolves outside *boundary*."""
-    try:
-        resolved_boundary = boundary.resolve()
-        resolved_root = root.resolve()
-    except (OSError, RuntimeError):
-        return True
-    if not resolved_root.is_relative_to(resolved_boundary):
-        return True
-
-    visited: set[Path] = {resolved_root}
-    pending: list[Path] = [resolved_root]
-
-    while pending:
-        current = pending.pop()
-        for dirpath, dirnames, filenames in os.walk(current, followlinks=False):
-            base = Path(dirpath)
-            visited.add(base)
-            kept_dirs: list[str] = []
-            for name in dirnames:
-                if name == ".git":
-                    continue
-                entry = base / name
-                if _is_reparse_link(entry):
-                    try:
-                        target = entry.resolve()
-                        target_is_dir = target.is_dir()
-                    except (OSError, RuntimeError):
-                        return True
-                    if not target.is_relative_to(resolved_boundary):
-                        return True
-                    if target_is_dir and target not in visited:
-                        visited.add(target)
-                        pending.append(target)
-                    continue
-                kept_dirs.append(name)
-            dirnames[:] = kept_dirs
-            for name in filenames:
-                entry = base / name
-                if _is_reparse_link(entry):
-                    try:
-                        target = entry.resolve()
-                    except (OSError, RuntimeError):
-                        return True
-                    if not target.is_relative_to(resolved_boundary):
-                        return True
-    return False
-
-
 def _install_from_github(
     source: str, dest_dir: str, *, record_as: str | None = None
 ) -> dict:
@@ -979,37 +897,26 @@ def _install_from_github(
         # Capture HEAD now, before any fallback paths might re-enter — every
         # child of a pack share the same upstream SHA so we record it once.
         commit = _resolve_local_head(clone_dir)
-        clone_root = Path(clone_dir).resolve()
 
         # Exclude .git from copies
         def ignore_git(dir_name: str, files: list[str]) -> list[str]:
             return [f for f in files if f == ".git"]
 
-        # Determine the skill source directory, confined to the cloned repo
-        skill_source = _resolve_within_clone(clone_root, path)
-        if skill_source is None:
-            return {
-                "success": False,
-                "error": f"Skill path escapes cloned repository: {path!r}",
-            }
+        # Determine the skill source directory
+        if path:
+            skill_source = Path(clone_dir) / path
+        else:
+            skill_source = Path(clone_dir)
 
         # Validate — if the direct path doesn't have SKILL.md, try auto-resolve
         if not skill_source.exists() or not _validate_skill_dir(skill_source):
             if skill_source.is_dir():
                 found_dirs = _scan_skill_dirs(skill_source)
-                safe_dirs = [
-                    d for d in found_dirs if not _has_escaping_link(d, clone_root)
-                ]
-                if found_dirs and not safe_dirs:
-                    return {
-                        "success": False,
-                        "error": f"Skill contains link escaping cloned repository: {source}",
-                    }
-                if len(safe_dirs) == 1:
-                    skill_source = safe_dirs[0]
-                elif safe_dirs:
+                if len(found_dirs) == 1:
+                    skill_source = found_dirs[0]
+                elif found_dirs:
                     return _batch_install_local(
-                        safe_dirs,
+                        found_dirs,
                         dest_dir,
                         ignore_fn=ignore_git,
                         record_as=record_as,
@@ -1019,9 +926,7 @@ def _install_from_github(
             # Still not resolved — try tree search by name hint
             if not _validate_skill_dir(skill_source):
                 if path:
-                    skill_name_hint = (
-                        path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-                    )
+                    skill_name_hint = path.rstrip("/").rsplit("/", 1)[-1]
                     resolved = _find_skill_in_tree(clone_dir, skill_name_hint)
                     if resolved:
                         skill_source = resolved
@@ -1035,12 +940,6 @@ def _install_from_github(
                         "success": False,
                         "error": f"No SKILL.md found in: {source}",
                     }
-
-        if _has_escaping_link(skill_source, clone_root):
-            return {
-                "success": False,
-                "error": f"Skill contains link escaping cloned repository: {source}",
-            }
 
         # Single skill — install it
         result = _install_single_local(
@@ -1384,18 +1283,15 @@ def fetch_remote_skill_index(
         clone_dir = os.path.join(tmp, "repo")
         _clone_repo(repo, ref, clone_dir)
 
-        clone_root = Path(clone_dir).resolve()
-        skills_root = _resolve_within_clone(clone_root, path)
-        if skills_root is None or not skills_root.is_dir():
+        skills_root = Path(clone_dir) / path if path else Path(clone_dir)
+        if not skills_root.is_dir():
             return index
 
         found = _scan_skill_dirs(skills_root)
         for skill_dir in found:
-            if _has_escaping_link(skill_dir, clone_root):
-                continue
             info = _parse_skill_md(skill_dir / "SKILL.md")
-            # Compute POSIX relative path from clone root for cross-platform install sources
-            rel = skill_dir.resolve().relative_to(clone_root).as_posix()
+            # Compute POSIX relative path from clone root for install source
+            rel = skill_dir.relative_to(Path(clone_dir)).as_posix()
             install_source = f"{repo}@{rel}"
             index.append(
                 {
